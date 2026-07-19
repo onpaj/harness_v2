@@ -36,6 +36,18 @@ spawning anything. That is what lets the full queue → dispatch → git → mer
 be exercised for free. Never add a test that calls the real CLI without the
 `live` marker.
 
+## Git conventions for this repo
+
+**Commit directly to `main`.** In this phase of the project that is the intended
+workflow — do not branch first, do not open a PR, and do not ask. Push when the
+work is done and the suite is green.
+
+This is a deliberate exception to the usual "branch before touching the default
+branch" default, and it applies to the harness's *own* repo only. It says nothing
+about the repos the harness operates on: there, runs still commit to `run/*`
+branches and merge only as far as the integration branch, and promotion to `main`
+is still a human PR.
+
 ## Module map
 
 Dependencies flow strictly downward; there are no cycles.
