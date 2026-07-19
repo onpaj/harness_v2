@@ -1,0 +1,137 @@
+import json
+
+from harness.drivers.fs_queue import FilesystemTaskQueue
+from harness.drivers.memory import MemoryEventSink, MemoryTaskQueue
+from harness.models import Task
+
+
+def make_task(task_id="tsk_1") -> Task:
+    return Task(id=task_id, workflow_template="default", created="2026-07-19T10:00:00Z")
+
+
+def build(tmp_path, name="tasks", quarantine=None):
+    events = MemoryEventSink()
+    queue = FilesystemTaskQueue(
+        name=name, root=tmp_path / name, events=events, quarantine=quarantine
+    )
+    return queue, events
+
+
+def test_creates_its_directories(tmp_path):
+    queue, _ = build(tmp_path)
+
+    assert (tmp_path / "tasks").is_dir()
+    assert (tmp_path / "tasks" / ".processing").is_dir()
+
+
+def test_put_writes_json_and_list_reads_it(tmp_path):
+    queue, _ = build(tmp_path)
+    task = make_task()
+
+    queue.put(task)
+
+    raw = json.loads((tmp_path / "tasks" / "tsk_1.json").read_text())
+    assert raw["workflowTemplate"] == "default"
+    assert queue.list() == [task]
+
+
+def test_claim_moves_file_into_processing(tmp_path):
+    queue, _ = build(tmp_path)
+    queue.put(make_task())
+
+    claimed = queue.claim(queue.list()[0], "lck_1")
+
+    assert claimed.lock_id == "lck_1"
+    assert not (tmp_path / "tasks" / "tsk_1.json").exists()
+    assert (tmp_path / "tasks" / ".processing" / "tsk_1.json").exists()
+    assert queue.list() == []
+
+
+def test_claim_of_already_claimed_task_returns_none(tmp_path):
+    queue, _ = build(tmp_path)
+    queue.put(make_task())
+    task = queue.list()[0]
+    queue.claim(task, "lck_1")
+
+    assert queue.claim(task, "lck_2") is None
+
+
+def test_transfer_moves_between_directories(tmp_path):
+    source, _ = build(tmp_path, "tasks")
+    destination, _ = build(tmp_path, "design")
+    source.put(make_task())
+    claimed = source.claim(source.list()[0], "lck_1")
+
+    source.transfer(claimed, destination)
+
+    assert not (tmp_path / "tasks" / ".processing" / "tsk_1.json").exists()
+    assert (tmp_path / "design" / "tsk_1.json").exists()
+    assert destination.list()[0].id == "tsk_1"
+
+
+def test_transfer_writes_the_updated_task(tmp_path):
+    from dataclasses import replace
+
+    source, _ = build(tmp_path, "tasks")
+    destination, _ = build(tmp_path, "design")
+    source.put(make_task())
+    claimed = source.claim(source.list()[0], "lck_1")
+
+    source.transfer(replace(claimed, status="design", lock_id=None), destination)
+
+    assert destination.list()[0].status == "design"
+    assert destination.list()[0].lock_id is None
+
+
+def test_transfer_to_foreign_queue_type_still_works(tmp_path):
+    source, _ = build(tmp_path, "tasks")
+    destination = MemoryTaskQueue("design")
+    source.put(make_task())
+    claimed = source.claim(source.list()[0], "lck_1")
+
+    source.transfer(claimed, destination)
+
+    assert destination.list()[0].id == "tsk_1"
+    assert not (tmp_path / "tasks" / ".processing" / "tsk_1.json").exists()
+
+
+def test_recover_returns_claimed_tasks_and_clears_lock(tmp_path):
+    queue, _ = build(tmp_path)
+    queue.put(make_task())
+    queue.claim(queue.list()[0], "lck_1")
+
+    recovered = queue.recover()
+
+    assert recovered == 1
+    assert queue.list()[0].lock_id is None
+    assert not any((tmp_path / "tasks" / ".processing").iterdir())
+
+
+def test_corrupt_file_goes_to_quarantine_and_emits(tmp_path):
+    quarantine = MemoryTaskQueue("failed")
+    queue, events = build(tmp_path, quarantine=quarantine)
+    queue.put(make_task())
+    (tmp_path / "tasks" / "rozbity.json").write_text("{tohle neni json")
+
+    listed = queue.list()
+
+    assert [task.id for task in listed] == ["tsk_1"]
+    assert not (tmp_path / "tasks" / "rozbity.json").exists()
+    assert "corrupt" in events.names()
+
+
+def test_corrupt_file_does_not_stop_listing_without_quarantine(tmp_path):
+    queue, events = build(tmp_path)
+    queue.put(make_task())
+    (tmp_path / "tasks" / "rozbity.json").write_text("{tohle neni json")
+
+    assert [task.id for task in queue.list()] == ["tsk_1"]
+    assert "corrupt" in events.names()
+
+
+def test_list_ignores_non_json_files(tmp_path):
+    queue, _ = build(tmp_path)
+    queue.put(make_task())
+    (tmp_path / "tasks" / "README.txt").write_text("ahoj")
+
+    assert len(queue.list()) == 1
