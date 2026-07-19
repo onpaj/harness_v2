@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 from harness.cli import DEFAULT_WORKFLOW, main
 from harness.models import Task
 
@@ -57,9 +59,71 @@ def test_submit_writes_a_task(tmp_path, capsys):
 
 def test_submit_rejects_invalid_data(tmp_path, capsys):
     main(["init", "--root", str(tmp_path)])
+    capsys.readouterr()  # zahoď hlášky z init, dál nás zajímá jen submit
 
     assert main(["submit", "--root", str(tmp_path), "--data", "{rozbite"]) == 2
 
+    out, err = capsys.readouterr()
+    assert out == ""
+    assert "platný JSON" in err
 
-def test_submit_without_init_fails_cleanly(tmp_path):
+
+def test_submit_without_init_fails_cleanly(tmp_path, capsys):
     assert main(["submit", "--root", str(tmp_path / "prazdno")]) == 2
+
+    out, err = capsys.readouterr()
+    assert out == ""
+    assert "inicializovaný" in err
+
+
+def test_run_with_unknown_workflow_fails_cleanly(tmp_path, capsys):
+    """Třetí zdokumentovaná chybová cesta: neznámý workflow (přes `run`)."""
+    main(["init", "--root", str(tmp_path)])
+    capsys.readouterr()
+
+    assert main(["run", "--root", str(tmp_path), "--workflow", "neexistujici"]) == 2
+
+    out, err = capsys.readouterr()
+    assert out == ""
+    assert "neexistujici" in err
+
+
+def test_init_rejects_workflow_name_with_path_separator(tmp_path, capsys):
+    assert main(["init", "--root", str(tmp_path), "--workflow", "foo/bar"]) == 2
+
+    out, err = capsys.readouterr()
+    assert out == ""
+    assert "foo/bar" in err
+    # ověření, že selhalo dřív, než se cokoliv zapsalo na disk
+    assert not (tmp_path / "workflows").exists()
+
+
+def test_root_before_subcommand_is_rejected_not_silently_applied(tmp_path, monkeypatch):
+    """`--root` zadané PŘED podpříkazem se dřív tiše zahazovalo a harness sáhl
+    na (chybný) výchozí kořen. Musí to selhat nahlas, ne zapsat jinam.
+    HARNESS_HOME navíc přesměrujeme na tmp_path, aby test i při regresi nikdy
+    nesáhl na reálný ~/.harness."""
+    monkeypatch.setenv("HARNESS_HOME", str(tmp_path / "should-not-be-used"))
+    bogus_root = tmp_path / "bogus-root"
+
+    with pytest.raises(SystemExit) as excinfo:
+        main(["--root", str(bogus_root), "init"])
+
+    assert excinfo.value.code == 2
+    assert not bogus_root.exists()
+    assert not (tmp_path / "should-not-be-used").exists()
+
+
+def test_harness_home_used_only_when_root_absent(tmp_path, monkeypatch):
+    """HARNESS_HOME se použije jen tehdy, když --root chybí; jinak má --root
+    přednost."""
+    env_root = tmp_path / "from-env"
+    flag_root = tmp_path / "from-flag"
+    monkeypatch.setenv("HARNESS_HOME", str(env_root))
+
+    assert main(["init"]) == 0
+    assert env_root.is_dir()
+    assert not flag_root.exists()
+
+    assert main(["init", "--root", str(flag_root)]) == 0
+    assert flag_root.is_dir()

@@ -10,6 +10,7 @@ import sys
 from pathlib import Path
 
 from harness.app import HarnessLayout, build
+from harness.drivers.fs_workflows import invalid_workflow_name
 from harness.drivers.system_clock import SystemClock
 from harness.ids import new_task_id
 from harness.models import Task
@@ -40,6 +41,11 @@ def _root(value: str | None) -> Path:
 def _init(args: argparse.Namespace) -> int:
     root = _root(args.root)
     layout = HarnessLayout(root)
+
+    if invalid_workflow_name(args.workflow):
+        print(f"chyba: neplatné jméno workflow: {args.workflow!r}", file=sys.stderr)
+        return 2
+
     layout.workflows.mkdir(parents=True, exist_ok=True)
 
     definition_path = layout.workflows / f"{args.workflow}.json"
@@ -109,7 +115,11 @@ def _run(args: argparse.Namespace) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="harness")
-    parser.add_argument("--root", default=None, help="kořen harnessu (jinak HARNESS_HOME)")
+    # --root a --workflow se deklarují jen na podpříkazech (viz níže). Deklarace
+    # na top-level parseru by byla mrtvá: argparse's _SubParsersAction přepíše
+    # jmenný prostor rodiče hodnotami z podpříkazu, takže by --root zadané
+    # před podpříkazem bylo tiše zahozeno a harness by sáhl na chybný (výchozí)
+    # kořen. Podpříkaz je required=True, takže tahle kolize nastane vždy.
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     init = subparsers.add_parser("init", help="založ strom adresářů")
