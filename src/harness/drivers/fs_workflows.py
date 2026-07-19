@@ -9,12 +9,21 @@ from harness.models import Transition, Workflow
 from harness.ports.workflows import WorkflowNotFound, WorkflowRepository
 
 
+def invalid_workflow_name(name: str) -> bool:
+    """Jméno nesmí obsahovat cestový oddělovač a nesmí to být "", "." nebo "..".
+
+    Jediné místo, kde tohle pravidlo žije — `cli.py` ho importuje, aby ho mohlo
+    ověřit ještě před zápisem definičního souboru, tedy dřív, než se vůbec
+    dostane k této repository."""
+    return "/" in name or "\\" in name or name in ("", ".", "..")
+
+
 class FilesystemWorkflowRepository(WorkflowRepository):
     def __init__(self, root: Path) -> None:
         self._root = Path(root)
 
     def get(self, name: str) -> Workflow:
-        if "/" in name or "\\" in name or name in ("", ".", ".."):
+        if invalid_workflow_name(name):
             raise WorkflowNotFound(f"neplatné jméno workflow: {name!r}")
 
         path = self._root / f"{name}.json"

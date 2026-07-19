@@ -10,6 +10,7 @@ import sys
 from pathlib import Path
 
 from harness.app import HarnessLayout, build
+from harness.drivers.fs_workflows import invalid_workflow_name
 from harness.drivers.system_clock import SystemClock
 from harness.ids import new_task_id
 from harness.models import Task
@@ -37,19 +38,11 @@ def _root(value: str | None) -> Path:
     return Path(os.environ.get("HARNESS_HOME", "~/.harness")).expanduser()
 
 
-def _invalid_workflow_name(name: str) -> bool:
-    """Stejné pravidlo jako FilesystemWorkflowRepository.get (drivers/fs_workflows.py) —
-    jméno nesmí obsahovat cestový oddělovač a nesmí to být "", "." nebo "..".
-    Duplikováno zde, protože potřebujeme ověřit jméno ještě před zápisem
-    definičního souboru, tedy dřív, než se vůbec dostaneme k repository."""
-    return "/" in name or "\\" in name or name in ("", ".", "..")
-
-
 def _init(args: argparse.Namespace) -> int:
     root = _root(args.root)
     layout = HarnessLayout(root)
 
-    if _invalid_workflow_name(args.workflow):
+    if invalid_workflow_name(args.workflow):
         print(f"chyba: neplatné jméno workflow: {args.workflow!r}", file=sys.stderr)
         return 2
 
