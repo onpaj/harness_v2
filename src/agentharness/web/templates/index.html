@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+{% block title %}agentharness &mdash; overview{% endblock %}
+{% block content %}
+<h1>agentharness</h1>
+
+<h2>Queues</h2>
+<table>
+  <tr><th>agent</th><th>pending</th><th>active</th><th>dead</th><th>cost 24h (USD)</th></tr>
+  {% for agent in agents %}
+  <tr>
+    <td>{{ agent }}</td>
+    <td>{{ snapshot.queue_depths[agent] }}</td>
+    <td>{{ snapshot.active[agent] }}</td>
+    <td>{{ snapshot.dead_depths[agent] }}</td>
+    <td>{{ "%.4f"|format(cost_by_agent.get(agent, 0.0)) }}</td>
+  </tr>
+  {% else %}
+  <tr><td colspan="5" class="muted">no agents configured</td></tr>
+  {% endfor %}
+</table>
+
+<h2>Last 24 hours</h2>
+<table>
+  <tr><th>runs</th><th>failures</th><th>cost (USD)</th><th>p50 (ms)</th><th>p95 (ms)</th></tr>
+  <tr>
+    <td>{{ snapshot.runs_24h }}</td>
+    <td>{{ snapshot.failures_24h }}</td>
+    <td>{{ "%.4f"|format(snapshot.cost_24h) }}</td>
+    <td>{{ "%.0f"|format(latency.p50) }}</td>
+    <td>{{ "%.0f"|format(latency.p95) }}</td>
+  </tr>
+</table>
+
+<h2>Recent runs</h2>
+{% include "_runs_table.html" %}
+{% endblock %}

@@ -19,6 +19,7 @@ from agentharness.dispatch.routing import route_handoffs
 from agentharness.git.merge import MergeConflict, merge_leaves
 from agentharness.ids import new_task_id, new_trace_id
 from agentharness.models import Task, TaskArtifacts
+from agentharness.obs.logging import emit
 from agentharness.queue.base import Queue
 from agentharness.registry.agents import AgentRegistry
 from agentharness.registry.repos import RepoRegistry
@@ -86,7 +87,8 @@ class Dispatcher:
         )
         self.queue.enqueue(task)
         self.store.record_task(task, status="pending")
-        self.store.event(
+        emit(
+            self.store,
             "task.enqueued", task_id=task.task_id, trace_id=trace_id, agent=agent,
             data={"intent": intent, "root": True},
         )
@@ -98,7 +100,7 @@ class Dispatcher:
         """One poll pass. Returns how many tasks were dispatched."""
         for task in self.queue.reclaim_expired():
             self.store.set_task_status(task.task_id, "pending")
-            self.store.event("task.lease_expired", task_id=task.task_id, trace_id=task.trace_id)
+            emit(self.store, "task.lease_expired", task_id=task.task_id, trace_id=task.trace_id)
         self.queue.promote_delayed()
 
         await self.gate.wait_until_clear()
@@ -134,7 +136,8 @@ class Dispatcher:
             for outcome in done:
                 if isinstance(outcome, BaseException):
                     # A crash in the dispatch path must never vanish silently.
-                    self.store.event(
+                    emit(
+            self.store,
                         "dispatch.error",
                         data={"error": f"{type(outcome).__name__}: {outcome}"},
                     )
@@ -151,7 +154,7 @@ class Dispatcher:
         if status == "ok" and result is not None and result.status == "needs_input":
             self.queue.ack(task)
             self.store.set_task_status(task.task_id, "blocked")
-            self.store.event("task.blocked", task_id=task.task_id, trace_id=task.trace_id)
+            emit(self.store, "task.blocked", task_id=task.task_id, trace_id=task.trace_id)
             await self._maybe_complete_trace(task)
             return
 
@@ -176,7 +179,8 @@ class Dispatcher:
                     self.store.record_handoff(
                         task.task_id, routed.task.task_id, routed.handoff.agent, True
                     )
-                    self.store.event(
+                    emit(
+            self.store,
                         "handoff.accepted",
                         task_id=routed.task.task_id,
                         trace_id=task.trace_id,
@@ -186,7 +190,8 @@ class Dispatcher:
                 self.store.record_handoff(
                     task.task_id, None, routed.handoff.agent, False, routed.reason
                 )
-                self.store.event(
+                emit(
+            self.store,
                     "handoff.rejected",
                     task_id=task.task_id,
                     trace_id=task.trace_id,
@@ -202,7 +207,8 @@ class Dispatcher:
             self.gate.trip()
             self.queue.nack(task, requeue=True, delay_seconds=0.0)
             self.store.set_task_status(task.task_id, "pending")
-            self.store.event(
+            emit(
+            self.store,
                 "dispatch.paused", task_id=task.task_id, trace_id=task.trace_id,
                 data={"reason": "rate limited", "backoff": self.gate.backoff},
             )
@@ -217,7 +223,8 @@ class Dispatcher:
             )
             self.queue.nack(task, requeue=True, delay_seconds=delay)
             self.store.set_task_status(task.task_id, "pending")
-            self.store.event(
+            emit(
+            self.store,
                 "task.retry", task_id=task.task_id, trace_id=task.trace_id,
                 data={"attempt": task.attempt, "delay": delay, "error": exec_text},
             )
@@ -225,7 +232,8 @@ class Dispatcher:
 
         self.queue.dead_letter(task, exec_text or "run failed")
         self.store.set_task_status(task.task_id, "dead")
-        self.store.event(
+        emit(
+            self.store,
             "task.dead_lettered", task_id=task.task_id, trace_id=task.trace_id,
             data={"error": exec_text},
         )
@@ -252,7 +260,8 @@ class Dispatcher:
                 merge_leaves, mirror, branches, repo, self.cfg
             )
         except MergeConflict as exc:
-            self.store.event(
+            emit(
+            self.store,
                 "trace.merge_conflict",
                 trace_id=task.trace_id,
                 data={"branch": exc.branch, "files": exc.files, "branches": branches},
@@ -260,7 +269,8 @@ class Dispatcher:
             return
 
         self.store.trace_merged(task.trace_id, merge_ref)
-        self.store.event(
+        emit(
+            self.store,
             "trace.merged", trace_id=task.trace_id,
             data={"merge_ref": merge_ref, "branches": branches},
         )
@@ -276,6 +286,6 @@ class Dispatcher:
             try:
                 await self.tick()
             except Exception as exc:  # noqa: BLE001 -- the loop must not die
-                self.store.event("dispatch.error", data={"error": str(exc)})
+                emit(self.store, "dispatch.error", data={"error": str(exc)})
             await asyncio.sleep(self.cfg.poll_interval_seconds)
         await self.drain()

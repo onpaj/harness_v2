@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}agentharness{% endblock %}</title>
+  <style>
+    body { font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+           margin: 1.5rem; line-height: 1.45; color: #1b1b1b; background: #fbfbfa; }
+    h1, h2 { font-size: 1.1rem; margin: 1.4rem 0 0.5rem; }
+    h1 { font-size: 1.3rem; margin-top: 0; }
+    a { color: #0b5; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    nav a { margin-right: 1rem; }
+    table { border-collapse: collapse; width: 100%; margin-bottom: 1rem; }
+    th, td { border: 1px solid #ddd; padding: 0.25rem 0.5rem;
+             text-align: left; font-size: 0.85rem; vertical-align: top; }
+    th { background: #f0f0ee; }
+    .banner { background: #fde2e2; border: 1px solid #d33; padding: 0.5rem 0.75rem;
+              margin-bottom: 1rem; font-weight: bold; }
+    .muted { color: #777; }
+    .status-failed, .status-timeout { color: #c00; font-weight: bold; }
+    .status-ok { color: #070; }
+    footer { margin-top: 2rem; font-size: 0.75rem; color: #888; }
+  </style>
+</head>
+<body>
+  <nav><a href="/">overview</a><a href="/runs">runs</a><a href="/api/snapshot">snapshot.json</a></nav>
+  {% if paused or (snapshot and snapshot.paused) %}
+    <div class="banner">PAUSED &mdash; rate limit gate is tripped; dispatch is on hold.</div>
+  {% endif %}
+  {% block content %}{% endblock %}
+  <footer>Read-only view. Use the <code>agentharness</code> CLI to change anything.</footer>
+</body>
+</html>

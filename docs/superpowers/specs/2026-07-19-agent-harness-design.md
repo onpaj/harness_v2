@@ -349,6 +349,34 @@ Each phase ends with something runnable and tested.
 8. **Proof workload** — `planner → implementer → reviewer` agent set exercised
    against a real repo.
 
+## 12a. Deviations taken during implementation
+
+Both were deliberate and are reflected in the code.
+
+1. **croniter instead of APScheduler** (§4, §12). Durability comes from a
+   `schedules` table in `runs.db` with a `next_fire_at` column, which is simpler
+   than APScheduler's SQLAlchemy job store and drops two dependencies. The
+   required behaviour is unchanged: schedules survive restarts and every task
+   carries its `schedule_id`. A schedule whose fire time is long past fires
+   **once**, not once per missed interval.
+
+2. **No push step for run branches** (§6 step 5). Worktrees are added directly
+   off the bare mirror, so a commit creates the `run/*` ref in the mirror's own
+   ref store and is immediately visible to `resolve_ref`. A separate push would
+   be a no-op; a test asserts the visibility property instead.
+
+Three implementation facts worth recording, since each cost real debugging time:
+
+- `merge_leaves` acquires the repo lock internally. Wrapping it in a second
+  `repo_lock` self-deadlocks, because `flock` contends across file descriptors
+  even within a single process.
+- A child worktree inherits its ancestors' `.harness/runs/<trace>/<task>/`
+  directories from `base_ref`. A run must locate its own artifact dir from the
+  path given in its prompt, never by globbing the worktree.
+- A bare mirror's default fetch refspec would prune locally-created `run/*`
+  branches. `fetch()` restricts to `refs/heads/*` from origin to protect run
+  history.
+
 ## 13. Non-goals
 
 - Not a general LLM-app framework. `claude -p` *is* the agent runtime; there is no

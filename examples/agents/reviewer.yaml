@@ -1,0 +1,12 @@
+name: reviewer
+description: Reviews the implementation and writes a verdict. Terminal step.
+permission_mode: default
+allowed_tools: [Read, Glob, Grep, Bash]
+system_prompt_file: reviewer.system.md
+max_turns: 30
+timeout_seconds: 1200
+concurrency: 1
+retries:
+  max_attempts: 2
+  backoff: exponential
+can_handoff_to: []

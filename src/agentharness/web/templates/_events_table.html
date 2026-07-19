@@ -1,0 +1,15 @@
+<table>
+  <tr><th>ts</th><th>kind</th><th>agent</th><th>task</th><th>run</th><th>data</th></tr>
+  {% for event in events %}
+  <tr>
+    <td>{{ event.ts }}</td>
+    <td>{{ event.kind }}</td>
+    <td>{{ event.agent or "-" }}</td>
+    <td>{{ event.task_id or "-" }}</td>
+    <td>{{ event.run_id or "-" }}</td>
+    <td>{{ event.data if event.data is not none else "-" }}</td>
+  </tr>
+  {% else %}
+  <tr><td colspan="6" class="muted">no events</td></tr>
+  {% endfor %}
+</table>

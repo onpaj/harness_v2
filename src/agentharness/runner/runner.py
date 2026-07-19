@@ -22,6 +22,7 @@ from agentharness.git import worktree as wt
 from agentharness.git.lock import repo_lock
 from agentharness.ids import new_run_id
 from agentharness.models import Result, RunRecord, Task
+from agentharness.obs.logging import emit
 from agentharness.registry.agents import AgentRegistry
 from agentharness.registry.repos import RepoRegistry
 from agentharness.runner.executor import ExecRequest, Executor, ExecResult
@@ -65,7 +66,8 @@ class Runner:
         # directly (replay, tests) must not depend on the dispatcher having
         # recorded it earlier.
         self.store.record_task(task, status="running")
-        self.store.event(
+        emit(
+            self.store,
             "run.started", task_id=task.task_id, trace_id=task.trace_id, run_id=run_id, agent=task.agent
         )
 
@@ -102,13 +104,22 @@ class Runner:
                 stderr_log=f"{task.artifact_dir}/logs/stderr.log" if output_ref else None,
             )
             self.store.record_run(run)
-            self.store.event(
+            emit(
+            self.store,
                 "run.finished",
                 task_id=task.task_id,
                 trace_id=task.trace_id,
                 run_id=run_id,
                 agent=task.agent,
-                data={"status": status, "degraded": degraded, "error": error, "output_ref": output_ref},
+                data={
+                    "status": status,
+                    "degraded": degraded,
+                    "error": error,
+                    "output_ref": output_ref,
+                    # The CLI's own words on why it stopped. Without this a
+                    # failed run records that it failed but not why.
+                    "cli_result": (exec_result.result_text or "")[:2000] if exec_result else None,
+                },
             )
             return RunOutcome(run=run, result=result, error=error, exec_result=exec_result)
 

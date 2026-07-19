@@ -1,0 +1,12 @@
+name: planner
+description: Turns a feature request into a concrete implementation plan.
+permission_mode: acceptEdits
+allowed_tools: [Read, Glob, Grep, Bash, Write]
+system_prompt_file: planner.system.md
+max_turns: 25
+timeout_seconds: 900
+concurrency: 1
+retries:
+  max_attempts: 3
+  backoff: exponential
+can_handoff_to: [implementer]
