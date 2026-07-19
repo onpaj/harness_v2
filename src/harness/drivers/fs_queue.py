@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import uuid
 from dataclasses import replace
 from pathlib import Path
 
@@ -90,6 +91,11 @@ class FilesystemTaskQueue(TaskQueue):
     def _read(self, path: Path, *, quarantine: bool = True) -> Task | None:
         try:
             return Task.from_dict(json.loads(path.read_text(encoding="utf-8")))
+        except FileNotFoundError:
+            # Soubor zmizel mezi glob() a čtením — to je vyhraný závod jiného
+            # zabírajícího (přesně to, co claim() toleruje), ne poškození.
+            # Tiše přeskočit: žádný event, žádný pokus o karanténu.
+            return None
         except (json.JSONDecodeError, KeyError, TypeError, OSError) as error:
             self._events.emit("corrupt", queue=self.name, path=str(path), reason=str(error))
             if quarantine:
@@ -102,12 +108,19 @@ class FilesystemTaskQueue(TaskQueue):
         if self._quarantine is None:
             return
         if isinstance(self._quarantine, FilesystemTaskQueue):
-            shutil.move(str(path), str(self._quarantine.root / path.name))
+            try:
+                shutil.move(str(path), str(self._quarantine.root / path.name))
+            except FileNotFoundError:
+                # Mezitím zmizel i on — nic k přesunutí, nic se neděje.
+                pass
         else:
             path.unlink(missing_ok=True)
 
     def _write(self, path: Path, task: Task) -> None:
-        temporary = path.with_suffix(".json.tmp")
+        # Unikátní jméno per zápis, aby si dva writery cílící na stejné id
+        # nesdíleli jeden temp soubor. Přípona zůstává ".json.tmp", takže ji
+        # glob("*.json") v list()/claim()/recover() nikdy nezachytí.
+        temporary = path.with_name(f"{path.stem}.{uuid.uuid4().hex}.json.tmp")
         temporary.write_text(
             json.dumps(task.to_dict(), indent=2, ensure_ascii=False), encoding="utf-8"
         )

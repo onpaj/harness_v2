@@ -135,3 +135,51 @@ def test_list_ignores_non_json_files(tmp_path):
     (tmp_path / "tasks" / "README.txt").write_text("ahoj")
 
     assert len(queue.list()) == 1
+
+
+def test_vanished_file_is_skipped_silently_not_quarantined(tmp_path):
+    quarantine, _ = build(tmp_path, "failed")
+    queue, events = build(tmp_path, quarantine=quarantine)
+    queue.put(make_task())
+    path = tmp_path / "tasks" / "tsk_1.json"
+    path.unlink()
+
+    task = queue._read(path)
+
+    assert task is None
+    assert "corrupt" not in events.names()
+    assert not any((tmp_path / "failed").glob("*.json"))
+
+
+def test_corrupt_file_goes_to_real_filesystem_quarantine(tmp_path):
+    quarantine, _ = build(tmp_path, "failed")
+    queue, events = build(tmp_path, quarantine=quarantine)
+    queue.put(make_task())
+    broken_path = tmp_path / "tasks" / "rozbity.json"
+    broken_path.write_text("{tohle neni json")
+
+    listed = queue.list()
+
+    assert [task.id for task in listed] == ["tsk_1"]
+    assert not broken_path.exists()
+    quarantined = tmp_path / "failed" / "rozbity.json"
+    assert quarantined.exists()
+    assert quarantined.read_text() == "{tohle neni json"
+    assert "corrupt" in events.names()
+
+
+def test_recover_quarantines_stranded_corrupt_file_and_still_counts_the_rest(tmp_path):
+    quarantine, _ = build(tmp_path, "failed")
+    queue, events = build(tmp_path, quarantine=quarantine)
+    queue.put(make_task())
+    queue.claim(queue.list()[0], "lck_1")
+    broken_path = tmp_path / "tasks" / ".processing" / "rozbity.json"
+    broken_path.write_text("{tohle neni json")
+
+    recovered = queue.recover()
+
+    assert recovered == 1
+    assert queue.list()[0].lock_id is None
+    assert not broken_path.exists()
+    assert (tmp_path / "failed" / "rozbity.json").exists()
+    assert "corrupt" in events.names()
