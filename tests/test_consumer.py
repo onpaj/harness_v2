@@ -1,5 +1,3 @@
-import inspect
-
 from harness.consumer import Consumer
 from harness.drivers.memory import (
     FakeClock,
@@ -122,10 +120,7 @@ async def test_invalid_outcome_lands_in_failed():
     assert "neco jineho" in failed.list()[0].history[-1].reason
 
 
-def test_consumer_has_no_branch_on_outcome_value():
-    """Rozhodování patří do ConsumerBehavior, ne sem."""
-    source = inspect.getsource(Consumer)
-
-    assert "Outcome.DONE" not in source
-    assert "Outcome.REQUEST_CHANGES" not in source
-    assert "request_changes" not in source
+# test_consumer_has_no_branch_on_outcome_value byl nahrazen AST-based testem
+# tests/test_architecture.py::test_consumer_has_no_branch_on_outcome_value —
+# viz komentář tam pro důvod (string-matching přes inspect.getsource nechytal
+# `if outcome == "done":`, aliasovaný import, ani větev v modulové funkci).

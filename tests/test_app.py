@@ -5,6 +5,12 @@ from harness.app import HarnessLayout, build
 from harness.drivers.memory import MemoryEventSink
 from harness.models import Task
 
+# `await runner` čeká na `asyncio.gather` uvnitř Harness.run, které skončí jen
+# když obě smyčky uvidí `stop.is_set()`. Kdyby to regresí přestalo platit,
+# `await runner` by visel navždy a test by zamrzl místo aby selhal.
+# `asyncio.wait_for` to promění na rychlé, jasné selhání.
+RUNNER_TIMEOUT = 5.0
+
 DEFINITION = {
     "name": "default",
     "start": "plan",
@@ -65,7 +71,7 @@ async def test_run_drives_a_task_all_the_way_to_done(tmp_path):
         if (tmp_path / "done" / "tsk_1.json").exists():
             break
     stop.set()
-    await runner
+    await asyncio.wait_for(runner, timeout=RUNNER_TIMEOUT)
 
     assert (tmp_path / "done" / "tsk_1.json").exists()
     finished = Task.from_dict(json.loads((tmp_path / "done" / "tsk_1.json").read_text()))
