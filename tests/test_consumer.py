@@ -5,7 +5,7 @@ from harness.drivers.memory import (
     MemoryTaskQueue,
     ScriptedBehavior,
 )
-from harness.models import Outcome, Task
+from harness.models import FAILED, Outcome, Task
 from harness.ports.behavior import ConsumerBehavior
 from harness.ports.strategy import EnqueueStrategy
 
@@ -115,12 +115,31 @@ async def test_behavior_exception_lands_in_failed():
     assert "failed" in events.names()
 
 
+async def test_behavior_exception_task_carries_terminal_failed_status():
+    """Task nahozený výjimkou z behavior musí ve failed/ nést terminální
+    status 'failed', ne zůstat na starém kroku ('design') — jinak by
+    status lhal stejně jako v Finding 1 na dispatcher straně."""
+    consumer, _, _, failed, _ = build(ExplodingBehavior(), make_task())
+
+    await consumer.tick()
+
+    assert failed.list()[0].status == FAILED
+
+
 async def test_invalid_outcome_lands_in_failed():
     consumer, _, _, failed, _ = build(BogusBehavior(), make_task())
 
     await consumer.tick()
 
     assert "neco jineho" in failed.list()[0].history[-1].reason
+
+
+async def test_invalid_outcome_task_carries_terminal_failed_status():
+    consumer, _, _, failed, _ = build(BogusBehavior(), make_task())
+
+    await consumer.tick()
+
+    assert failed.list()[0].status == FAILED
 
 
 # test_consumer_has_no_branch_on_outcome_value byl nahrazen AST-based testem

@@ -18,7 +18,12 @@ agenty, perzistentní úložiště ani git v ní nejsou.
 2. **Rozhodování má tři oddělené role.** `ConsumerBehavior` říká *co se stalo*,
    dispatcher *kam to jde dál*, consumer nerozhoduje nic. V `consumer.py` nesmí
    být větev závislá na hodnotě outcome; test to kontroluje čtením zdrojáku.
-3. **Status mění výhradně dispatcher.** `lastOutcome` zapisuje výhradně consumer.
+3. **Status mění dispatcher — s jednou výjimkou.** Rozhodnutí *kam task jde dál*
+   (krok, `end`) patří výhradně dispatcheru. Jediná výjimka: když consumer sám
+   nedokáže task doručit (behavior vyhodí výjimku, nebo vrátí neplatný
+   outcome), zapíše mu terminální status `failed` sám — symetricky k tomu, jak
+   `Dispatcher._fail` dělá totéž, když selže routing. `lastOutcome` zapisuje
+   výhradně consumer.
 4. **Router je čistá funkce.** `route()` nesmí sáhnout na I/O, čas ani stav.
 5. **`api/` ani `projection.py` neimportují `drivers/`.** UI nesmí vědět, na čem harness běží.
 6. **V `Harness.run()` jde `recover()` před `hydrate()`.** Obráceně se ztratí tasky z `.processing/`.
@@ -33,8 +38,14 @@ agenty, perzistentní úložiště ani git v ní nejsou.
 Python je **3.11** (`/Users/rem/.local/bin/python3.11`), na stroji **není `uv`** —
 plain `venv` + `pip install -e ".[dev]"`. Runtime nemá žádné produkční závislosti.
 
-Testy běží na in-memory driverech a `FakeClock` — bez disku a bez skutečného
-čekání. Nikdy nepiš test, který spí v reálném čase.
+Unit a integrační testy běží na in-memory driverech a `FakeClock` — bez disku
+a bez skutečného čekání. Nikdy do nich nepiš test, který spí v reálném čase.
+
+Jedinou záměrnou výjimkou je `tests/test_smoke.py` — běží na skutečném
+filesystemu a poluje reálným `asyncio.sleep(0.01)`, protože je to jediné
+místo, které ověřuje filesystémový driver naživo, end-to-end. Nejde o
+nedopatření a neuklízej ho do in-memory podoby — tím by zmizelo jediné
+pokrytí reálného FS v celé sadě.
 
 ## Git konvence
 

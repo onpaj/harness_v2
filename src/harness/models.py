@@ -9,6 +9,11 @@ from typing import Any, Union
 END = "end"
 """Vyhrazené jméno terminálního uzlu. Nemá frontu ani odchozí hrany."""
 
+FAILED = "failed"
+"""Vyhrazený terminální status tasku, který skončil ve frontě `failed/`.
+Stejně jako END nemá žádné odchozí hrany — jen tu navíc žádný workflow
+nezná jako svůj krok."""
+
 
 class Outcome(str, Enum):
     """Jediné hodnoty, které smí ConsumerBehavior vrátit."""

@@ -5,7 +5,7 @@ from harness.drivers.memory import (
     MemoryTaskQueue,
     MemoryWorkflowRepository,
 )
-from harness.models import END, Task, Transition, Workflow
+from harness.models import END, FAILED, Task, Transition, Workflow
 from harness.ports.strategy import EnqueueStrategy
 
 WORKFLOW = Workflow(
@@ -126,12 +126,34 @@ def test_unknown_workflow_template_lands_in_failed():
     assert "failed" in events.names()
 
 
+def test_unknown_workflow_template_task_carries_terminal_failed_status():
+    """Task s neznámým workflowTemplate nemá status; failed/ ho ale musí
+    nést jako terminální 'failed', ne nechat status na None — jinak by
+    cokoli čtoucí status bez procházení history vidělo lež."""
+    dispatcher, _, _, _, failed, _ = build(make_task(template="neznamy"))
+
+    dispatcher.tick()
+
+    assert failed.list()[0].status == FAILED
+
+
 def test_missing_edge_lands_in_failed():
     dispatcher, _, _, _, failed, _ = build(make_task("plan", "request_changes"))
 
     dispatcher.tick()
 
     assert failed.list()[0].history[-1].to_step == "failed"
+
+
+def test_mid_workflow_failure_task_carries_terminal_failed_status():
+    """Task, který selže uprostřed workflow (chybějící hrana), nesmí ve
+    failed/ zůstat se starým jménem kroku ('plan') — status musí přepsat
+    na terminální 'failed', stejně jako _finish přepisuje na 'end'."""
+    dispatcher, _, _, _, failed, _ = build(make_task("plan", "request_changes"))
+
+    dispatcher.tick()
+
+    assert failed.list()[0].status == FAILED
 
 
 def test_step_without_queue_lands_in_failed():
