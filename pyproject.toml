@@ -3,10 +3,14 @@ name = "harness"
 version = "0.1.0"
 description = "Orchestrační harness pro více agentů — fáze 1"
 requires-python = ">=3.11"
-dependencies = []
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn>=0.30",
+    "jinja2>=3.1",
+]
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "pytest-asyncio>=0.23"]
+dev = ["pytest>=8", "pytest-asyncio>=0.23", "httpx>=0.27"]
 
 [project.scripts]
 harness = "harness.cli:main"
