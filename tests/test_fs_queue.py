@@ -183,6 +183,12 @@ def test_file_vanishing_mid_recover_is_skipped_silently(tmp_path, monkeypatch):
     # tsk_1 zmizí přesně mezi glob() a čtením uvnitř recover() — simulace
     # vyhraného závodu, ne poškození. tsk_2 zůstává zdravý a musí se
     # zotavit normálně.
+    #
+    # Sledovat jen prázdný karanténní adresář nestačí: _quarantine_file má
+    # vlastní `except FileNotFoundError: pass`, takže i stará (chybná) verze
+    # recover(), která karanténu volala nepodmíněně, by na zmizelém souboru
+    # tiše no-opla a test by prošel i na rozbitém kódu. Proto se sleduje
+    # přímo volání _quarantine_file — musí být nula, ne jen jeho výsledek.
     vanished_path = tmp_path / "tasks" / ".processing" / "tsk_1.json"
     original_read_text = Path.read_text
 
@@ -193,11 +199,21 @@ def test_file_vanishing_mid_recover_is_skipped_silently(tmp_path, monkeypatch):
 
     monkeypatch.setattr(Path, "read_text", spy_read_text)
 
+    quarantine_calls: list[Path] = []
+    original_quarantine_file = queue._quarantine_file
+
+    def spy_quarantine_file(path):
+        quarantine_calls.append(path)
+        return original_quarantine_file(path)
+
+    monkeypatch.setattr(queue, "_quarantine_file", spy_quarantine_file)
+
     recovered = queue.recover()
 
     assert recovered == 1
     assert "corrupt" not in events.names()
     assert not any((tmp_path / "failed").glob("*.json"))
+    assert quarantine_calls == [], "vanished file must not trigger a quarantine attempt at all"
     remaining = queue.list()
     assert [task.id for task in remaining] == ["tsk_2"]
     assert remaining[0].lock_id is None

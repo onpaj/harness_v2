@@ -121,7 +121,7 @@ class FilesystemTaskQueue(TaskQueue):
         except (json.JSONDecodeError, KeyError, TypeError, OSError) as error:
             raise _Corrupt(str(error)) from error
 
-    def _read(self, path: Path, *, quarantine: bool = True) -> Task | None:
+    def _read(self, path: Path) -> Task | None:
         try:
             return self._load(path)
         except FileNotFoundError:
@@ -131,8 +131,7 @@ class FilesystemTaskQueue(TaskQueue):
             return None
         except _Corrupt as error:
             self._events.emit("corrupt", queue=self.name, path=str(path), reason=str(error))
-            if quarantine:
-                self._quarantine_file(path)
+            self._quarantine_file(path)
             return None
 
     def _quarantine_file(self, path: Path) -> None:
