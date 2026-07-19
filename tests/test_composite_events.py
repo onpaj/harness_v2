@@ -30,3 +30,11 @@ def test_broken_sink_does_not_stop_the_others():
 
 def test_no_sinks_is_not_an_error():
     CompositeEventSink().emit("dispatched", task_id="tsk_1")
+
+
+def test_broken_sink_is_reported_on_stderr(capsys):
+    composite = CompositeEventSink(ExplodingSink(), MemoryEventSink())
+
+    composite.emit("dispatched", task_id="tsk_1")
+
+    assert "sink praskl" in capsys.readouterr().err

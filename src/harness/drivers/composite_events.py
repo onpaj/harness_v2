@@ -6,6 +6,7 @@ za ním stojí.
 
 from __future__ import annotations
 
+import traceback
 from typing import Any
 
 from harness.ports.events import EventSink
@@ -20,4 +21,6 @@ class CompositeEventSink(EventSink):
             try:
                 sink.emit(name, **fields)
             except Exception:  # noqa: BLE001 - selhání pozorovatele nesmí zastavit smyčku
-                pass
+                # Hlášení na stderr — na EventSink se hlásit nemůžeme, ten právě selhal.
+                # Orchestrační smyčka musí pokračovat, ale porucha nesmí zmizet beze stopy.
+                traceback.print_exc()
