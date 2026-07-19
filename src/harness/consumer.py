@@ -53,6 +53,14 @@ class Consumer:
         if task is None:
             return False
 
+        self._events.emit(
+            "claimed",
+            task_id=task.id,
+            step=self._step,
+            queue=self._step,
+            task=task.to_dict(),
+        )
+
         try:
             outcome = await self._behavior.run(task)
         except Exception as error:  # noqa: BLE001 - jeden vadný task nesmí zastavit smyčku
@@ -79,7 +87,12 @@ class Consumer:
         )
         self._queue.transfer(updated, self._inbox)
         self._events.emit(
-            "consumed", task_id=task.id, step=self._step, outcome=outcome.value
+            "consumed",
+            task_id=task.id,
+            step=self._step,
+            outcome=outcome.value,
+            queue=self._step,
+            task=updated.to_dict(),
         )
 
     def _fail(self, task: Task, reason: str) -> None:
@@ -92,4 +105,10 @@ class Consumer:
         )
         broken = append_history(replace(task, lock_id=None), entry)
         self._queue.transfer(broken, self._failed)
-        self._events.emit("failed", task_id=task.id, reason=reason)
+        self._events.emit(
+            "failed",
+            task_id=task.id,
+            reason=reason,
+            queue="failed",
+            task=broken.to_dict(),
+        )

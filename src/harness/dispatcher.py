@@ -91,6 +91,8 @@ class Dispatcher:
             task_id=task.id,
             **{"from": task.status, "to": step},
             outcome=task.last_outcome,
+            queue=step,
+            task=routed.to_dict(),
         )
 
     def _finish(self, task: Task) -> None:
@@ -103,7 +105,9 @@ class Dispatcher:
         )
         finished = append_history(replace(task, status="end", lock_id=None), entry)
         self._inbox.transfer(finished, self._done)
-        self._events.emit("finished", task_id=task.id)
+        self._events.emit(
+            "finished", task_id=task.id, queue="done", task=finished.to_dict()
+        )
 
     def _fail(self, task: Task, reason: str) -> None:
         entry = HistoryEntry(
@@ -116,4 +120,10 @@ class Dispatcher:
         )
         broken = append_history(replace(task, lock_id=None), entry)
         self._inbox.transfer(broken, self._failed)
-        self._events.emit("failed", task_id=task.id, reason=reason)
+        self._events.emit(
+            "failed",
+            task_id=task.id,
+            reason=reason,
+            queue="failed",
+            task=broken.to_dict(),
+        )

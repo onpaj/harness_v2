@@ -71,7 +71,11 @@ def test_new_task_goes_to_start_queue_with_status_set():
     routed = step_queues["plan"].list()[0]
     assert routed.status == "plan"
     assert routed.lock_id is None
-    assert ("dispatched", {"task_id": "tsk_1", "from": None, "to": "plan", "outcome": None}) in events.events
+    _, fields = next(item for item in events.events if item[0] == "dispatched")
+    assert fields["task_id"] == "tsk_1"
+    assert fields["from"] is None
+    assert fields["to"] == "plan"
+    assert fields["outcome"] is None
 
 
 def test_dispatch_appends_history():
@@ -175,3 +179,35 @@ def test_dispatcher_does_not_touch_payload():
     dispatcher.tick()
 
     assert step_queues["plan"].list()[0].data == {"payload": "nedotknutelné"}
+
+
+def test_dispatched_event_carries_task_snapshot_and_queue():
+    dispatcher, _, _, _, _, events = build(make_task())
+
+    dispatcher.tick()
+
+    name, fields = next(item for item in events.events if item[0] == "dispatched")
+    assert fields["queue"] == "plan"
+    assert fields["task"]["id"] == "tsk_1"
+    assert fields["task"]["status"] == "plan"
+    assert fields["task"]["lockId"] is None
+
+
+def test_finished_event_carries_done_queue():
+    dispatcher, _, _, _, _, events = build(make_task("review", "done"))
+
+    dispatcher.tick()
+
+    _, fields = next(item for item in events.events if item[0] == "finished")
+    assert fields["queue"] == "done"
+    assert fields["task"]["id"] == "tsk_1"
+
+
+def test_failed_event_carries_failed_queue():
+    dispatcher, _, _, _, _, events = build(make_task(template="neznamy"))
+
+    dispatcher.tick()
+
+    _, fields = next(item for item in events.events if item[0] == "failed")
+    assert fields["queue"] == "failed"
+    assert fields["task"]["id"] == "tsk_1"

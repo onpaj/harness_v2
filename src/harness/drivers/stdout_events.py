@@ -13,6 +13,7 @@ class StdoutEventSink(EventSink):
         self._stream = stream if stream is not None else sys.stdout
 
     def emit(self, name: str, **fields: Any) -> None:
-        rendered = " ".join(f"{key}={value}" for key, value in fields.items())
+        printable = {key: value for key, value in fields.items() if key != "task"}
+        rendered = " ".join(f"{key}={value}" for key, value in printable.items())
         line = f"{name} {rendered}".rstrip()
         print(line, file=self._stream, flush=True)

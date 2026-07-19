@@ -71,7 +71,10 @@ async def test_done_outcome_returns_task_to_inbox():
     returned = inbox.list()[0]
     assert returned.last_outcome == "done"
     assert returned.lock_id is None
-    assert ("consumed", {"task_id": "tsk_1", "step": "design", "outcome": "done"}) in events.events
+    _, fields = next(item for item in events.events if item[0] == "consumed")
+    assert fields["task_id"] == "tsk_1"
+    assert fields["step"] == "design"
+    assert fields["outcome"] == "done"
 
 
 async def test_request_changes_outcome_is_written_verbatim():
@@ -129,3 +132,36 @@ def test_consumer_has_no_branch_on_outcome_value():
     assert "Outcome.DONE" not in source
     assert "Outcome.REQUEST_CHANGES" not in source
     assert "request_changes" not in source
+
+
+async def test_claimed_event_is_emitted_before_behavior_runs():
+    consumer, _, _, _, events = build(ScriptedBehavior(), make_task())
+
+    await consumer.tick()
+
+    names = events.names()
+    assert names.index("claimed") < names.index("consumed")
+    _, fields = next(item for item in events.events if item[0] == "claimed")
+    assert fields["queue"] == "design"
+    assert fields["task"]["lockId"] is not None
+
+
+async def test_consumed_event_carries_task_snapshot_and_queue():
+    consumer, _, _, _, events = build(ScriptedBehavior(), make_task())
+
+    await consumer.tick()
+
+    _, fields = next(item for item in events.events if item[0] == "consumed")
+    assert fields["queue"] == "design"
+    assert fields["task"]["lastOutcome"] == "done"
+    assert fields["task"]["lockId"] is None
+
+
+async def test_consumer_failure_event_carries_failed_queue():
+    consumer, _, _, _, events = build(ExplodingBehavior(), make_task())
+
+    await consumer.tick()
+
+    _, fields = next(item for item in events.events if item[0] == "failed")
+    assert fields["queue"] == "failed"
+    assert fields["task"]["id"] == "tsk_1"
