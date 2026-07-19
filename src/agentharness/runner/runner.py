@@ -35,6 +35,9 @@ class RunOutcome:
     run: RunRecord
     result: Result | None = None
     error: str | None = None
+    # Carried so the dispatcher can ask the rate-limit gate about the raw CLI
+    # outcome rather than pattern-matching a stringified error.
+    exec_result: ExecResult | None = None
 
 
 class Runner:
@@ -107,7 +110,7 @@ class Runner:
                 agent=task.agent,
                 data={"status": status, "degraded": degraded, "error": error, "output_ref": output_ref},
             )
-            return RunOutcome(run=run, result=result, error=error)
+            return RunOutcome(run=run, result=result, error=error, exec_result=exec_result)
 
         try:
             agent = self.agents.get(task.agent)

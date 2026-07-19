@@ -36,6 +36,8 @@ class Config(BaseModel):
     rate_limit_patterns: list[str] = Field(
         default_factory=lambda: list(DEFAULT_RATE_LIMIT_PATTERNS)
     )
+    retry_base_seconds: float = 30.0
+    retry_max_backoff_seconds: float = 3600.0
     rate_limit_initial_backoff_seconds: int = 60
     rate_limit_max_backoff_seconds: int = 3600
     commit_author_name: str = "agentharness"
