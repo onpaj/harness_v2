@@ -1,0 +1,18 @@
+<div class="board">
+  {% for column in board.columns %}
+  <div class="column">
+    <h2>{{ column.name }} <span class="count">{{ column.tasks|length }}</span></h2>
+    {% for task in column.tasks %}
+    <div class="card"
+         hx-get="/fragment/task/{{ task.id }}"
+         hx-target="#detail"
+         hx-swap="innerHTML">
+      <div class="id">{{ task.id }}</div>
+      {% if task.repository %}<div class="repo">{{ task.repository }}</div>{% endif %}
+      {% if task.lock_id %}<span class="badge working">zpracovává se</span>{% endif %}
+      {% if task.last_outcome %}<span class="badge {{ task.last_outcome }}">{{ task.last_outcome }}</span>{% endif %}
+    </div>
+    {% endfor %}
+  </div>
+  {% endfor %}
+</div>

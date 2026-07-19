@@ -1,0 +1,26 @@
+<h2>{{ task.id }}</h2>
+<table>
+  <tr><th>repository</th><td>{{ task.repository or "—" }}</td></tr>
+  <tr><th>worktree</th><td>{{ task.worktree or "—" }}</td></tr>
+  <tr><th>workflow</th><td>{{ task.workflow_template }}</td></tr>
+  <tr><th>status</th><td>{{ task.status or "—" }}</td></tr>
+  <tr><th>lastOutcome</th><td>{{ task.last_outcome or "—" }}</td></tr>
+  <tr><th>lockId</th><td>{{ task.lock_id or "—" }}</td></tr>
+  <tr><th>created</th><td>{{ task.created }}</td></tr>
+  <tr><th>data</th><td><pre>{{ task.data }}</pre></td></tr>
+</table>
+
+<h3>historie</h3>
+<table>
+  <tr><th>čas</th><th>actor</th><th>z</th><th>do</th><th>outcome</th><th>důvod</th></tr>
+  {% for entry in task.history %}
+  <tr>
+    <td>{{ entry.at }}</td>
+    <td>{{ entry.actor }}</td>
+    <td>{{ entry.from_step or "—" }}</td>
+    <td>{{ entry.to_step or "—" }}</td>
+    <td>{{ entry.outcome or "—" }}</td>
+    <td>{{ entry.reason or "—" }}</td>
+  </tr>
+  {% endfor %}
+</table>

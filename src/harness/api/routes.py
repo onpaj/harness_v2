@@ -4,11 +4,16 @@ from __future__ import annotations
 
 import json
 from collections.abc import AsyncIterator
+from pathlib import Path
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.templating import Jinja2Templates
 
 from harness.ports.board import BoardView
 from harness.ports.clock import Clock
+
+TEMPLATES = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 
 
 async def board_event_stream(
@@ -38,5 +43,41 @@ def build_json_router(view: BoardView) -> APIRouter:
         if found is None:
             raise HTTPException(status_code=404, detail=f"task {task_id} neexistuje")
         return found.to_dict()
+
+    return router
+
+
+def build_html_router(
+    view: BoardView, clock: Clock, coalesce_seconds: float
+) -> APIRouter:
+    router = APIRouter()
+
+    @router.get("/", response_class=HTMLResponse)
+    def index(request: Request) -> HTMLResponse:
+        return TEMPLATES.TemplateResponse(
+            request=request, name="board.html", context={"board": view.snapshot()}
+        )
+
+    @router.get("/fragment/board", response_class=HTMLResponse)
+    def fragment_board(request: Request) -> HTMLResponse:
+        return TEMPLATES.TemplateResponse(
+            request=request, name="_columns.html", context={"board": view.snapshot()}
+        )
+
+    @router.get("/fragment/task/{task_id}", response_class=HTMLResponse)
+    def fragment_task(request: Request, task_id: str) -> HTMLResponse:
+        found = view.get(task_id)
+        if found is None:
+            raise HTTPException(status_code=404, detail=f"task {task_id} neexistuje")
+        return TEMPLATES.TemplateResponse(
+            request=request, name="_task.html", context={"task": found}
+        )
+
+    @router.get("/api/events")
+    async def events() -> StreamingResponse:
+        return StreamingResponse(
+            board_event_stream(view, clock, coalesce_seconds),
+            media_type="text/event-stream",
+        )
 
     return router

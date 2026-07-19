@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="cs">
+<head>
+  <meta charset="utf-8">
+  <title>harness board</title>
+  <script src="/static/htmx.min.js"></script>
+  <script src="/static/sse.js"></script>
+  <style>
+    body { font: 14px system-ui, sans-serif; margin: 0; padding: 16px; background: #f4f5f7; }
+    h1 { font-size: 16px; margin: 0 0 16px; }
+    .board { display: flex; gap: 12px; align-items: flex-start; overflow-x: auto; }
+    .column { background: #ebecf0; border-radius: 6px; padding: 8px; min-width: 220px; flex: 1; }
+    .column h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .04em; margin: 4px 4px 8px; color: #5e6c84; }
+    .count { color: #97a0af; font-weight: normal; }
+    .card { background: #fff; border-radius: 4px; box-shadow: 0 1px 1px rgba(9,30,66,.25); padding: 8px; margin-bottom: 8px; cursor: pointer; }
+    .card .id { font-family: ui-monospace, monospace; font-size: 12px; }
+    .card .repo { color: #5e6c84; font-size: 12px; }
+    .badge { display: inline-block; font-size: 11px; border-radius: 3px; padding: 1px 6px; margin-top: 6px; margin-right: 4px; }
+    .badge.done { background: #e3fcef; color: #006644; }
+    .badge.request_changes { background: #fffae6; color: #974f0c; }
+    .badge.working { background: #deebff; color: #0747a6; }
+    dialog { border: none; border-radius: 6px; padding: 16px; max-width: 640px; width: 90%; }
+    table { border-collapse: collapse; width: 100%; font-size: 13px; }
+    td, th { text-align: left; padding: 4px 8px; border-bottom: 1px solid #ebecf0; vertical-align: top; }
+  </style>
+</head>
+<body hx-ext="sse" sse-connect="/api/events">
+  <h1>harness board</h1>
+  <div id="board" hx-get="/fragment/board" hx-trigger="sse:board" hx-swap="innerHTML">
+    {% include "_columns.html" %}
+  </div>
+  <dialog id="detail"></dialog>
+  <script>
+    document.body.addEventListener('htmx:afterSwap', function (event) {
+      if (event.detail.target.id === 'detail') { document.getElementById('detail').showModal(); }
+    });
+    document.getElementById('detail').addEventListener('click', function (event) {
+      if (event.target.id === 'detail') { event.target.close(); }
+    });
+  </script>
+</body>
+</html>
