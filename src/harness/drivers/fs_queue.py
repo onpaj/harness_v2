@@ -21,6 +21,17 @@ from harness.ports.queue import TaskQueue
 PROCESSING = ".processing"
 
 
+class _Corrupt(Exception):
+    """Interní signál: soubor existuje, ale nejde deserializovat.
+
+    Odlišuje se od zmizelého souboru (FileNotFoundError), aby volající
+    _load() nemuseli hádat důvod z jediné hodnoty None."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
 class FilesystemTaskQueue(TaskQueue):
     def __init__(
         self,
@@ -79,8 +90,18 @@ class FilesystemTaskQueue(TaskQueue):
     def recover(self) -> int:
         count = 0
         for path in sorted(self._processing.glob("*.json")):
-            task = self._read(path, quarantine=False)
-            if task is None:
+            try:
+                task = self._load(path)
+            except FileNotFoundError:
+                # Soubor zmizel mezi glob() a čtením — vyhraný závod jiného
+                # zabírajícího, ne poškození. Tiše přeskočit: žádný event,
+                # žádný pokus o karanténu (ten by mohl smést i zdravý task,
+                # kdyby mezitím na stejné cestě vznikl nový soubor).
+                continue
+            except _Corrupt as error:
+                self._events.emit(
+                    "corrupt", queue=self.name, path=str(path), reason=str(error)
+                )
                 self._quarantine_file(path)
                 continue
             self._write(path, replace(task, lock_id=None))
@@ -88,15 +109,27 @@ class FilesystemTaskQueue(TaskQueue):
             count += 1
         return count
 
-    def _read(self, path: Path, *, quarantine: bool = True) -> Task | None:
+    def _load(self, path: Path) -> Task:
+        """Přečte a deserializuje task, nebo vyhodí přesně to, proč se to
+        nepovedlo — FileNotFoundError (zmizel) vs. _Corrupt (poškozený).
+        Jediné čtení, žádný re-check existence: ten by jen znovu otevřel
+        stejné TOCTOU okno, které má toto rozlišení zavřít."""
         try:
             return Task.from_dict(json.loads(path.read_text(encoding="utf-8")))
+        except FileNotFoundError:
+            raise
+        except (json.JSONDecodeError, KeyError, TypeError, OSError) as error:
+            raise _Corrupt(str(error)) from error
+
+    def _read(self, path: Path, *, quarantine: bool = True) -> Task | None:
+        try:
+            return self._load(path)
         except FileNotFoundError:
             # Soubor zmizel mezi glob() a čtením — to je vyhraný závod jiného
             # zabírajícího (přesně to, co claim() toleruje), ne poškození.
             # Tiše přeskočit: žádný event, žádný pokus o karanténu.
             return None
-        except (json.JSONDecodeError, KeyError, TypeError, OSError) as error:
+        except _Corrupt as error:
             self._events.emit("corrupt", queue=self.name, path=str(path), reason=str(error))
             if quarantine:
                 self._quarantine_file(path)
@@ -121,7 +154,16 @@ class FilesystemTaskQueue(TaskQueue):
         # nesdíleli jeden temp soubor. Přípona zůstává ".json.tmp", takže ji
         # glob("*.json") v list()/claim()/recover() nikdy nezachytí.
         temporary = path.with_name(f"{path.stem}.{uuid.uuid4().hex}.json.tmp")
-        temporary.write_text(
-            json.dumps(task.to_dict(), indent=2, ensure_ascii=False), encoding="utf-8"
-        )
-        os.replace(temporary, path)
+        try:
+            temporary.write_text(
+                json.dumps(task.to_dict(), indent=2, ensure_ascii=False), encoding="utf-8"
+            )
+            os.replace(temporary, path)
+        except Exception:
+            # Selhání zápisu nebo přejmenování nesmí nechat temp soubor viset
+            # navždy — na rozdíl od starého deterministického jména ho už nic
+            # nepřepíše. Tvrdý SIGKILL přesně mezi write_text a touto větví
+            # ho přesto může zanechat; to je pro tuto fázi akceptované riziko,
+            # ne důvod stavět adresářový sweeper.
+            temporary.unlink(missing_ok=True)
+            raise

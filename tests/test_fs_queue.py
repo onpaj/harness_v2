@@ -1,4 +1,8 @@
 import json
+import os
+from pathlib import Path
+
+import pytest
 
 from harness.drivers.fs_queue import FilesystemTaskQueue
 from harness.drivers.memory import MemoryEventSink, MemoryTaskQueue
@@ -166,6 +170,52 @@ def test_corrupt_file_goes_to_real_filesystem_quarantine(tmp_path):
     assert quarantined.exists()
     assert quarantined.read_text() == "{tohle neni json"
     assert "corrupt" in events.names()
+
+
+def test_file_vanishing_mid_recover_is_skipped_silently(tmp_path, monkeypatch):
+    quarantine, _ = build(tmp_path, "failed")
+    queue, events = build(tmp_path, quarantine=quarantine)
+    queue.put(make_task("tsk_1"))
+    queue.put(make_task("tsk_2"))
+    for task in queue.list():
+        queue.claim(task, f"lck_{task.id}")
+
+    # tsk_1 zmizí přesně mezi glob() a čtením uvnitř recover() — simulace
+    # vyhraného závodu, ne poškození. tsk_2 zůstává zdravý a musí se
+    # zotavit normálně.
+    vanished_path = tmp_path / "tasks" / ".processing" / "tsk_1.json"
+    original_read_text = Path.read_text
+
+    def spy_read_text(self, *args, **kwargs):
+        if self == vanished_path:
+            vanished_path.unlink()
+        return original_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", spy_read_text)
+
+    recovered = queue.recover()
+
+    assert recovered == 1
+    assert "corrupt" not in events.names()
+    assert not any((tmp_path / "failed").glob("*.json"))
+    remaining = queue.list()
+    assert [task.id for task in remaining] == ["tsk_2"]
+    assert remaining[0].lock_id is None
+
+
+def test_write_cleans_up_temp_file_when_replace_fails(tmp_path, monkeypatch):
+    queue, _ = build(tmp_path)
+
+    def failing_replace(*args, **kwargs):
+        raise OSError("simulated replace failure")
+
+    monkeypatch.setattr(os, "replace", failing_replace)
+
+    with pytest.raises(OSError):
+        queue.put(make_task())
+
+    assert list((tmp_path / "tasks").glob("*.tmp")) == []
+    assert list((tmp_path / "tasks").glob("*.json")) == []
 
 
 def test_recover_quarantines_stranded_corrupt_file_and_still_counts_the_rest(tmp_path):
