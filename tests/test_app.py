@@ -1,0 +1,92 @@
+import asyncio
+import json
+
+from harness.app import HarnessLayout, build
+from harness.drivers.memory import MemoryEventSink
+from harness.models import Task
+
+DEFINITION = {
+    "name": "default",
+    "start": "plan",
+    "transitions": [
+        {"from": "plan", "on": "done", "to": "review"},
+        {"from": "review", "on": "done", "to": "end"},
+        {"from": "review", "on": "request_changes", "to": "plan"},
+    ],
+}
+
+
+def seed(tmp_path):
+    layout = HarnessLayout(tmp_path)
+    layout.workflows.mkdir(parents=True, exist_ok=True)
+    (layout.workflows / "default.json").write_text(json.dumps(DEFINITION))
+    return layout
+
+
+def test_build_creates_one_queue_per_step(tmp_path):
+    seed(tmp_path)
+
+    harness = build(tmp_path, "default", events=MemoryEventSink())
+
+    assert sorted(step for step in harness.workflow.steps()) == ["plan", "review"]
+    assert (tmp_path / "queues" / "plan").is_dir()
+    assert (tmp_path / "queues" / "review").is_dir()
+    assert not (tmp_path / "queues" / "end").exists()
+    assert len(harness.consumers) == 2
+
+
+def test_build_creates_inbox_done_and_failed(tmp_path):
+    seed(tmp_path)
+
+    build(tmp_path, "default", events=MemoryEventSink())
+
+    assert (tmp_path / "tasks").is_dir()
+    assert (tmp_path / "done").is_dir()
+    assert (tmp_path / "failed").is_dir()
+
+
+async def test_run_drives_a_task_all_the_way_to_done(tmp_path):
+    seed(tmp_path)
+    events = MemoryEventSink()
+    harness = build(
+        tmp_path,
+        "default",
+        events=events,
+        delay=0.0,
+        request_changes_once_at="review",
+    )
+    task = Task(id="tsk_1", workflow_template="default", created="2026-07-19T10:00:00Z")
+    (tmp_path / "tasks" / "tsk_1.json").write_text(json.dumps(task.to_dict()))
+
+    stop = asyncio.Event()
+    runner = asyncio.create_task(harness.run(poll_interval=0.01, stop=stop))
+    for _ in range(400):
+        await asyncio.sleep(0.01)
+        if (tmp_path / "done" / "tsk_1.json").exists():
+            break
+    stop.set()
+    await runner
+
+    assert (tmp_path / "done" / "tsk_1.json").exists()
+    finished = Task.from_dict(json.loads((tmp_path / "done" / "tsk_1.json").read_text()))
+    visited = [entry.to_step for entry in finished.history if entry.actor == "dispatcher"]
+    assert visited == ["plan", "review", "plan", "review", "end"]
+
+
+def test_recover_returns_stranded_tasks(tmp_path):
+    seed(tmp_path)
+    harness = build(tmp_path, "default", events=MemoryEventSink())
+    stranded = Task(
+        id="tsk_1",
+        workflow_template="default",
+        created="2026-07-19T10:00:00Z",
+        lock_id="lck_1",
+    )
+    (tmp_path / "tasks" / ".processing" / "tsk_1.json").write_text(
+        json.dumps(stranded.to_dict())
+    )
+
+    assert harness.recover() == 1
+    assert (tmp_path / "tasks" / "tsk_1.json").exists()
+    revived = Task.from_dict(json.loads((tmp_path / "tasks" / "tsk_1.json").read_text()))
+    assert revived.lock_id is None
