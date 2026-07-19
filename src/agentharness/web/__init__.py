@@ -1,1 +1,0 @@
-"""The read-only dashboard."""
