@@ -88,6 +88,14 @@ def test_card_shows_last_outcome(client):
     assert "request_changes" in body
 
 
+def test_card_shows_time_in_state_only_when_history_exists(client):
+    body = client.get("/fragment/board").text
+
+    card_one, card_two = body.split("tsk_2", 1)
+    assert "2026-07-19T10:00:05Z" in card_one
+    assert "since" not in card_two
+
+
 def test_fragment_task_shows_metadata_and_history(client):
     body = client.get("/fragment/task/tsk_1").text
 
