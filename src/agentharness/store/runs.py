@@ -331,6 +331,30 @@ class RunStore:
                 ),
             )
 
+    def events_for_trace(self, trace_id: str) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT ts, kind, task_id, trace_id, run_id, agent, data_json "
+                "FROM events WHERE trace_id = ? ORDER BY id",
+                (trace_id,),
+            ).fetchall()
+        return [self._event_row(r) for r in rows]
+
+    def recent_events(self, limit: int = 100) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT ts, kind, task_id, trace_id, run_id, agent, data_json "
+                "FROM events ORDER BY id DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [self._event_row(r) for r in rows]
+
+    @staticmethod
+    def _event_row(row: sqlite3.Row) -> dict[str, Any]:
+        event = dict(row)
+        event["data"] = json.loads(event.pop("data_json")) if event["data_json"] else None
+        return event
+
     # --- schedules -----------------------------------------------------------
 
     def upsert_schedule(self, s: ScheduleDef, next_fire_at: datetime) -> None:
