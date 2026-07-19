@@ -67,11 +67,4 @@ def test_events_endpoint_is_registered():
     projection = BoardProjection(WORKFLOW)
     client = TestClient(create_app(view=projection, clock=FakeClock()))
 
-    paths: set[str] = set()
-    for route in client.app.routes:
-        if hasattr(route, "path"):
-            paths.add(route.path)
-        elif hasattr(route, "original_router"):
-            paths.update(r.path for r in route.original_router.routes)
-
-    assert "/api/events" in paths
+    assert client.app.url_path_for("events") == "/api/events"
