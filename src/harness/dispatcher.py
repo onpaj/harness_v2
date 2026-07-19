@@ -6,6 +6,7 @@ from dataclasses import replace
 
 from harness.ids import new_lock_id
 from harness.models import (
+    FAILED,
     Failed,
     Finished,
     HistoryEntry,
@@ -110,10 +111,12 @@ class Dispatcher:
             at=self._clock.now(),
             actor=ACTOR,
             from_step=task.status,
-            to_step="failed",
+            to_step=FAILED,
             outcome=task.last_outcome,
             reason=reason,
         )
-        broken = append_history(replace(task, lock_id=None), entry)
+        broken = append_history(
+            replace(task, status=FAILED, lock_id=None), entry
+        )
         self._inbox.transfer(broken, self._failed)
         self._events.emit("failed", task_id=task.id, reason=reason)

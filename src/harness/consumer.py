@@ -9,7 +9,7 @@ from __future__ import annotations
 from dataclasses import replace
 
 from harness.ids import new_lock_id
-from harness.models import HistoryEntry, Outcome, Task, append_history
+from harness.models import FAILED, HistoryEntry, Outcome, Task, append_history
 from harness.ports.behavior import ConsumerBehavior
 from harness.ports.clock import Clock
 from harness.ports.events import EventSink
@@ -87,9 +87,11 @@ class Consumer:
             at=self._clock.now(),
             actor=self.actor,
             from_step=self._step,
-            to_step="failed",
+            to_step=FAILED,
             reason=reason,
         )
-        broken = append_history(replace(task, lock_id=None), entry)
+        broken = append_history(
+            replace(task, status=FAILED, lock_id=None), entry
+        )
         self._queue.transfer(broken, self._failed)
         self._events.emit("failed", task_id=task.id, reason=reason)
