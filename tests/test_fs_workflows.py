@@ -71,6 +71,29 @@ def test_name_with_path_separator_is_rejected(tmp_path):
         repository.get("../tajne")
 
 
+@pytest.mark.parametrize(
+    "raw_json",
+    [
+        "42",
+        "null",
+        '["start", "x"]',
+        '"start line"',
+    ],
+    ids=["number", "null", "list", "string-containing-start"],
+)
+def test_non_dict_top_level_raises(tmp_path, raw_json):
+    """Fuzzování odhalilo, že top-level JSON nemusí být objekt. Bez explicitní
+    kontroly by `"start" not in raw` na čísle/None spadlo na TypeError a na
+    stringu, který podřetězcem obsahuje "start" (např. "start line"), by
+    kontrola prošla a spadlo by až na AttributeError z `raw.get(...)` o kus
+    níž. Obojí muselo být odchyceno dřív a převedeno na WorkflowNotFound."""
+    (tmp_path / "spatny_tvar.json").write_text(raw_json)
+    repository = FilesystemWorkflowRepository(tmp_path)
+
+    with pytest.raises(WorkflowNotFound):
+        repository.get("spatny_tvar")
+
+
 def test_path_separator_is_rejected_even_when_escape_target_exists(tmp_path):
     """A weaker version of this test (no real file at the escaped path)
     would pass even if the separator guard were deleted entirely: the

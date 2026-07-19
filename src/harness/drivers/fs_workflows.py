@@ -27,6 +27,12 @@ class FilesystemWorkflowRepository(WorkflowRepository):
                 f"workflow {name!r} má rozbitou definici: {error}"
             ) from None
 
+        if not isinstance(raw, dict):
+            raise WorkflowNotFound(
+                f"workflow {name!r} má neplatnou definici: očekáván objekt, "
+                f"nalezeno {type(raw).__name__}"
+            )
+
         if "start" not in raw:
             raise WorkflowNotFound(f"workflow {name!r} nemá start")
 
