@@ -1,9 +1,20 @@
+import asyncio
 import json
 
 import pytest
 
-from harness.cli import DEFAULT_WORKFLOW, main
-from harness.models import Task
+from harness.cli import DEFAULT_WORKFLOW, main, serve
+from harness.models import END, Task, Transition, Workflow
+from harness.projection import BoardProjection
+
+SERVE_TEST_WORKFLOW = Workflow(
+    name="default",
+    start="plan",
+    transitions=(
+        Transition(from_step="plan", on="done", to_step="review"),
+        Transition(from_step="review", on="done", to_step=END),
+    ),
+)
 
 
 def test_init_creates_layout_and_default_workflow(tmp_path):
@@ -140,3 +151,41 @@ def test_run_accepts_api_port(monkeypatch, tmp_path):
 
     assert main(["run", "--root", str(tmp_path), "--api-port", "9123"]) == 0
     assert captured["port"] == 9123
+
+
+async def test_serve_returns_when_uvicorn_stops_before_the_loop(monkeypatch):
+    """Regrese: `serve()` dřív dělal `await asyncio.gather(loop, uvicorn.Server(...).serve())`
+    a `stop.set()` volal až ve `finally`. Když uvicorn (po Ctrl+C) doběhne dřív a
+    vrátí se BEZ výjimky, `gather` dál čekal na `loop` -- ten ale neskončí dřív,
+    než se nastaví `stop`, ke kterému se kód dostane teprve PO návratu z `gather`.
+    Uzavřený kruh: `serve()` by nikdy neskončil.
+
+    Reprodukce je strukturální (jak to dělal reviewer): fake uvicorn server, co
+    se sám vrátí okamžitě (jako uvicorn po Ctrl+C), + `loop`, co běží donekonečna,
+    dokud nedostane `stop`. Na nedopravené verzi tenhle test zamrzne a spadne na
+    `asyncio.wait_for` timeoutu; na opravené doběhne během zlomku sekundy."""
+
+    class FakeHarness:
+        def __init__(self):
+            self.projection = BoardProjection(SERVE_TEST_WORKFLOW)
+            self.stop_seen: asyncio.Event | None = None
+
+        async def run(self, poll_interval, stop):
+            self.stop_seen = stop
+            while not stop.is_set():
+                await asyncio.sleep(0.01)
+
+    class FakeUvicornServer:
+        def __init__(self, config):
+            pass
+
+        async def serve(self):
+            return  # simuluje uvicorn, který se po Ctrl+C vrátí bez výjimky
+
+    monkeypatch.setattr("harness.cli.uvicorn.Server", FakeUvicornServer)
+
+    harness = FakeHarness()
+    await asyncio.wait_for(serve(harness, 8000, 0.01), timeout=2.0)
+
+    assert harness.stop_seen is not None
+    assert harness.stop_seen.is_set()

@@ -127,10 +127,15 @@ async def serve(harness, port: int, poll_interval: float) -> None:
 
     app = create_app(view=harness.projection, clock=SystemClock())
     config = uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning")
+    server = asyncio.create_task(uvicorn.Server(config).serve())
     try:
-        await asyncio.gather(loop, uvicorn.Server(config).serve())
+        done, _ = await asyncio.wait({loop, server}, return_when=asyncio.FIRST_COMPLETED)
+        for task in done:
+            task.result()  # propaguj výjimku, pokud některá úloha spadla
     finally:
         stop.set()
+        server.cancel()
+        await asyncio.gather(loop, server, return_exceptions=True)
 
 
 def main(argv: list[str] | None = None) -> int:
