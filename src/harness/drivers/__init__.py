@@ -1,0 +1,1 @@
+"""Konkrétní implementace portů."""
