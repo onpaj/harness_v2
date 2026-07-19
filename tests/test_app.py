@@ -96,3 +96,45 @@ def test_recover_returns_stranded_tasks(tmp_path):
     assert (tmp_path / "tasks" / "tsk_1.json").exists()
     revived = Task.from_dict(json.loads((tmp_path / "tasks" / "tsk_1.json").read_text()))
     assert revived.lock_id is None
+
+
+async def test_projection_is_hydrated_from_queues_at_start(tmp_path):
+    seed(tmp_path)
+    harness = build(tmp_path, "default", delay=0.0)
+    waiting = Task(
+        id="tsk_9",
+        workflow_template="default",
+        created="2026-07-19T09:00:00Z",
+        status="review",
+    )
+    (tmp_path / "queues" / "review" / "tsk_9.json").write_text(
+        json.dumps(waiting.to_dict())
+    )
+
+    stop = asyncio.Event()
+    stop.set()
+    await harness.run(poll_interval=0.01, stop=stop)
+
+    assert harness.projection.get("tsk_9") is not None
+    assert harness.projection.snapshot().column("review").tasks[0].id == "tsk_9"
+
+
+async def test_stranded_task_survives_into_the_projection(tmp_path):
+    seed(tmp_path)
+    harness = build(tmp_path, "default", delay=0.0)
+    stranded = Task(
+        id="tsk_8",
+        workflow_template="default",
+        created="2026-07-19T09:00:00Z",
+        status="plan",
+        lock_id="lck_1",
+    )
+    (tmp_path / "queues" / "plan" / ".processing" / "tsk_8.json").write_text(
+        json.dumps(stranded.to_dict())
+    )
+
+    stop = asyncio.Event()
+    stop.set()
+    await harness.run(poll_interval=0.01, stop=stop)
+
+    assert harness.projection.get("tsk_8") is not None

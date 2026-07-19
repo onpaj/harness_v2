@@ -24,6 +24,18 @@ harness submit --root /tmp/harness-demo --repo app-backend \
 harness run --root /tmp/harness-demo --delay 0.5 --request-changes-at review
 ```
 
+## Board
+
+`harness run` vedle orchestrační smyčky servíruje read-only board na
+`http://127.0.0.1:8420/`. Sloupce jsou kroky workflow plus `done` a `failed`,
+karty jsou tasky, klik ukáže metadata a historii. Board se aktualizuje sám
+přes SSE.
+
+`--api-port 0` board vypne.
+
+Board čte výhradně přes port `BoardView`. O tom, že tasky jsou JSON soubory
+a fronty adresáře, neví — a vědět nesmí.
+
 ## Jak práce teče
 
 ```

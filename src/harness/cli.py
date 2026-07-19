@@ -9,6 +9,9 @@ import os
 import sys
 from pathlib import Path
 
+import uvicorn
+
+from harness.api.app import create_app
 from harness.app import HarnessLayout, build
 from harness.drivers.fs_workflows import invalid_workflow_name
 from harness.drivers.system_clock import SystemClock
@@ -107,10 +110,27 @@ def _run(args: argparse.Namespace) -> int:
         return 2
 
     try:
-        asyncio.run(harness.run(poll_interval=args.poll))
+        asyncio.run(serve(harness, args.api_port, args.poll))
     except KeyboardInterrupt:
         return 0
     return 0
+
+
+async def serve(harness, port: int, poll_interval: float) -> None:
+    """Smyčka a board v jednom event loopu."""
+    stop = asyncio.Event()
+    loop = asyncio.create_task(harness.run(poll_interval=poll_interval, stop=stop))
+
+    if port == 0:
+        await loop
+        return
+
+    app = create_app(view=harness.projection, clock=SystemClock())
+    config = uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning")
+    try:
+        await asyncio.gather(loop, uvicorn.Server(config).serve())
+    finally:
+        stop.set()
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -140,6 +160,12 @@ def main(argv: list[str] | None = None) -> int:
     run.add_argument("--delay", type=float, default=5.0)
     run.add_argument("--poll", type=float, default=0.2)
     run.add_argument("--request-changes-at", default=None, dest="request_changes_at")
+    run.add_argument(
+        "--api-port",
+        type=int,
+        default=8420,
+        help="port boardu; 0 board vypne",
+    )
     run.set_defaults(handler=_run)
 
     args = parser.parse_args(argv)

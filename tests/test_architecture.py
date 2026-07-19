@@ -116,3 +116,19 @@ def test_consumer_has_no_branch_on_outcome_value():
         "consumer.py obsahuje porovnání odvozené od outcome na řádku "
         f"{offending[0].lineno} — rozhodování patří do ConsumerBehavior/dispatcheru"
     )
+
+
+def test_projection_does_not_import_drivers():
+    """Read model sahá na porty, ne na drivery."""
+    assert not any(
+        module.startswith("harness.drivers")
+        for module in imported_modules(SOURCE / "projection.py")
+    )
+
+
+def test_api_does_not_import_drivers():
+    """UI nesmí vědět nic o driverech, na kterých harness běží."""
+    for path in (SOURCE / "api").rglob("*.py"):
+        assert not any(
+            module.startswith("harness.drivers") for module in imported_modules(path)
+        ), f"{path.name} importuje driver"

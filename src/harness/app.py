@@ -8,10 +8,12 @@ from pathlib import Path
 
 from harness.consumer import Consumer
 from harness.dispatcher import Dispatcher
+from harness.drivers.composite_events import CompositeEventSink
 from harness.drivers.dummy_behavior import DummyBehavior
 from harness.drivers.fifo_strategy import FifoStrategy
 from harness.drivers.fs_queue import FilesystemTaskQueue
 from harness.drivers.fs_workflows import FilesystemWorkflowRepository
+from harness.drivers.projection_events import ProjectionSink
 from harness.drivers.stdout_events import StdoutEventSink
 from harness.drivers.system_clock import SystemClock
 from harness.models import Workflow
@@ -19,6 +21,7 @@ from harness.ports.behavior import ConsumerBehavior
 from harness.ports.clock import Clock
 from harness.ports.events import EventSink
 from harness.ports.queue import TaskQueue
+from harness.projection import BoardProjection
 
 
 @dataclass(frozen=True)
@@ -54,7 +57,11 @@ class Harness:
         workflow: Workflow,
         dispatcher: Dispatcher,
         consumers: list[Consumer],
-        queues: list[TaskQueue],
+        inbox: TaskQueue,
+        step_queues: dict[str, TaskQueue],
+        done: TaskQueue,
+        failed: TaskQueue,
+        projection: BoardProjection,
         events: EventSink,
         clock: Clock,
     ) -> None:
@@ -62,12 +69,17 @@ class Harness:
         self.workflow = workflow
         self.dispatcher = dispatcher
         self.consumers = consumers
-        self._queues = queues
+        self.projection = projection
+        self._inbox = inbox
+        self._step_queues = step_queues
+        self._done = done
+        self._failed = failed
         self._events = events
         self._clock = clock
 
     def recover(self) -> int:
-        total = sum(queue.recover() for queue in self._queues)
+        queues = [self._inbox, *self._step_queues.values()]
+        total = sum(queue.recover() for queue in queues)
         if total:
             self._events.emit("recovered", count=total)
         return total
@@ -77,6 +89,12 @@ class Harness:
     ) -> None:
         stop = stop or asyncio.Event()
         self.recover()
+        self.projection.hydrate(
+            inbox=self._inbox,
+            step_queues=self._step_queues,
+            done=self._done,
+            failed=self._failed,
+        )
         self._events.emit("started", workflow=self.workflow.name)
         await asyncio.gather(
             self._dispatcher_loop(poll_interval, stop),
@@ -118,6 +136,9 @@ def build(
 
     workflows = FilesystemWorkflowRepository(layout.workflows)
     workflow = workflows.get(workflow_name)
+
+    projection = BoardProjection(workflow)
+    events = CompositeEventSink(events, ProjectionSink(projection))
 
     failed = FilesystemTaskQueue(name="failed", root=layout.failed, events=events)
     done = FilesystemTaskQueue(name="done", root=layout.done, events=events)
@@ -165,7 +186,11 @@ def build(
         workflow=workflow,
         dispatcher=dispatcher,
         consumers=consumers,
-        queues=[inbox, *step_queues.values()],
+        inbox=inbox,
+        step_queues=step_queues,
+        done=done,
+        failed=failed,
+        projection=projection,
         events=events,
         clock=clock,
     )

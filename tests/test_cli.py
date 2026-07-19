@@ -127,3 +127,16 @@ def test_harness_home_used_only_when_root_absent(tmp_path, monkeypatch):
 
     assert main(["init", "--root", str(flag_root)]) == 0
     assert flag_root.is_dir()
+
+
+def test_run_accepts_api_port(monkeypatch, tmp_path):
+    main(["init", "--root", str(tmp_path)])
+    captured = {}
+
+    async def fake_serve(harness, port, poll_interval):
+        captured["port"] = port
+
+    monkeypatch.setattr("harness.cli.serve", fake_serve)
+
+    assert main(["run", "--root", str(tmp_path), "--api-port", "9123"]) == 0
+    assert captured["port"] == 9123

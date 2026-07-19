@@ -20,6 +20,9 @@ agenty, perzistentní úložiště ani git v ní nejsou.
    být větev závislá na hodnotě outcome; test to kontroluje čtením zdrojáku.
 3. **Status mění výhradně dispatcher.** `lastOutcome` zapisuje výhradně consumer.
 4. **Router je čistá funkce.** `route()` nesmí sáhnout na I/O, čas ani stav.
+5. **`api/` ani `projection.py` neimportují `drivers/`.** UI nesmí vědět, na čem harness běží.
+6. **V `Harness.run()` jde `recover()` před `hydrate()`.** Obráceně se ztratí tasky z `.processing/`.
+7. **Event o pohybu tasku nese `task` i `queue`.** Bez toho projekce neuvidí tasky vzniklé po startu.
 
 ## Práce tady
 
@@ -50,6 +53,10 @@ Závislosti tečou striktně dolů, cykly nejsou.
 | Orchestrace | `dispatcher`, `consumer` — znají jen porty |
 | Drivery | `drivers/{fs_queue,fs_workflows,fifo_strategy,dummy_behavior,stdout_events,system_clock,memory}` |
 | Okraje | `app` (wiring), `cli` |
+
+- `projection.py` — in-memory read model boardu; hydratace z front + proud eventů
+- `ports/board.py` — port `BoardView`, kterým se dívá UI
+- `api/` — FastAPI board; vidí jen `BoardView`, nikdy driver
 
 ## Co je za co zodpovědné
 
