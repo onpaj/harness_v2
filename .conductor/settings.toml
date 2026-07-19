@@ -1,0 +1,27 @@
+"$schema" = "https://conductor.build/schemas/settings.repo.schema.json"
+
+[scripts]
+# Postaví izolované venv a nainstaluje harness v editable režimu i s dev
+# závislostmi (pytest). Na stroji není `uv` — plain venv + pip (viz CLAUDE.md).
+# python3.11 se hledá na PATH, s fallbackem na ~/.local/bin (non-interaktivní
+# zsh nemusí mít .local/bin na PATH). Root harnessu je per-workspace, aby si
+# paralelní workspaces nešláply na sdílenou frontu.
+setup = """
+set -e
+PY="$(command -v python3.11 || echo "$HOME/.local/bin/python3.11")"
+"$PY" -m venv .venv
+.venv/bin/python -m pip install --quiet --upgrade pip
+.venv/bin/python -m pip install --quiet -e ".[dev]"
+.venv/bin/harness init --root "$CONDUCTOR_WORKSPACE_PATH/.harness"
+"""
+
+# Každý workspace má vlastní root → smyčky se navzájem neruší.
+run_mode = "concurrent"
+
+# Spustí orchestrační smyčku. Běží dopředu a pollује frontu dokud ji Conductor
+# nezastaví (SIGHUP → smyčka čistě skončí). Root musí být inicializovaný ze
+# setup scriptu výše.
+[scripts.run.loop]
+command = '.venv/bin/harness run --root "$CONDUCTOR_WORKSPACE_PATH/.harness"'
+default = true
+icon = "play"
