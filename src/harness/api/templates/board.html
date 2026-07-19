@@ -27,7 +27,7 @@
 </head>
 <body hx-ext="sse" sse-connect="/api/events">
   <h1>harness board</h1>
-  <div id="board" hx-get="/fragment/board" hx-trigger="sse:board" hx-swap="innerHTML">
+  <div id="board" data-revision="{{ board.revision }}" hx-get="/fragment/board" hx-trigger="sse:board" hx-swap="innerHTML">
     {% include "_columns.html" %}
   </div>
   <dialog id="detail"></dialog>
@@ -38,6 +38,32 @@
     document.getElementById('detail').addEventListener('click', function (event) {
       if (event.target.id === 'detail') { event.target.close(); }
     });
+
+    // Revision de-dup: klient si pamatuje poslední vykreslenou revizi a
+    // swap přeskočí, když se nezměnila. Musí se zaregistrovat dřív než
+    // htmx zpracuje hx-trigger na #board (htmx čeká na DOMContentLoaded,
+    // tenhle skript běží při parsování stránky), aby stopImmediatePropagation
+    // stihla zastavit htmx dřív, než sama vyvolá /fragment/board.
+    (function () {
+      var boardEl = document.getElementById('board');
+      var initial = parseInt(boardEl.getAttribute('data-revision'), 10);
+      var lastRevision = isNaN(initial) ? null : initial;
+      boardEl.addEventListener('sse:board', function (event) {
+        var raw = event.detail && event.detail.data;
+        if (!raw) { return; }
+        var revision;
+        try {
+          revision = JSON.parse(raw).revision;
+        } catch (error) {
+          return;
+        }
+        if (revision === lastRevision) {
+          event.stopImmediatePropagation();
+          return;
+        }
+        lastRevision = revision;
+      });
+    })();
   </script>
 </body>
 </html>
