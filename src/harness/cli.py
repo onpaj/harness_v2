@@ -402,6 +402,7 @@ async def serve(harness, port: int, poll_interval: float) -> None:
     app = create_app(
         view=harness.projection,
         artifacts=harness.artifacts,
+        output=harness.stage_output,
         control=harness.control,
         clock=SystemClock(),
     )

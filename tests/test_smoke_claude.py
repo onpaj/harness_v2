@@ -26,6 +26,7 @@ from harness.drivers.fake_forge import FakeForge
 from harness.drivers.fs_agents import FilesystemAgentCatalog
 from harness.drivers.fs_repos import FilesystemRepositoryRegistry
 from harness.drivers.git_workspace import GitWorkspace
+from harness.drivers.memory import MemoryEventSink
 from harness.drivers.system_clock import SystemClock
 from harness.drivers.worktree_artifacts import WorktreeArtifactView
 from harness.models import Task
@@ -102,10 +103,12 @@ async def test_trivial_task_lands_with_real_claude(tmp_path):
 
     registry = FilesystemRepositoryRegistry(layout.repos)
     catalog = FilesystemAgentCatalog(layout.agents)
+    recorder = MemoryEventSink()
     harness = build(
         root,
         "default",
         clock=SystemClock(),
+        events=recorder,
         workspace=GitWorkspace(registry, layout.worktrees),
         catalog=catalog,
         runner=ClaudeCliRunner(),
@@ -147,3 +150,12 @@ async def test_trivial_task_lands_with_real_claude(tmp_path):
     prs = json.loads((root / "forge" / "prs.json").read_text())
     assert len(prs) == 1
     assert prs[0]["branch"] == f"harness/{task_id}"
+
+    # Live stage output: the real stream-json run must have streamed at least one
+    # rendered line through `on_output` → the behavior → the event bus.
+    stage_lines = [
+        fields["line"]
+        for name, fields in recorder.events
+        if name == "stage_output" and fields.get("task_id") == task_id
+    ]
+    assert stage_lines, "no live stage output was streamed from real claude"

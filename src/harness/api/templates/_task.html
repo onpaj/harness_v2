@@ -41,3 +41,11 @@
   </tr>
   {% endfor %}
 </table>
+
+<h3>live output</h3>
+<div hx-ext="sse" sse-connect="/api/tasks/{{ task.id }}/output/events" sse-close="end">
+  <div id="stage-output" sse-swap="line" hx-swap="beforeend scroll:bottom"
+       style="max-height: 240px; overflow: auto; background: #091e42; color: #c1c7d0;
+              padding: 8px; border-radius: 4px; white-space: pre-wrap;
+              font: 12px ui-monospace, monospace;"></div>
+</div>
