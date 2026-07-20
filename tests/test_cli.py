@@ -544,3 +544,41 @@ def test_installed_version_report_degrades_when_the_script_fails(tmp_path, monke
 
     # The upgrade itself succeeded; only the report failed. Don't imply otherwise.
     assert "installed" in cli.installed_version_report()
+
+
+# --- forge selection -------------------------------------------------------
+
+
+def test_run_rejects_an_unknown_forge():
+    with pytest.raises(SystemExit):
+        main(["run", "--forge", "bogus"])
+
+
+def test_build_forge_returns_fake_when_asked(tmp_path):
+    from harness.cli import _build_forge
+    from harness.drivers.fake_forge import FakeForge
+
+    assert isinstance(_build_forge("fake", tmp_path), FakeForge)
+
+
+def test_build_forge_without_a_token_still_returns_a_github_forge(tmp_path, monkeypatch):
+    """No token must fail at `land`, on the task — not refuse to start, which
+    would make the harness unusable for `harness submit`."""
+    from harness.cli import _build_forge
+    from harness.drivers.github_forge import GithubForge
+
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+
+    forge = _build_forge("github", tmp_path)
+
+    assert isinstance(forge, GithubForge)
+    assert forge._client is None
+
+
+def test_build_forge_with_a_token_wires_the_http_client(tmp_path, monkeypatch):
+    from harness.cli import _build_forge
+    from harness.drivers.github_client import HttpGithubClient
+
+    monkeypatch.setenv("GITHUB_TOKEN", "tok")
+
+    assert isinstance(_build_forge("github", tmp_path)._client, HttpGithubClient)

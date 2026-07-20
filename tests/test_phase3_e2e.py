@@ -113,6 +113,13 @@ def _make_repo(path: Path) -> None:
     _git(path, "add", "-A")
     _git(path, "commit", "-q", "-m", "init")
 
+    # Landing now pushes the task branch before proposing a PR, so the fixture
+    # needs somewhere to push to. A bare sibling repo stands in for the remote —
+    # this keeps the smoke honest: a repo with no remote genuinely cannot land.
+    remote = path.parent / (path.name + "-remote.git")
+    _git(remote.parent, "init", "--bare", "-q", str(remote))
+    _git(path, "remote", "add", "origin", str(remote))
+
 
 def _catalog() -> MemoryAgentCatalog:
     def spec(step: str, *outcomes: Outcome) -> AgentSpec:

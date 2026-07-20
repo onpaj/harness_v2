@@ -24,6 +24,7 @@ from harness.drivers.fs_workflows import invalid_workflow_name
 from harness.drivers.git_remote import github_slug
 from harness.drivers.git_workspace import GitWorkspace
 from harness.drivers.github_client import GithubClient, HttpGithubClient
+from harness.drivers.github_forge import GithubForge
 from harness.drivers.github_source import GithubTaskSource
 from harness.drivers.launchd import (
     DEFAULT_LABEL,
@@ -630,19 +631,32 @@ def _service_status(args: argparse.Namespace) -> int:
     return 0
 
 
+def _build_forge(kind: str, root: Path):
+    """The forge for a real run. `fake` writes into `<root>/forge/prs.json`.
+
+    `github` without a `GITHUB_TOKEN` yields a forge that fails at `land` rather
+    than one that refuses to start: the harness stays usable for `harness
+    submit`, and the operator sees exactly which task needs the token.
+    """
+    if kind == "fake":
+        return FakeForge(root / "forge")
+    token = os.environ.get("GITHUB_TOKEN")
+    return GithubForge(HttpGithubClient(token) if token else None)
+
+
 def _run(args: argparse.Namespace) -> int:
     root = _root(args.root)
     layout = HarnessLayout(root)
-    # The real phase 3 run: agent behind `claude -p`, git worktree under a
-    # shared root, repo name→path from `repos.json`, personas from `agents/`,
-    # artifacts versioned in the worktree, fake forge (PR into prs.json). The
-    # GitHub driver is a clean follow-up — a swap of the forge driver.
+    # The real run: agent behind `claude -p`, git worktree under a shared root,
+    # repo name→path from `repos.json`, personas from `agents/`, artifacts
+    # versioned in the worktree, and a real GitHub forge (`--forge fake` swaps
+    # in prs.json for offline runs and tests).
     registry = FilesystemRepositoryRegistry(layout.repos)
     catalog = FilesystemAgentCatalog(layout.agents)
     runner = ClaudeCliRunner()
     workspace = GitWorkspace(registry, layout.worktrees)
     artifact_view = WorktreeArtifactView(layout.worktrees)
-    forge = FakeForge(root / "forge")
+    forge = _build_forge(args.forge, root)
     sources = _github_sources(args, root, registry)
     try:
         harness = build(
@@ -758,6 +772,12 @@ def main(argv: list[str] | None = None) -> int:
         type=int,
         default=8420,
         help="board port; 0 disables the board",
+    )
+    run.add_argument(
+        "--forge",
+        choices=("github", "fake"),
+        default="github",
+        help="where landing proposes the change (default: real GitHub)",
     )
     run.set_defaults(handler=_run)
 

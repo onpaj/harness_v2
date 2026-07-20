@@ -48,6 +48,10 @@ class LandingBehavior(ConsumerBehavior):
                 handle.write(relpath, content)
             handle.commit("[land] task artifacts")
 
+        # The forge cannot open a PR for a ref the remote has never seen. A
+        # failure here raises, and the consumer writes the task into `failed/`.
+        handle.push()
+
         pull = self._forge.open_pull_request(
             task,
             branch=handle.branch,

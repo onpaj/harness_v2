@@ -112,7 +112,7 @@ Dependencies flow strictly downward, no cycles.
 | Ports | `ports/{queue,workflows,strategy,behavior,events,clock,workspace,artifacts,forge,board,agent,repos,source}` |
 | Orchestration | `dispatcher`, `consumer`, `source_poller` — know only ports (and not `workspace`/`forge`/`artifacts`/`agent`/`repos`/`drivers`) |
 | Behaviors | `behaviors/{landing,agent}` — touch ports, not drivers |
-| Drivers | `drivers/{fs_queue,fs_workflows,fifo_strategy,dummy_behavior,stdout_events,system_clock,memory,fs_artifacts,git_workspace,fake_forge,claude_cli,fs_agents,fs_repos,worktree_artifacts,source_reflector,github_client,github_source,launchd}` |
+| Drivers | `drivers/{fs_queue,fs_workflows,fifo_strategy,dummy_behavior,stdout_events,system_clock,memory,fs_artifacts,git_workspace,fake_forge,claude_cli,fs_agents,fs_repos,worktree_artifacts,source_reflector,github_client,github_source,github_forge,launchd}` |
 | Edges | `app` (wiring), `cli` |
 
 - `projection.py` — in-memory read model of the board; hydration from queues + event stream
@@ -129,6 +129,9 @@ Dependencies flow strictly downward, no cycles.
 - `drivers/source_reflector.py` — `SourceReflectorSink(EventSink)`: event stream → projection into the source
 - `drivers/github_client.py` — `GithubClient` (ABC), `Issue`, `FakeGithubClient`, `HttpGithubClient` (stdlib `urllib`)
 - `drivers/github_source.py` — `GithubTaskSource`: issue → task, state → label
+- `drivers/github_forge.py` — `GithubForge`: opens the real PR. Slug per task from
+  the worktree's origin, base = the repo's default branch, `Closes #n` for an
+  issue-born task, `ForgeError` on every failure path
 - `drivers/launchd.py` — the background service on macOS: pure `wrapper_script`/
   `plist_bytes` builders (unit-tested) plus a thin `launchctl` shell; driven by
   `harness service install|uninstall|status`
@@ -199,9 +202,18 @@ Dependencies flow strictly downward, no cycles.
   behavior, like the dummy itself, is fake. `build` with a `catalog` switches the agent
   steps to `ClaudeCliBehavior`; the real run (`cli._run`) injects `GitWorkspace`,
   `ClaudeCliRunner`, `WorktreeArtifactView`, `Filesystem{AgentCatalog,Repository‑
-  Registry}` and `FakeForge` — a swap of driver, not surroundings.
+  Registry}` and `GithubForge` — a swap of driver, not surroundings.
 - **Landing is idempotent.** For an existing PR on a branch the forge returns the
-  existing one. So a re-run after a crash won't open a second PR.
+  existing one (`GithubForge` matches on `head=owner:branch`). So a re-run after a
+  crash won't open a second PR. The push is a plain `git push -u origin` — the task
+  branch only ever moves forward, so a rejection is a real anomaly and must fail.
+- **Landing needs a pushable remote.** `land` pushes the task branch before it
+  proposes, so a registered repo with no `origin` cannot land — that is why the
+  git e2e/smoke fixtures create a bare sibling repo and add it as `origin`.
+- **A failed PR fails the task.** `GithubForge` raises `ForgeError` on a missing
+  `GITHUB_TOKEN`, a non-GitHub origin or an API error, and the task lands in
+  `failed/`. Deliberate: before this, `land` reported success while only writing
+  to `prs.json`. Offline or in tests, use `--forge fake`.
 - **`ArtifactStore.begin(task, step)` allocates the next attempt.** Writing into one
   slot belongs to one run; the second pass (the loop) gets a new subdirectory.
 - **The service holds no secret.** launchd hands a process almost no environment, so

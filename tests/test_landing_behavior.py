@@ -114,3 +114,33 @@ async def test_copy_artifacts_false_skips_copy_but_opens_pr():
     assert "[land] task artifacts" not in handle.commits
     assert len(forge.opened) == 1
     assert result.outcome is Outcome.DONE
+
+
+async def test_pushes_the_branch_before_opening_the_pull_request():
+    behavior, workspace, _, forge = build()
+
+    await behavior.run(make_task())
+
+    handle = workspace.handles["tsk_1"]
+    assert handle.pushes == ["harness/tsk_1"]
+    assert len(forge.opened) == 1
+
+
+async def test_no_pull_request_when_the_push_fails():
+    """A branch the remote never received must not get a PR claiming it exists."""
+    import pytest
+
+    behavior, workspace, _, forge = build()
+
+    class Boom(RuntimeError):
+        pass
+
+    def explode():
+        raise Boom("remote rejected")
+
+    workspace.attach(make_task()).push = explode
+
+    with pytest.raises(Boom):
+        await behavior.run(make_task())
+
+    assert forge.opened == []
