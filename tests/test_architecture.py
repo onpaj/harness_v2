@@ -46,6 +46,31 @@ def test_orchestration_does_not_import_drivers():
         ), f"{name} importuje driver"
 
 
+WORK_PORTS = (
+    "harness.ports.workspace",
+    "harness.ports.forge",
+    "harness.ports.artifacts",
+)
+
+
+def test_orchestration_does_not_import_work_ports():
+    """Worktree, forge ani artefakty nezná dispatcher/consumer — sahá na ně jen
+    behavior. Jinak by orchestrace věděla o payloadu, na kterém task pracuje."""
+    for name in ("dispatcher.py", "consumer.py"):
+        imports = imported_modules(SOURCE / name)
+        leaked = [port for port in WORK_PORTS if port in imports]
+        assert not leaked, f"{name} importuje {leaked}"
+
+
+def test_behaviors_import_only_ports_not_drivers():
+    """Behaviory (behaviors/) sahají na porty a modely, ne na jiné drivery."""
+    for path in (SOURCE / "behaviors").glob("*.py"):
+        assert not any(
+            module.startswith("harness.drivers")
+            for module in imported_modules(path)
+        ), f"{path.name} importuje driver"
+
+
 def test_only_app_and_cli_wire_drivers():
     wiring = {"app.py", "cli.py"}
     for path in SOURCE.glob("*.py"):

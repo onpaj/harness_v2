@@ -4,6 +4,7 @@ import json
 import pytest
 
 from harness.cli import DEFAULT_WORKFLOW, main, serve
+from harness.drivers.memory import MemoryArtifactStore
 from harness.models import END, Task, Transition, Workflow
 from harness.projection import BoardProjection
 
@@ -168,6 +169,7 @@ async def test_serve_returns_when_uvicorn_stops_before_the_loop(monkeypatch):
     class FakeHarness:
         def __init__(self):
             self.projection = BoardProjection(SERVE_TEST_WORKFLOW)
+            self.artifacts = MemoryArtifactStore()
             self.stop_seen: asyncio.Event | None = None
 
         async def run(self, poll_interval, stop):

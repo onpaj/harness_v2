@@ -5,9 +5,14 @@ mezi frontami podle **workflow** — malého state machine s explicitními hrana
 
 Spec fáze 1: `docs/superpowers/specs/2026-07-19-orchestration-phase1-design.md`
 Plán fáze 1: `docs/superpowers/plans/2026-07-19-orchestration-phase1.md`
+Spec fáze 2: `docs/superpowers/specs/2026-07-20-orchestration-phase2-design.md`
+Plán fáze 2: `docs/superpowers/plans/2026-07-20-orchestration-phase2.md`
 
-Projekt se staví **po fázích**. Fáze 1 je POC orchestrační smyčky; skutečné
-agenty, perzistentní úložiště ani git v ní nejsou.
+Projekt se staví **po fázích**. Fáze 1 je POC orchestrační smyčky. Fáze 2 přidává
+**worktree, artefakty a landing**: každá fáze pracuje ve worktree pojmenovaném
+v tasku, píše artefakty do harnessové složky, commituje po fázích a na konci
+otevře PR. Skutečný agent a skutečný GitHub jsou pořád jen driver, který se
+vymění dál.
 
 ## Invarianty — nerozbíjet
 
@@ -28,6 +33,11 @@ agenty, perzistentní úložiště ani git v ní nejsou.
 5. **`api/` ani `projection.py` neimportují `drivers/`.** UI nesmí vědět, na čem harness běží.
 6. **V `Harness.run()` jde `recover()` před `hydrate()`.** Obráceně se ztratí tasky z `.processing/`.
 7. **Event o pohybu tasku nese `task` i `queue`.** Bez toho projekce neuvidí tasky vzniklé po startu.
+8. **`repository`/`worktree` čte jen behavior.** Router a dispatcher pořád rozhodují výhradně podle `(status, lastOutcome)`.
+9. **Commit dělá behavior driver, ne consumer a ne LLM.** Consumer nezná git.
+10. **Artefakty jsou attempt-indexed** (`<task>/<step>/<attempt>/`). Re-run kroku nikdy nepřepíše předchozí pokus — jinak by smyčka `request_changes` z audit trailu zmizela.
+11. **`Workspace`/`Forge`/`ArtifactStore` nezná dispatcher ani consumer.** Sahá na ně jen behavior; wiring v `app.py`. `api/` sahá jen na `ArtifactView`. Hlídá `test_architecture.py`.
+12. **Landing je krok, ne magie.** Přiklopí artefakty do worktree a otevře PR; může selhat do `failed/`. `end` zůstává čistý terminál.
 
 ## Práce tady
 
@@ -41,11 +51,11 @@ plain `venv` + `pip install -e ".[dev]"`. Runtime nemá žádné produkční zá
 Unit a integrační testy běží na in-memory driverech a `FakeClock` — bez disku
 a bez skutečného čekání. Nikdy do nich nepiš test, který spí v reálném čase.
 
-Jedinou záměrnou výjimkou je `tests/test_smoke.py` — běží na skutečném
-filesystemu a poluje reálným `asyncio.sleep(0.01)`, protože je to jediné
-místo, které ověřuje filesystémový driver naživo, end-to-end. Nejde o
-nedopatření a neuklízej ho do in-memory podoby — tím by zmizelo jediné
-pokrytí reálného FS v celé sadě.
+Záměrnou výjimkou jsou `tests/test_smoke.py` (reálný FS) a
+`tests/test_smoke_git.py` (reálný git worktree + fs artefakty + fake forge,
+end-to-end přes landing/PR). Oba poluí reálným `asyncio.sleep(0.01)` — je to
+jediné pokrytí reálných FS/git driverů naživo. Neuklízej je do in-memory
+podoby; tím by to pokrytí zmizelo.
 
 ## Git konvence
 
@@ -60,14 +70,18 @@ Závislosti tečou striktně dolů, cykly nejsou.
 |---|---|
 | Základ | `models` (neimportuje nic z balíku), `ids` |
 | Logika | `router` (zná jen `models`) |
-| Porty | `ports/{queue,workflows,strategy,behavior,events,clock}` |
-| Orchestrace | `dispatcher`, `consumer` — znají jen porty |
-| Drivery | `drivers/{fs_queue,fs_workflows,fifo_strategy,dummy_behavior,stdout_events,system_clock,memory}` |
+| Porty | `ports/{queue,workflows,strategy,behavior,events,clock,workspace,artifacts,forge,board}` |
+| Orchestrace | `dispatcher`, `consumer` — znají jen porty (a ne `workspace`/`forge`/`artifacts`) |
+| Behaviory | `behaviors/landing` — sahá na porty, ne na drivery |
+| Drivery | `drivers/{fs_queue,fs_workflows,fifo_strategy,dummy_behavior,stdout_events,system_clock,memory,fs_artifacts,git_workspace,fake_forge}` |
 | Okraje | `app` (wiring), `cli` |
 
 - `projection.py` — in-memory read model boardu; hydratace z front + proud eventů
 - `ports/board.py` — port `BoardView`, kterým se dívá UI
-- `api/` — FastAPI board; vidí jen `BoardView`, nikdy driver
+- `ports/artifacts.py` — `ArtifactStore` (zápis) a `ArtifactView` (čtení pro UI)
+- `ports/workspace.py` — `Workspace.attach(task) -> WorkspaceHandle` (worktree + commit)
+- `ports/forge.py` — `Forge.open_pull_request(...)` (landing navrhne PR)
+- `api/` — FastAPI board; vidí jen `BoardView` a `ArtifactView`, nikdy driver
 
 ## Co je za co zodpovědné
 
@@ -77,6 +91,16 @@ Závislosti tečou striktně dolů, cykly nejsou.
   lease, idempotenci i původ po pádu.
 - **`END = "end"`** je vyhrazený uzel. Není to „stav bez odchozích hran" —
   překlep by tak tiše vypadal jako úspěch.
+- **Task má dvě pracovní plochy** (fáze 2). **Worktree** (`repository`/`worktree`)
+  drží kód, verzuje ho git branch tasku. **Složka artefaktů** (harnessová,
+  neverzovaná do landingu, čitelná pro UI) drží plán/design/review. Oddělené
+  záměrně — worktree zůstane čistý, UI čte bez gitu, `git clean` artefakty
+  nesmaže. Detaily viz spec fáze 2.
+- **`BehaviorResult(outcome, summary)`** je návrat behavioru. `outcome` routuje
+  dispatcher; `summary` je zpráva commitu, řádek historie, tělo PR i board.
+- **Task je transakce.** Práce žije v izolovaném worktree/složce; na konci
+  **landing** přiklopí artefakty a otevře PR. Harness se nedotkne `main` — jen
+  navrhuje. Merge strategii řeší člověk.
 
 ## Gotchas
 
@@ -89,6 +113,13 @@ Závislosti tečou striktně dolů, cykly nejsou.
 - **`DummyBehavior` musí vracet `done` deterministicky.** `request_changes_once_at`
   vrátí `REQUEST_CHANGES` jen při prvním průchodu daného tasku daným krokem;
   jinak by se smyčka točila donekonečna.
+- **`build()` má default pracovní drivery in-memory.** Substrát dummy behavioru,
+  stejně jako dummy sám je fake. Skutečný běh (`cli._run`) i git smoke si vstříknou
+  `GitWorkspace`/`FilesystemArtifactStore`/`FakeForge` — záměna driveru, ne okolí.
+- **Landing je idempotentní.** Forge při existujícím PR pro branch vrátí ten
+  stávající. Re-run po pádu tak neotevře druhý PR.
+- **`ArtifactStore.begin(task, step)` alokuje další attempt.** Zápis do jednoho
+  slotu patří jednomu běhu; druhý průchod (smyčka) dostane nový podadresář.
 
 ## Operátor
 

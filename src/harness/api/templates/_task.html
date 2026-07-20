@@ -24,3 +24,15 @@
   </tr>
   {% endfor %}
 </table>
+
+<h3>artefakty</h3>
+<table>
+  <tr><th>krok</th><th>pokus</th><th>jméno</th></tr>
+  {% for ref in artifacts %}
+  <tr>
+    <td>{{ ref.step }}</td>
+    <td>{{ ref.attempt }}</td>
+    <td><a href="/api/tasks/{{ task.id }}/artifacts/{{ ref.step }}/{{ ref.attempt }}/{{ ref.name }}">{{ ref.name }}</a></td>
+  </tr>
+  {% endfor %}
+</table>
