@@ -24,6 +24,7 @@ from harness.ports.clock import Clock
 from harness.ports.events import EventSink
 from harness.ports.forge import Forge, PullRequest
 from harness.ports.queue import TaskQueue
+from harness.ports.repos import RepositoryNotFound, RepositoryRegistry
 from harness.ports.workflows import WorkflowNotFound, WorkflowRepository
 from harness.ports.workspace import Workspace, WorkspaceHandle
 
@@ -260,3 +261,16 @@ class FakeAgentRunner(AgentRunner):
         if self._default is not None:
             return self._default
         return AgentRun(Outcome.DONE, f"{spec.name}: hotovo")
+
+
+class MemoryRepositoryRegistry(RepositoryRegistry):
+    """Registr rep nad dictem jméno → cesta."""
+
+    def __init__(self, repos: dict[str, Path]) -> None:
+        self._repos = repos
+
+    def resolve(self, name: str) -> Path:
+        try:
+            return self._repos[name]
+        except KeyError:
+            raise RepositoryNotFound(f"repo {name!r} není v registru") from None
