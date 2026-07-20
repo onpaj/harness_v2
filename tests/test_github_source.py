@@ -57,6 +57,29 @@ def test_second_poll_returns_empty():
     assert second == []
 
 
+class LaggyGithubClient(FakeGithubClient):
+    """Simulates GitHub's read-after-write lag: `list_issues` returns the issue
+    under `harness:todo` even after `remove_label` — the label swap hasn't
+    propagated to the list yet. Without dedup, `poll()` would claim the same
+    issue repeatedly."""
+
+    def remove_label(self, repo, number, label):  # noqa: D401 - lag: no-op
+        pass
+
+
+def test_poll_dedups_claimed_issue_despite_label_lag():
+    client = LaggyGithubClient(
+        [Issue(1, "Fix", "", "u1", ("harness:todo",))]
+    )
+    source = build_source(client)
+
+    first = source.poll()
+    second = source.poll()  # list still returns #1 under harness:todo (lag)
+
+    assert len(first) == 1
+    assert second == []  # #1 was already claimed → not ingested a second time
+
+
 def test_report_progress_known_step_sets_step_label():
     client = FakeGithubClient([Issue(1, "Fix", "", "u1", ("harness:todo",))])
     source = build_source(client)

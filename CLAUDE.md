@@ -163,7 +163,10 @@ Dependencies flow strictly downward, no cycles.
   `kind` / no `source`) is silently ignored by the adapter, so tasks from
   `harness submit` pass through without a single outward call. `poll()` claims by
   flipping the label (GitHub's twin of the atomic `rename` in `fs_queue.claim()`) —
-  "at most once" ingestion without a side ledger.
+  "at most once" ingestion across restarts. Within the process, though,
+  `list_issues` reads with read-after-write lag (unlike `rename`), so
+  `GithubTaskSource` keeps an in-process ledger of claimed numbers (`_claimed`)
+  so a fast poll won't claim the same issue twice.
 
 ## Gotchas
 

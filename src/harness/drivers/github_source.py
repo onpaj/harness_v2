@@ -3,7 +3,13 @@
 The single place with GitHub knowledge on the source side. Swapping the label in
 `poll()` is the twin of the atomic `rename` in `fs_queue.claim()` — a later poll
 won't return an issue with the claim label, which gives "at most once" ingestion
-without a side ledger.
+across process restarts.
+
+Unlike `rename`, however, `list_issues` reads with read-after-write lag: after
+`remove_label`, another (fast) tick may still return the issue under the select
+label and claim it a second time. To guard against that, `poll()` keeps an
+in-process ledger of already-claimed numbers (`_claimed`) — within a process it
+ingests each issue exactly once.
 """
 
 from __future__ import annotations
@@ -52,10 +58,19 @@ class GithubTaskSource(TaskSource):
             failed_label,
             *self._step_labels.values(),
         }
+        # In-process ledger of already-claimed issues. Swapping the label
+        # (todo→queued) gives at-most-once across restarts, but `list_issues`
+        # reads with read-after-write lag — after `remove_label` another tick
+        # may still return the issue under the select label and claim it a
+        # second time. This set cuts that off within the process.
+        self._claimed: set[int] = set()
 
     def poll(self) -> list[Task]:
         tasks: list[Task] = []
         for issue in self._client.list_issues(self._repo, label=self._select_label):
+            if issue.number in self._claimed:
+                continue  # already claimed by this process, the list is just catching up on lag
+            self._claimed.add(issue.number)
             # Claim: swap the label before the task heads to the inbox.
             self._client.remove_label(self._repo, issue.number, self._select_label)
             self._client.add_label(self._repo, issue.number, self._claimed_label)
