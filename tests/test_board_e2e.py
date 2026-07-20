@@ -121,3 +121,40 @@ async def test_failed_task_lands_in_failed_column(tmp_path):
     failed = next(item for item in columns if item["name"] == "failed")
     assert failed["tasks"], "task with an unknown workflow did not reach the failed column"
     assert failed["tasks"][0]["id"] == "tsk_2"
+
+
+async def test_restart_moves_failed_task_back_to_todo(tmp_path):
+    seed(tmp_path)
+    harness = build(tmp_path, "default", delay=0.0)
+    client = TestClient(
+        create_app(
+            view=harness.projection, control=harness.control, clock=SystemClock()
+        )
+    )
+    # A task with an unknown workflow lands in `failed` on the first dispatch.
+    broken = Task(
+        id="tsk_3", workflow_template="neznamy", created="2026-07-19T10:00:00Z"
+    )
+    (tmp_path / "tasks" / "tsk_3.json").write_text(json.dumps(broken.to_dict()))
+
+    hydrate_from_queues(harness)
+    await drive_until_quiet(harness)
+
+    def column_of(task_id: str) -> str | None:
+        for column in client.get("/api/board").json()["columns"]:
+            if any(item["id"] == task_id for item in column["tasks"]):
+                return column["name"]
+        return None
+
+    assert column_of("tsk_3") == "failed"
+
+    response = client.post("/tasks/tsk_3/restart")
+
+    assert response.status_code == 200
+    # Reset and back on the board as `todo`, ready for the dispatcher to pick up.
+    assert column_of("tsk_3") == "todo"
+
+    detail = client.get("/api/tasks/tsk_3").json()
+    assert detail["status"] is None
+    assert detail["history"][-1]["actor"] == "operator"
+    assert detail["history"][-1]["reason"] == "restarted by operator"

@@ -1,4 +1,9 @@
 <h2>{{ task.id }}</h2>
+{% if task.status == "failed" %}
+<button hx-post="/tasks/{{ task.id }}/restart"
+        hx-target="#detail"
+        hx-swap="innerHTML">Restart</button>
+{% endif %}
 <table>
   <tr><th>repository</th><td>{{ task.repository or "—" }}</td></tr>
   <tr><th>worktree</th><td>{{ task.worktree or "—" }}</td></tr>

@@ -2,7 +2,7 @@ import asyncio
 
 from harness.drivers.memory import MemoryTaskQueue
 from harness.models import END, Task, Transition, Workflow
-from harness.ports.board import DONE_COLUMN, FAILED_COLUMN
+from harness.ports.board import DONE_COLUMN, FAILED_COLUMN, TODO_COLUMN
 from harness.projection import BoardProjection, column_order
 
 WORKFLOW = Workflow(
@@ -30,6 +30,7 @@ def make_task(task_id="tsk_1", status=None, created="2026-07-19T10:00:00Z", **kw
 
 def test_column_order_follows_reachability_and_ignores_back_edges():
     assert column_order(WORKFLOW) == (
+        TODO_COLUMN,
         "plan",
         "design",
         "development",
@@ -151,7 +152,7 @@ def test_hydrate_reads_every_source():
     assert board.column("design").tasks[0].id == "tsk_5"
 
 
-def test_hydrate_skips_inbox_task_without_status():
+def test_hydrate_places_statusless_inbox_task_in_todo():
     projection = BoardProjection(WORKFLOW)
     inbox = MemoryTaskQueue("tasks")
     inbox.put(make_task("tsk_1"))
@@ -163,7 +164,17 @@ def test_hydrate_skips_inbox_task_without_status():
         failed=MemoryTaskQueue("failed"),
     )
 
-    assert projection.get("tsk_1") is None
+    assert projection.snapshot().column(TODO_COLUMN).tasks[0].id == "tsk_1"
+
+
+def test_apply_moves_task_from_failed_to_todo():
+    projection = BoardProjection(WORKFLOW)
+    projection.apply(FAILED_COLUMN, make_task(status="failed"))
+
+    projection.apply(TODO_COLUMN, make_task(status=None))
+
+    assert projection.snapshot().column(FAILED_COLUMN).tasks == ()
+    assert projection.snapshot().column(TODO_COLUMN).tasks[0].id == "tsk_1"
 
 
 async def test_subscribe_yields_current_revision_first():

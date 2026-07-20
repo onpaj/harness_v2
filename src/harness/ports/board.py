@@ -13,6 +13,9 @@ from typing import Any
 
 from harness.models import Task
 
+TODO_COLUMN = "todo"
+"""Column for freshly loaded inbox tasks that have not started yet (status=None)."""
+
 DONE_COLUMN = "done"
 """Column for tasks that reached END."""
 

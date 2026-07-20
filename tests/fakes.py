@@ -1,5 +1,6 @@
 from harness.models import Task
 from harness.ports.board import Board, BoardView
+from harness.ports.control import TaskControl
 
 
 class FakeBoardView(BoardView):
@@ -17,3 +18,16 @@ class FakeBoardView(BoardView):
 
     async def subscribe(self):
         yield self._board.revision
+
+
+class FakeTaskControl(TaskControl):
+    """Records restart calls; returns a configurable result. Lets the API be
+    tested without queues."""
+
+    def __init__(self, result: bool = True) -> None:
+        self._result = result
+        self.restarted: list[str] = []
+
+    def restart(self, task_id: str) -> bool:
+        self.restarted.append(task_id)
+        return self._result
