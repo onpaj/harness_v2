@@ -18,6 +18,7 @@ from harness.models import BehaviorResult, Task
 from harness.ports.agent import AgentRunner, AgentSpec
 from harness.ports.behavior import ConsumerBehavior
 from harness.ports.clock import Clock
+from harness.ports.events import EventSink
 from harness.ports.workspace import Workspace
 
 
@@ -29,12 +30,14 @@ class ClaudeCliBehavior(ConsumerBehavior):
         workspace: Workspace,
         runner: AgentRunner,
         spec: AgentSpec,
+        events: EventSink,
         timeout: float = 600.0,
     ) -> None:
         self._clock = clock
         self._workspace = workspace
         self._runner = runner
         self._spec = spec
+        self._events = events
         self._timeout = timeout
 
     async def run(self, task: Task) -> BehaviorResult:
@@ -44,13 +47,31 @@ class ClaudeCliBehavior(ConsumerBehavior):
         # What's left of `ArtifactStore.begin()` from phase 2: scan
         # `.artifacts/<id>/` in the worktree and allocate the next attempt
         # number for this step.
-        _attempt, relpath = next_attempt(handle.path, task.id, step)
+        attempt, relpath = next_attempt(handle.path, task.id, step)
 
         prompt = compose_prompt(
             task, step=step, artifact_relpath=relpath, spec=self._spec
         )
+
+        # Live stage output: the behavior is the only place that knows the task,
+        # step and attempt, so it tags each rendered line the runner streams and
+        # emits it as an event. It carries `task_id` (not `task`/`queue`), so the
+        # board projection ignores it — the board is unaffected (invariant 7).
+        def on_output(line: str) -> None:
+            self._events.emit(
+                "stage_output",
+                task_id=task.id,
+                step=step,
+                attempt=attempt,
+                line=line,
+            )
+
         run = await self._runner.run(
-            prompt=prompt, spec=self._spec, cwd=handle.path, timeout=self._timeout
+            prompt=prompt,
+            spec=self._spec,
+            cwd=handle.path,
+            timeout=self._timeout,
+            on_output=on_output,
         )
 
         # The agent only wrote artifacts and code; the worker runs the commit

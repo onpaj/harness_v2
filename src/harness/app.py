@@ -22,6 +22,7 @@ from harness.drivers.memory import (
 )
 from harness.drivers.projection_events import ProjectionSink
 from harness.drivers.source_reflector import SourceReflectorSink
+from harness.drivers.stage_output import StageOutputProjection
 from harness.drivers.stdout_events import StdoutEventSink
 from harness.drivers.system_clock import SystemClock
 from harness.models import Workflow
@@ -31,6 +32,7 @@ from harness.ports.behavior import ConsumerBehavior
 from harness.ports.clock import Clock
 from harness.ports.events import EventSink
 from harness.ports.forge import Forge
+from harness.ports.logs import StageOutputView
 from harness.ports.queue import TaskQueue
 from harness.ports.source import TaskSource
 from harness.ports.workspace import Workspace
@@ -92,6 +94,7 @@ class Harness:
         failed: TaskQueue,
         projection: BoardProjection,
         artifacts: ArtifactView,
+        stage_output: StageOutputView,
         events: EventSink,
         clock: Clock,
         pollers: list[SourcePoller] | None = None,
@@ -103,6 +106,7 @@ class Harness:
         self.pollers = pollers or []
         self.projection = projection
         self.artifacts = artifacts
+        self.stage_output = stage_output
         self._inbox = inbox
         self._step_queues = step_queues
         self._done = done
@@ -199,10 +203,16 @@ def build(
     workflow = workflows.get(workflow_name)
 
     projection = BoardProjection(workflow)
+    stage_output = StageOutputProjection()
     # The reflector comes after ProjectionSink: the outward projection must not
-    # get ahead of the board.
+    # get ahead of the board. The stage-output projection sits alongside the
+    # board sink — it feeds a separate read model (live agent output) and never
+    # touches the board.
     events = CompositeEventSink(
-        events, ProjectionSink(projection), SourceReflectorSink(sources)
+        events,
+        ProjectionSink(projection),
+        stage_output,
+        SourceReflectorSink(sources),
     )
 
     failed = FilesystemTaskQueue(name="failed", root=layout.failed, events=events)
@@ -249,6 +259,7 @@ def build(
                 workspace=workspace,
                 runner=runner,
                 spec=catalog.get(step),
+                events=events,
                 timeout=agent_timeout,
             )
         return work
@@ -293,6 +304,7 @@ def build(
         failed=failed,
         projection=projection,
         artifacts=view,
+        stage_output=stage_output,
         events=events,
         clock=clock,
         pollers=pollers,

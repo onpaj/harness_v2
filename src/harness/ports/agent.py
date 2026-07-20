@@ -10,6 +10,7 @@ returns a verdict.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -42,9 +43,20 @@ class AgentRunner(ABC):
 
     @abstractmethod
     async def run(
-        self, *, prompt: str, spec: AgentSpec, cwd: Path, timeout: float
+        self,
+        *,
+        prompt: str,
+        spec: AgentSpec,
+        cwd: Path,
+        timeout: float,
+        on_output: Callable[[str], None] | None = None,
     ) -> AgentRun:
-        """Run the agent and return its verdict. Failures propagate as exceptions."""
+        """Run the agent and return its verdict. Failures propagate as exceptions.
+
+        `on_output`, when given, is called with each rendered activity line as the
+        agent works — the seam through which the harness streams live stage output.
+        A runner that can't stream simply ignores it.
+        """
 
 
 class AgentCatalog(ABC):

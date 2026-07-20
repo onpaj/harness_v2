@@ -38,6 +38,12 @@
     document.getElementById('detail').addEventListener('click', function (event) {
       if (event.target.id === 'detail') { event.target.close(); }
     });
+    // Clearing the modal on close removes the live-output element, which lets
+    // the htmx SSE extension tear its EventSource down (htmx:beforeCleanupElement)
+    // instead of leaving it streaming to a hidden dialog.
+    document.getElementById('detail').addEventListener('close', function (event) {
+      event.target.innerHTML = '';
+    });
 
     // Revision de-dup: the client remembers the last rendered revision and
     // skips the swap when it hasn't changed. It must register before htmx

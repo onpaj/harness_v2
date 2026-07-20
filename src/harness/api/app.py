@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -11,6 +12,7 @@ from harness.api.routes import build_html_router, build_json_router
 from harness.ports.artifacts import ArtifactRef, ArtifactView
 from harness.ports.board import BoardView
 from harness.ports.clock import Clock
+from harness.ports.logs import StageOutputView
 
 
 class _EmptyArtifactView(ArtifactView):
@@ -25,17 +27,33 @@ class _EmptyArtifactView(ArtifactView):
         return None
 
 
+class _EmptyStageOutputView(StageOutputView):
+    """Empty stage-output view for a board wired without live output. Keeps
+    `create_app` backward compatible — the panel connects but stays empty and
+    closes at once. Sits behind the port, so api/ still knows no driver."""
+
+    def tail(self, task_id: str) -> tuple[str, ...]:
+        return ()
+
+    async def subscribe(self, task_id: str) -> AsyncIterator[str]:
+        return
+        yield  # pragma: no cover - makes this an async generator
+
+
 def create_app(
     *,
     view: BoardView,
     artifacts: ArtifactView | None = None,
+    output: StageOutputView | None = None,
     clock: Clock,
     coalesce_seconds: float = 0.25,
 ) -> FastAPI:
     artifacts = artifacts or _EmptyArtifactView()
+    output = output or _EmptyStageOutputView()
     app = FastAPI(title="harness board", docs_url=None, redoc_url=None)
     app.state.view = view
     app.state.artifacts = artifacts
+    app.state.output = output
     app.state.clock = clock
     app.state.coalesce_seconds = coalesce_seconds
     app.mount(
@@ -44,5 +62,7 @@ def create_app(
         name="static",
     )
     app.include_router(build_json_router(view, artifacts))
-    app.include_router(build_html_router(view, artifacts, clock, coalesce_seconds))
+    app.include_router(
+        build_html_router(view, artifacts, output, clock, coalesce_seconds)
+    )
     return app
