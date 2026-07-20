@@ -278,7 +278,11 @@ async def test_serve_returns_when_uvicorn_stops_before_the_loop(monkeypatch):
 # --- harness service -------------------------------------------------------
 
 
-def test_service_install_refuses_an_uninitialized_root(tmp_path, capsys):
+def test_service_install_refuses_an_uninitialized_root(tmp_path, monkeypatch, capsys):
+    # Pin the platform: on Linux the launchd guard fires first and this would
+    # assert the wrong message (as CI found).
+    monkeypatch.setattr("harness.cli.sys.platform", "darwin")
+
     code = main(["service", "install", "--root", str(tmp_path / "nope")])
 
     assert code == 2
