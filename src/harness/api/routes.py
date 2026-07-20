@@ -7,9 +7,10 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, PlainTextResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
 
+from harness.ports.artifacts import ArtifactView
 from harness.ports.board import BoardView
 from harness.ports.clock import Clock
 
@@ -30,7 +31,7 @@ async def board_event_stream(
         await clock.sleep(coalesce_seconds)
 
 
-def build_json_router(view: BoardView) -> APIRouter:
+def build_json_router(view: BoardView, artifacts: ArtifactView) -> APIRouter:
     router = APIRouter(prefix="/api")
 
     @router.get("/board")
@@ -44,11 +45,27 @@ def build_json_router(view: BoardView) -> APIRouter:
             raise HTTPException(status_code=404, detail=f"task {task_id} neexistuje")
         return found.to_dict()
 
+    @router.get("/tasks/{task_id}/artifacts")
+    def task_artifacts(task_id: str) -> dict:
+        refs = artifacts.list(task_id)
+        return {"artifacts": [ref.to_dict() for ref in refs]}
+
+    @router.get("/tasks/{task_id}/artifacts/{step}/{attempt}/{name}")
+    def task_artifact(
+        task_id: str, step: str, attempt: int, name: str
+    ) -> PlainTextResponse:
+        content = artifacts.read(task_id, step, attempt, name)
+        if content is None:
+            raise HTTPException(
+                status_code=404, detail=f"artefakt {name} neexistuje"
+            )
+        return PlainTextResponse(content)
+
     return router
 
 
 def build_html_router(
-    view: BoardView, clock: Clock, coalesce_seconds: float
+    view: BoardView, artifacts: ArtifactView, clock: Clock, coalesce_seconds: float
 ) -> APIRouter:
     router = APIRouter()
 
@@ -70,7 +87,9 @@ def build_html_router(
         if found is None:
             raise HTTPException(status_code=404, detail=f"task {task_id} neexistuje")
         return TEMPLATES.TemplateResponse(
-            request=request, name="_task.html", context={"task": found}
+            request=request,
+            name="_task.html",
+            context={"task": found, "artifacts": artifacts.list(task_id)},
         )
 
     @router.get("/api/events")

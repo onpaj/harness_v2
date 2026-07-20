@@ -51,6 +51,7 @@ async def test_task_travels_from_submit_to_done(tmp_path, capsys):
         "review",
         "development",
         "review",
+        "land",
         "end",
     ]
     assert any(entry.outcome == "request_changes" for entry in finished.history)

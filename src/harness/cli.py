@@ -13,7 +13,10 @@ import uvicorn
 
 from harness.api.app import create_app
 from harness.app import HarnessLayout, build
+from harness.drivers.fake_forge import FakeForge
+from harness.drivers.fs_artifacts import FilesystemArtifactStore
 from harness.drivers.fs_workflows import invalid_workflow_name
+from harness.drivers.git_workspace import GitWorkspace
 from harness.drivers.system_clock import SystemClock
 from harness.ids import new_task_id
 from harness.models import Task
@@ -29,7 +32,8 @@ DEFAULT_DEFINITION = {
         {"from": "design", "on": "done", "to": "architecture"},
         {"from": "architecture", "on": "done", "to": "development"},
         {"from": "development", "on": "done", "to": "review"},
-        {"from": "review", "on": "done", "to": "end"},
+        {"from": "review", "on": "done", "to": "land"},
+        {"from": "land", "on": "done", "to": "end"},
         {"from": "review", "on": "request_changes", "to": "development"},
     ],
 }
@@ -87,6 +91,7 @@ def _submit(args: argparse.Namespace) -> int:
         workflow_template=args.workflow,
         created=SystemClock().now(),
         repository=args.repo,
+        worktree=args.worktree,
         data=data,
     )
     (layout.tasks / f"{task.id}.json").write_text(
@@ -98,10 +103,18 @@ def _submit(args: argparse.Namespace) -> int:
 
 def _run(args: argparse.Namespace) -> int:
     root = _root(args.root)
+    # Skutečný běh: git worktree, artefakty na disku, fake forge (PR do
+    # prs.json). GitHub driver je čistý follow-up — záměna forge driveru.
+    workspace = GitWorkspace()
+    artifacts = FilesystemArtifactStore(root / "artifacts")
+    forge = FakeForge(root / "forge")
     try:
         harness = build(
             root,
             args.workflow,
+            workspace=workspace,
+            artifacts=artifacts,
+            forge=forge,
             delay=args.delay,
             request_changes_once_at=args.request_changes_at,
         )
@@ -125,7 +138,9 @@ async def serve(harness, port: int, poll_interval: float) -> None:
         await loop
         return
 
-    app = create_app(view=harness.projection, clock=SystemClock())
+    app = create_app(
+        view=harness.projection, artifacts=harness.artifacts, clock=SystemClock()
+    )
     config = uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning")
     server = asyncio.create_task(uvicorn.Server(config).serve())
     try:
@@ -156,6 +171,7 @@ def main(argv: list[str] | None = None) -> int:
     submit.add_argument("--root", default=None)
     submit.add_argument("--workflow", default=DEFAULT_WORKFLOW)
     submit.add_argument("--repo", default=None)
+    submit.add_argument("--worktree", default=None, help="cesta k worktree tasku")
     submit.add_argument("--data", default=None, help="JSON payload")
     submit.set_defaults(handler=_submit)
 

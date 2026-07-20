@@ -6,6 +6,7 @@ import asyncio
 from dataclasses import dataclass
 from pathlib import Path
 
+from harness.behaviors.landing import LandingBehavior
 from harness.consumer import Consumer
 from harness.dispatcher import Dispatcher
 from harness.drivers.composite_events import CompositeEventSink
@@ -13,15 +14,26 @@ from harness.drivers.dummy_behavior import DummyBehavior
 from harness.drivers.fifo_strategy import FifoStrategy
 from harness.drivers.fs_queue import FilesystemTaskQueue
 from harness.drivers.fs_workflows import FilesystemWorkflowRepository
+from harness.drivers.memory import (
+    MemoryArtifactStore,
+    MemoryForge,
+    MemoryWorkspace,
+)
 from harness.drivers.projection_events import ProjectionSink
 from harness.drivers.stdout_events import StdoutEventSink
 from harness.drivers.system_clock import SystemClock
 from harness.models import Workflow
+from harness.ports.artifacts import ArtifactStore
 from harness.ports.behavior import ConsumerBehavior
 from harness.ports.clock import Clock
 from harness.ports.events import EventSink
+from harness.ports.forge import Forge
 from harness.ports.queue import TaskQueue
+from harness.ports.workspace import Workspace
 from harness.projection import BoardProjection
+
+LANDING_STEP = "land"
+"""Krok, kterému wiring přiřadí LandingBehavior místo DummyBehavior."""
 
 
 @dataclass(frozen=True)
@@ -62,6 +74,7 @@ class Harness:
         done: TaskQueue,
         failed: TaskQueue,
         projection: BoardProjection,
+        artifacts: ArtifactStore,
         events: EventSink,
         clock: Clock,
     ) -> None:
@@ -70,6 +83,7 @@ class Harness:
         self.dispatcher = dispatcher
         self.consumers = consumers
         self.projection = projection
+        self.artifacts = artifacts
         self._inbox = inbox
         self._step_queues = step_queues
         self._done = done
@@ -126,6 +140,10 @@ def build(
     events: EventSink | None = None,
     clock: Clock | None = None,
     behavior: ConsumerBehavior | None = None,
+    workspace: Workspace | None = None,
+    artifacts: ArtifactStore | None = None,
+    forge: Forge | None = None,
+    landing_step: str = LANDING_STEP,
     delay: float = 5.0,
     request_changes_once_at: str | None = None,
 ) -> Harness:
@@ -133,6 +151,13 @@ def build(
     events = events or StdoutEventSink()
     clock = clock or SystemClock()
     strategy = FifoStrategy()
+
+    # Pracovní drivery: default je in-memory (substrát dummy behavioru, stejně
+    # jako DummyBehavior sám je fake). Skutečný běh (`harness run`) i git smoke
+    # si sem vstříknou git/fs/fake — záměna driveru, ne okolí.
+    workspace = workspace or MemoryWorkspace()
+    artifacts = artifacts or MemoryArtifactStore()
+    forge = forge or MemoryForge()
 
     workflows = FilesystemWorkflowRepository(layout.workflows)
     workflow = workflows.get(workflow_name)
@@ -152,9 +177,19 @@ def build(
         for step in workflow.steps()
     }
 
-    behavior = behavior or DummyBehavior(
-        clock=clock, delay=delay, request_changes_once_at=request_changes_once_at
+    work = behavior or DummyBehavior(
+        clock=clock,
+        workspace=workspace,
+        artifacts=artifacts,
+        delay=delay,
+        request_changes_once_at=request_changes_once_at,
     )
+    landing = LandingBehavior(
+        clock=clock, workspace=workspace, artifacts=artifacts, forge=forge
+    )
+
+    def behavior_for(step: str) -> ConsumerBehavior:
+        return landing if step == landing_step else work
 
     dispatcher = Dispatcher(
         inbox=inbox,
@@ -173,7 +208,7 @@ def build(
             queue=queue,
             inbox=inbox,
             failed=failed,
-            behavior=behavior,
+            behavior=behavior_for(step),
             strategy=strategy,
             events=events,
             clock=clock,
@@ -191,6 +226,7 @@ def build(
         done=done,
         failed=failed,
         projection=projection,
+        artifacts=artifacts,
         events=events,
         clock=clock,
     )
