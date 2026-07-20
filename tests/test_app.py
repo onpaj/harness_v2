@@ -4,6 +4,36 @@ import json
 from harness.app import HarnessLayout, build
 from harness.drivers.memory import MemoryEventSink
 from harness.models import Task
+from harness.ports.source import TaskSource
+
+
+class ReplaySource(TaskSource):
+    """Returns a task for the same source identity on every poll — the shape of
+    an issue that keeps reappearing under the select label after a restart."""
+
+    kind = "github"
+
+    def __init__(self, issue):
+        self._issue = issue
+        self._n = 0
+
+    def poll(self):
+        self._n += 1
+        return [
+            Task(
+                id=f"tsk_replay_{self._n}",
+                workflow_template="default",
+                created="2026-07-20T10:00:00Z",
+                dedup_key=f"github:o/r:{self._issue}",
+                data={"source": {"kind": "github", "repo": "o/r", "issue": self._issue}},
+            )
+        ]
+
+    def report_progress(self, task, progress):  # pragma: no cover - not called
+        pass
+
+    def finish(self, task, result):  # pragma: no cover - not called
+        pass
 
 # `await runner` waits on the `asyncio.gather` inside Harness.run, which finishes
 # only when both loops see `stop.is_set()`. If a regression broke that, `await
@@ -126,6 +156,28 @@ async def test_projection_is_hydrated_from_queues_at_start(tmp_path):
 
     assert harness.projection.get("tsk_9") is not None
     assert harness.projection.snapshot().column("review").tasks[0].id == "tsk_9"
+
+
+def test_seed_pollers_collects_from_every_queue(tmp_path):
+    # A task for issue #1 already sits in `done/` (it ran to completion before a
+    # restart). Seeding must find it there so the source can't re-ingest #1.
+    seed(tmp_path)
+    source = ReplaySource(issue=1)
+    harness = build(tmp_path, "default", events=MemoryEventSink(), sources=[source])
+    done_task = Task(
+        id="tsk_done",
+        workflow_template="default",
+        created="2026-07-20T09:00:00Z",
+        dedup_key="github:o/r:1",
+        data={"source": {"kind": "github", "repo": "o/r", "issue": 1}},
+    )
+    (tmp_path / "done" / "tsk_done.json").write_text(json.dumps(done_task.to_dict()))
+
+    harness._seed_pollers()
+
+    # The source would hand back issue #1, but it is already on disk → skipped.
+    assert harness.pollers[0].tick() is False
+    assert list((tmp_path / "tasks").glob("tsk_*.json")) == []
 
 
 async def test_stranded_task_survives_into_the_projection(tmp_path):

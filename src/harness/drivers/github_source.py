@@ -18,7 +18,7 @@ from harness.drivers.github_client import GithubClient
 from harness.ids import new_task_id
 from harness.models import Task
 from harness.ports.clock import Clock
-from harness.ports.source import FinishResult, Progress, TaskSource
+from harness.ports.source import FinishResult, Progress, TaskSource, dedup_key
 
 
 class GithubTaskSource(TaskSource):
@@ -82,6 +82,7 @@ class GithubTaskSource(TaskSource):
                     created=self._clock.now(),
                     repository=self._repository,
                     worktree=f"{self._worktree_root}/{task_id}",
+                    dedup_key=dedup_key(self.kind, self._repo, issue.number),
                     data={
                         "title": issue.title,
                         "body": issue.body,

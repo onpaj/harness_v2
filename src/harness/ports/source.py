@@ -22,6 +22,19 @@ from dataclasses import dataclass
 from harness.models import Task
 
 
+def dedup_key(kind: str, *parts: object) -> str:
+    """The stable identity of a source item, as stamped onto `Task.dedup_key`.
+
+    A `TaskSource` builds it from whatever uniquely names the item in its world
+    — for GitHub that is `(repo, issue)`. Two items with the same key are the
+    *same* piece of outside work: a GitHub issue must never yield two tasks, no
+    matter how often it is polled or how many times the harness restarts. The
+    poller compares this key across every task already on disk, so the guarantee
+    is persistent (see `SourcePoller`).
+    """
+    return ":".join([kind, *(str(part) for part in parts)])
+
+
 @dataclass(frozen=True)
 class Progress:
     """A task's in-progress state as the outer world sees it (no harness knowledge)."""

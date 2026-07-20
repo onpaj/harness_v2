@@ -125,6 +125,25 @@ class Harness:
             self._events.emit("recovered", count=total)
         return total
 
+    def _seed_pollers(self) -> None:
+        """Teach the pollers which source identities are already ingested.
+
+        Runs after `recover()` (so in-flight tasks are back in their queues and
+        visible to `list()`), before the loops start. This is what makes source
+        deduplication survive a restart: a GitHub issue whose task is already on
+        disk — in any queue, done or failed — is never ingested a second time.
+        """
+        if not self.pollers:
+            return
+        existing = [
+            *self._inbox.list(),
+            *(task for queue in self._step_queues.values() for task in queue.list()),
+            *self._done.list(),
+            *self._failed.list(),
+        ]
+        for poller in self.pollers:
+            poller.seed(existing)
+
     async def run(
         self,
         poll_interval: float = 0.2,
@@ -143,6 +162,7 @@ class Harness:
             done=self._done,
             failed=self._failed,
         )
+        self._seed_pollers()
         self._events.emit("started", workflow=self.workflow.name)
         await asyncio.gather(
             self._dispatcher_loop(poll_interval, stop),

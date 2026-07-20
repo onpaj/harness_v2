@@ -32,6 +32,7 @@ def test_poll_claims_issue_and_builds_task():
     [task] = source.poll()
 
     assert _labels(client, 1) == {"harness:queued"}
+    assert task.dedup_key == "github:o/r:1"
     assert task.data["source"] == {
         "kind": "github",
         "repo": "o/r",
