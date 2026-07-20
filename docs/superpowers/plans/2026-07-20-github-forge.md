@@ -991,8 +991,8 @@ Three edits:
 ```markdown
 - **Landing is idempotent.** For an existing PR on a branch the forge returns the
   existing one (`GithubForge` matches on `head=owner:branch`). So a re-run after a
-  crash won't open a second PR. The push is `--force-with-lease` for the same
-  reason — reset-on-reattach rewrites the branch.
+  crash won't open a second PR. The push is a plain `git push -u origin` — the task
+  branch only ever moves forward, so a rejection is a real anomaly and must fail.
 - **A failed PR fails the task.** `GithubForge` raises `ForgeError` on a missing
   `GITHUB_TOKEN`, a non-GitHub origin or an API error, and the task lands in
   `failed/`. That is deliberate: before this, `land` reported success while only
