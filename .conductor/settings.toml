@@ -29,18 +29,14 @@ EOF
 # Each workspace has its own root → the loops don't interfere with each other.
 run_mode = "concurrent"
 
-# Runs the orchestration loop. It runs forward and polls the queue until
-# Conductor stops it (SIGHUP → the loop exits cleanly). The root must have been
-# initialized by the setup script above.
-#
-# GitHub source: `--github-repo onpaj/Anela.Heblo` turns on ingestion of issues
-# labeled `harness:todo`. `--github-repository heblo` is the name in repos.json
-# that resolves the local clone (invariant 15) — the source disables itself
-# without it. The token is taken at runtime from `gh` (no secret in the file);
-# the source also disables itself when `GITHUB_TOKEN` is missing. The GitHub poll
-# runs on its own interval (`--source-poll`, default 30 s) so it doesn't hammer
-# `list_issues`, while the internal loop stays fast for a responsive board.
+# GitHub source: with GITHUB_TOKEN present, the harness scans EVERY repo in
+# repos.json (currently harness_v2 and heblo) for issues labeled `harness:todo`.
+# Each repo's owner/name slug is derived from its clone's git origin. The token
+# is taken at runtime from `gh` (no secret in the file); without it the harness
+# runs on `harness submit` alone. GitHub is polled on its own interval
+# (`--source-poll`, default 30 s) so it doesn't hit API rate limits, while the
+# internal loop stays fast for a responsive board.
 [scripts.run.loop]
-command = 'GITHUB_TOKEN="$(gh auth token)" .venv/bin/harness run --root "$CONDUCTOR_WORKSPACE_PATH/.harness" --github-repo onpaj/Anela.Heblo --github-repository heblo'
+command = 'GITHUB_TOKEN="$(gh auth token)" .venv/bin/harness run --root "$CONDUCTOR_WORKSPACE_PATH/.harness"'
 default = true
 icon = "play"
