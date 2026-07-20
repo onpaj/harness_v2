@@ -1,9 +1,10 @@
+import argparse
 import asyncio
 import json
 
 import pytest
 
-from harness.cli import DEFAULT_WORKFLOW, main, serve
+from harness.cli import DEFAULT_WORKFLOW, _github_source, main, serve
 from harness.drivers.memory import MemoryArtifactStore
 from harness.models import END, Task, Transition, Workflow
 from harness.projection import BoardProjection
@@ -139,6 +140,42 @@ def test_harness_home_used_only_when_root_absent(tmp_path, monkeypatch):
 
     assert main(["init", "--root", str(flag_root)]) == 0
     assert flag_root.is_dir()
+
+
+def _github_args(**overrides):
+    """Minimální namespace, jaký `run` parser předá do `_github_source`."""
+    base = dict(
+        github_repo="onpaj/Anela.Heblo",
+        github_repository="heblo",
+        github_workflow="default",
+        github_label="harness:todo",
+        worktree_root=None,
+    )
+    base.update(overrides)
+    return argparse.Namespace(**base)
+
+
+def test_github_source_stamps_repository_name_not_root_path(monkeypatch, tmp_path):
+    """`task.repository` je jméno pro `repos.json` (invariant 15), ne cesta
+    `<root>/repo`. Zdroj bere jméno z `--github-repository`."""
+    monkeypatch.setenv("GITHUB_TOKEN", "t0ken")
+
+    source = _github_source(_github_args(github_repository="heblo"), tmp_path)
+
+    assert source is not None
+    assert source._repository == "heblo"
+    # a rozhodně ne stará napevno drátovaná cesta
+    assert source._repository != str(tmp_path / "repo")
+
+
+def test_github_source_disabled_without_repository_name(monkeypatch, tmp_path, capsys):
+    """`--github-repo` bez `--github-repository` nemá jak resolvnout worktree —
+    zdroj se vypne s hláškou, symetricky k chybějícímu tokenu."""
+    monkeypatch.setenv("GITHUB_TOKEN", "t0ken")
+
+    assert _github_source(_github_args(github_repository=None), tmp_path) is None
+
+    assert "--github-repository" in capsys.readouterr().err
 
 
 def test_run_accepts_api_port(monkeypatch, tmp_path):

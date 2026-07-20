@@ -331,13 +331,20 @@ def _github_source(args: argparse.Namespace, root: Path) -> TaskSource | None:
             file=sys.stderr,
         )
         return None
+    if not args.github_repository:
+        print(
+            "varování: --github-repo bez --github-repository (jméno repa "
+            "v repos.json), zdroj vypnut",
+            file=sys.stderr,
+        )
+        return None
     worktree_root = args.worktree_root or str(root / "worktrees")
     return GithubTaskSource(
         client=HttpGithubClient(token),
         clock=SystemClock(),
         repo=args.github_repo,
         workflow=args.github_workflow,
-        repository=str(root / "repo"),
+        repository=args.github_repository,
         worktree_root=worktree_root,
         select_label=args.github_label,
         step_labels=DEFAULT_STEP_LABELS,
@@ -441,6 +448,13 @@ def main(argv: list[str] | None = None) -> int:
         "--github-repo",
         default=None,
         help="repo (owner/name) for the GitHub task source; with GITHUB_TOKEN",
+    )
+    run.add_argument(
+        "--github-repository",
+        default=None,
+        dest="github_repository",
+        help="jméno repa v repos.json, jímž se resolvne worktree cesta "
+        "(nutné s --github-repo)",
     )
     run.add_argument(
         "--github-label",
