@@ -87,16 +87,16 @@ class GitWorkspaceHandle(WorkspaceHandle):
         return _git(["-C", str(self._path), "rev-parse", "HEAD"]).strip()
 
     def push(self) -> None:
-        # --force-with-lease, not --force: reset-on-reattach rewrites the task
-        # branch on a re-run, so a plain push would be rejected as non-fast-
-        # forward — but the lease still refuses to clobber a ref someone else
-        # moved out from under us.
+        # Plain push, no force: the task branch only ever moves forward.
+        # Reset-on-reattach (`reset --hard` + `clean -fd`) discards uncommitted
+        # working-tree state on a re-run, it never rewinds the branch pointer.
+        # A rejected push therefore means something else touched the branch —
+        # that must surface as a failure, not be forced over.
         _git(
             [
                 "-C",
                 str(self._path),
                 "push",
-                "--force-with-lease",
                 "-u",
                 "origin",
                 self._branch,
