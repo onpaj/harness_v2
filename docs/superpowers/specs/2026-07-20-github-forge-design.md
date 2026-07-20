@@ -118,9 +118,12 @@ resolve slug → cached `default_branch` → `find_pull_request` → return or
 `_run` builds the forge from `--forge`. For `github`: read `GITHUB_TOKEN`,
 construct `HttpGithubClient` and `GithubForge`. A missing token is **not** a
 startup error — it fails at `land`, on the task, where the operator can see
-which task it broke and restart it after exporting the token. `harness doctor`
-already reports `GITHUB_TOKEN` presence as a warning; that warning becomes
-materially important and its text should say so.
+which task it broke and restart it after exporting the token.
+
+(A `harness doctor` that reports `GITHUB_TOKEN` presence is being added by the
+unmerged work for issue #14. Once that lands, its warning becomes materially
+more important than it reads today and its text should say so — but this spec
+does not depend on it.)
 
 ## Data flow
 
