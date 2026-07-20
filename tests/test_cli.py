@@ -1,11 +1,13 @@
 import argparse
 import asyncio
 import json
+from pathlib import Path
 
 import pytest
 
-from harness.cli import DEFAULT_WORKFLOW, _github_source, main, serve
-from harness.drivers.memory import MemoryArtifactStore
+from harness.cli import DEFAULT_WORKFLOW, _github_sources, main, serve
+from harness.drivers.github_client import FakeGithubClient
+from harness.drivers.memory import MemoryArtifactStore, MemoryRepositoryRegistry
 from harness.models import END, Task, Transition, Workflow
 from harness.projection import BoardProjection
 from tests.fakes import FakeTaskControl
@@ -144,10 +146,8 @@ def test_harness_home_used_only_when_root_absent(tmp_path, monkeypatch):
 
 
 def _github_args(**overrides):
-    """The minimal namespace the `run` parser hands to `_github_source`."""
+    """The minimal namespace the `run` parser hands to `_github_sources`."""
     base = dict(
-        github_repo="onpaj/Anela.Heblo",
-        github_repository="heblo",
         github_workflow="default",
         github_label="harness:todo",
         worktree_root=None,
@@ -156,28 +156,52 @@ def _github_args(**overrides):
     return argparse.Namespace(**base)
 
 
-def test_github_source_stamps_repository_name_not_root_path(monkeypatch, tmp_path):
-    """`task.repository` is a name for `repos.json` (invariant 15), not the path
-    `<root>/repo`. The source takes the name from `--github-repository`."""
+def test_github_sources_builds_one_per_github_repo(monkeypatch, tmp_path):
+    """One source per repos.json repo that has a GitHub origin; the task carries
+    the repo *name* (invariant 15), not a path."""
     monkeypatch.setenv("GITHUB_TOKEN", "t0ken")
+    registry = MemoryRepositoryRegistry(
+        {"heblo": Path("/repos/heblo"), "harness_v2": Path("/repos/harness_v2")}
+    )
+    slugs = {
+        Path("/repos/heblo"): "onpaj/Anela.Heblo",
+        Path("/repos/harness_v2"): "onpaj/harness_v2",
+    }
 
-    source = _github_source(_github_args(github_repository="heblo"), tmp_path)
+    sources = _github_sources(
+        _github_args(),
+        tmp_path,
+        registry,
+        slug_of=slugs.get,
+        client=FakeGithubClient(),
+    )
 
-    assert source is not None
-    assert source._repository == "heblo"
-    # and definitely not the old hard-wired path
-    assert source._repository != str(tmp_path / "repo")
+    assert {s._repository for s in sources} == {"heblo", "harness_v2"}
+    assert {s._repo for s in sources} == {"onpaj/Anela.Heblo", "onpaj/harness_v2"}
 
 
-def test_github_source_disabled_without_repository_name(monkeypatch, tmp_path, capsys):
-    """`--github-repo` without `--github-repository` has no way to resolve the
-    worktree — the source is disabled with a message, symmetrically to a missing
-    token."""
+def test_github_sources_skips_repo_without_github_origin(monkeypatch, tmp_path, capsys):
+    """A repo whose origin is not GitHub is skipped with a warning, others build."""
     monkeypatch.setenv("GITHUB_TOKEN", "t0ken")
+    registry = MemoryRepositoryRegistry(
+        {"heblo": Path("/repos/heblo"), "local": Path("/repos/local")}
+    )
+    slugs = {Path("/repos/heblo"): "onpaj/Anela.Heblo", Path("/repos/local"): None}
 
-    assert _github_source(_github_args(github_repository=None), tmp_path) is None
+    sources = _github_sources(
+        _github_args(), tmp_path, registry, slug_of=slugs.get, client=FakeGithubClient()
+    )
 
-    assert "--github-repository" in capsys.readouterr().err
+    assert [s._repository for s in sources] == ["heblo"]
+    assert "local has no GitHub origin" in capsys.readouterr().err
+
+
+def test_github_sources_empty_without_token(monkeypatch, tmp_path):
+    """No GITHUB_TOKEN → no sources (harness runs on `submit` alone), silently."""
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    registry = MemoryRepositoryRegistry({"heblo": Path("/repos/heblo")})
+
+    assert _github_sources(_github_args(), tmp_path, registry) == []
 
 
 def test_run_accepts_api_port(monkeypatch, tmp_path):

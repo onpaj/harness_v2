@@ -18,13 +18,15 @@ from harness.drivers.fake_forge import FakeForge
 from harness.drivers.fs_agents import FilesystemAgentCatalog
 from harness.drivers.fs_repos import FilesystemRepositoryRegistry
 from harness.drivers.fs_workflows import invalid_workflow_name
+from harness.drivers.git_remote import github_slug
 from harness.drivers.git_workspace import GitWorkspace
-from harness.drivers.github_client import HttpGithubClient
+from harness.drivers.github_client import GithubClient, HttpGithubClient
 from harness.drivers.github_source import GithubTaskSource
 from harness.drivers.system_clock import SystemClock
 from harness.drivers.worktree_artifacts import WorktreeArtifactView
 from harness.ids import new_task_id
 from harness.models import Task
+from harness.ports.repos import RepositoryRegistry
 from harness.ports.source import TaskSource
 from harness.ports.workflows import WorkflowNotFound
 
@@ -318,37 +320,46 @@ def _submit(args: argparse.Namespace) -> int:
     return 0
 
 
-def _github_source(args: argparse.Namespace, root: Path) -> TaskSource | None:
-    """A source from GitHub Issues when `--github-repo` and `GITHUB_TOKEN` are
-    present. Otherwise None — the harness runs as before (just `harness
-    submit`)."""
-    if not args.github_repo:
-        return None
-    token = os.environ.get("GITHUB_TOKEN")
-    if not token:
-        print(
-            "warning: --github-repo without GITHUB_TOKEN, source disabled",
-            file=sys.stderr,
-        )
-        return None
-    if not args.github_repository:
-        print(
-            "warning: --github-repo without --github-repository (the repo name "
-            "in repos.json), source disabled",
-            file=sys.stderr,
-        )
-        return None
+def _github_sources(
+    args: argparse.Namespace,
+    root: Path,
+    registry: RepositoryRegistry,
+    *,
+    slug_of=github_slug,
+    client: GithubClient | None = None,
+) -> list[TaskSource]:
+    """One `GithubTaskSource` per repo in `repos.json` that has a GitHub origin.
+
+    The slug is derived from each clone's git origin (`slug_of`); a repo with no
+    GitHub origin is skipped with a warning. Without `GITHUB_TOKEN` (and no
+    injected client) there are no sources and the harness runs on `harness
+    submit` alone."""
+    if client is None:
+        token = os.environ.get("GITHUB_TOKEN")
+        if not token:
+            return []
+        client = HttpGithubClient(token)
+
     worktree_root = args.worktree_root or str(root / "worktrees")
-    return GithubTaskSource(
-        client=HttpGithubClient(token),
-        clock=SystemClock(),
-        repo=args.github_repo,
-        workflow=args.github_workflow,
-        repository=args.github_repository,
-        worktree_root=worktree_root,
-        select_label=args.github_label,
-        step_labels=DEFAULT_STEP_LABELS,
-    )
+    sources: list[TaskSource] = []
+    for name in registry.names():
+        slug = slug_of(registry.resolve(name))
+        if slug is None:
+            print(f"warning: {name} has no GitHub origin, not scanned", file=sys.stderr)
+            continue
+        sources.append(
+            GithubTaskSource(
+                client=client,
+                clock=SystemClock(),
+                repo=slug,
+                workflow=args.github_workflow,
+                repository=name,
+                worktree_root=worktree_root,
+                select_label=args.github_label,
+                step_labels=DEFAULT_STEP_LABELS,
+            )
+        )
+    return sources
 
 
 def _run(args: argparse.Namespace) -> int:
@@ -364,7 +375,7 @@ def _run(args: argparse.Namespace) -> int:
     workspace = GitWorkspace(registry, layout.worktrees)
     artifact_view = WorktreeArtifactView(layout.worktrees)
     forge = FakeForge(root / "forge")
-    source = _github_source(args, root)
+    sources = _github_sources(args, root, registry)
     try:
         harness = build(
             root,
@@ -375,7 +386,7 @@ def _run(args: argparse.Namespace) -> int:
             catalog=catalog,
             artifact_view=artifact_view,
             agent_timeout=args.agent_timeout,
-            sources=[source] if source else None,
+            sources=sources or None,
             delay=args.delay,
             request_changes_once_at=args.request_changes_at,
         )
@@ -461,18 +472,6 @@ def main(argv: list[str] | None = None) -> int:
     )
     run.add_argument("--agent-timeout", type=float, default=600.0, dest="agent_timeout")
     run.add_argument("--request-changes-at", default=None, dest="request_changes_at")
-    run.add_argument(
-        "--github-repo",
-        default=None,
-        help="repo (owner/name) for the GitHub task source; with GITHUB_TOKEN",
-    )
-    run.add_argument(
-        "--github-repository",
-        default=None,
-        dest="github_repository",
-        help="the repo name in repos.json used to resolve the worktree path "
-        "(required with --github-repo)",
-    )
     run.add_argument(
         "--github-label",
         default="harness:todo",
