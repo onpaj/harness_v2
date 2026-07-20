@@ -21,7 +21,13 @@ run_mode = "concurrent"
 # Spustí orchestrační smyčku. Běží dopředu a pollује frontu dokud ji Conductor
 # nezastaví (SIGHUP → smyčka čistě skončí). Root musí být inicializovaný ze
 # setup scriptu výše.
+#
+# GitHub zdroj: `--github-repo onpaj/Anela.Heblo` zapne ingesci issue s labelem
+# `harness:todo`. Token se bere za běhu z `gh` (žádný secret v souboru); zdroj
+# se sám vypne, když `GITHUB_TOKEN` chybí. `--poll 5` drží interval pollování
+# nízko — GitHubí `list_issues` čte s lagem, tak nemá smysl bušit každých 0.2 s
+# (in-process dedup ve zdroji navíc chrání před dvojitým claimem).
 [scripts.run.loop]
-command = '.venv/bin/harness run --root "$CONDUCTOR_WORKSPACE_PATH/.harness"'
+command = 'GITHUB_TOKEN="$(gh auth token)" .venv/bin/harness run --root "$CONDUCTOR_WORKSPACE_PATH/.harness" --github-repo onpaj/Anela.Heblo --poll 5'
 default = true
 icon = "play"
