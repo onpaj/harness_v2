@@ -33,13 +33,23 @@ WAITING = Task(
     status="development",
 )
 
+TITLED = Task(
+    id="tsk_3",
+    workflow_template="default",
+    created="2026-07-19T10:00:02Z",
+    repository="/Users/x/repos/my-repo",
+    worktree="/Users/x/worktrees/wt_sacramento",
+    status="development",
+    data={"title": "Fix the login bug"},
+)
+
 
 @pytest.fixture
 def client() -> TestClient:
     board = Board(
         revision=9,
         columns=(
-            BoardColumn(name="development", tasks=(WORKING, WAITING)),
+            BoardColumn(name="development", tasks=(WORKING, WAITING, TITLED)),
             BoardColumn(name="done", tasks=()),
             BoardColumn(name="failed", tasks=()),
         ),
@@ -80,6 +90,29 @@ def test_card_shows_working_badge_only_when_locked(client):
     card_one, card_two = body.split("tsk_2", 1)
     assert "zpracovává se" in card_one
     assert "zpracovává se" not in card_two
+
+
+def test_card_shows_title_instead_of_id_when_present(client):
+    body = client.get("/fragment/board").text
+
+    assert "Fix the login bug" in body
+    # Titled task shows its title as the card label, not its raw id.
+    assert ">tsk_3<" not in body
+
+
+def test_card_falls_back_to_id_when_no_title(client):
+    body = client.get("/fragment/board").text
+
+    assert "tsk_1" in body
+    assert "tsk_2" in body
+
+
+def test_card_shows_repo_and_worktree_basename_not_path(client):
+    body = client.get("/fragment/board").text
+
+    assert "my-repo" in body
+    assert "wt_sacramento" in body
+    assert "/Users/x/" not in body
 
 
 def test_card_shows_last_outcome(client):
