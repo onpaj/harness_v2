@@ -105,6 +105,17 @@ async def test_consumer_appends_history_without_target():
     assert entry.outcome == "done"
 
 
+async def test_consumer_records_behavior_summary():
+    """Summary z BehaviorResult se propíše do historie i eventu."""
+    consumer, _, inbox, _, events = build(ScriptedBehavior(), make_task())
+
+    await consumer.tick()
+
+    assert inbox.list()[0].history[-1].summary == "design: done"
+    _, fields = next(item for item in events.events if item[0] == "consumed")
+    assert fields["summary"] == "design: done"
+
+
 async def test_behavior_exception_lands_in_failed():
     consumer, _, inbox, failed, events = build(ExplodingBehavior(), make_task())
 

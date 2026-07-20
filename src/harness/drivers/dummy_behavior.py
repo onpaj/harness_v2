@@ -7,7 +7,7 @@ ale jen jednou, jinak by se smyčka točila donekonečna.
 
 from __future__ import annotations
 
-from harness.models import Outcome, Task
+from harness.models import BehaviorResult, Outcome, Task
 from harness.ports.behavior import ConsumerBehavior
 from harness.ports.clock import Clock
 
@@ -25,12 +25,15 @@ class DummyBehavior(ConsumerBehavior):
         self._step = request_changes_once_at
         self._already_asked: set[str] = set()
 
-    async def run(self, task: Task) -> Outcome:
+    async def run(self, task: Task) -> BehaviorResult:
         await self._clock.sleep(self._delay)
 
         if self._step is not None and task.status == self._step:
             if task.id not in self._already_asked:
                 self._already_asked.add(task.id)
-                return Outcome.REQUEST_CHANGES
+                return BehaviorResult(
+                    Outcome.REQUEST_CHANGES,
+                    summary=f"{task.status}: vyžádány změny",
+                )
 
-        return Outcome.DONE
+        return BehaviorResult(Outcome.DONE, summary=f"{task.status}: hotovo")

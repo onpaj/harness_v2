@@ -1,5 +1,6 @@
 from harness.models import (
     END,
+    BehaviorResult,
     Failed,
     Finished,
     HistoryEntry,
@@ -10,6 +11,39 @@ from harness.models import (
     Workflow,
     append_history,
 )
+
+
+def test_behavior_result_carries_outcome_and_summary():
+    result = BehaviorResult(Outcome.DONE, summary="přidán retry s backoffem")
+
+    assert result.outcome is Outcome.DONE
+    assert result.summary == "přidán retry s backoffem"
+
+
+def test_behavior_result_summary_defaults_empty():
+    assert BehaviorResult(Outcome.REQUEST_CHANGES).summary == ""
+
+
+def test_history_entry_roundtrips_summary():
+    entry = HistoryEntry(
+        at="t",
+        actor="consumer:design",
+        from_step="design",
+        to_step=None,
+        outcome="done",
+        summary="hotovo",
+    )
+
+    raw = entry.to_dict()
+
+    assert raw["summary"] == "hotovo"
+    assert HistoryEntry.from_dict(raw) == entry
+
+
+def test_history_entry_omits_summary_when_absent():
+    entry = HistoryEntry(at="t", actor="dispatcher", from_step=None, to_step="plan")
+
+    assert "summary" not in entry.to_dict()
 
 
 def test_task_roundtrips_through_camelcase_json():

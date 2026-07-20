@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import Any
 
-from harness.models import Outcome, Task, Workflow
+from harness.models import BehaviorResult, Outcome, Task, Workflow
 from harness.ports.behavior import ConsumerBehavior
 from harness.ports.clock import Clock
 from harness.ports.events import EventSink
@@ -89,10 +89,9 @@ class ScriptedBehavior(ConsumerBehavior):
         self._outcomes = {step: list(values) for step, values in (outcomes or {}).items()}
         self.seen: list[str] = []
 
-    async def run(self, task: Task) -> Outcome:
+    async def run(self, task: Task) -> BehaviorResult:
         step = task.status or ""
         self.seen.append(step)
         pending = self._outcomes.get(step)
-        if pending:
-            return pending.pop(0)
-        return Outcome.DONE
+        outcome = pending.pop(0) if pending else Outcome.DONE
+        return BehaviorResult(outcome, summary=f"{step}: {outcome.value}")

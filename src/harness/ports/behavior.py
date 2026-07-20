@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 
-from harness.models import Outcome, Task
+from harness.models import BehaviorResult, Task
 
 
 class ConsumerBehavior(ABC):
@@ -13,5 +13,5 @@ class ConsumerBehavior(ABC):
     """
 
     @abstractmethod
-    async def run(self, task: Task) -> Outcome:
-        """Vykonej práci a vrať, co se stalo."""
+    async def run(self, task: Task) -> BehaviorResult:
+        """Vykonej práci a vrať, co se stalo a co se udělalo."""

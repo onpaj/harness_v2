@@ -23,6 +23,18 @@ class Outcome(str, Enum):
 
 
 @dataclass(frozen=True)
+class BehaviorResult:
+    """Návrat behavioru: co se stalo (outcome) a co se udělalo (summary).
+
+    `outcome` je řídicí signál, na který routuje dispatcher. `summary` je krátký
+    terminální výrok o běhu — zpráva commitu, řádek historie, tělo PR, board.
+    """
+
+    outcome: Outcome
+    summary: str = ""
+
+
+@dataclass(frozen=True)
 class HistoryEntry:
     """Jeden řádek audit logu tasku."""
 
@@ -31,6 +43,7 @@ class HistoryEntry:
     from_step: str | None
     to_step: str | None
     outcome: str | None = None
+    summary: str | None = None
     reason: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
@@ -42,6 +55,8 @@ class HistoryEntry:
         }
         if self.outcome is not None:
             raw["outcome"] = self.outcome
+        if self.summary is not None:
+            raw["summary"] = self.summary
         if self.reason is not None:
             raw["reason"] = self.reason
         return raw
@@ -54,6 +69,7 @@ class HistoryEntry:
             from_step=raw.get("from"),
             to_step=raw.get("to"),
             outcome=raw.get("outcome"),
+            summary=raw.get("summary"),
             reason=raw.get("reason"),
         )
 

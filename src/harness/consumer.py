@@ -9,7 +9,14 @@ from __future__ import annotations
 from dataclasses import replace
 
 from harness.ids import new_lock_id
-from harness.models import FAILED, HistoryEntry, Outcome, Task, append_history
+from harness.models import (
+    FAILED,
+    BehaviorResult,
+    HistoryEntry,
+    Outcome,
+    Task,
+    append_history,
+)
 from harness.ports.behavior import ConsumerBehavior
 from harness.ports.clock import Clock
 from harness.ports.events import EventSink
@@ -62,35 +69,39 @@ class Consumer:
         )
 
         try:
-            outcome = await self._behavior.run(task)
+            result = await self._behavior.run(task)
         except Exception as error:  # noqa: BLE001 - jeden vadný task nesmí zastavit smyčku
             self._fail(task, f"behavior vyhodil výjimku: {error}")
             return True
 
-        if not isinstance(outcome, Outcome):
-            self._fail(task, f"behavior vrátil neplatný outcome: {outcome!r}")
+        if not isinstance(result, BehaviorResult) or not isinstance(
+            result.outcome, Outcome
+        ):
+            self._fail(task, f"behavior vrátil neplatný výsledek: {result!r}")
             return True
 
-        self._deliver(task, outcome)
+        self._deliver(task, result)
         return True
 
-    def _deliver(self, task: Task, outcome: Outcome) -> None:
+    def _deliver(self, task: Task, result: BehaviorResult) -> None:
         entry = HistoryEntry(
             at=self._clock.now(),
             actor=self.actor,
             from_step=self._step,
             to_step=None,
-            outcome=outcome.value,
+            outcome=result.outcome.value,
+            summary=result.summary or None,
         )
         updated = append_history(
-            replace(task, last_outcome=outcome.value, lock_id=None), entry
+            replace(task, last_outcome=result.outcome.value, lock_id=None), entry
         )
         self._queue.transfer(updated, self._inbox)
         self._events.emit(
             "consumed",
             task_id=task.id,
             step=self._step,
-            outcome=outcome.value,
+            outcome=result.outcome.value,
+            summary=result.summary,
             queue=self._step,
             task=updated.to_dict(),
         )
