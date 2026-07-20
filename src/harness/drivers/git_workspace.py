@@ -1,9 +1,12 @@
 """Git worktree jako pracovní plocha.
 
-`attach` připojí task k worktree pojmenovanému v tasku. Neexistuje-li, založí
-ho přes `git worktree add` na task branchi `harness/<task_id>` z HEAD repa;
-jinak reuse. Handle umí zapsat soubor a commitnout. Commit stageuje vše a při
-prázdné pracovní ploše vrátí None místo prázdného commitu.
+`attach` odvodí kořen repa z jména (`task.repository`) přes `RepositoryRegistry`
+a worktree umístí pod `<worktrees_root>/<task_id>`. Neexistuje-li, založí ho
+přes `git worktree add` na task branchi `harness/<task_id>` z HEAD repa;
+existuje-li (reattach po pádu / zpětné hraně), **resetne** ho zpět na HEAD a
+uklidí netrackované soubory (`reset --hard` + `clean -fd`, bez `-x`), aby další
+pokus začal z čistého listu. Handle umí zapsat soubor a commitnout. Commit
+stageuje vše a při prázdné pracovní ploše vrátí None místo prázdného commitu.
 
 Volá systémový `git` přes subprocess — žádná nová produkční závislost.
 """
@@ -14,6 +17,7 @@ import subprocess
 from pathlib import Path
 
 from harness.models import Task
+from harness.ports.repos import RepositoryRegistry
 from harness.ports.workspace import Workspace, WorkspaceHandle
 
 _IDENTITY = {
@@ -83,14 +87,51 @@ class GitWorkspaceHandle(WorkspaceHandle):
 
 
 class GitWorkspace(Workspace):
-    """Zakládá a znovupoužívá git worktree pojmenované v tasku."""
+    """Zakládá a znovupoužívá git worktree pod společným kořenem.
+
+    Fáze 3: kořen repa odvozuje z **jména** (`task.repository`) přes registry —
+    task nese logické jméno, ne cestu. Worktree leží na
+    `<worktrees_root>/<task_id>`. Reattach špinavý worktree resetuje na HEAD.
+
+    Legacy (fáze 2): bez registry odvozuje kořen i worktree přímo z tasku
+    (`task.repository` jako cesta, `task.worktree`) a reuse je prostý — bez
+    resetu. Tenhle režim drží fázi-2 smoke naživu; Task 8 plánu ho odstraní
+    spolu s přepsáním `test_smoke_git.py`.
+    """
+
+    def __init__(
+        self,
+        registry: RepositoryRegistry | None = None,
+        worktrees_root: Path | None = None,
+    ) -> None:
+        self._registry = registry
+        self._worktrees_root = (
+            Path(worktrees_root) if worktrees_root is not None else None
+        )
 
     def attach(self, task: Task) -> GitWorkspaceHandle:
-        repo = Path(task.repository)
-        worktree = Path(task.worktree)
         branch = f"harness/{task.id}"
+
+        if self._registry is None:
+            # Legacy fáze-2 cesta: cesty přímo z tasku, prostý reuse.
+            base = Path(task.repository)
+            worktree = Path(task.worktree)
+            if not worktree.exists():
+                _git(["-C", str(base), "worktree", "add", str(worktree), "-b", branch])
+            return GitWorkspaceHandle(worktree, branch)
+
+        base = self._registry.resolve(task.repository)
+        worktree = self._worktrees_root / task.id
         if not worktree.exists():
+            worktree.parent.mkdir(parents=True, exist_ok=True)
             _git(
-                ["-C", str(repo), "worktree", "add", str(worktree), "-b", branch]
+                ["-C", str(base), "worktree", "add", str(worktree), "-b", branch]
             )
+        else:
+            # Reset-on-reattach: zpětná hrana i restart po pádu musí začít
+            # z čistého listu. `reset --hard` zahodí necommitnuté změny, `clean
+            # -fd` smaže netrackované soubory a adresáře. Bez `-x` — ignorované
+            # soubory (např. `.artifacts/` pokud by byly gitignored) zůstávají.
+            _git(["-C", str(worktree), "reset", "--hard", "HEAD"])
+            _git(["-C", str(worktree), "clean", "-fd"])
         return GitWorkspaceHandle(worktree, branch)
