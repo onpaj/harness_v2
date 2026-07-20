@@ -155,3 +155,51 @@ def test_plist_path_follows_the_launchagents_convention():
     assert plist_path(Path("/home/rem"), "com.harness") == Path(
         "/home/rem/Library/LaunchAgents/com.harness.plist"
     )
+
+
+# --- the bootout/bootstrap race -------------------------------------------
+
+
+def test_load_waits_for_the_old_copy_to_disappear(monkeypatch):
+    """`bootout` returns before launchd has torn the job down; bootstrapping
+    into a still-loaded label fails with "Bootstrap failed: 5"."""
+    from harness.drivers import launchd
+
+    calls: list[list[str]] = []
+    # Loaded for the first two polls, gone on the third.
+    remaining = [object(), object(), None]
+
+    def fake_launchctl(args, *, check=True):
+        calls.append(args)
+
+        class Result:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
+        return Result()
+
+    monkeypatch.setattr(launchd, "_launchctl", fake_launchctl)
+    monkeypatch.setattr(launchd, "status", lambda uid, label: remaining.pop(0))
+    monkeypatch.setattr(launchd.time, "sleep", lambda seconds: None)
+
+    launchd.load(501, Path("/tmp/x.plist"), "com.harness")
+
+    verbs = [args[0] for args in calls]
+    assert verbs == ["bootout", "bootstrap", "kickstart"]
+
+
+def test_load_refuses_to_bootstrap_over_a_stuck_job(monkeypatch):
+    from harness.drivers import launchd
+
+    import pytest
+
+    monkeypatch.setattr(
+        launchd, "_launchctl", lambda args, check=True: type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+    )
+    monkeypatch.setattr(launchd, "status", lambda uid, label: "still here")
+    monkeypatch.setattr(launchd.time, "sleep", lambda seconds: None)
+    monkeypatch.setattr(launchd.time, "monotonic", iter(range(100)).__next__)
+
+    with pytest.raises(launchd.ServiceError, match="still loaded"):
+        launchd.load(501, Path("/tmp/x.plist"), "com.harness")

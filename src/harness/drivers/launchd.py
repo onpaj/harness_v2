@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import plistlib
 import subprocess
+import time
 from pathlib import Path
 
 DEFAULT_LABEL = "com.harness"
@@ -120,10 +121,31 @@ def _launchctl(args: list[str], *, check: bool = True) -> subprocess.CompletedPr
     return result
 
 
+def _wait_until_unloaded(uid: int, label: str, timeout: float = 10.0) -> bool:
+    """Block until launchd has really dropped the label. True if it is gone.
+
+    `bootout` returns before the job is actually torn down, so a `bootstrap`
+    issued straight afterwards hits the still-loaded label and fails with
+    "Bootstrap failed: 5: Input/output error". Polling `print` is the only
+    reliable signal that the old copy is gone.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if status(uid, label) is None:
+            return True
+        time.sleep(0.2)
+    return status(uid, label) is None
+
+
 def load(uid: int, path: Path, label: str) -> None:
     """(Re)load the agent. Boots out a previous copy first so install is idempotent."""
     domain = f"gui/{uid}"
     _launchctl(["bootout", f"{domain}/{label}"], check=False)  # absent is fine
+    if not _wait_until_unloaded(uid, label):
+        raise ServiceError(
+            f"{label} is still loaded after bootout — "
+            f"run `launchctl bootout gui/{uid}/{label}` by hand and retry"
+        )
     _launchctl(["bootstrap", domain, str(path)])
     _launchctl(["kickstart", "-k", f"{domain}/{label}"])
 
