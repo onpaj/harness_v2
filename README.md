@@ -10,9 +10,28 @@ persistent storage, and git arrive in later phases.
 
 ## Installation
 
+The quickest way from a fresh clone to a runnable harness is the installer. It
+checks prerequisites (Python 3.11+, git; it warns if the `claude` CLI is
+missing, which real runs need), creates a virtualenv, installs the package with
+its dev extras, runs `harness init`, and walks you through populating
+`repos.json`:
+
+```sh
+./install.sh
+```
+
+It is safe to re-run: an existing venv is reused, `harness init` never
+overwrites existing files, and the `repos.json` step only adds entries. Useful
+flags: `--root DIR` (harness home, mirrors `harness --root`; default
+`$HARNESS_HOME` or `~/.harness`), `--workflow NAME`, and `--yes` for a
+non-interactive run that skips the `repos.json` wizard. See `./install.sh --help`.
+
+Prefer to do it by hand? The installer is a thin wrapper over:
+
 ```sh
 python3.11 -m venv .venv
 .venv/bin/pip install -e ".[dev]"
+.venv/bin/harness init
 ```
 
 ## Quick start
