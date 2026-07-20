@@ -115,7 +115,8 @@ class GithubTaskSource(TaskSource):
         self._client.add_label(self._repo, number, target)
 
     def _mine(self, task: Task) -> bool:
-        return task.data.get("source", {}).get("kind") == self.kind
+        src = task.data.get("source", {})
+        return src.get("kind") == self.kind and src.get("repo") == self._repo
 
     def _issue(self, task: Task) -> int:
         return task.data["source"]["issue"]
