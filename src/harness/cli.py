@@ -631,7 +631,7 @@ def _service_status(args: argparse.Namespace) -> int:
     return 0
 
 
-def _build_forge(kind: str, root: Path):
+def _build_forge(kind: str, root: Path, registry: RepositoryRegistry | None = None):
     """The forge for a real run. `fake` writes into `<root>/forge/prs.json`.
 
     `github` without a `GITHUB_TOKEN` yields a forge that fails at `land` rather
@@ -641,7 +641,9 @@ def _build_forge(kind: str, root: Path):
     if kind == "fake":
         return FakeForge(root / "forge")
     token = os.environ.get("GITHUB_TOKEN")
-    return GithubForge(HttpGithubClient(token) if token else None)
+    return GithubForge(
+        HttpGithubClient(token) if token else None, registry=registry
+    )
 
 
 def _run(args: argparse.Namespace) -> int:
@@ -661,7 +663,7 @@ def _run(args: argparse.Namespace) -> int:
     runner = ClaudeCliRunner() if use_agent else None
     workspace = GitWorkspace(registry, layout.worktrees)
     artifact_view = WorktreeArtifactView(layout.worktrees)
-    forge = _build_forge(args.forge, root)
+    forge = _build_forge(args.forge, root, registry)
     sources = _github_sources(args, root, registry)
     try:
         harness = build(

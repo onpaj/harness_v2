@@ -17,6 +17,7 @@ from harness.drivers.git_remote import github_slug
 from harness.drivers.github_client import GithubClient
 from harness.models import Task
 from harness.ports.forge import Forge, PullRequest
+from harness.ports.repos import RepositoryRegistry
 
 
 class ForgeError(RuntimeError):
@@ -30,11 +31,28 @@ class GithubForge(Forge):
         self,
         client: GithubClient | None,
         *,
+        registry: RepositoryRegistry | None = None,
         slug_of: Callable[[Path], str | None] = github_slug,
     ) -> None:
         self._client = client
+        self._registry = registry
         self._slug_of = slug_of
         self._base: dict[str, str] = {}
+
+    def _repo_path(self, task: Task) -> Path | None:
+        """Where the task's repository lives on this machine.
+
+        The registry first: `task.repository` is a name and resolving it is
+        exactly what the registry is for (invariant 15). `task.worktree` is only
+        a fallback — `harness submit` leaves it unset, and a task that came that
+        way used to fail landing with "has no worktree".
+        """
+        if self._registry is not None and task.repository:
+            try:
+                return Path(self._registry.resolve(task.repository))
+            except Exception:  # noqa: BLE001 - unknown name falls through
+                pass
+        return Path(task.worktree) if task.worktree else None
 
     def open_pull_request(
         self, task: Task, *, branch: str, title: str, body: str
@@ -45,11 +63,13 @@ class GithubForge(Forge):
                 "GITHUB_TOKEN is not set — cannot open a pull request. "
                 "Export it, or run with --forge fake."
             )
-        if not task.worktree:
+        repo_path = self._repo_path(task)
+        if repo_path is None:
             raise ForgeError(
-                f"task {task.id} has no worktree — cannot resolve its GitHub repository"
+                f"task {task.id}: cannot locate repository {task.repository!r} — "
+                "not in repos.json and the task carries no worktree"
             )
-        slug = self._slug_of(Path(task.worktree))
+        slug = self._slug_of(repo_path)
         if slug is None:
             raise ForgeError(
                 f"{task.repository} has no GitHub origin — cannot open a pull request"

@@ -116,7 +116,32 @@ def test_non_github_origin_fails_loudly():
         )
 
 
-def test_task_without_a_worktree_fails_loudly():
+def test_task_without_a_worktree_resolves_through_the_registry():
+    """`harness submit` leaves `worktree` unset — the repo name plus the registry
+    is what locates the clone (invariant 15). This reached `land` and failed in a
+    live run before the registry was wired in."""
+    from harness.drivers.memory import MemoryRepositoryRegistry
+
+    client = FakeGithubClient()
+    forge = GithubForge(
+        client,
+        registry=MemoryRepositoryRegistry({"app": Path("/repos/app")}),
+        slug_of=lambda path: "onpaj/harness_v2" if path == Path("/repos/app") else None,
+    )
+    task = Task(
+        id="tsk_1",
+        workflow_template="default",
+        created="2026-07-20T10:00:00Z",
+        repository="app",
+    )
+
+    pull = forge.open_pull_request(task, branch="harness/tsk_1", title="T", body="B")
+
+    assert pull.number == 1
+    assert client.created[0]["head"] == "onpaj:harness/tsk_1"
+
+
+def test_unlocatable_repository_fails_loudly():
     forge, _ = build()
     task = Task(
         id="tsk_1",
@@ -125,8 +150,29 @@ def test_task_without_a_worktree_fails_loudly():
         repository="app",
     )
 
-    with pytest.raises(ForgeError, match="worktree"):
+    with pytest.raises(ForgeError, match="cannot locate repository"):
         forge.open_pull_request(task, branch="harness/tsk_1", title="T", body="B")
+
+
+def test_registry_wins_over_the_task_worktree():
+    """Both present: the registry is authoritative — the worktree is a fallback."""
+    from harness.drivers.memory import MemoryRepositoryRegistry
+
+    seen = []
+
+    def slug_of(path):
+        seen.append(path)
+        return "onpaj/harness_v2"
+
+    forge = GithubForge(
+        FakeGithubClient(),
+        registry=MemoryRepositoryRegistry({"app": Path("/repos/app")}),
+        slug_of=slug_of,
+    )
+
+    forge.open_pull_request(make_task(), branch="harness/tsk_1", title="T", body="B")
+
+    assert seen == [Path("/repos/app")]
 
 
 def test_api_error_becomes_a_forge_error():
