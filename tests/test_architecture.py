@@ -50,15 +50,34 @@ WORK_PORTS = (
     "harness.ports.workspace",
     "harness.ports.forge",
     "harness.ports.artifacts",
+    # Fáze 3: agent, katalog person a registr rep jsou taky práce, ne
+    # orchestrace — sahá na ně jen behavior / wiring.
+    "harness.ports.agent",
+    "harness.ports.repos",
+)
+
+WORK_DRIVERS = (
+    # Fáze 3 drivery za work-porty. Generický `test_orchestration_does_not_
+    # import_drivers` je pokrývá jako každý driver; tady jsou jmenovitě, aby
+    # regrese byla čitelná (dispatcher/consumer se nesmí navázat na agenta).
+    "harness.drivers.claude_cli",
+    "harness.drivers.fs_agents",
+    "harness.drivers.fs_repos",
+    "harness.drivers.worktree_artifacts",
 )
 
 
 def test_orchestration_does_not_import_work_ports():
-    """Worktree, forge ani artefakty nezná dispatcher/consumer — sahá na ně jen
-    behavior. Jinak by orchestrace věděla o payloadu, na kterém task pracuje."""
+    """Worktree, forge, artefakty, agent ani registr rep nezná dispatcher/
+    consumer — sahá na ně jen behavior. Jinak by orchestrace věděla o payloadu,
+    na kterém task pracuje, i o tom, čím se práce vykonává."""
     for name in ("dispatcher.py", "consumer.py"):
         imports = imported_modules(SOURCE / name)
-        leaked = [port for port in WORK_PORTS if port in imports]
+        leaked = [
+            module
+            for module in (*WORK_PORTS, *WORK_DRIVERS)
+            if module in imports
+        ]
         assert not leaked, f"{name} importuje {leaked}"
 
 
@@ -157,3 +176,24 @@ def test_api_does_not_import_drivers():
         assert not any(
             module.startswith("harness.drivers") for module in imported_modules(path)
         ), f"{path.name} importuje driver"
+
+
+def _imported_names_from(path: Path, module: str) -> set[str]:
+    """Jména importovaná z `module` v souboru `path` (`from module import X`)."""
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module == module:
+            names.update(alias.name for alias in node.names)
+    return names
+
+
+def test_api_reads_artifacts_only_through_view():
+    """`api/` čte artefakty jen přes `ArtifactView` (read-side). Zápisový
+    `ArtifactStore` ani jeho drivery do UI nepatří — board nesmí umět artefakt
+    vytvořit, jen ho ukázat. Fáze 3: read-side driver je `WorktreeArtifactView`,
+    ale `api/` o něm neví, sahá jen na port."""
+    for path in (SOURCE / "api").rglob("*.py"):
+        names = _imported_names_from(path, "harness.ports.artifacts")
+        assert "ArtifactStore" not in names, f"{path.name} importuje ArtifactStore"
+        assert "ArtifactSlot" not in names, f"{path.name} importuje ArtifactSlot"

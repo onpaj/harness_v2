@@ -1,22 +1,87 @@
-"""Smoke fáze 2 na skutečném gitu.
+"""Smoke fáze 3 na skutečném gitu a filesystému.
 
 Jako `test_smoke.py` poluje reálným krátkým `asyncio.sleep` — je to jediné
-místo (vedle fázeI smoke), které ověřuje git/fs/forge drivery naživo, end-to-end.
-Neuklízet do in-memory podoby; tím by zmizelo jediné pokrytí reálného worktree.
+místo (vedle fázeI smoke), které ověřuje git/fs/forge drivery naživo,
+end-to-end. Neuklízet do in-memory podoby; tím by zmizelo jediné pokrytí
+reálného worktree.
+
+Fáze 3: práci kroku svěří `ClaudeCliBehavior` **skutečnému** `AgentRunner`u —
+tady ale ne reálnému `claude` (ten NEBĚŽÍ, je nedeterministický a drahý), nýbrž
+lokálnímu `EchoRunner`, který z promptu vyparsuje cestu artefaktu a fyzicky ji
+zapíše do worktree. Reálný je git, filesystém a forge. Artefakty tak musí
+skončit versované v `.artifacts/<id>/` ve worktree (ne v oddělené složce),
+per-krok commity nese branch tasku a PR se zapíše do `prs.json`.
 """
 
 import asyncio
 import json
+import re
 import subprocess
+from pathlib import Path
+from typing import Any
 
 from harness.app import build
-from harness.cli import main
 from harness.drivers.fake_forge import FakeForge
-from harness.drivers.fs_artifacts import FilesystemArtifactStore
 from harness.drivers.git_workspace import GitWorkspace
-from harness.models import Task
+from harness.drivers.memory import MemoryAgentCatalog, MemoryRepositoryRegistry
+from harness.drivers.system_clock import SystemClock
+from harness.drivers.worktree_artifacts import WorktreeArtifactView
+from harness.models import Outcome, Task
+from harness.ports.agent import AgentRun, AgentRunner, AgentSpec
 
 RUNNER_TIMEOUT = 5.0
+
+DEFINITION = {
+    "name": "default",
+    "start": "plan",
+    "transitions": [
+        {"from": "plan", "on": "done", "to": "design"},
+        {"from": "design", "on": "done", "to": "architecture"},
+        {"from": "architecture", "on": "done", "to": "development"},
+        {"from": "development", "on": "done", "to": "review"},
+        {"from": "review", "on": "done", "to": "land"},
+        {"from": "land", "on": "done", "to": "end"},
+        {"from": "review", "on": "request_changes", "to": "development"},
+    ],
+}
+
+# `.artifacts/<task_id>/<step>-<NN>.md`, jak ji `compose_prompt` vloží do promptu.
+_RELPATH = re.compile(
+    r"\.artifacts/(?P<task>[^/\s]+)/(?P<step>[^/\s]+)-(?P<nn>\d+)\.md"
+)
+
+
+class EchoRunner(AgentRunner):
+    """Fake agent: zapíše artefakt na cestu z promptu a vrátí verdikt kroku.
+
+    `review` vrátí `REQUEST_CHANGES` při prvním průchodu daného tasku (zpětná
+    hrana na `development`), jinak `DONE`. Tím development i review běží dvakrát
+    a jejich artefakty dostanou attempt 01 i 02. Bez subprocessu, bez `claude`.
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+        self._review_seen: set[str] = set()
+
+    async def run(
+        self, *, prompt: str, spec: AgentSpec, cwd: Path, timeout: float
+    ) -> AgentRun:
+        self.calls.append({"spec": spec, "cwd": cwd})
+
+        match = _RELPATH.search(prompt)
+        assert match is not None, "prompt neobsahuje cestu artefaktu"
+        relpath = match.group(0)
+        task_id = match.group("task")
+        target = Path(cwd) / relpath
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(f"# {spec.name} artefakt\n", encoding="utf-8")
+
+        outcome = Outcome.DONE
+        if spec.name == "review" and task_id not in self._review_seen:
+            self._review_seen.add(task_id)
+            outcome = Outcome.REQUEST_CHANGES
+        assert outcome in spec.allowed_outcomes
+        return AgentRun(outcome, summary=f"{spec.name}: hotovo")
 
 
 def _git(repo, *args):
@@ -33,37 +98,56 @@ def _make_repo(path):
     _git(path, "commit", "-q", "-m", "init")
 
 
+def _catalog() -> MemoryAgentCatalog:
+    def spec(step: str, *outcomes: Outcome) -> AgentSpec:
+        return AgentSpec(
+            name=step,
+            prompt=f"Persona kroku {step}.",
+            allowed_outcomes=outcomes or (Outcome.DONE,),
+        )
+
+    return MemoryAgentCatalog(
+        {
+            "plan": spec("plan"),
+            "design": spec("design"),
+            "architecture": spec("architecture"),
+            "development": spec("development"),
+            "review": spec("review", Outcome.DONE, Outcome.REQUEST_CHANGES),
+        }
+    )
+
+
 async def test_task_lands_as_pull_request_on_real_git(tmp_path):
     root = tmp_path / "harness"
     repo = tmp_path / "repo"
-    worktree = tmp_path / "wt"
+    worktrees_root = tmp_path / "wt"
     _make_repo(repo)
 
-    main(["init", "--root", str(root)])
-    main(
-        [
-            "submit",
-            "--root",
-            str(root),
-            "--repo",
-            str(repo),
-            "--worktree",
-            str(worktree),
-        ]
+    # Workflow na disku a task v inboxu — bez CLI, přímo do stromu.
+    (root / "workflows").mkdir(parents=True)
+    (root / "workflows" / "default.json").write_text(json.dumps(DEFINITION))
+    task = Task(
+        id="tsk_smoke_git",
+        workflow_template="default",
+        created="2026-07-20T10:00:00Z",
+        repository="app",
+        data={"title": "přidat rate limiting"},
     )
-    task_id = None
-    for path in (root / "tasks").glob("*.json"):
-        task_id = json.loads(path.read_text())["id"]
-    assert task_id is not None
+    (root / "tasks").mkdir(parents=True)
+    (root / "tasks" / f"{task.id}.json").write_text(json.dumps(task.to_dict()))
+    task_id = task.id
 
+    registry = MemoryRepositoryRegistry({"app": repo})
     harness = build(
         root,
         "default",
-        workspace=GitWorkspace(),
-        artifacts=FilesystemArtifactStore(root / "artifacts"),
+        clock=SystemClock(),
+        workspace=GitWorkspace(registry, worktrees_root),
+        catalog=_catalog(),
+        runner=EchoRunner(),
+        artifact_view=WorktreeArtifactView(worktrees_root),
         forge=FakeForge(root / "forge"),
         delay=0.0,
-        request_changes_once_at="review",
     )
     stop = asyncio.Event()
     runner = asyncio.create_task(harness.run(poll_interval=0.01, stop=stop))
@@ -79,7 +163,8 @@ async def test_task_lands_as_pull_request_on_real_git(tmp_path):
     )
     assert finished.status == "end"
 
-    # worktree existuje a nese per-fázové commity na task branchi
+    # worktree existuje na odvozené cestě a nese per-krok commity na task branchi
+    worktree = worktrees_root / task_id
     assert worktree.is_dir()
     branch = subprocess.run(
         ["git", "-C", str(worktree), "rev-parse", "--abbrev-ref", "HEAD"],
@@ -94,12 +179,23 @@ async def test_task_lands_as_pull_request_on_real_git(tmp_path):
         capture_output=True,
         text=True,
     ).stdout
-    assert "[plan]" in log
-    assert "[land] artefakty tasku" in log
+    assert "plan: hotovo" in log
+    assert "development: hotovo" in log
+    assert "review: hotovo" in log
 
-    # artefakty na disku, attempt-indexed (review běžel dvakrát kvůli smyčce)
-    assert (root / "artifacts" / task_id / "review" / "0").is_dir()
-    assert (root / "artifacts" / task_id / "review" / "1").is_dir()
+    # artefakty jsou VE WORKTREE pod `.artifacts/<id>/`, versované (git je vidí),
+    # ne v oddělené složce. Smyčka (request_changes) dala development i review
+    # attempt 01 i 02.
+    tracked = subprocess.run(
+        ["git", "-C", str(worktree), "ls-files"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    for name in ("plan-01", "development-01", "development-02", "review-01", "review-02"):
+        assert f".artifacts/{task_id}/{name}.md" in tracked
+    # Žádná oddělená složka artefaktů mimo worktree.
+    assert not (root / "artifacts").exists()
 
     # PR zaznamenán ve forge
     prs = json.loads((root / "forge" / "prs.json").read_text())

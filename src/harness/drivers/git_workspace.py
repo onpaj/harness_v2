@@ -89,36 +89,22 @@ class GitWorkspaceHandle(WorkspaceHandle):
 class GitWorkspace(Workspace):
     """Zakládá a znovupoužívá git worktree pod společným kořenem.
 
-    Fáze 3: kořen repa odvozuje z **jména** (`task.repository`) přes registry —
-    task nese logické jméno, ne cestu. Worktree leží na
-    `<worktrees_root>/<task_id>`. Reattach špinavý worktree resetuje na HEAD.
-
-    Legacy (fáze 2): bez registry odvozuje kořen i worktree přímo z tasku
-    (`task.repository` jako cesta, `task.worktree`) a reuse je prostý — bez
-    resetu. Tenhle režim drží fázi-2 smoke naživu; Task 8 plánu ho odstraní
-    spolu s přepsáním `test_smoke_git.py`.
+    Kořen repa odvozuje z **jména** (`task.repository`) přes registry — task
+    nese logické jméno, ne cestu. Worktree leží na `<worktrees_root>/<task_id>`.
+    Neexistuje-li, založí ho přes `git worktree add`; reattach špinavý worktree
+    resetuje na HEAD (zpětná hrana i restart po pádu tak začnou z čistého listu).
     """
 
     def __init__(
         self,
-        registry: RepositoryRegistry | None = None,
-        worktrees_root: Path | None = None,
+        registry: RepositoryRegistry,
+        worktrees_root: Path,
     ) -> None:
         self._registry = registry
-        self._worktrees_root = (
-            Path(worktrees_root) if worktrees_root is not None else None
-        )
+        self._worktrees_root = Path(worktrees_root)
 
     def attach(self, task: Task) -> GitWorkspaceHandle:
         branch = f"harness/{task.id}"
-
-        if self._registry is None:
-            # Legacy fáze-2 cesta: cesty přímo z tasku, prostý reuse.
-            base = Path(task.repository)
-            worktree = Path(task.worktree)
-            if not worktree.exists():
-                _git(["-C", str(base), "worktree", "add", str(worktree), "-b", branch])
-            return GitWorkspaceHandle(worktree, branch)
 
         base = self._registry.resolve(task.repository)
         worktree = self._worktrees_root / task.id
