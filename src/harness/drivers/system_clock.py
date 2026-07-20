@@ -1,4 +1,4 @@
-"""Skutečný čas."""
+"""Real time."""
 
 from __future__ import annotations
 

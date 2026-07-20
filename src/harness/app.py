@@ -1,4 +1,4 @@
-"""Wiring. Jediné místo, kde se porty potkají s konkrétními drivery."""
+"""Wiring. The one place where the ports meet concrete drivers."""
 
 from __future__ import annotations
 
@@ -38,7 +38,7 @@ from harness.projection import BoardProjection
 from harness.source_poller import SourcePoller
 
 LANDING_STEP = "land"
-"""Krok, kterému wiring přiřadí LandingBehavior místo DummyBehavior."""
+"""The step to which the wiring assigns LandingBehavior instead of DummyBehavior."""
 
 
 @dataclass(frozen=True)
@@ -187,9 +187,10 @@ def build(
     sources = sources or []
     strategy = FifoStrategy()
 
-    # Pracovní drivery: default je in-memory (substrát dummy behavioru, stejně
-    # jako DummyBehavior sám je fake). Skutečný běh (`harness run`) i git smoke
-    # si sem vstříknou git/fs/fake — záměna driveru, ne okolí.
+    # Working drivers: the default is in-memory (the substrate of the dummy
+    # behavior, just as DummyBehavior itself is a fake). The real run (`harness
+    # run`) and the git smoke inject git/fs/fake here — a swap of the driver,
+    # not its surroundings.
     workspace = workspace or MemoryWorkspace()
     artifacts = artifacts or MemoryArtifactStore()
     forge = forge or MemoryForge()
@@ -198,7 +199,8 @@ def build(
     workflow = workflows.get(workflow_name)
 
     projection = BoardProjection(workflow)
-    # Reflector až za ProjectionSink: projekce ven nesmí předběhnout board.
+    # The reflector comes after ProjectionSink: the outward projection must not
+    # get ahead of the board.
     events = CompositeEventSink(
         events, ProjectionSink(projection), SourceReflectorSink(sources)
     )
@@ -215,9 +217,9 @@ def build(
         for step in workflow.steps()
     }
 
-    # Read-side artefaktů: když je předaný (fáze 3: `WorktreeArtifactView`),
-    # dostane ho i landing i `api/`; jinak zůstává zápisový store (taky
-    # `ArtifactView`), jako ve fázi 2.
+    # Read side of artifacts: when passed in (phase 3: `WorktreeArtifactView`),
+    # both landing and `api/` get it; otherwise the write store (also an
+    # `ArtifactView`) stays, as in phase 2.
     view: ArtifactView = artifact_view or artifacts
 
     work = behavior or DummyBehavior(
@@ -227,8 +229,8 @@ def build(
         delay=delay,
         request_changes_once_at=request_changes_once_at,
     )
-    # Když je landingu předán read-side pohled na worktree, artefakty už tam
-    # jsou versované — landing je nekopíruje, jen otevře PR.
+    # When landing is handed a read-side view of the worktree, the artifacts are
+    # already versioned there — landing doesn't copy them, it just opens the PR.
     landing = LandingBehavior(
         clock=clock,
         workspace=workspace,
@@ -241,7 +243,7 @@ def build(
         if step == landing_step:
             return landing
         if catalog is not None:
-            # Chybějící spec → AgentNotFound probublá už při buildu (fail fast).
+            # Missing spec → AgentNotFound surfaces already at build time (fail fast).
             return ClaudeCliBehavior(
                 clock=clock,
                 workspace=workspace,

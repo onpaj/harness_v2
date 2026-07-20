@@ -1,18 +1,18 @@
-"""End-to-end fáze 3 na fake agentovi + reálném git worktree.
+"""End-to-end phase 3 on a fake agent + a real git worktree.
 
-Task se **jménem repa** (`repository="app"`) proteče celým workflow fáze 3
-`plan→design→architecture→development→review→land→end`. `review` jednou vrátí
-`request_changes` (zpětná hrana na `development`), takže `development` i `review`
-běží dvakrát a jejich artefakty dostanou attempt 01 i 02.
+A task identified by its **repository name** (`repository="app"`) flows through
+the whole phase-3 workflow `plan→design→architecture→development→review→land→end`.
+`review` returns `request_changes` once (the back edge to `development`), so
+`development` and `review` both run twice and their artifacts get attempt 01 and 02.
 
-Práci kroku pohání `EchoRunner` — malý `AgentRunner`, který z promptu vyparsuje
-cestu artefaktu a fyzicky ji zapíše do worktree (aby `next_attempt` příště
-napočítal další číslo a artefakt se dal commitnout). `FakeAgentRunner` z
-`memory.py` má statický `writes` per jméno agenta, takže by neuměl psát pokaždé
-jiné jméno souboru; proto vlastní runner.
+The step's work is driven by `EchoRunner` — a small `AgentRunner` that parses the
+artifact path out of the prompt and physically writes it into the worktree (so
+`next_attempt` counts the next number the following time and the artifact can be
+committed). The `FakeAgentRunner` from `memory.py` has a static `writes` per agent
+name, so it couldn't write a different file name each time; hence a dedicated runner.
 
-Reálný `claude` NEBĚŽÍ; git ano — worktree je skutečný, aby se ověřilo, že
-artefakty jsou versované (`git ls-files` je ukáže).
+The real `claude` DOES NOT RUN; git does — the worktree is real, so we can verify
+the artifacts are versioned (`git ls-files` shows them).
 """
 
 from __future__ import annotations
@@ -52,21 +52,21 @@ DEFINITION = {
 TASK_ID = "tsk_p3_e2e"
 MAX_STEPS = 1000
 
-# `.artifacts/<task_id>/<step>-<NN>.md`, jak ji `compose_prompt` vkládá do promptu.
+# `.artifacts/<task_id>/<step>-<NN>.md`, the way `compose_prompt` inserts it into the prompt.
 _RELPATH = re.compile(
     r"\.artifacts/(?P<task>[^/\s]+)/(?P<step>[^/\s]+)-(?P<nn>\d+)\.md"
 )
 
 
 class EchoRunner(AgentRunner):
-    """Fake agent: zapíše artefakt na cestu z promptu a vrátí verdikt kroku.
+    """Fake agent: writes the artifact to the path from the prompt and returns the step's verdict.
 
-    - Z promptu vyparsuje `.artifacts/<id>/<step>-NN.md` a fyzicky ji zapíše do
-      `cwd` (vytvoří rodiče), takže artefakt se objeví ve worktree a
-      `next_attempt` příště napočítá další číslo.
-    - `review` vrací `REQUEST_CHANGES` při PRVNÍM průchodu daného tasku a `DONE`
-      podruhé (jako `DummyBehavior.request_changes_once`); ostatní kroky vždy
-      `DONE`. Outcome vždy leží v `spec.allowed_outcomes`.
+    - Parses `.artifacts/<id>/<step>-NN.md` out of the prompt and physically writes
+      it into `cwd` (creating parents), so the artifact shows up in the worktree and
+      `next_attempt` counts the next number the following time.
+    - `review` returns `REQUEST_CHANGES` on the FIRST pass of a given task and `DONE`
+      the second time (like `DummyBehavior.request_changes_once`); the other steps
+      always return `DONE`. The outcome always lies within `spec.allowed_outcomes`.
     """
 
     def __init__(self) -> None:
@@ -81,7 +81,7 @@ class EchoRunner(AgentRunner):
         )
 
         match = _RELPATH.search(prompt)
-        assert match is not None, "prompt neobsahuje cestu artefaktu"
+        assert match is not None, "prompt does not contain an artifact path"
         relpath = match.group(0)
         task_id = match.group("task")
         target = Path(cwd) / relpath
@@ -118,7 +118,7 @@ def _catalog() -> MemoryAgentCatalog:
     def spec(step: str, *outcomes: Outcome) -> AgentSpec:
         return AgentSpec(
             name=step,
-            prompt=f"Persona kroku {step}.",
+            prompt=f"Persona for the {step} step.",
             allowed_outcomes=outcomes or (Outcome.DONE,),
         )
 
@@ -151,7 +151,7 @@ async def drive_until_quiet(harness: Harness) -> int:
                 acted = True
         if not acted:
             return step
-    raise AssertionError("smyčka se nezklidnila")
+    raise AssertionError("loop did not settle")
 
 
 async def build_and_run(tmp_path: Path):
@@ -186,7 +186,7 @@ async def build_and_run(tmp_path: Path):
         created="2026-07-20T10:00:00Z",
         repository="app",
         worktree=None,
-        data={"title": "přidat rate limiting"},
+        data={"title": "add rate limiting"},
     )
     submit(tmp_path, task)
     await drive_until_quiet(harness)
@@ -210,16 +210,16 @@ async def test_task_reaches_done_through_land(tmp_path):
 async def test_runner_called_per_step_with_loop(tmp_path):
     _, runner, *_ = await build_and_run(tmp_path)
 
-    # Každý agentní krok proběhl; development a review dvakrát kvůli smyčce.
+    # Every agent step ran; development and review twice because of the loop.
     assert runner.count("plan") == 1
     assert runner.count("design") == 1
     assert runner.count("architecture") == 1
     assert runner.count("development") == 2
     assert runner.count("review") == 2
-    # `land` má LandingBehavior, ne agenta — runner ho nevidí.
+    # `land` has a LandingBehavior, not an agent — the runner never sees it.
     assert runner.count("land") == 0
 
-    # Agent běžel ve worktree tasku a s odpovídajícím spec.
+    # The agent ran in the task's worktree and with the matching spec.
     worktree = tmp_path / "wt" / TASK_ID
     assert all(call["cwd"] == worktree for call in runner.calls)
     assert all(call["spec"].name != "land" for call in runner.calls)
@@ -234,7 +234,7 @@ async def test_second_attempt_artifacts_exist_and_are_committed(tmp_path):
     assert "review-01.md" in names
     assert "review-02.md" in names
 
-    # Fyzicky ve worktree a commitnuté — git je vidí jako tracked soubory.
+    # Physically in the worktree and committed — git sees them as tracked files.
     tracked = subprocess.run(
         ["git", "-C", str(worktree), "ls-files"],
         check=True,

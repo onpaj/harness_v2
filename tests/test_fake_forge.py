@@ -17,7 +17,7 @@ def test_open_pull_request_writes_file_and_returns_details(tmp_path):
     task = _make_task()
 
     pr = forge.open_pull_request(
-        task, branch="harness/tsk_1", title="Task tsk_1", body="tělo PR"
+        task, branch="harness/tsk_1", title="Task tsk_1", body="PR body"
     )
 
     assert pr.number == 1
@@ -28,7 +28,7 @@ def test_open_pull_request_writes_file_and_returns_details(tmp_path):
     records = json.loads((tmp_path / "prs.json").read_text(encoding="utf-8"))
     assert len(records) == 1
     assert records[0]["branch"] == "harness/tsk_1"
-    assert records[0]["body"] == "tělo PR"
+    assert records[0]["body"] == "PR body"
 
 
 def test_second_open_for_same_branch_is_idempotent(tmp_path):
@@ -36,10 +36,10 @@ def test_second_open_for_same_branch_is_idempotent(tmp_path):
     task = _make_task()
 
     first = forge.open_pull_request(
-        task, branch="harness/tsk_1", title="Task tsk_1", body="tělo"
+        task, branch="harness/tsk_1", title="Task tsk_1", body="body"
     )
     second = forge.open_pull_request(
-        task, branch="harness/tsk_1", title="jiný titul", body="jiné tělo"
+        task, branch="harness/tsk_1", title="different title", body="different body"
     )
 
     assert second.number == first.number

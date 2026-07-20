@@ -115,19 +115,19 @@ def test_corrupt_file_goes_to_quarantine_and_emits(tmp_path):
     quarantine = MemoryTaskQueue("failed")
     queue, events = build(tmp_path, quarantine=quarantine)
     queue.put(make_task())
-    (tmp_path / "tasks" / "rozbity.json").write_text("{tohle neni json")
+    (tmp_path / "tasks" / "broken.json").write_text("{this is not json")
 
     listed = queue.list()
 
     assert [task.id for task in listed] == ["tsk_1"]
-    assert not (tmp_path / "tasks" / "rozbity.json").exists()
+    assert not (tmp_path / "tasks" / "broken.json").exists()
     assert "corrupt" in events.names()
 
 
 def test_corrupt_file_does_not_stop_listing_without_quarantine(tmp_path):
     queue, events = build(tmp_path)
     queue.put(make_task())
-    (tmp_path / "tasks" / "rozbity.json").write_text("{tohle neni json")
+    (tmp_path / "tasks" / "broken.json").write_text("{this is not json")
 
     assert [task.id for task in queue.list()] == ["tsk_1"]
     assert "corrupt" in events.names()
@@ -136,7 +136,7 @@ def test_corrupt_file_does_not_stop_listing_without_quarantine(tmp_path):
 def test_list_ignores_non_json_files(tmp_path):
     queue, _ = build(tmp_path)
     queue.put(make_task())
-    (tmp_path / "tasks" / "README.txt").write_text("ahoj")
+    (tmp_path / "tasks" / "README.txt").write_text("hi")
 
     assert len(queue.list()) == 1
 
@@ -159,16 +159,16 @@ def test_corrupt_file_goes_to_real_filesystem_quarantine(tmp_path):
     quarantine, _ = build(tmp_path, "failed")
     queue, events = build(tmp_path, quarantine=quarantine)
     queue.put(make_task())
-    broken_path = tmp_path / "tasks" / "rozbity.json"
-    broken_path.write_text("{tohle neni json")
+    broken_path = tmp_path / "tasks" / "broken.json"
+    broken_path.write_text("{this is not json")
 
     listed = queue.list()
 
     assert [task.id for task in listed] == ["tsk_1"]
     assert not broken_path.exists()
-    quarantined = tmp_path / "failed" / "rozbity.json"
+    quarantined = tmp_path / "failed" / "broken.json"
     assert quarantined.exists()
-    assert quarantined.read_text() == "{tohle neni json"
+    assert quarantined.read_text() == "{this is not json"
     assert "corrupt" in events.names()
 
 
@@ -180,15 +180,16 @@ def test_file_vanishing_mid_recover_is_skipped_silently(tmp_path, monkeypatch):
     for task in queue.list():
         queue.claim(task, f"lck_{task.id}")
 
-    # tsk_1 zmizí přesně mezi glob() a čtením uvnitř recover() — simulace
-    # vyhraného závodu, ne poškození. tsk_2 zůstává zdravý a musí se
-    # zotavit normálně.
+    # tsk_1 vanishes exactly between glob() and reading inside recover() — a
+    # simulated lost race, not corruption. tsk_2 stays healthy and must
+    # recover normally.
     #
-    # Sledovat jen prázdný karanténní adresář nestačí: _quarantine_file má
-    # vlastní `except FileNotFoundError: pass`, takže i stará (chybná) verze
-    # recover(), která karanténu volala nepodmíněně, by na zmizelém souboru
-    # tiše no-opla a test by prošel i na rozbitém kódu. Proto se sleduje
-    # přímo volání _quarantine_file — musí být nula, ne jen jeho výsledek.
+    # Watching only for an empty quarantine directory isn't enough:
+    # _quarantine_file has its own `except FileNotFoundError: pass`, so even
+    # the old (buggy) recover() that called quarantine unconditionally would
+    # silently no-op on a vanished file and the test would pass on broken
+    # code too. So we watch the _quarantine_file call directly — it must be
+    # zero, not just its result.
     vanished_path = tmp_path / "tasks" / ".processing" / "tsk_1.json"
     original_read_text = Path.read_text
 
@@ -239,13 +240,13 @@ def test_recover_quarantines_stranded_corrupt_file_and_still_counts_the_rest(tmp
     queue, events = build(tmp_path, quarantine=quarantine)
     queue.put(make_task())
     queue.claim(queue.list()[0], "lck_1")
-    broken_path = tmp_path / "tasks" / ".processing" / "rozbity.json"
-    broken_path.write_text("{tohle neni json")
+    broken_path = tmp_path / "tasks" / ".processing" / "broken.json"
+    broken_path.write_text("{this is not json")
 
     recovered = queue.recover()
 
     assert recovered == 1
     assert queue.list()[0].lock_id is None
     assert not broken_path.exists()
-    assert (tmp_path / "failed" / "rozbity.json").exists()
+    assert (tmp_path / "failed" / "broken.json").exists()
     assert "corrupt" in events.names()

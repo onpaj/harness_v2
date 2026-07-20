@@ -71,33 +71,33 @@ def test_submit_writes_a_task(tmp_path, capsys):
 
 def test_submit_rejects_invalid_data(tmp_path, capsys):
     main(["init", "--root", str(tmp_path)])
-    capsys.readouterr()  # zahoď hlášky z init, dál nás zajímá jen submit
+    capsys.readouterr()  # discard init's messages; from here we only care about submit
 
-    assert main(["submit", "--root", str(tmp_path), "--data", "{rozbite"]) == 2
+    assert main(["submit", "--root", str(tmp_path), "--data", "{broken"]) == 2
 
     out, err = capsys.readouterr()
     assert out == ""
-    assert "platný JSON" in err
+    assert "valid JSON" in err
 
 
 def test_submit_without_init_fails_cleanly(tmp_path, capsys):
-    assert main(["submit", "--root", str(tmp_path / "prazdno")]) == 2
+    assert main(["submit", "--root", str(tmp_path / "empty")]) == 2
 
     out, err = capsys.readouterr()
     assert out == ""
-    assert "inicializovaný" in err
+    assert "initialized" in err
 
 
 def test_run_with_unknown_workflow_fails_cleanly(tmp_path, capsys):
-    """Třetí zdokumentovaná chybová cesta: neznámý workflow (přes `run`)."""
+    """The third documented error path: unknown workflow (via `run`)."""
     main(["init", "--root", str(tmp_path)])
     capsys.readouterr()
 
-    assert main(["run", "--root", str(tmp_path), "--workflow", "neexistujici"]) == 2
+    assert main(["run", "--root", str(tmp_path), "--workflow", "nonexistent"]) == 2
 
     out, err = capsys.readouterr()
     assert out == ""
-    assert "neexistujici" in err
+    assert "nonexistent" in err
 
 
 def test_init_rejects_workflow_name_with_path_separator(tmp_path, capsys):
@@ -106,15 +106,15 @@ def test_init_rejects_workflow_name_with_path_separator(tmp_path, capsys):
     out, err = capsys.readouterr()
     assert out == ""
     assert "foo/bar" in err
-    # ověření, že selhalo dřív, než se cokoliv zapsalo na disk
+    # confirm it failed before anything was written to disk
     assert not (tmp_path / "workflows").exists()
 
 
 def test_root_before_subcommand_is_rejected_not_silently_applied(tmp_path, monkeypatch):
-    """`--root` zadané PŘED podpříkazem se dřív tiše zahazovalo a harness sáhl
-    na (chybný) výchozí kořen. Musí to selhat nahlas, ne zapsat jinam.
-    HARNESS_HOME navíc přesměrujeme na tmp_path, aby test i při regresi nikdy
-    nesáhl na reálný ~/.harness."""
+    """`--root` given BEFORE the subcommand used to be silently dropped, and the
+    harness reached for the (wrong) default root. It must fail loudly, not write
+    elsewhere. We also redirect HARNESS_HOME to tmp_path so that, even on a
+    regression, the test never touches the real ~/.harness."""
     monkeypatch.setenv("HARNESS_HOME", str(tmp_path / "should-not-be-used"))
     bogus_root = tmp_path / "bogus-root"
 
@@ -127,8 +127,8 @@ def test_root_before_subcommand_is_rejected_not_silently_applied(tmp_path, monke
 
 
 def test_harness_home_used_only_when_root_absent(tmp_path, monkeypatch):
-    """HARNESS_HOME se použije jen tehdy, když --root chybí; jinak má --root
-    přednost."""
+    """HARNESS_HOME is used only when --root is absent; otherwise --root takes
+    precedence."""
     env_root = tmp_path / "from-env"
     flag_root = tmp_path / "from-flag"
     monkeypatch.setenv("HARNESS_HOME", str(env_root))
@@ -155,16 +155,17 @@ def test_run_accepts_api_port(monkeypatch, tmp_path):
 
 
 async def test_serve_returns_when_uvicorn_stops_before_the_loop(monkeypatch):
-    """Regrese: `serve()` dřív dělal `await asyncio.gather(loop, uvicorn.Server(...).serve())`
-    a `stop.set()` volal až ve `finally`. Když uvicorn (po Ctrl+C) doběhne dřív a
-    vrátí se BEZ výjimky, `gather` dál čekal na `loop` -- ten ale neskončí dřív,
-    než se nastaví `stop`, ke kterému se kód dostane teprve PO návratu z `gather`.
-    Uzavřený kruh: `serve()` by nikdy neskončil.
+    """Regression: `serve()` used to do `await asyncio.gather(loop, uvicorn.Server(...).serve())`
+    and only called `stop.set()` in `finally`. When uvicorn (after Ctrl+C)
+    finishes first and returns WITHOUT an exception, `gather` kept waiting on
+    `loop` -- but that won't finish before `stop` is set, which the code only
+    reaches AFTER `gather` returns. A closed loop: `serve()` would never finish.
 
-    Reprodukce je strukturální (jak to dělal reviewer): fake uvicorn server, co
-    se sám vrátí okamžitě (jako uvicorn po Ctrl+C), + `loop`, co běží donekonečna,
-    dokud nedostane `stop`. Na nedopravené verzi tenhle test zamrzne a spadne na
-    `asyncio.wait_for` timeoutu; na opravené doběhne během zlomku sekundy."""
+    The reproduction is structural (the way the reviewer did it): a fake uvicorn
+    server that returns immediately on its own (like uvicorn after Ctrl+C), plus
+    a `loop` that runs forever until it gets `stop`. On the unfixed version this
+    test hangs and fails on the `asyncio.wait_for` timeout; on the fixed one it
+    finishes in a fraction of a second."""
 
     class FakeHarness:
         def __init__(self):
@@ -182,7 +183,7 @@ async def test_serve_returns_when_uvicorn_stops_before_the_loop(monkeypatch):
             pass
 
         async def serve(self):
-            return  # simuluje uvicorn, který se po Ctrl+C vrátí bez výjimky
+            return  # simulates uvicorn returning without an exception after Ctrl+C
 
     monkeypatch.setattr("harness.cli.uvicorn.Server", FakeUvicornServer)
 

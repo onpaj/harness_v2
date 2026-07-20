@@ -1,1 +1,1 @@
-"""Webové API nad portem BoardView. Neimportuje nic z harness.drivers."""
+"""Web API over the BoardView port. Imports nothing from harness.drivers."""

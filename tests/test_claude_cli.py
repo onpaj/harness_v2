@@ -30,16 +30,16 @@ def _base_argv(prompt: str) -> list[str]:
 
 
 def test_build_argv_base_flags_and_persona():
-    spec = AgentSpec(name="planner", prompt="Jsi planner.")
+    spec = AgentSpec(name="planner", prompt="You are the planner.")
 
-    argv = build_argv(prompt="udělej to", spec=spec)
+    argv = build_argv(prompt="do it", spec=spec)
 
-    for token in _base_argv("udělej to"):
+    for token in _base_argv("do it"):
         assert token in argv
-    # persona jde přes --append-system-prompt
+    # persona goes through --append-system-prompt
     idx = argv.index("--append-system-prompt")
-    assert argv[idx + 1] == "Jsi planner."
-    # bez modelu / fallbacku / tools se flagy nepřidají
+    assert argv[idx + 1] == "You are the planner."
+    # without a model / fallback / tools the flags are not added
     assert "--model" not in argv
     assert "--fallback-model" not in argv
     assert "--allowedTools" not in argv
@@ -108,7 +108,7 @@ def _envelope(result: str, *, is_error: bool = False) -> str:
 
 def test_parse_verdict_reads_fenced_block():
     inner = '```json\n{"outcome": "done", "summary": "ok"}\n```'
-    stdout = _envelope(f"Hotovo.\n{inner}")
+    stdout = _envelope(f"Done.\n{inner}")
 
     run = parse_verdict(stdout, allowed=(Outcome.DONE,))
 
@@ -118,7 +118,7 @@ def test_parse_verdict_reads_fenced_block():
 
 
 def test_parse_verdict_request_changes_when_allowed():
-    inner = '```json\n{"outcome": "request_changes", "summary": "oprav to"}\n```'
+    inner = '```json\n{"outcome": "request_changes", "summary": "fix it"}\n```'
     stdout = _envelope(inner)
 
     run = parse_verdict(
@@ -126,29 +126,29 @@ def test_parse_verdict_request_changes_when_allowed():
     )
 
     assert run.outcome is Outcome.REQUEST_CHANGES
-    assert run.summary == "oprav to"
+    assert run.summary == "fix it"
 
 
 def test_parse_verdict_takes_last_fenced_block():
-    first = '```json\n{"outcome": "request_changes", "summary": "první"}\n```'
-    last = '```json\n{"outcome": "done", "summary": "poslední"}\n```'
-    stdout = _envelope(f"{first}\nmezitext\n{last}")
+    first = '```json\n{"outcome": "request_changes", "summary": "first"}\n```'
+    last = '```json\n{"outcome": "done", "summary": "last"}\n```'
+    stdout = _envelope(f"{first}\nin between\n{last}")
 
     run = parse_verdict(
         stdout, allowed=(Outcome.DONE, Outcome.REQUEST_CHANGES)
     )
 
     assert run.outcome is Outcome.DONE
-    assert run.summary == "poslední"
+    assert run.summary == "last"
 
 
 def test_parse_verdict_falls_back_to_whole_result_json():
-    stdout = _envelope('{"outcome": "done", "summary": "bez fence"}')
+    stdout = _envelope('{"outcome": "done", "summary": "no fence"}')
 
     run = parse_verdict(stdout, allowed=(Outcome.DONE,))
 
     assert run.outcome is Outcome.DONE
-    assert run.summary == "bez fence"
+    assert run.summary == "no fence"
 
 
 def test_parse_verdict_missing_summary_defaults_empty():
@@ -187,7 +187,7 @@ def test_parse_verdict_is_error_true_raises():
 
 def test_parse_verdict_unreadable_outer_json_raises():
     with pytest.raises(VerdictError):
-        parse_verdict("tohle není JSON", allowed=(Outcome.DONE,))
+        parse_verdict("this is not JSON", allowed=(Outcome.DONE,))
 
 
 def test_parse_verdict_missing_result_field_raises():
@@ -198,14 +198,14 @@ def test_parse_verdict_missing_result_field_raises():
 
 
 def test_parse_verdict_no_verdict_block_raises():
-    stdout = _envelope("Jen povídání, žádný verdikt.")
+    stdout = _envelope("Just chatter, no verdict.")
 
     with pytest.raises(VerdictError):
         parse_verdict(stdout, allowed=(Outcome.DONE,))
 
 
 def test_parse_verdict_missing_outcome_key_raises():
-    inner = '```json\n{"summary": "chybí outcome"}\n```'
+    inner = '```json\n{"summary": "missing outcome"}\n```'
     stdout = _envelope(inner)
 
     with pytest.raises(VerdictError):

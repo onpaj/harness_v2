@@ -1,8 +1,8 @@
-"""SourcePoller: jádro plnící inbox ze zdroje tasků.
+"""SourcePoller: the core that fills the inbox from the task source.
 
-Druhý producent téže fronty vedle `harness submit`. Jádro zůstává
-GitHub-slepé — poller zná jen porty (`TaskSource`, `TaskQueue`, `EventSink`),
-nikdy driver.
+A second producer of the same queue alongside `harness submit`. The core stays
+GitHub-blind — the poller knows only ports (`TaskSource`, `TaskQueue`,
+`EventSink`), never a driver.
 """
 
 from __future__ import annotations
@@ -21,14 +21,15 @@ class SourcePoller:
         self._events = events
 
     def tick(self) -> bool:
-        """Přines tasky ze zdroje a vlož je do inboxu. True, když něco přišlo.
+        """Fetch tasks from the source and put them into the inbox. True if something arrived.
 
-        Výjimku z `poll()` (GitHub dole) chytneme a zalogujeme; tik vrátí False,
-        smyčka pak spí a zkusí to zas — pád zdroje nesmí zastavit orchestraci.
+        We catch and log an exception from `poll()` (GitHub down); the tick then
+        returns False, the loop sleeps and tries again — a source failure must
+        not stop the orchestration.
         """
         try:
             tasks = self._source.poll()
-        except Exception as error:  # noqa: BLE001 - pád zdroje nezastaví smyčku
+        except Exception as error:  # noqa: BLE001 - a source failure won't stop the loop
             self._events.emit(
                 "source_error", source=self._source.kind, error=str(error)
             )

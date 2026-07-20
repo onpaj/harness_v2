@@ -1,1 +1,1 @@
-"""Konkrétní implementace portů."""
+"""Concrete implementations of the ports."""

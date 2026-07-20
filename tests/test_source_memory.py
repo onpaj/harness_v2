@@ -1,4 +1,4 @@
-"""MemoryTaskSource — in-memory driver portu TaskSource."""
+"""MemoryTaskSource — in-memory driver for the TaskSource port."""
 
 from harness.drivers.memory import FakeClock, MemoryTaskSource
 from harness.models import Task
@@ -32,7 +32,7 @@ def test_poll_builds_task_with_worktree_and_repository():
     source = MemoryTaskSource(
         clock=FakeClock(), repository="app-backend", worktree_root="/wt"
     )
-    issue = source.submit("Fix bug", body="detaily")
+    issue = source.submit("Fix bug", body="details")
 
     [task] = source.poll()
 
@@ -40,7 +40,7 @@ def test_poll_builds_task_with_worktree_and_repository():
     assert task.worktree == f"/wt/{task.id}"
     assert task.created == "2026-07-19T10:00:00Z"
     assert task.workflow_template == "default"
-    assert task.data["body"] == "detaily"
+    assert task.data["body"] == "details"
     assert task.data["source"]["issue"] == issue
 
 

@@ -1,4 +1,4 @@
-"""GithubClient — fake i stdlib http driver (bez sítě, přes fake opener)."""
+"""GithubClient — both the fake and the stdlib http driver (no network, via a fake opener)."""
 
 import io
 import json
@@ -42,7 +42,7 @@ def test_fake_add_and_remove_label_mutate():
 def test_fake_remove_absent_label_is_noop():
     client = FakeGithubClient([Issue(1, "A", "", "u1", ("harness:todo",))])
 
-    client.remove_label("o/r", 1, "nope")  # nesmí spadnout
+    client.remove_label("o/r", 1, "nope")  # must not crash
 
     assert client._issues[1].labels == ("harness:todo",)
 
@@ -55,7 +55,7 @@ def test_fake_add_existing_label_is_noop():
     assert client._issues[1].labels == ("harness:todo",)
 
 
-# --- HttpGithubClient s fake openerem --------------------------------------
+# --- HttpGithubClient with a fake opener -----------------------------------
 
 
 class FakeResponse:
@@ -87,7 +87,7 @@ def test_http_list_issues_maps_fields_and_filters_out_prs():
         {
             "number": 1,
             "title": "Bug",
-            "body": "detaily",
+            "body": "details",
             "html_url": "https://github.com/o/r/issues/1",
             "labels": [{"name": "harness:todo"}, {"name": "bug"}],
         },
@@ -151,7 +151,7 @@ def test_http_remove_label_404_is_swallowed():
             )
 
     client = HttpGithubClient("tok", opener=NotFoundOpener())
-    client.remove_label("o/r", 5, "gone")  # nesmí propadnout
+    client.remove_label("o/r", 5, "gone")  # must not slip through
 
 
 def test_http_remove_label_other_error_propagates():

@@ -1,90 +1,97 @@
-# Fáze 2 — artefakty, worktree a landing
+# Phase 2 — artifacts, worktree, and landing
 
-Status: návrh
-Datum: 2026-07-20
+Status: draft
+Date: 2026-07-20
 
-## Cíl
+## Goal
 
-Task přestává být jen token, který putuje mezi frontami. Ve fázi 2 každá fáze
-**pracuje ve worktree** pojmenovaném v tasku, **produkuje artefakty** (plán,
-design, review) do harnessem vlastněné složky a **commituje svou práci** s
-vlastní zprávou. Na konci workflow **landing** krok přiklopí artefakty do
-worktree a otevře **pull request**. Harness se nikdy nedotkne `main` — jen
-navrhuje.
+A task stops being merely a token that travels between queues. In phase 2 every
+phase **works in a worktree** named in the task, **produces artifacts** (plan,
+design, review) into a harness-owned folder, and **commits its work** with its
+own message. At the end of the workflow the **landing** step folds the artifacts
+into the worktree and opens a **pull request**. The harness never touches
+`main` — it only proposes.
 
-Fáze 2 je pořád POC. Skutečný agent, skutečný GitHub a produkční úložiště se
-vymění v dalších fázích — **záměnou driveru, nikdy jeho okolí**.
+Phase 2 is still a POC. The real agent, real GitHub, and production storage get
+swapped in later phases — **by swapping the driver, never its surroundings**.
 
-### Co je ve fázi 2 nově
+### What's new in phase 2
 
-- `repository` a `worktree` přestávají být neprůhledný náklad. Behavior je čte,
-  aby se připojil k pracovní ploše. **Router ani dispatcher je pořád nečtou.**
-- Fáze produkují artefakty. Behavior je píše *živě* do harnessové složky; UI je
-  vidí, jak přibývají.
-- Behavior vrací `(outcome, summary)` místo holého `Outcome`. `summary` je
-  krátký popis „co jsem udělal".
-- Práce se commituje po fázích na task branch. Zprávu commitu tvoří `summary`.
-- Landing krok přiklopí artefakty do worktree a otevře PR.
+- `repository` and `worktree` stop being opaque cargo. The behavior reads them
+  in order to attach to a working surface. **The router and dispatcher still
+  don't read them.**
+- Phases produce artifacts. The behavior writes them *live* into the harness
+  folder; the UI watches them accumulate.
+- The behavior returns `(outcome, summary)` instead of a bare `Outcome`.
+  `summary` is a short description of "what I did".
+- Work is committed per phase onto the task branch. The commit message comes
+  from `summary`.
+- The landing step folds the artifacts into the worktree and opens a PR.
 
-### Co je pořád mimo rozsah
+### What's still out of scope
 
-- **Skutečný agent.** Behavior je dummy — píše připravené artefakty a vrací
-  determinstický outcome + summary.
-- **Skutečný GitHub.** Landing jde přes port `Forge`; ve fázi 2 má testovací
-  driver (zaznamená PR / pushne do lokálního bare remote). GitHub driver je
-  čistý follow-up — záměna driveru.
-- **Více procesů, retry politiky, rate limiting, TTL leasu.**
+- **The real agent.** The behavior is a dummy — it writes prepared artifacts and
+  returns a deterministic outcome + summary.
+- **Real GitHub.** Landing goes through the `Forge` port; in phase 2 it has a
+  test driver (records the PR / pushes into a local bare remote). The GitHub
+  driver is a clean follow-up — a driver swap.
+- **Multiple processes, retry policies, rate limiting, lease TTL.**
 
-## Základní teze (ARD2): task je transakce
+## Foundational thesis (ARD2): a task is a transaction
 
-Během tasku žije všechna práce v izolované pracovní ploše, kterou skutečná
-historie projektu nevidí. Na konci se přiklopí jako celek — nebo vůbec ne.
+During a task, all work lives in an isolated working surface that the project's
+real history never sees. At the end it's folded in as a whole — or not at all.
 
-Tři vlastnosti, které z toho plynou a které fáze 2 chrání:
+Three properties that follow from this, and that phase 2 protects:
 
-1. **Atomicita.** Task, který selže nebo je opuštěn, nechá projekt netknutý.
-2. **Čistá historie.** Projekt nevidí pět revizí plánu a smyčku request_changes.
-   Vidí jeden návrh (PR).
-3. **Izolace.** Dva tasky běžící souběžně se nepotkají v historii projektu,
-   protože ani jeden v ní není, dokud nelanduje.
+1. **Atomicity.** A task that fails or is abandoned leaves the project
+   untouched.
+2. **Clean history.** The project doesn't see five plan revisions and a
+   request_changes loop. It sees one proposal (the PR).
+3. **Isolation.** Two tasks running concurrently never collide in the project's
+   history, because neither is in it until it lands.
 
-Cena: harness musí držet potenciálně velký pracovní stav (worktree + složka
-artefaktů) per task, **durabilně** po celý život tasku. „Neverzované během
-tasku" ≠ „neperzistentní" — recovery po pádu platí i tady.
+The price: the harness must hold potentially large working state (worktree +
+artifacts folder) per task, **durably**, for the task's entire lifetime.
+"Unversioned during the task" ≠ "non-persistent" — crash recovery applies here
+too.
 
-## Dvě pracovní plochy per task
+## Two working surfaces per task
 
-Task má za běhu **dvě** oddělené plochy. Jsou oddělené záměrně.
+At runtime a task has **two** separate surfaces. They are separate on purpose.
 
-| Plocha | Co drží | Verzování | Kdo čte |
+| Surface | What it holds | Versioning | Who reads it |
 |---|---|---|---|
-| **Worktree** (`repository`/`worktree`) | kód, který fáze upravují | git branch tasku, commit po fázi | behavior |
-| **Složka artefaktů** (harness) | plán, design, review | neverzovaná do landingu | behavior + UI |
+| **Worktree** (`repository`/`worktree`) | the code the phases edit | task git branch, commit per phase | behavior |
+| **Artifacts folder** (harness) | plan, design, review | not versioned until landing | behavior + UI |
 
-Proč ne jedna plocha (artefakty přímo ve worktree):
+Why not a single surface (artifacts directly in the worktree):
 
-- **`git status`/`diff` zůstane čistý.** Diff kódu je jen kód, ne scaffolding.
-- **UI čte bez gitu.** Jedna sdílená harness složka, ne N worktree přes N repo.
-- **Odolnost vůči git operacím.** `git clean -fdx`, přepnutí branch ani reset
-  ve worktree nemůžou smazat artefakty — leží mimo doménu gitu.
-- **„Neverzované během tasku" je zadarmo.** Ve worktree by neverzovaný artefakt
-  musel být *untracked* → přesně stav, který `git clean` maže. Ve složce mimo
-  git jsou „neverzované" i „odolné" současně; ve worktree se vylučují.
+- **`git status`/`diff` stays clean.** The code diff is just code, not
+  scaffolding.
+- **The UI reads without git.** One shared harness folder, not N worktrees
+  across N repos.
+- **Resilience to git operations.** `git clean -fdx`, switching branches, or a
+  reset in the worktree can't delete artifacts — they lie outside git's domain.
+- **"Unversioned during the task" is free.** In the worktree an unversioned
+  artifact would have to be *untracked* → exactly the state `git clean` wipes.
+  In a folder outside git, "unversioned" and "resilient" hold at the same time;
+  in the worktree they're mutually exclusive.
 
-Cena je landing krok, který artefakty přiklopí do worktree — a to je vlastně
-výhoda: rozhodne se *kam* v repu artefakty přistanou.
+The price is the landing step that folds the artifacts into the worktree — and
+that's actually an advantage: it decides *where* in the repo the artifacts land.
 
-### Adresace artefaktů — attempt-indexed
+### Artifact addressing — attempt-indexed
 
-Artefakty žijí pod `<artifacts_root>/<task-id>/<step>/<attempt>/<name>`.
+Artifacts live under `<artifacts_root>/<task-id>/<step>/<attempt>/<name>`.
 
-`attempt` je pořadové číslo běhu daného kroku daným taskem. Zpětná hrana
-(`review --request_changes--> development`) znamená, že `development` i `review`
-běží víckrát. Kdyby druhý běh přepsal `review.md`, audit trail by o smyčce
-přišel — proto **každý pokus dostane vlastní podadresář**. Store alokuje další
-`attempt` slot při `begin(task_id, step)`.
+`attempt` is the sequence number of a given step's run by a given task. The
+back edge (`review --request_changes--> development`) means `development` and
+`review` both run more than once. If the second run overwrote `review.md`, the
+audit trail would lose the loop — so **each attempt gets its own subdirectory**.
+The store allocates the next `attempt` slot on `begin(task_id, step)`.
 
-## Kontrakt behavioru
+## Behavior contract
 
 ```python
 @dataclass(frozen=True)
@@ -96,142 +103,149 @@ class ConsumerBehavior(ABC):
     async def run(self, task: Task) -> BehaviorResult: ...
 ```
 
-`run` vrací `BehaviorResult` místo `Outcome`. Důvody, proč to neporušuje
-rozdělení rolí z fáze 1:
+`run` returns a `BehaviorResult` instead of an `Outcome`. Why this doesn't break
+the separation of roles from phase 1:
 
-- **`outcome` musel být návratová hodnota už dřív** — je to řídicí signál, na
-  který routuje dispatcher. Přibalit `summary` je symetrické: „tohle se stalo a
-  tohle jsem udělal".
-- **`summary` je terminální výrok o běhu** — jedna věta na konci práce. To je
-  něco jiného než plán/review, které se *streamují* do složky artefaktů, jak
-  agent pracuje. Oba žijí vedle sebe: velké dokumenty do složky živě, summary
-  na návratu.
+- **`outcome` already had to be a return value** — it's the control signal the
+  dispatcher routes on. Bundling `summary` alongside it is symmetric: "this is
+  what happened and this is what I did".
+- **`summary` is a terminal statement about the run** — one sentence at the end
+  of the work. That's different from the plan/review, which are *streamed* into
+  the artifacts folder as the agent works. Both live side by side: large
+  documents into the folder live, the summary on return.
 
-Jeden `summary` obsluhuje **čtyři** konzumenty:
+A single `summary` serves **four** consumers:
 
-1. **Zpráva commitu** — behavior driver commituje s ním (`[development] přidán…`).
-2. **Řádek historie** — consumer ho zapíše do audit logu.
-3. **Board UI** — „co který krok udělal".
-4. **Tělo PR** — landing agreguje summary z historie do popisu PR.
+1. **Commit message** — the behavior driver commits with it (`[development] added…`).
+2. **History line** — the consumer writes it into the audit log.
+3. **Board UI** — "what each step did".
+4. **PR body** — landing aggregates the summaries from history into the PR
+   description.
 
-### Kde se commituje — behavior driver, ne consumer
+### Where the commit happens — the behavior driver, not the consumer
 
-„Harness commituje, ne agent" znamená přesně: commit dělá **behavior driver**
-(harnessový kód obalující agenta), ne LLM. Agent edituje soubory a *řekne*, co
-udělal; nikdy nespouští `git commit`. Nezávisíme na tom, že si vzpomene, že to
-udělá správně, nebo že stageuje správné cesty.
+"The harness commits, not the agent" means precisely: the commit is done by the
+**behavior driver** (the harness code wrapping the agent), not the LLM. The
+agent edits files and *says* what it did; it never runs `git commit`. We don't
+depend on it remembering to do that correctly, or on it staging the right paths.
 
-Commit tím pádem leží v behavioru (má po ruce worktree i „co se změnilo"), **ne
-v tenkém consumeru** — ten nikdy nezíská git závislost. Invariant „consumer jen
-doručí outcome, nevětví na jeho hodnotě" platí dál: consumer zapíše outcome i
-summary, ale nerozhoduje podle nich.
+The commit therefore lives in the behavior (which has the worktree and "what
+changed" on hand), **not in the thin consumer** — which never acquires a git
+dependency. The invariant "the consumer only delivers the outcome, never
+branches on its value" still holds: the consumer writes both the outcome and the
+summary, but decides nothing based on them.
 
 ## Landing
 
-Landing je **normální krok workflow**, ne harnessová magie. Poslední krok před
-`end`. Jeho behavior:
+Landing is a **normal workflow step**, not harness magic. It's the last step
+before `end`. Its behavior:
 
-1. Připojí se k worktree.
-2. Přečte složku artefaktů tasku a **přiklopí** ji do worktree (např. pod
-   `docs/tasks/<id>/`), commitne „[land] artefakty tasku".
-3. Otevře PR přes `Forge` — titul z původního zadání tasku, tělo z agregovaných
-   summary v historii.
-4. Vrátí `BehaviorResult(DONE, "otevřen PR …")`.
+1. Attaches to the worktree.
+2. Reads the task's artifacts folder and **folds** it into the worktree (e.g.
+   under `docs/tasks/<id>/`), commits "[land] task artifacts".
+3. Opens a PR through `Forge` — title from the task's original assignment, body
+   from the aggregated summaries in history.
+4. Returns `BehaviorResult(DONE, "opened PR …")`.
 
-Protože je to krok, může selhat (push odmítnut, API chyba) → `failed/`, stejná
-mašinerie jako všude jinde. `end` zůstává čistý terminál bez vedlejších efektů.
-Uživatel PR zreviduje a mergne vlastní strategií (squash/rebase/merge) — harness
-merge strategii neřeší.
+Because it's a step, it can fail (push rejected, API error) → `failed/`, the same
+machinery as everywhere else. `end` stays a clean terminal with no side effects.
+The user reviews the PR and merges it with their own strategy
+(squash/rebase/merge) — the harness doesn't decide the merge strategy.
 
-### Idempotence landingu
+### Landing idempotence
 
-Landing je vícekrokový (commit → push → otevři PR). Re-run po pádu musí být
-idempotentní: „otevři PR, pokud ještě neexistuje". Fáze 2 to řeší nejjednodušeji
-— Forge driver při existujícím PR pro branch vrátí ten stávající.
+Landing is multi-step (commit → push → open PR). A re-run after a crash must be
+idempotent: "open the PR if it doesn't exist yet". Phase 2 solves this the
+simplest way — the Forge driver returns the existing PR when one already exists
+for the branch.
 
-## Nové porty a drivery
+## New ports and drivers
 
-| Port | Odpovědnost | Driver fáze 2 | Vymění se za |
+| Port | Responsibility | Phase 2 driver | Swapped for |
 |---|---|---|---|
-| `Workspace` | `attach(task) -> WorkspaceHandle`; handle má `path`, `branch`, `commit(msg) -> sha \| None` | git worktree | — |
-| `ArtifactStore` | `begin(task_id, step) -> ArtifactSlot`; read: `list/read` | složka na disku | S3, DB |
-| `ArtifactView` | read-only podmnožina `ArtifactStore` pro UI | tentýž fs driver | — |
-| `Forge` | `open_pull_request(task, branch, title, body) -> PullRequest` | fake (zaznamená / lokální bare) | GitHub API |
+| `Workspace` | `attach(task) -> WorkspaceHandle`; the handle has `path`, `branch`, `commit(msg) -> sha \| None` | git worktree | — |
+| `ArtifactStore` | `begin(task_id, step) -> ArtifactSlot`; read: `list/read` | folder on disk | S3, DB |
+| `ArtifactView` | read-only subset of `ArtifactStore` for the UI | the same fs driver | — |
+| `Forge` | `open_pull_request(task, branch, title, body) -> PullRequest` | fake (records / local bare) | GitHub API |
 
-Ke každému portu vzniká **in-memory driver pro testy**. Orchestrace (dispatcher,
-consumer) porty `Workspace`/`Forge`/`ArtifactStore` **nezná** — sahá na ně
-výhradně behavior. Wiring je v `app.py`.
+Every port gets an **in-memory driver for tests**. The orchestration
+(dispatcher, consumer) **doesn't know** the `Workspace`/`Forge`/`ArtifactStore`
+ports — only the behavior touches them. The wiring is in `app.py`.
 
 ### WorkspaceHandle
 
-- `path: Path` — pracovní adresář, kde behavior edituje.
-- `branch: str` — task branch (`harness/<task-id>`), na kterém commity leží.
-- `commit(message) -> str | None` — stageuje vše a commitne; vrací sha, nebo
-  `None` když není co commitovat (fáze bez změny kódu — plán, review).
+- `path: Path` — the working directory where the behavior edits.
+- `branch: str` — the task branch (`harness/<task-id>`) the commits sit on.
+- `commit(message) -> str | None` — stages everything and commits; returns the
+  sha, or `None` when there's nothing to commit (a phase with no code change —
+  plan, review).
 
 ### GitWorkspace
 
-- `attach(task)`: worktree pod `task.worktree` pro repo `task.repository`.
-  Neexistuje-li, `git worktree add <worktree> -b harness/<task_id> <base>`;
-  existuje-li, znovupoužije. Vrátí handle.
-- Dvě tasky **nesmí** sdílet worktree — jinak si přepíšou práci. Ve fázi 2 to
-  garantuje autor tasku; harness invariant jen dokumentuje.
+- `attach(task)`: worktree under `task.worktree` for repo `task.repository`.
+  If it doesn't exist, `git worktree add <worktree> -b harness/<task_id> <base>`;
+  if it does, reuse it. Returns the handle.
+- Two tasks **must not** share a worktree — otherwise they'd overwrite each
+  other's work. In phase 2 the task's author guarantees this; the harness
+  invariant just documents it.
 
-## Změny v modelu workflow
+## Changes to the workflow model
 
-Výchozí workflow dostává krok `land` před `end`:
+The default workflow gains a `land` step before `end`:
 
 ```json
 {"from": "review", "on": "done", "to": "land"},
 {"from": "land",   "on": "done", "to": "end"}
 ```
 
-`land` je běžný krok s vlastní frontou. Wiring mu přiřadí `LandingBehavior`;
-ostatním krokům `DummyBehavior`. Který krok je landing, je konfigurace
-(`landing_step`, default `"land"`), ne magické jméno v jádře.
+`land` is an ordinary step with its own queue. The wiring assigns it
+`LandingBehavior`; the other steps get `DummyBehavior`. Which step is the landing
+step is configuration (`landing_step`, default `"land"`), not a magic name in the
+core.
 
-## HistoryEntry — nové pole `summary`
+## HistoryEntry — new `summary` field
 
-`HistoryEntry` dostává volitelné `summary: str | None`. Consumer ho vyplní
-hodnotou z `BehaviorResult`. Serializuje se, jen když je přítomné. Audit log
-tím nese nejen *co se stalo* (outcome), ale i *co se udělalo* (summary).
+`HistoryEntry` gains an optional `summary: str | None`. The consumer fills it
+with the value from `BehaviorResult`. It's serialized only when present. The
+audit log thus carries not only *what happened* (outcome) but also *what was
+done* (summary).
 
-## Recovery přestává být zadarmo
+## Recovery stops being free
 
-Fáze 1 se opírala o „práce je idempotentní, recovery jen znovu spustí". Skutečný
-agent, který napůl upravil worktree, ten předpoklad boří. Ve fázi 2 s dummy
-behaviorem je re-run pořád bezpečný, ale seam je reálný:
+Phase 1 leaned on "work is idempotent, recovery just re-runs it". A real agent
+that half-edited the worktree breaks that assumption. In phase 2 with the dummy
+behavior a re-run is still safe, but the seam is real:
 
-- Per-fázový commit je čistý bod obnovy — poslední commit drží hotovou práci,
-  fáze se přehraje z něj.
-- Store `begin()` při re-runu alokuje **nový** attempt, takže se half-written
-  artefakty nemíchají s novým během.
+- The per-phase commit is a clean recovery point — the last commit holds the
+  finished work, the phase replays from there.
+- On a re-run the store's `begin()` allocates a **new** attempt, so half-written
+  artifacts don't mix with the new run.
 
-TTL leasu se ani ve fázi 2 neimplementuje.
+The lease TTL still isn't implemented in phase 2.
 
-## Chybové stavy (přibývá k fázi 1)
+## Error states (added to phase 1)
 
-| Situace | Detekce | Kam |
+| Situation | Detection | Where |
 |---|---|---|
-| Behavior nevrátí `BehaviorResult` | validace v consumeru | `failed/` |
-| `attach` selže (repo/worktree chybí) | výjimka z behavioru | `failed/` |
-| `commit`/landing selže | výjimka z behavioru | `failed/` |
-| Forge odmítne PR | výjimka z behavioru | `failed/` |
+| Behavior doesn't return a `BehaviorResult` | validation in the consumer | `failed/` |
+| `attach` fails (repo/worktree missing) | exception from the behavior | `failed/` |
+| `commit`/landing fails | exception from the behavior | `failed/` |
+| Forge rejects the PR | exception from the behavior | `failed/` |
 
-Vše přes stávající `_fail` cestu — jeden vadný task nezastaví smyčku.
+All via the existing `_fail` path — one bad task doesn't stop the loop.
 
 ## UI
 
-Board z fáze 1 dostává druhou věc k vykreslení: **artefakty per task**, živě.
-API sahá na `ArtifactView` (read-only port), nikdy na driver. Detail tasku
-ukáže seznam artefaktů (step, attempt, name) a jejich obsah.
+The board from phase 1 gets a second thing to render: **artifacts per task**,
+live. The API touches `ArtifactView` (a read-only port), never the driver. The
+task detail shows a list of artifacts (step, attempt, name) and their contents.
 
-## Struktura kódu (přírůstky)
+## Code structure (additions)
 
 ```
 src/harness/
   models.py            # + BehaviorResult, HistoryEntry.summary
-  consumer.py          # run() vrací BehaviorResult; zapíše summary
+  consumer.py          # run() returns BehaviorResult; writes summary
   ports/
     workspace.py       # Workspace, WorkspaceHandle
     artifacts.py       # ArtifactStore, ArtifactView, ArtifactSlot, ArtifactRef
@@ -241,39 +255,44 @@ src/harness/
     git_workspace.py   # GitWorkspace
     fs_artifacts.py    # FilesystemArtifactStore
     fake_forge.py      # FakeForge
-    dummy_behavior.py  # píše artefakty, commituje, vrací (outcome, summary)
-  behaviors/           # (nové) landing.py — LandingBehavior
-  app.py               # wiring nových portů, per-step behaviory
+    dummy_behavior.py  # writes artifacts, commits, returns (outcome, summary)
+  behaviors/           # (new) landing.py — LandingBehavior
+  app.py               # wiring of the new ports, per-step behaviors
 ```
 
-## Invarianty — nové/upřesněné
+## Invariants — new/refined
 
-Rozšiřují seznam z `CLAUDE.md`, neruší ho.
+These extend the list in `CLAUDE.md`, they don't replace it.
 
-8. **`repository`/`worktree` čte jen behavior.** Router a dispatcher pořád
-   rozhodují výhradně podle `(status, lastOutcome)`.
-9. **Commit dělá behavior driver, ne consumer a ne LLM.** Consumer nezná git.
-10. **Artefakty jsou attempt-indexed.** Re-run kroku nikdy nepřepíše předchozí
-    pokus.
-11. **`Workspace`/`Forge`/`ArtifactStore` nezná dispatcher ani consumer.** Sahá
-    na ně jen behavior; wiring v `app.py`. `api/` sahá jen na `ArtifactView`.
-12. **Landing je krok, ne magie.** `end` zůstává čistý terminál.
+8. **Only the behavior reads `repository`/`worktree`.** The router and
+   dispatcher still decide solely from `(status, lastOutcome)`.
+9. **The commit is done by the behavior driver, not the consumer and not the
+   LLM.** The consumer doesn't know git.
+10. **Artifacts are attempt-indexed.** A step re-run never overwrites a previous
+    attempt.
+11. **`Workspace`/`Forge`/`ArtifactStore` are unknown to the dispatcher and
+    consumer.** Only the behavior touches them; wiring in `app.py`. `api/`
+    touches only `ArtifactView`.
+12. **Landing is a step, not magic.** `end` stays a clean terminal.
 
-## Ověření hotovosti
+## Done-ness verification
 
-Fáze 2 je hotová, když:
+Phase 2 is done when:
 
-1. Task s `repository`+`worktree` proteče `plan → … → review → land → end`.
-2. Každá fáze zapsala artefakt do `<task>/<step>/<attempt>/` a UI ho vidí.
-3. Zpětná hrana (`request_changes`) vytvoří druhý attempt `development` i
-   `review` — oba pokusy jsou ve složce vidět.
-4. Worktree nese per-fázový commit se smysluplnou zprávou (ze summary), ne
-   „development stage".
-5. Landing přiklopil artefakty do worktree a otevřel PR (fake Forge zaznamenal
-   branch, titul, tělo z agregovaných summary).
-6. `history` doputovaného tasku nese `summary` u každého consumer řádku.
-7. Zabití procesu uprostřed a restart vede k dokončení tasku (recovery + nový
-   attempt).
-8. Architektonické testy: dispatcher/consumer neimportují nové porty ani
-   drivery; `api/` sahá jen na `ArtifactView`; consumer nevětví na outcome.
+1. A task with `repository`+`worktree` flows through
+   `plan → … → review → land → end`.
+2. Every phase wrote an artifact into `<task>/<step>/<attempt>/` and the UI sees
+   it.
+3. The back edge (`request_changes`) creates a second attempt of both
+   `development` and `review` — both attempts are visible in the folder.
+4. The worktree carries a per-phase commit with a meaningful message (from the
+   summary), not "development stage".
+5. Landing folded the artifacts into the worktree and opened a PR (the fake
+   Forge recorded the branch, title, and body from the aggregated summaries).
+6. The `history` of a landed task carries a `summary` on every consumer line.
+7. Killing the process midway and restarting leads to the task completing
+   (recovery + a new attempt).
+8. Architecture tests: the dispatcher/consumer don't import the new ports or
+   drivers; `api/` touches only `ArtifactView`; the consumer doesn't branch on
+   the outcome.
 ```

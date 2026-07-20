@@ -1,80 +1,85 @@
-# Board UI — přehled nad harness
+# Board UI — an overview on top of the harness
 
-Status: schváleno
-Datum: 2026-07-19
-Navazuje na: `2026-07-19-orchestration-phase1-design.md`
+Status: approved
+Date: 2026-07-19
+Follows on from: `2026-07-19-orchestration-phase1-design.md`
 
-## Cíl
+## Goal
 
-Webová aplikace, která ukazuje, co se v harness právě děje. Sloupce jsou kroky
-workflow, karty jsou tasky ve svém aktuálním stavu, klik na kartu ukáže metadata
-a historii tasku. Board se aktualizuje sám.
+A web application that shows what is happening in the harness right now. Columns
+are workflow steps, cards are tasks in their current status, and clicking a card
+shows the task's metadata and history. The board refreshes itself.
 
-Vzniká paralelně s implementací fáze 1 a je **součástí harness balíčku** — ne
-samostatný projekt.
+It is built in parallel with the phase 1 implementation and is **part of the
+harness package** — not a standalone project.
 
-### Architektonický požadavek
+### Architectural requirement
 
-Stejný jako u fáze 1 a je pro tento návrh určující: **UI nesmí vědět nic o
-driverech, na kterých harness běží.** Nesmí vědět, že tasky jsou JSON soubory,
-že fronty jsou adresáře ani že jednou budou v databázi. Vidí výhradně port.
+The same as in phase 1, and it drives this design: **the UI must know nothing
+about the drivers the harness runs on.** It must not know that tasks are JSON
+files, that queues are directories, or that one day they will live in a database.
+It sees a port and nothing else.
 
-### Co je mimo rozsah
+### Out of scope
 
-- Jakákoli akce. Board je read-only pozorovatelna, ne ovladač. Žádný retry,
-  requeue, ruční přesun karty ani zakládání tasků.
-- Autentizace, více uživatelů, perzistence pohledu.
-- Více workflow. Fáze 1 má jen `default`; board ho zobrazí napevno. Přepínač
-  přibude, až přibudou workflow.
+- Any action. The board is a read-only observation deck, not a control panel. No
+  retry, requeue, manual card move, or task creation.
+- Authentication, multiple users, view persistence.
+- Multiple workflows. Phase 1 has only `default`; the board hardcodes it. A
+  switcher arrives once more workflows do.
 
-## Základní teze
+## Core thesis
 
-Zdrojem pravdy pro UI je **proud eventů**, ne úložiště. Board je projekce nad
-tímto proudem, drží se v paměti a API ji čte přes port `BoardView`.
+The source of truth for the UI is the **event stream**, not the store. The board
+is a projection over that stream, kept in memory, and the API reads it through
+the `BoardView` port.
 
-Důsledek: UI se k datům nedostává jinou cestou než tou, kterou už harness
-publikuje. Nemá vlastní čtení ze storage, tedy ani žádnou cestu, kterou by
-znalost driverů mohla prosáknout.
+Consequence: the UI reaches its data by no path other than the one the harness
+already publishes. It has no storage reads of its own, and therefore no path
+through which driver knowledge could leak.
 
-## Topologie
+## Topology
 
 ```
 dispatcher/consumer ──emit──> EventSink (CompositeEventSink)
                                  ├──> StdoutEvents
                                  └──> ProjectionSink ──> BoardProjection
                                                             ▲        │
-                              TaskQueue.list() ─hydratace───┘        │
+                              TaskQueue.list() ─hydration──┘        │
                                                                      ▼
                                                       BoardView (port) <── FastAPI
 ```
 
-Vše běží v **jednom procesu** a jednom asyncio loopu — dispatcher, consumeři
-i uvicorn. Projekce je tím pádem prostý objekt v paměti; žádný transport, žádná
-serializace navíc.
+Everything runs in **one process** and one asyncio loop — the dispatcher, the
+consumers, and uvicorn. The projection is therefore a plain in-memory object; no
+transport, no extra serialization.
 
-Cena: UI spadne s harnessem a škáluje s ním. Pro POC je to správný obchod;
-oddělení do vlastní služby je záměna driveru `BoardView` a přidání transportu
-pod `ProjectionSink`, ne přepis API.
+Cost: the UI goes down with the harness and scales with it. For a POC that is the
+right trade; splitting it into its own service is a matter of swapping the
+`BoardView` driver and adding a transport under `ProjectionSink`, not rewriting
+the API.
 
-## Přírůstky k fázi 1
+## Additions to phase 1
 
-| Přírůstek | Druh | Odpovědnost |
+| Addition | Kind | Responsibility |
 |---|---|---|
 | `BoardView` | **port** | `snapshot()`, `get(id)`, `subscribe()` |
-| `BoardProjection` | read model | drží stav boardu, aplikuje eventy |
-| `CompositeEventSink` | driver `EventSink` | rozešle event více sinkům |
-| `ProjectionSink` | driver `EventSink` | doručí event do `BoardProjection` |
-| `api/` | aplikace | FastAPI + šablony |
+| `BoardProjection` | read model | holds board state, applies events |
+| `CompositeEventSink` | `EventSink` driver | fans an event out to multiple sinks |
+| `ProjectionSink` | `EventSink` driver | delivers an event to `BoardProjection` |
+| `api/` | application | FastAPI + templates |
 
-Dispatcher ani consumer se **nemění**. Nevědí, že posluchačů eventů přibylo.
+The dispatcher and consumer **do not change**. They do not know that event
+listeners have multiplied.
 
-## Změna kontraktu eventů
+## Change to the event contract
 
-Event musí nést **celý snapshot tasku**, ne pouze `task_id`.
+An event must carry the **whole task snapshot**, not just the `task_id`.
 
-Bez toho projekce neumí zobrazit task, který vznikl až po startu procesu:
-hydratace o něm neví a event o něm neříká nic než identitu. S plným snapshotem
-je projekce soběstačná a nikdy nesahá zpátky do fronty.
+Without it the projection cannot display a task that came into being after the
+process started: hydration doesn't know about it, and the event says nothing but
+its identity. With the full snapshot the projection is self-sufficient and never
+reaches back into a queue.
 
 ```json
 {
@@ -86,159 +91,165 @@ je projekce soběstačná a nikdy nesahá zpátky do fronty.
 }
 ```
 
-`queue` je cílová fronta — jméno kroku, `done` nebo `failed`. Viz Zařazení do
-sloupce.
+`queue` is the target queue — a step name, `done`, or `failed`. See Column
+placement.
 
-Cena je objemnější řádek na stdout. Formátování zůstává věcí driveru —
-`StdoutEvents` si smí snapshot zkrátit, `ProjectionSink` ho potřebuje celý.
+The cost is a bulkier line on stdout. Formatting stays the driver's business —
+`StdoutEvents` may abbreviate the snapshot, `ProjectionSink` needs it whole.
 
-### Viditelnost nových tasků
+### Visibility of new tasks
 
-Task čerstvě vhozený do `tasks/` je na boardu vidět až ve chvíli, kdy ho
-dispatcher poprvé odbaví, tedy se zpožděním nejvýše jednoho poll intervalu.
+A task freshly dropped into `tasks/` is visible on the board only once the
+dispatcher first handles it, i.e. with a delay of at most one poll interval.
 
-Proto board **nemá sloupec Inbox** — byl by prakticky vždy prázdný a jeho obsah
-by byl nahodilý podle toho, kdy se stránka načetla.
+That is why the board **has no Inbox column** — it would be practically always
+empty and its contents would be arbitrary, depending on when the page loaded.
 
 ## BoardProjection
 
-### Hydratace při startu
+### Hydration at startup
 
-In-memory projekce je po restartu prázdná, ale tasky ležící ve frontách žádný
-event nevygenerují, dokud se nepohnou. Board by tedy lhal o stavu systému.
+The in-memory projection is empty after a restart, but tasks sitting in queues
+generate no event until they move. The board would then lie about the state of
+the system.
 
-Při startu proto projekce jednorázově přečte **všechny fronty přes
-`TaskQueue.list()`** — `queues/*`, `done/` i `failed/` — a postaví si z nich
-výchozí stav. Teprve pak začne aplikovat eventy.
+At startup, therefore, the projection reads **all queues once through
+`TaskQueue.list()`** — `queues/*`, `done/`, and `failed/` — and builds its
+initial state from them. Only then does it start applying events.
 
-Čte přes port, nikoli přes filesystem; požadavek na neznalost driverů drží.
+It reads through the port, not the filesystem; the driver-ignorance requirement
+holds.
 
-Cena: projekce má dva zdroje, snapshot a proud. Je to vědomé — alternativou byl
-perzistentní event log s replayem, což znamená formát, rotaci a replay time už
-ve fázi 1.
+Cost: the projection has two sources, the snapshot and the stream. This is
+deliberate — the alternative was a persistent event log with replay, which means
+a format, rotation, and replay time already in phase 1.
 
-Tasky v `<queue>/.processing/` se do hydratace zahrnou také; jinak by po
-restartu zmizely právě ty tasky, na kterých se pracovalo.
+Tasks in `<queue>/.processing/` are included in hydration too; otherwise a
+restart would make exactly the tasks that were being worked on disappear.
 
-### Stav a revize
+### State and revision
 
-Projekce drží mapu `task_id -> Task` a monotónně rostoucí `revision`, které se
-zvýší při každé aplikované změně. `revision` jde ven v SSE události a slouží
-klientovi k přeskočení zbytečného překreslení.
+The projection holds a `task_id -> Task` map and a monotonically increasing
+`revision`, which bumps on every applied change. `revision` goes out in the SSE
+event and lets the client skip a needless redraw.
 
-### Zařazení do sloupce
+### Column placement
 
-Sloupec **není** odvozen ze `status` — `done/` a `failed/` nejsou kroky
-workflow a task v nich si nese poslední `status`, který měl. Projekce proto
-zařazuje podle zdroje:
+A column is **not** derived from `status` — `done/` and `failed/` are not
+workflow steps, and a task in them carries the last `status` it had. The
+projection therefore places by source:
 
-- **Při hydrataci** podle fronty, ze které byl task načten (`queues/<krok>`,
+- **During hydration** by the queue the task was read from (`queues/<step>`,
   `done/`, `failed/`).
-- **Za běhu** podle rozhodnutí, které event nese: `MoveTo(step)` → sloupec
+- **At runtime** by the decision the event carries: `MoveTo(step)` → column
   `step`, `Finished` → `Done`, `Failed` → `Failed`.
 
-Event tedy vedle snapshotu tasku nese i cílovou frontu. Bez toho by projekce
-musela dohadovat terminální stav ze `status`, což je přesně ta nejednoznačnost,
-kvůli které má fáze 1 vyhrazený uzel `end`.
+The event thus carries the target queue alongside the task snapshot. Without it
+the projection would have to guess the terminal state from `status` — precisely
+the ambiguity for which phase 1 has the reserved `end` node.
 
-`lockId != null` znamená, že se na tasku právě pracuje — badge na kartě.
+`lockId != null` means the task is being worked on right now — a badge on the
+card.
 
-## Port BoardView
+## The BoardView port
 
 ```python
 class BoardView(Protocol):
     def snapshot(self) -> Board: ...
     def get(self, task_id: str) -> Task | None: ...
-    def subscribe(self) -> AsyncIterator[int]: ...   # yielduje revision
+    def subscribe(self) -> AsyncIterator[int]: ...   # yields revision
 ```
 
-Toto je jediné, co API vidí. `BoardProjection` je dnešní driver. Až bude read
-model ve fázi 2 v databázi, vymění se driver; API se nedotkne.
+This is all the API sees. `BoardProjection` is today's driver. Once the read
+model lives in a database in phase 2, the driver is swapped; the API is not
+touched.
 
-`subscribe()` je součást portu záměrně — kdyby ho API řešilo samo, muselo by
-znát vnitřek projekce.
+`subscribe()` is part of the port on purpose — if the API handled it itself, it
+would have to know the projection's internals.
 
-Implementace `subscribe()`: `asyncio.Queue` na připojeného klienta, **bounded**,
-při zaplnění se přebytek zahazuje. U události, která nenese data a jen říká
-„podívej se znovu", je zahození bezpečné — další notifikace přijde a fragment je
-vždy celá pravda.
+Implementation of `subscribe()`: an `asyncio.Queue` per connected client,
+**bounded**, dropping the overflow when full. For an event that carries no data
+and only says "look again," dropping is safe — another notification will come and
+the fragment is always the whole truth.
 
 ## API
 
-Všechny endpointy jsou read-only.
+Every endpoint is read-only.
 
-| Endpoint | Vrací |
+| Endpoint | Returns |
 |---|---|
-| `GET /` | HTML stránka boardu |
-| `GET /fragment/board` | HTML fragment se sloupci — cíl htmx swapu |
-| `GET /fragment/task/{id}` | HTML fragment detailu do modalu |
+| `GET /` | the board's HTML page |
+| `GET /fragment/board` | HTML fragment with the columns — target of the htmx swap |
+| `GET /fragment/task/{id}` | HTML fragment of the detail for the modal |
 | `GET /api/events` | SSE stream |
-| `GET /api/board` | JSON snapshot boardu |
-| `GET /api/tasks/{id}` | JSON detail tasku |
+| `GET /api/board` | JSON snapshot of the board |
+| `GET /api/tasks/{id}` | JSON detail of the task |
 
-JSON varianty htmx nepoužívá. Existují jako testovací povrch a případný druhý
-klient. Obě větve čtou z téhož `BoardView.snapshot()`, takže se nemohou rozejít.
+htmx does not use the JSON variants. They exist as a testing surface and a
+possible second client. Both branches read from the same `BoardView.snapshot()`,
+so they cannot drift apart.
 
-Neznámé `task_id` vrací 404 v obou větvích.
+An unknown `task_id` returns 404 in both branches.
 
-## Živý refresh
+## Live refresh
 
-Server posílá přes SSE **holé oznámení**, ne data ani diff:
+Over SSE the server sends a **bare notification**, not data or a diff:
 
 ```
 event: board
 data: {"revision": 42}
 ```
 
-Prohlížeč na něj reaguje `hx-get="/fragment/board"` a překreslí sloupce.
+The browser reacts with `hx-get="/fragment/board"` and redraws the columns.
 
-Tím padá celá kategorie problémů: reconnect nepotřebuje dopočítávat zmeškané
-události (další notifikace stejně přijde a fragment je vždy celá pravda), pomalý
-klient nenafoukne buffer a nezáleží na pořadí zpráv.
+That drops a whole category of problems: a reconnect need not reconstruct missed
+events (another notification will come anyway and the fragment is always the whole
+truth), a slow client cannot inflate a buffer, and message ordering does not
+matter.
 
-Dvě opatření:
+Two safeguards:
 
-- **Coalescing** — nejvýše jedna notifikace za 250 ms. Pět consumerů by jinak
-  dokázalo tepat překreslováním.
-- **Revision** — klient si pamatuje poslední vykreslenou a swap přeskočí, když
-  se nezměnila.
+- **Coalescing** — at most one notification every 250 ms. Five consumers could
+  otherwise hammer away with redraws.
+- **Revision** — the client remembers the last one it rendered and skips the swap
+  when it hasn't changed.
 
 ## UI
 
-### Sloupce
+### Columns
 
-Kroky workflow `default` v pořadí dosažitelnosti ze `start`; zpětné hrany se při
-určování pořadí ignorují, jinak by pořadí nebylo definované. Napravo `Done`
-a `Failed`.
+The steps of the `default` workflow in reachability order from `start`; back
+edges are ignored when determining order, otherwise the order would be undefined.
+`Done` and `Failed` on the right.
 
-Karty ve sloupci řazené podle `created` vzestupně — tedy v pořadí, v jakém je
-vezme FIFO `EnqueueStrategy`. Sloupec pak čte jako fronta, kterou skutečně je.
+Cards in a column are ordered by `created` ascending — i.e. in the order the FIFO
+`EnqueueStrategy` takes them. The column then reads as the queue it actually is.
 
-### Karta
+### Card
 
-`id`, `repository`, čas ve stavu, badge `lastOutcome` (`request_changes`
-vizuálně odlišené) a badge **„zpracovává se"** při `lockId != null`.
+`id`, `repository`, time in status, a `lastOutcome` badge (`request_changes`
+visually distinguished), and a **"processing"** badge when `lockId != null`.
 
-Ten poslední badge je jediný signál, který odlišuje task čekající ve frontě od
-tasku, na kterém právě běží behavior.
+That last badge is the only signal that distinguishes a task waiting in the queue
+from a task whose behavior is running right now.
 
 ### Detail
 
-Klik na kartu otevře modal: všechna metadata tasku a `history` jako časová osa
-— `at`, `actor`, `from → to`, `outcome`, u chyby `reason`.
+Clicking a card opens a modal: all of the task's metadata and its `history` as a
+timeline — `at`, `actor`, `from → to`, `outcome`, and `reason` on error.
 
-Historie je tady hlavní hodnota. Je z ní vidět, proč task spadl a kolikrát se
-vrátil z `review`.
+The history is the main value here. From it you can see why a task failed and how
+many times it bounced back from `review`.
 
 ### Stack
 
-Jinja2 šablony ve FastAPI, htmx se SSE rozšířením. Žádný build step, žádné
-`node_modules`, celé UI je součástí Python balíčku.
+Jinja2 templates in FastAPI, htmx with the SSE extension. No build step, no
+`node_modules`, the whole UI is part of the Python package.
 
-Cena: bohatší interakce později narazí na strop. Pro board s pěti sloupci
-a modalem je to daleko.
+Cost: richer interaction will later hit a ceiling. For a board with five columns
+and a modal, that ceiling is far off.
 
-## Struktura kódu
+## Code structure
 
 ```
 src/harness/
@@ -256,49 +267,51 @@ src/harness/
       _columns.html
       _task.html
     static/
-  app.py                   # wiring: composite sink, hydratace, uvicorn v témže loopu
+  app.py                   # wiring: composite sink, hydration, uvicorn in the same loop
 ```
 
-Závislosti:
+Dependencies:
 
-- `projection.py` importuje `models.py` a `ports/`. Nikdy `drivers/`.
-- `api/` importuje `ports/board.py` a `models.py`. Nic víc.
-- Factory bere `BoardView` jako parametr. Proto jde API testovat s fake view
-  a proto o driverech nemůže vědět ani omylem.
-- Veškeré wiring zůstává v `app.py`.
+- `projection.py` imports `models.py` and `ports/`. Never `drivers/`.
+- `api/` imports `ports/board.py` and `models.py`. Nothing more.
+- The factory takes `BoardView` as a parameter. That is why the API is testable
+  with a fake view and why it cannot know about drivers even by accident.
+- All wiring stays in `app.py`.
 
-## Chybové stavy
+## Error states
 
-| Situace | Chování |
+| Situation | Behavior |
 |---|---|
-| Task, ke kterému nedorazila hydratace ani event | na boardu není; objeví se prvním eventem |
-| Event s neznámým `task_id` | projekce ho založí jako nový záznam |
-| Výjimka v `ProjectionSink` | zachycena v `CompositeEventSink`; **selhání sinku nesmí zastavit smyčku ani ostatní sinky** |
-| Odpojený SSE klient | jeho fronta se zahodí; server nic dalšího neřeší |
-| Přetečená fronta SSE klienta | přebytek se zahodí, spojení zůstává |
+| A task reached by neither hydration nor an event | not on the board; appears with the first event |
+| An event with an unknown `task_id` | the projection creates it as a new record |
+| An exception in `ProjectionSink` | caught in `CompositeEventSink`; **a sink's failure must not stop the loop or the other sinks** |
+| A disconnected SSE client | its queue is dropped; the server does nothing further |
+| An overflowed SSE client queue | the overflow is dropped, the connection stays |
 
-## Testovací strategie
+## Testing strategy
 
-| Vrstva | Jak |
+| Layer | How |
 |---|---|
-| `BoardProjection` | tabulkově: hydratace, event → snapshot, zpětná hrana, přesun do `failed`, monotonie `revision` |
-| `CompositeEventSink` | výjimka z jednoho sinku neshodí ostatní |
-| API | `httpx` + fake `BoardView`; JSON i fragmenty; 404 na neznámé id |
-| SSE | fake view, ruční tick → coalescing a doručení notifikace |
-| End-to-end | celá smyčka na in-memory driverech + HTTP klient: task doteče do `done/` a board to po cestě odráží |
-| Invariant | `api/` ani `projection.py` neimportují nic z `drivers/` |
+| `BoardProjection` | table-driven: hydration, event → snapshot, back edge, move to `failed`, monotonicity of `revision` |
+| `CompositeEventSink` | an exception from one sink does not bring down the others |
+| API | `httpx` + a fake `BoardView`; JSON and fragments; 404 on an unknown id |
+| SSE | a fake view, manual tick → coalescing and notification delivery |
+| End-to-end | the whole loop on in-memory drivers + an HTTP client: a task flows through to `done/` and the board reflects it along the way |
+| Invariant | neither `api/` nor `projection.py` imports anything from `drivers/` |
 
-Testy nesmí sahat na skutečný čas — coalescing se testuje přes `Clock`, ne přes
-`sleep`.
+Tests must not touch real time — coalescing is tested via `Clock`, not `sleep`.
 
-## Ověření hotovosti
+## Completion check
 
-1. Spuštěný harness servíruje board na lokálním portu.
-2. Board po startu ukazuje tasky, které už ve frontách ležely.
-3. Task procházející workflow se na boardu posouvá mezi sloupci bez zásahu
-   uživatele.
-4. Task, na kterém běží behavior, má badge „zpracovává se".
-5. Task s `request_changes` je vidět, jak se vrátil z `review` do `development`.
-6. Detail doputovaného tasku ukazuje celou historii včetně zpětné hrany.
-7. Task s neznámým `workflowTemplate` se objeví ve sloupci `Failed` i s důvodem.
-8. Restart procesu board obnoví do stavu odpovídajícího frontám.
+1. A running harness serves the board on a local port.
+2. After startup the board shows the tasks that were already sitting in queues.
+3. A task moving through the workflow advances between columns on the board
+   without user intervention.
+4. A task whose behavior is running has a "processing" badge.
+5. A task with `request_changes` can be seen bouncing back from `review` to
+   `development`.
+6. The detail of a completed task shows the whole history, including the back
+   edge.
+7. A task with an unknown `workflowTemplate` appears in the `Failed` column,
+   reason included.
+8. Restarting the process restores the board to a state matching the queues.

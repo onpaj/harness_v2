@@ -1,1 +1,1 @@
-"""Porty. Tento balík neimportuje nic z harness.drivers."""
+"""Ports. This package imports nothing from harness.drivers."""

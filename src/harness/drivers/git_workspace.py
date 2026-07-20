@@ -1,14 +1,15 @@
-"""Git worktree jako pracovní plocha.
+"""Git worktree as a working directory.
 
-`attach` odvodí kořen repa z jména (`task.repository`) přes `RepositoryRegistry`
-a worktree umístí pod `<worktrees_root>/<task_id>`. Neexistuje-li, založí ho
-přes `git worktree add` na task branchi `harness/<task_id>` z HEAD repa;
-existuje-li (reattach po pádu / zpětné hraně), **resetne** ho zpět na HEAD a
-uklidí netrackované soubory (`reset --hard` + `clean -fd`, bez `-x`), aby další
-pokus začal z čistého listu. Handle umí zapsat soubor a commitnout. Commit
-stageuje vše a při prázdné pracovní ploše vrátí None místo prázdného commitu.
+`attach` derives the repo root from the name (`task.repository`) via
+`RepositoryRegistry` and places the worktree under `<worktrees_root>/<task_id>`.
+If it does not exist, it creates it via `git worktree add` on the task branch
+`harness/<task_id>` from the repo's HEAD; if it exists (reattach after a crash /
+backward edge), it **resets** it back to HEAD and cleans up untracked files
+(`reset --hard` + `clean -fd`, without `-x`), so the next attempt starts from a
+clean slate. The handle can write a file and commit. Commit stages everything
+and returns None instead of an empty commit when the working directory is empty.
 
-Volá systémový `git` přes subprocess — žádná nová produkční závislost.
+Calls the system `git` via subprocess — no new production dependency.
 """
 
 from __future__ import annotations
@@ -29,7 +30,7 @@ _IDENTITY = {
 
 
 class GitError(RuntimeError):
-    """Systémový `git` selhal. Nese příkaz i jeho stderr."""
+    """The system `git` failed. Carries the command and its stderr."""
 
 
 def _git(args: list[str], *, cwd: Path | None = None, env_extra: dict[str, str] | None = None) -> str:
@@ -49,13 +50,13 @@ def _git(args: list[str], *, cwd: Path | None = None, env_extra: dict[str, str] 
         )
     except subprocess.CalledProcessError as error:
         raise GitError(
-            f"git {' '.join(args)} selhal (exit {error.returncode}): {error.stderr.strip()}"
+            f"git {' '.join(args)} failed (exit {error.returncode}): {error.stderr.strip()}"
         ) from error
     return result.stdout
 
 
 class GitWorkspaceHandle(WorkspaceHandle):
-    """Připojený git worktree."""
+    """An attached git worktree."""
 
     def __init__(self, path: Path, branch: str) -> None:
         self._path = Path(path)
@@ -87,12 +88,13 @@ class GitWorkspaceHandle(WorkspaceHandle):
 
 
 class GitWorkspace(Workspace):
-    """Zakládá a znovupoužívá git worktree pod společným kořenem.
+    """Creates and reuses git worktrees under a shared root.
 
-    Kořen repa odvozuje z **jména** (`task.repository`) přes registry — task
-    nese logické jméno, ne cestu. Worktree leží na `<worktrees_root>/<task_id>`.
-    Neexistuje-li, založí ho přes `git worktree add`; reattach špinavý worktree
-    resetuje na HEAD (zpětná hrana i restart po pádu tak začnou z čistého listu).
+    Derives the repo root from the **name** (`task.repository`) via the registry
+    — the task carries a logical name, not a path. The worktree lives at
+    `<worktrees_root>/<task_id>`. If it does not exist, it creates it via
+    `git worktree add`; on reattach a dirty worktree is reset to HEAD (so both a
+    backward edge and a restart after a crash start from a clean slate).
     """
 
     def __init__(
@@ -114,10 +116,11 @@ class GitWorkspace(Workspace):
                 ["-C", str(base), "worktree", "add", str(worktree), "-b", branch]
             )
         else:
-            # Reset-on-reattach: zpětná hrana i restart po pádu musí začít
-            # z čistého listu. `reset --hard` zahodí necommitnuté změny, `clean
-            # -fd` smaže netrackované soubory a adresáře. Bez `-x` — ignorované
-            # soubory (např. `.artifacts/` pokud by byly gitignored) zůstávají.
+            # Reset-on-reattach: both a backward edge and a restart after a
+            # crash must start from a clean slate. `reset --hard` discards
+            # uncommitted changes, `clean -fd` removes untracked files and
+            # directories. Without `-x` — ignored files (e.g. `.artifacts/` if
+            # they were gitignored) stay.
             _git(["-C", str(worktree), "reset", "--hard", "HEAD"])
             _git(["-C", str(worktree), "clean", "-fd"])
         return GitWorkspaceHandle(worktree, branch)

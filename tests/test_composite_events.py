@@ -5,7 +5,7 @@ from harness.ports.events import EventSink
 
 class ExplodingSink(EventSink):
     def emit(self, name, **fields):
-        raise RuntimeError("sink praskl")
+        raise RuntimeError("sink blew up")
 
 
 def test_event_reaches_every_sink():
@@ -37,4 +37,4 @@ def test_broken_sink_is_reported_on_stderr(capsys):
 
     composite.emit("dispatched", task_id="tsk_1")
 
-    assert "sink praskl" in capsys.readouterr().err
+    assert "sink blew up" in capsys.readouterr().err

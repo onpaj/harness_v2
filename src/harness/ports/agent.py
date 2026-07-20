@@ -1,9 +1,10 @@
-"""Port agenta — katalog person, spec a jejich běh.
+"""Agent port — persona catalog, spec, and how they run.
 
-Práci kroku svěří behavior driver **agentovi**. Kdo je agent, je čistě data:
-`AgentSpec` popisuje personu (prompt, model, povolené nástroje a outcomes).
-`AgentCatalog` mapuje jméno kroku na spec, `AgentRunner` spec spustí. Runner
-nezná fronty ani rozhodování — dostane prompt a vrátí verdikt.
+The behavior driver hands a step's work to an **agent**. Who the agent is is
+pure data: `AgentSpec` describes the persona (prompt, model, allowed tools and
+outcomes). `AgentCatalog` maps a step name to a spec, `AgentRunner` runs the
+spec. The runner knows nothing about queues or routing — it gets a prompt and
+returns a verdict.
 """
 
 from __future__ import annotations
@@ -17,7 +18,7 @@ from harness.models import Outcome
 
 @dataclass(frozen=True)
 class AgentSpec:
-    """Persona jako data. `allowed_outcomes` ohraničuje, co smí verdikt vrátit."""
+    """Persona as data. `allowed_outcomes` bounds what the verdict may return."""
 
     name: str
     prompt: str
@@ -29,7 +30,7 @@ class AgentSpec:
 
 @dataclass(frozen=True)
 class AgentRun:
-    """Výsledek jednoho běhu agenta: verdikt, shrnutí a syrový výstup."""
+    """Result of a single agent run: verdict, summary, and raw output."""
 
     outcome: Outcome
     summary: str
@@ -37,22 +38,22 @@ class AgentRun:
 
 
 class AgentRunner(ABC):
-    """Spustí spec s daným promptem v `cwd` a vrátí verdikt."""
+    """Runs a spec with the given prompt in `cwd` and returns a verdict."""
 
     @abstractmethod
     async def run(
         self, *, prompt: str, spec: AgentSpec, cwd: Path, timeout: float
     ) -> AgentRun:
-        """Spusť agenta a vrať jeho verdikt. Selhání probublá výjimkou."""
+        """Run the agent and return its verdict. Failures propagate as exceptions."""
 
 
 class AgentCatalog(ABC):
-    """Mapuje jméno (typicky krok) na `AgentSpec`."""
+    """Maps a name (typically a step) to an `AgentSpec`."""
 
     @abstractmethod
     def get(self, name: str) -> AgentSpec:
-        """Vrať spec pro jméno, nebo vyhoď `AgentNotFound`."""
+        """Return the spec for the name, or raise `AgentNotFound`."""
 
 
 class AgentNotFound(Exception):
-    """Katalog nezná agenta daného jména."""
+    """The catalog has no agent by that name."""

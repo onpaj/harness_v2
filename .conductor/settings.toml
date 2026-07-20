@@ -1,11 +1,12 @@
 "$schema" = "https://conductor.build/schemas/settings.repo.schema.json"
 
 [scripts]
-# Postaví izolované venv a nainstaluje harness v editable režimu i s dev
-# závislostmi (pytest). Na stroji není `uv` — plain venv + pip (viz CLAUDE.md).
-# python3.11 se hledá na PATH, s fallbackem na ~/.local/bin (non-interaktivní
-# zsh nemusí mít .local/bin na PATH). Root harnessu je per-workspace, aby si
-# paralelní workspaces nešláply na sdílenou frontu.
+# Builds an isolated venv and installs harness in editable mode along with the
+# dev dependencies (pytest). There is no `uv` on the machine — plain venv + pip
+# (see CLAUDE.md). python3.11 is looked up on PATH, with a fallback to
+# ~/.local/bin (a non-interactive zsh may not have .local/bin on PATH). The
+# harness root is per-workspace, so parallel workspaces don't step on a shared
+# queue.
 setup = """
 set -e
 PY="$(command -v python3.11 || echo "$HOME/.local/bin/python3.11")"
@@ -15,18 +16,19 @@ PY="$(command -v python3.11 || echo "$HOME/.local/bin/python3.11")"
 .venv/bin/harness init --root "$CONDUCTOR_WORKSPACE_PATH/.harness"
 """
 
-# Každý workspace má vlastní root → smyčky se navzájem neruší.
+# Each workspace has its own root → the loops don't interfere with each other.
 run_mode = "concurrent"
 
-# Spustí orchestrační smyčku. Běží dopředu a pollује frontu dokud ji Conductor
-# nezastaví (SIGHUP → smyčka čistě skončí). Root musí být inicializovaný ze
-# setup scriptu výše.
+# Runs the orchestration loop. It runs forward and polls the queue until
+# Conductor stops it (SIGHUP → the loop exits cleanly). The root must have been
+# initialized by the setup script above.
 #
-# GitHub zdroj: `--github-repo onpaj/Anela.Heblo` zapne ingesci issue s labelem
-# `harness:todo`. Token se bere za běhu z `gh` (žádný secret v souboru); zdroj
-# se sám vypne, když `GITHUB_TOKEN` chybí. `--poll 5` drží interval pollování
-# nízko — GitHubí `list_issues` čte s lagem, tak nemá smysl bušit každých 0.2 s
-# (in-process dedup ve zdroji navíc chrání před dvojitým claimem).
+# GitHub source: `--github-repo onpaj/Anela.Heblo` turns on ingestion of issues
+# labeled `harness:todo`. The token is taken at runtime from `gh` (no secret in
+# the file); the source disables itself when `GITHUB_TOKEN` is missing. `--poll 5`
+# keeps the poll interval low — GitHub's `list_issues` reads with lag, so there's
+# no point hammering it every 0.2 s (in-process dedup in the source also guards
+# against a double claim).
 [scripts.run.loop]
 command = 'GITHUB_TOKEN="$(gh auth token)" .venv/bin/harness run --root "$CONDUCTOR_WORKSPACE_PATH/.harness" --github-repo onpaj/Anela.Heblo --poll 5'
 default = true

@@ -5,12 +5,12 @@ from typing import Any
 
 
 class EventSink(ABC):
-    """Strukturovaný výstup.
+    """Structured output.
 
-    Dostává jméno a pole, nikdy naformátovaný řetězec — formátování je věc
-    driveru. Jinak by budoucí OTel driver parsoval text.
+    Receives a name and fields, never a formatted string — formatting is the
+    driver's job. Otherwise a future OTel driver would be parsing text.
     """
 
     @abstractmethod
     def emit(self, name: str, **fields: Any) -> None:
-        """Vyemituj událost."""
+        """Emit an event."""

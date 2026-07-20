@@ -1,7 +1,8 @@
-"""In-memory read model boardu.
+"""In-memory read model of the board.
 
-Staví se ze dvou zdrojů: jednorázové hydratace z front při startu a poté
-už jen z proudu eventů. Sahá výhradně na porty — o driverech neví.
+Built from two sources: a one-time hydration from the queues at startup, and
+after that only from the stream of events. Touches ports exclusively — it knows
+nothing about drivers.
 """
 
 from __future__ import annotations
@@ -21,10 +22,10 @@ from harness.ports.queue import TaskQueue
 
 
 def column_order(workflow: Workflow) -> tuple[str, ...]:
-    """Kroky v pořadí dosažitelnosti ze startu, pak done a failed.
+    """Steps in order of reachability from the start, then done and failed.
 
-    Zpětné hrany se ignorují — krok už jednou zařazený se nepřesouvá.
-    Jinak by pořadí sloupců záviselo na tom, kudy se prohledávání vydalo.
+    Backward edges are ignored — a step already placed is never moved.
+    Otherwise the column order would depend on which way the search went.
     """
     order: list[str] = []
     pending: list[str] = [workflow.start]
@@ -61,10 +62,10 @@ class BoardProjection(BoardView):
         done: TaskQueue,
         failed: TaskQueue,
     ) -> None:
-        """Postav výchozí stav z front.
+        """Build the initial state from the queues.
 
-        Volá se až PO recovery — ta vrátí tasky z .processing/ zpátky do
-        front, takže je list() uvidí a nic v letu se neztratí.
+        Called only AFTER recovery — which returns tasks from .processing/ back
+        into the queues, so list() sees them and nothing in flight is lost.
         """
         for step, queue in step_queues.items():
             for task in queue.list():
@@ -79,7 +80,7 @@ class BoardProjection(BoardView):
         self._bump()
 
     def apply(self, column: str, task: Task) -> None:
-        """Zaznamenej, že task je nově v daném sloupci."""
+        """Record that the task is now in the given column."""
         self._store(column, task)
         self._bump()
 
@@ -103,7 +104,7 @@ class BoardProjection(BoardView):
         return self._tasks.get(task_id)
 
     async def subscribe(self) -> AsyncIterator[int]:
-        """Proud revizí. Fronta je bounded — pomalý klient nikoho nebrzdí."""
+        """Stream of revisions. The queue is bounded — a slow client stalls no one."""
         inbox: asyncio.Queue[int] = asyncio.Queue(maxsize=1)
         self._subscribers.add(inbox)
         try:
@@ -125,9 +126,9 @@ class BoardProjection(BoardView):
             try:
                 inbox.put_nowait(self._revision)
             except asyncio.QueueFull:
-                # Fronta drží jednu (stale) revizi. Nahraď ji čerstvou, ať
-                # pomalý odběratel po probuzení uvidí nejnovější stav, ne
-                # zastaralý mezikrok.
+                # The queue holds one (stale) revision. Replace it with a fresh
+                # one so that after waking, a slow subscriber sees the latest
+                # state, not a stale intermediate step.
                 try:
                     inbox.get_nowait()
                 except asyncio.QueueEmpty:

@@ -1,13 +1,15 @@
-"""GithubTaskSource: issue → task, stav tasku → label na issue.
+"""GithubTaskSource: issue → task, task status → label on the issue.
 
-Jediné místo se znalostí GitHubu na straně zdroje. Přehození labelu v `poll()`
-je dvojče atomického `rename` ve `fs_queue.claim()` — další poll issue s claim
-labelem nevrátí, což dává ingesci „nanejvýš jednou" přes restarty procesu.
+The single place with GitHub knowledge on the source side. Swapping the label in
+`poll()` is the twin of the atomic `rename` in `fs_queue.claim()` — a later poll
+won't return an issue with the claim label, which gives "at most once" ingestion
+across process restarts.
 
-Na rozdíl od `rename` ale `list_issues` čte s read-after-write lagem: po
-`remove_label` může další (rychlý) tick issue pořád vrátit pod select labelem a
-claimnout ho podruhé. Proti tomu drží `poll()` in-process ledger už claimnutých
-čísel (`_claimed`) — v rámci procesu ingestuje každé issue právě jednou.
+Unlike `rename`, however, `list_issues` reads with read-after-write lag: after
+`remove_label`, another (fast) tick may still return the issue under the select
+label and claim it a second time. To guard against that, `poll()` keeps an
+in-process ledger of already-claimed numbers (`_claimed`) — within a process it
+ingests each issue exactly once.
 """
 
 from __future__ import annotations
@@ -48,27 +50,28 @@ class GithubTaskSource(TaskSource):
         self._pr_label = pr_label
         self._failed_label = failed_label
         self._step_labels = step_labels or {}
-        # Množina labelů, které tenhle zdroj spravuje. Jen z ní `_set_state`
-        # odebírá — cizí labely (bug, priority) zůstanou nedotčené.
+        # The set of labels this source manages. `_set_state` only removes from
+        # it — foreign labels (bug, priority) stay untouched.
         self._managed = {
             claimed_label,
             pr_label,
             failed_label,
             *self._step_labels.values(),
         }
-        # In-process ledger už claimnutých issue. Swap labelu (todo→queued) dává
-        # at-most-once přes restarty, ale `list_issues` čte s read-after-write
-        # lagem — po `remove_label` může další tick issue pořád vrátit pod select
-        # labelem a claimnout ho podruhé. Tenhle set to utne v rámci procesu.
+        # In-process ledger of already-claimed issues. Swapping the label
+        # (todo→queued) gives at-most-once across restarts, but `list_issues`
+        # reads with read-after-write lag — after `remove_label` another tick
+        # may still return the issue under the select label and claim it a
+        # second time. This set cuts that off within the process.
         self._claimed: set[int] = set()
 
     def poll(self) -> list[Task]:
         tasks: list[Task] = []
         for issue in self._client.list_issues(self._repo, label=self._select_label):
             if issue.number in self._claimed:
-                continue  # už claimnuto tímhle procesem, list jen dojíždí lag
+                continue  # already claimed by this process, the list is just catching up on lag
             self._claimed.add(issue.number)
-            # Claim: přehoď label dřív, než task odejde do inboxu.
+            # Claim: swap the label before the task heads to the inbox.
             self._client.remove_label(self._repo, issue.number, self._select_label)
             self._client.add_label(self._repo, issue.number, self._claimed_label)
             task_id = new_task_id()
@@ -97,7 +100,7 @@ class GithubTaskSource(TaskSource):
         if not self._mine(task):
             return
         label = self._step_labels.get(progress.step)
-        if label:  # neznámý krok → bez labelu (coarse default, míň šumu)
+        if label:  # unknown step → no label (coarse default, less noise)
             self._set_state(self._issue(task), label)
 
     def finish(self, task: Task, result: FinishResult) -> None:

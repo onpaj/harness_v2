@@ -6,8 +6,8 @@ from harness.models import Task
 
 
 class EnqueueStrategy(ABC):
-    """Vybírá, který task z fronty přijde na řadu."""
+    """Picks which task from the queue comes up next."""
 
     @abstractmethod
     def select(self, tasks: list[Task]) -> Task | None:
-        """Vybraný task, nebo None když není z čeho vybírat."""
+        """The selected task, or None when there is nothing to pick from."""

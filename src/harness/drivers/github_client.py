@@ -1,7 +1,7 @@
-"""GitHub client za ABC. Fake pro testy, stdlib http pro ostrý běh.
+"""GitHub client behind an ABC. Fake for tests, stdlib http for the real run.
 
-Žádná nová produkční závislost — `HttpGithubClient` jede na `urllib.request` +
-`json`. Kdyby to svádělo k `requests`/`httpx`, nedělej to.
+No new production dependency — `HttpGithubClient` runs on `urllib.request` +
+`json`. If you're tempted to reach for `requests`/`httpx`, don't.
 """
 
 from __future__ import annotations
@@ -25,23 +25,23 @@ class Issue:
 
 
 class GithubClient(ABC):
-    """Minimální GitHub API, které konektor potřebuje."""
+    """The minimal GitHub API the connector needs."""
 
     @abstractmethod
     def list_issues(self, repo: str, *, label: str) -> list[Issue]:
-        """Otevřené issue se zadaným labelem (bez PR)."""
+        """Open issues with the given label (no PRs)."""
 
     @abstractmethod
     def add_label(self, repo: str, number: int, label: str) -> None:
-        """Přidej label. Přidání už nastaveného je no-op."""
+        """Add a label. Adding one that is already set is a no-op."""
 
     @abstractmethod
     def remove_label(self, repo: str, number: int, label: str) -> None:
-        """Odeber label. Chybějící je no-op (idempotentní)."""
+        """Remove a label. A missing one is a no-op (idempotent)."""
 
 
 class FakeGithubClient(GithubClient):
-    """Issue v dictu. Pro unit/e2e i smoke — bez sítě."""
+    """Issues in a dict. For unit/e2e and smoke — no network."""
 
     def __init__(self, issues: list[Issue] | None = None) -> None:
         self._issues: dict[int, Issue] = {i.number: i for i in (issues or [])}
@@ -67,8 +67,8 @@ class FakeGithubClient(GithubClient):
 
 
 class HttpGithubClient(GithubClient):
-    """Reálný client proti `api.github.com`. `opener` je injektovatelný, ať jde
-    otestovat bez sítě; default je stdlib `urllib.request.build_opener()`."""
+    """Real client against `api.github.com`. `opener` is injectable so it can be
+    tested without a network; the default is stdlib `urllib.request.build_opener()`."""
 
     def __init__(
         self,
@@ -96,7 +96,7 @@ class HttpGithubClient(GithubClient):
 
         issues: list[Issue] = []
         for item in raw:
-            if "pull_request" in item:  # PR jsou taky „issues" — odfiltruj
+            if "pull_request" in item:  # PRs are also "issues" — filter them out
                 continue
             issues.append(
                 Issue(
@@ -124,6 +124,6 @@ class HttpGithubClient(GithubClient):
         try:
             self._opener.open(request)
         except urllib.error.HTTPError as error:
-            if error.code == 404:  # label už tam není → nic
+            if error.code == 404:  # label is already gone → nothing to do
                 return
             raise

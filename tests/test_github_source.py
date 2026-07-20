@@ -1,4 +1,4 @@
-"""GithubTaskSource — issue → task, stav → label."""
+"""GithubTaskSource — issue → task, status → label."""
 
 from harness.drivers.github_client import FakeGithubClient, Issue
 from harness.drivers.github_source import GithubTaskSource
@@ -25,7 +25,7 @@ def _labels(client, number):
 
 def test_poll_claims_issue_and_builds_task():
     client = FakeGithubClient(
-        [Issue(1, "Fix bug", "detaily", "https://gh/o/r/issues/1", ("harness:todo",))]
+        [Issue(1, "Fix bug", "details", "https://gh/o/r/issues/1", ("harness:todo",))]
     )
     source = build_source(client)
 
@@ -39,7 +39,7 @@ def test_poll_claims_issue_and_builds_task():
         "url": "https://gh/o/r/issues/1",
     }
     assert task.data["title"] == "Fix bug"
-    assert task.data["body"] == "detaily"
+    assert task.data["body"] == "details"
     assert task.repository == "/repos/r"
     assert task.worktree == f"/wt/{task.id}"
 
@@ -58,9 +58,10 @@ def test_second_poll_returns_empty():
 
 
 class LaggyGithubClient(FakeGithubClient):
-    """Simuluje read-after-write lag GitHubu: `list_issues` vrací issue pod
-    `harness:todo` i po `remove_label` — swap labelu se do listu ještě
-    nepropagoval. Bez dedupu by `poll()` stejné issue claimoval opakovaně."""
+    """Simulates GitHub's read-after-write lag: `list_issues` returns the issue
+    under `harness:todo` even after `remove_label` — the label swap hasn't
+    propagated to the list yet. Without dedup, `poll()` would claim the same
+    issue repeatedly."""
 
     def remove_label(self, repo, number, label):  # noqa: D401 - lag: no-op
         pass
@@ -73,10 +74,10 @@ def test_poll_dedups_claimed_issue_despite_label_lag():
     source = build_source(client)
 
     first = source.poll()
-    second = source.poll()  # list stále vrací #1 pod harness:todo (lag)
+    second = source.poll()  # list still returns #1 under harness:todo (lag)
 
     assert len(first) == 1
-    assert second == []  # #1 už bylo claimnuto → podruhé se neingestuje
+    assert second == []  # #1 was already claimed → not ingested a second time
 
 
 def test_report_progress_known_step_sets_step_label():
@@ -94,7 +95,7 @@ def test_report_progress_unknown_step_leaves_labels_unchanged():
     source = build_source(client)
     [task] = source.poll()  # queued
 
-    source.report_progress(task, Progress(step="plan"))  # není v step_labels
+    source.report_progress(task, Progress(step="plan"))  # not in step_labels
 
     assert _labels(client, 1) == {"harness:queued"}
 

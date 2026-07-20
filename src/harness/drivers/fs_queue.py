@@ -1,8 +1,8 @@
-"""Fronta jako adresář s JSON soubory.
+"""A queue as a directory of JSON files.
 
-claim() je atomický rename do <root>/.processing/. Jedna operace řeší lease,
-idempotenci i původ po pádu: protože má .processing/ každá fronta vlastní,
-recovery ví, kam task vrátit, aniž by se to kamkoli ukládalo.
+claim() is an atomic rename into <root>/.processing/. A single operation handles
+the lease, idempotency, and origin after a crash: because each queue has its own
+.processing/, recovery knows where to return a task without storing that anywhere.
 """
 
 from __future__ import annotations
@@ -22,10 +22,10 @@ PROCESSING = ".processing"
 
 
 class _Corrupt(Exception):
-    """Interní signál: soubor existuje, ale nejde deserializovat.
+    """Internal signal: the file exists but cannot be deserialized.
 
-    Odlišuje se od zmizelého souboru (FileNotFoundError), aby volající
-    _load() nemuseli hádat důvod z jediné hodnoty None."""
+    Distinct from a vanished file (FileNotFoundError), so callers of
+    _load() need not guess the reason from a single None value."""
 
     def __init__(self, reason: str) -> None:
         super().__init__(reason)
@@ -93,10 +93,10 @@ class FilesystemTaskQueue(TaskQueue):
             try:
                 task = self._load(path)
             except FileNotFoundError:
-                # Soubor zmizel mezi glob() a čtením — vyhraný závod jiného
-                # zabírajícího, ne poškození. Tiše přeskočit: žádný event,
-                # žádný pokus o karanténu (ten by mohl smést i zdravý task,
-                # kdyby mezitím na stejné cestě vznikl nový soubor).
+                # The file vanished between glob() and reading — a race lost to
+                # another claimant, not corruption. Skip silently: no event,
+                # no quarantine attempt (that could sweep away a healthy task
+                # if a new file appeared at the same path in the meantime).
                 continue
             except _Corrupt as error:
                 self._events.emit(
@@ -110,10 +110,10 @@ class FilesystemTaskQueue(TaskQueue):
         return count
 
     def _load(self, path: Path) -> Task:
-        """Přečte a deserializuje task, nebo vyhodí přesně to, proč se to
-        nepovedlo — FileNotFoundError (zmizel) vs. _Corrupt (poškozený).
-        Jediné čtení, žádný re-check existence: ten by jen znovu otevřel
-        stejné TOCTOU okno, které má toto rozlišení zavřít."""
+        """Reads and deserializes a task, or raises exactly why it failed —
+        FileNotFoundError (vanished) vs. _Corrupt (corrupted). A single read,
+        no existence re-check: that would only reopen the same TOCTOU window
+        this distinction is meant to close."""
         try:
             return Task.from_dict(json.loads(path.read_text(encoding="utf-8")))
         except FileNotFoundError:
@@ -125,9 +125,9 @@ class FilesystemTaskQueue(TaskQueue):
         try:
             return self._load(path)
         except FileNotFoundError:
-            # Soubor zmizel mezi glob() a čtením — to je vyhraný závod jiného
-            # zabírajícího (přesně to, co claim() toleruje), ne poškození.
-            # Tiše přeskočit: žádný event, žádný pokus o karanténu.
+            # The file vanished between glob() and reading — a race lost to
+            # another claimant (exactly what claim() tolerates), not corruption.
+            # Skip silently: no event, no quarantine attempt.
             return None
         except _Corrupt as error:
             self._events.emit("corrupt", queue=self.name, path=str(path), reason=str(error))
@@ -135,23 +135,23 @@ class FilesystemTaskQueue(TaskQueue):
             return None
 
     def _quarantine_file(self, path: Path) -> None:
-        """Task se nedá deserializovat, takže mu nelze připsat historii.
-        Soubor se přesune tak, jak je; důvod nese jen event."""
+        """The task cannot be deserialized, so no history can be attributed to it.
+        The file is moved as-is; only the event carries the reason."""
         if self._quarantine is None:
             return
         if isinstance(self._quarantine, FilesystemTaskQueue):
             try:
                 shutil.move(str(path), str(self._quarantine.root / path.name))
             except FileNotFoundError:
-                # Mezitím zmizel i on — nic k přesunutí, nic se neděje.
+                # It vanished in the meantime too — nothing to move, nothing happens.
                 pass
         else:
             path.unlink(missing_ok=True)
 
     def _write(self, path: Path, task: Task) -> None:
-        # Unikátní jméno per zápis, aby si dva writery cílící na stejné id
-        # nesdíleli jeden temp soubor. Přípona zůstává ".json.tmp", takže ji
-        # glob("*.json") v list()/claim()/recover() nikdy nezachytí.
+        # A unique name per write, so two writers targeting the same id don't
+        # share a single temp file. The suffix stays ".json.tmp", so
+        # glob("*.json") in list()/claim()/recover() never picks it up.
         temporary = path.with_name(f"{path.stem}.{uuid.uuid4().hex}.json.tmp")
         try:
             temporary.write_text(
@@ -159,10 +159,10 @@ class FilesystemTaskQueue(TaskQueue):
             )
             os.replace(temporary, path)
         except Exception:
-            # Selhání zápisu nebo přejmenování nesmí nechat temp soubor viset
-            # navždy — na rozdíl od starého deterministického jména ho už nic
-            # nepřepíše. Tvrdý SIGKILL přesně mezi write_text a touto větví
-            # ho přesto může zanechat; to je pro tuto fázi akceptované riziko,
-            # ne důvod stavět adresářový sweeper.
+            # A failed write or rename must not leave the temp file hanging
+            # forever — unlike the old deterministic name, nothing overwrites it
+            # anymore. A hard SIGKILL exactly between write_text and this branch
+            # can still leave it behind; for this phase that's an accepted risk,
+            # not a reason to build a directory sweeper.
             temporary.unlink(missing_ok=True)
             raise

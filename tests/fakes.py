@@ -3,7 +3,7 @@ from harness.ports.board import Board, BoardView
 
 
 class FakeBoardView(BoardView):
-    """Board s pevným obsahem. API se tak testuje bez projekce a bez front."""
+    """Board with fixed contents. Lets the API be tested without a projection or queues."""
 
     def __init__(self, board: Board, tasks: dict[str, Task] | None = None) -> None:
         self._board = board

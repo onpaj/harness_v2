@@ -1,7 +1,7 @@
-"""Rozbočka event sinků.
+"""Fan-out for event sinks.
 
-Dispatcher a consumer emitují do jediného portu a nevědí, kolik posluchačů
-za ním stojí.
+The dispatcher and consumer emit into a single port and do not know how many
+listeners stand behind it.
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ class CompositeEventSink(EventSink):
         for sink in self._sinks:
             try:
                 sink.emit(name, **fields)
-            except Exception:  # noqa: BLE001 - selhání pozorovatele nesmí zastavit smyčku
-                # Hlášení na stderr — na EventSink se hlásit nemůžeme, ten právě selhal.
-                # Orchestrační smyčka musí pokračovat, ale porucha nesmí zmizet beze stopy.
+            except Exception:  # noqa: BLE001 - an observer's failure must not stop the loop
+                # Report to stderr — we cannot report to the EventSink, it just failed.
+                # The orchestration loop must go on, but the fault must not vanish without a trace.
                 traceback.print_exc()

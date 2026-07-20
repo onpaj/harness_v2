@@ -1,4 +1,4 @@
-"""Most mezi proudem eventů a read modelem boardu."""
+"""Bridge between the event stream and the board's read model."""
 
 from __future__ import annotations
 

@@ -1,8 +1,9 @@
-"""Most mezi proudem harness eventů a projekcí do zdroje tasků.
+"""Bridge between the harness event stream and the projection into the task source.
 
-Zrcadlí `ProjectionSink` (board), jen míří ven místo do UI. Mapuje harness
-event na `Progress`/`FinishResult` bez znalosti GitHubu; adapter ten na label.
-Routing podle `kind` řeší adapter (`_mine` guard), reflector volá všechny.
+Mirrors `ProjectionSink` (board), only it points outward instead of to the UI. It
+maps a harness event to `Progress`/`FinishResult` without GitHub knowledge; the
+adapter turns that into a label. Routing by `kind` is the adapter's job (`_mine`
+guard), the reflector calls all of them.
 """
 
 from __future__ import annotations

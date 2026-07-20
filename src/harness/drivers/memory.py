@@ -1,4 +1,4 @@
-"""In-memory drivery. Používají se v testech — bez disku a bez čekání."""
+"""In-memory drivers. Used in tests — no disk and no waiting."""
 
 from __future__ import annotations
 
@@ -71,7 +71,7 @@ class MemoryWorkflowRepository(WorkflowRepository):
         try:
             return self._workflows[name]
         except KeyError:
-            raise WorkflowNotFound(f"workflow {name!r} neexistuje") from None
+            raise WorkflowNotFound(f"workflow {name!r} does not exist") from None
 
 
 class MemoryEventSink(EventSink):
@@ -98,9 +98,9 @@ class FakeClock(Clock):
 
 
 class ScriptedBehavior(ConsumerBehavior):
-    """Vrací předepsané outcomes podle kroku, na kterém task stojí.
+    """Returns scripted outcomes based on the step the task is on.
 
-    Dojdou-li předpisy pro daný krok, vrací DONE.
+    When the scripted outcomes for a step run out, returns DONE.
     """
 
     def __init__(self, outcomes: dict[str, list[Outcome]] | None = None) -> None:
@@ -131,7 +131,7 @@ class MemoryArtifactSlot(ArtifactSlot):
 
 
 class MemoryArtifactStore(ArtifactStore):
-    """Artefakty v dictu. `begin` alokuje další attempt pro (task, step)."""
+    """Artifacts in a dict. `begin` allocates the next attempt for (task, step)."""
 
     def __init__(self) -> None:
         self._data: dict[tuple[str, str, int, str], str] = {}
@@ -178,7 +178,7 @@ class MemoryWorkspaceHandle(WorkspaceHandle):
 
 
 class MemoryWorkspace(Workspace):
-    """Worktree v paměti. Opětovný attach téhož tasku vrací týž handle."""
+    """Worktree in memory. Re-attaching the same task returns the same handle."""
 
     def __init__(self) -> None:
         self.handles: dict[str, MemoryWorkspaceHandle] = {}
@@ -192,9 +192,10 @@ class MemoryWorkspace(Workspace):
 
 
 class MemoryTaskSource(TaskSource):
-    """In-memory zdroj tasků. „Issue" je řádek v interní frontě, „claim" ho
-    přesune z nezkonzumovaných pryč — dvojče `poll()` GitHub adapteru bez sítě.
-    Projekce ven (`report_progress`/`finish`) se zapisují do `states` pro aserce.
+    """In-memory task source. An "issue" is a row in an internal queue, and
+    "claim" moves it out of the unconsumed set — the twin of the GitHub
+    adapter's `poll()` without the network. Outbound projection
+    (`report_progress`/`finish`) is written into `states` for assertions.
     """
 
     kind = "memory"
@@ -216,7 +217,7 @@ class MemoryTaskSource(TaskSource):
         self.states: dict[str, list] = {}
 
     def submit(self, title: str, body: str = "") -> str:
-        """Testovací helper: přidej „issue" do fronty a vrať jeho id."""
+        """Test helper: add an "issue" to the queue and return its id."""
         issue_id = f"issue-{self._next_issue}"
         self._next_issue += 1
         self._pending.append((issue_id, title, body))
@@ -264,7 +265,7 @@ class MemoryTaskSource(TaskSource):
 
 
 class MemoryForge(Forge):
-    """Zaznamenává PR. Idempotentní podle branch."""
+    """Records PRs. Idempotent by branch."""
 
     def __init__(self) -> None:
         self.opened: list[PullRequest] = []
@@ -288,7 +289,7 @@ class MemoryForge(Forge):
 
 
 class MemoryAgentCatalog(AgentCatalog):
-    """Katalog nad dictem jméno → spec."""
+    """Catalog over a name → spec dict."""
 
     def __init__(self, specs: dict[str, AgentSpec]) -> None:
         self._specs = specs
@@ -297,16 +298,16 @@ class MemoryAgentCatalog(AgentCatalog):
         try:
             return self._specs[name]
         except KeyError:
-            raise AgentNotFound(f"agent {name!r} neexistuje") from None
+            raise AgentNotFound(f"agent {name!r} does not exist") from None
 
 
 class FakeAgentRunner(AgentRunner):
-    """Skriptovaný runner bez subprocessu.
+    """Scripted runner without a subprocess.
 
-    `runs` mapuje jméno agenta na jeho verdikt; `default` je fallback, když
-    jméno není ve `runs`. `writes` mapuje jméno agenta na soubory (relpath →
-    obsah), které se při běhu zapíší do `cwd` — simuluje agenta píšícího
-    artefakty a kód. Každé volání se zaznamená do `self.calls`.
+    `runs` maps an agent name to its verdict; `default` is the fallback when
+    the name is not in `runs`. `writes` maps an agent name to files (relpath →
+    content) that are written into `cwd` during the run — simulating an agent
+    writing artifacts and code. Every call is recorded in `self.calls`.
     """
 
     def __init__(
@@ -334,11 +335,11 @@ class FakeAgentRunner(AgentRunner):
             return self._runs[spec.name]
         if self._default is not None:
             return self._default
-        return AgentRun(Outcome.DONE, f"{spec.name}: hotovo")
+        return AgentRun(Outcome.DONE, f"{spec.name}: done")
 
 
 class MemoryRepositoryRegistry(RepositoryRegistry):
-    """Registr rep nad dictem jméno → cesta."""
+    """Repository registry over a name → path dict."""
 
     def __init__(self, repos: dict[str, Path]) -> None:
         self._repos = repos
@@ -347,4 +348,4 @@ class MemoryRepositoryRegistry(RepositoryRegistry):
         try:
             return self._repos[name]
         except KeyError:
-            raise RepositoryNotFound(f"repo {name!r} není v registru") from None
+            raise RepositoryNotFound(f"repo {name!r} is not in the registry") from None

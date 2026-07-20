@@ -1,7 +1,7 @@
-"""Port, kterým se dívá UI.
+"""The port the UI looks through.
 
-Jediné, co API o harnessu ví. Dnešní driver je in-memory projekce, zítra
-může být read model v databázi — API se to nedotkne.
+All the API knows about the harness. Today's driver is an in-memory projection,
+tomorrow it could be a read model in a database — the API won't notice.
 """
 
 from __future__ import annotations
@@ -14,10 +14,10 @@ from typing import Any
 from harness.models import Task
 
 DONE_COLUMN = "done"
-"""Sloupec pro tasky, které doputovaly na END."""
+"""Column for tasks that reached END."""
 
 FAILED_COLUMN = "failed"
-"""Sloupec pro tasky, které nelze směrovat."""
+"""Column for tasks that cannot be routed."""
 
 
 @dataclass(frozen=True)
@@ -48,16 +48,16 @@ class Board:
 
 
 class BoardView(ABC):
-    """Read-only pohled na stav harnessu."""
+    """Read-only view of the harness state."""
 
     @abstractmethod
     def snapshot(self) -> Board:
-        """Aktuální board."""
+        """The current board."""
 
     @abstractmethod
     def get(self, task_id: str) -> Task | None:
-        """Task podle id, nebo None."""
+        """Task by id, or None."""
 
     @abstractmethod
     def subscribe(self) -> AsyncIterator[int]:
-        """Proud čísel revizí. První hodnota je aktuální revize."""
+        """A stream of revision numbers. The first value is the current revision."""

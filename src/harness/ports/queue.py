@@ -6,10 +6,10 @@ from harness.models import Task
 
 
 class TaskQueue(ABC):
-    """Fronta tasků.
+    """Task queue.
 
-    Inbox, fronty jednotlivých kroků, done i failed jsou instance tohoto
-    portu. Terminální stavy jsou prostě fronty, které nikdo nekonzumuje.
+    The inbox, the per-step queues, done and failed are all instances of this
+    port. Terminal states are simply queues that nobody consumes.
     """
 
     def __init__(self, name: str) -> None:
@@ -17,23 +17,23 @@ class TaskQueue(ABC):
 
     @abstractmethod
     def list(self) -> list[Task]:
-        """Nezabrané tasky ve frontě."""
+        """Unclaimed tasks in the queue."""
 
     @abstractmethod
     def claim(self, task: Task, lock_id: str) -> Task | None:
-        """Zaber task. Vrátí task s vyplněným lockId, nebo None při prohraném závodě."""
+        """Claim a task. Returns the task with lockId set, or None on a lost race."""
 
     @abstractmethod
     def put(self, task: Task) -> None:
-        """Vlož nezabraný task."""
+        """Insert an unclaimed task."""
 
     @abstractmethod
     def transfer(self, task: Task, destination: TaskQueue) -> None:
-        """Přesuň zabraný task do jiné fronty.
+        """Move a claimed task to another queue.
 
-        Musí být atomické: task nesmí existovat v obou frontách zároveň.
+        Must be atomic: the task must never exist in both queues at once.
         """
 
     @abstractmethod
     def recover(self) -> int:
-        """Vrať zabrané tasky zpět do fronty a vynuluj lockId. Vrací počet."""
+        """Return claimed tasks to the queue and clear lockId. Returns the count."""

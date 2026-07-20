@@ -17,12 +17,12 @@ class FirstStrategy(EnqueueStrategy):
 
 class ExplodingBehavior(ConsumerBehavior):
     async def run(self, task):
-        raise RuntimeError("behavior praskl")
+        raise RuntimeError("behavior blew up")
 
 
 class BogusBehavior(ConsumerBehavior):
     async def run(self, task):
-        return "neco jineho"
+        return "something else"
 
 
 def build(behavior, task: Task | None = None):
@@ -106,7 +106,7 @@ async def test_consumer_appends_history_without_target():
 
 
 async def test_consumer_records_behavior_summary():
-    """Summary z BehaviorResult se propíše do historie i eventu."""
+    """The summary from BehaviorResult propagates into both history and the event."""
     consumer, _, inbox, _, events = build(ScriptedBehavior(), make_task())
 
     await consumer.tick()
@@ -122,14 +122,14 @@ async def test_behavior_exception_lands_in_failed():
     assert await consumer.tick() is True
 
     assert inbox.list() == []
-    assert "behavior praskl" in failed.list()[0].history[-1].reason
+    assert "behavior blew up" in failed.list()[0].history[-1].reason
     assert "failed" in events.names()
 
 
 async def test_behavior_exception_task_carries_terminal_failed_status():
-    """Task nahozený výjimkou z behavior musí ve failed/ nést terminální
-    status 'failed', ne zůstat na starém kroku ('design') — jinak by
-    status lhal stejně jako v Finding 1 na dispatcher straně."""
+    """A task raised by a behavior exception must carry terminal status
+    'failed' in failed/, not stay on the old step ('design') — otherwise
+    status would lie just as in Finding 1 on the dispatcher side."""
     consumer, _, _, failed, _ = build(ExplodingBehavior(), make_task())
 
     await consumer.tick()
@@ -142,7 +142,7 @@ async def test_invalid_outcome_lands_in_failed():
 
     await consumer.tick()
 
-    assert "neco jineho" in failed.list()[0].history[-1].reason
+    assert "something else" in failed.list()[0].history[-1].reason
 
 
 async def test_invalid_outcome_task_carries_terminal_failed_status():
@@ -153,10 +153,10 @@ async def test_invalid_outcome_task_carries_terminal_failed_status():
     assert failed.list()[0].status == FAILED
 
 
-# test_consumer_has_no_branch_on_outcome_value byl nahrazen AST-based testem
+# test_consumer_has_no_branch_on_outcome_value was replaced by the AST-based test
 # tests/test_architecture.py::test_consumer_has_no_branch_on_outcome_value —
-# viz komentář tam pro důvod (string-matching přes inspect.getsource nechytal
-# `if outcome == "done":`, aliasovaný import, ani větev v modulové funkci).
+# see the comment there for the reason (string-matching via inspect.getsource
+# missed `if outcome == "done":`, an aliased import, and a branch in a module function).
 
 
 async def test_claimed_event_is_emitted_before_behavior_runs():

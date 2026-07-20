@@ -1,13 +1,14 @@
-"""Konvence rozmístění artefaktů ve worktree — jediné místo pravdy.
+"""Convention for laying out artifacts in the worktree — the single source of truth.
 
-Artefakty žijí pod `.artifacts/<task_id>/` jako ploché soubory:
+Artifacts live under `.artifacts/<task_id>/` as flat files:
 
-- task-level: `plan.md`, `architecture-decisions.md` (bez čísla)
-- step-attempt: `<step>-<NN>.md` (dvouciferný zero-pad, per-step counter od 01)
+- task-level: `plan.md`, `architecture-decisions.md` (no number)
+- step-attempt: `<step>-<NN>.md` (two-digit zero-pad, per-step counter from 01)
 
-Modul neimportuje nic z balíku `harness` — je to čistá doménová utilita jako
-`models`/`ids`. Sahá na něj zápisová strana (`next_attempt` v behaviru) i
-čtecí (`WorktreeArtifactView`), aby pravidlo pojmenování nebylo duplikované.
+The module imports nothing from the `harness` package — it is a pure domain
+utility like `models`/`ids`. Both the write side (`next_attempt` in the behavior)
+and the read side (`WorktreeArtifactView`) use it, so the naming rule isn't
+duplicated.
 """
 
 from __future__ import annotations
@@ -15,21 +16,21 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-# `<step>-<NN>.md` — step-attempt; cokoliv jiného `.md` je task-level.
+# `<step>-<NN>.md` — step-attempt; any other `.md` is task-level.
 STEP_ATTEMPT = re.compile(r"^(?P<step>.+)-(?P<nn>\d+)\.md$")
 
 
 def artifacts_dir(worktree: Path, task_id: str) -> Path:
-    """Adresář artefaktů tasku uvnitř worktree."""
+    """The task's artifacts directory inside the worktree."""
     return Path(worktree) / ".artifacts" / task_id
 
 
 def next_attempt(worktree: Path, task_id: str, step: str) -> tuple[int, str]:
-    """Alokuj další pokus kroku ve worktree.
+    """Allocate the next attempt of a step in the worktree.
 
-    Spočítá existující `.artifacts/<task_id>/<step>-<číslo>.md` a vrátí
-    `(NN, relpath)`, kde `NN = počet + 1` (první pokus = 1) a `relpath` je
-    relativní k worktree kořeni. Neexistující adresář → `NN = 1`.
+    Counts the existing `.artifacts/<task_id>/<step>-<number>.md` files and returns
+    `(NN, relpath)`, where `NN = count + 1` (first attempt = 1) and `relpath` is
+    relative to the worktree root. A missing directory → `NN = 1`.
     """
     directory = artifacts_dir(worktree, task_id)
     count = 0

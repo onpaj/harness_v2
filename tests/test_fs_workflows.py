@@ -32,43 +32,45 @@ def test_loads_definition_from_named_file(tmp_path):
 def test_missing_file_raises(tmp_path):
     repository = FilesystemWorkflowRepository(tmp_path)
 
-    with pytest.raises(WorkflowNotFound, match="neznamy"):
-        repository.get("neznamy")
+    with pytest.raises(WorkflowNotFound, match="unknown"):
+        repository.get("unknown")
 
 
 def test_malformed_definition_raises(tmp_path):
-    (tmp_path / "rozbity.json").write_text("{tohle neni json")
+    (tmp_path / "broken.json").write_text("{this is not json")
     repository = FilesystemWorkflowRepository(tmp_path)
 
     with pytest.raises(WorkflowNotFound):
-        repository.get("rozbity")
+        repository.get("broken")
 
 
 def test_definition_without_start_raises(tmp_path):
-    (tmp_path / "bez.json").write_text(json.dumps({"name": "bez", "transitions": []}))
+    (tmp_path / "without.json").write_text(
+        json.dumps({"name": "without", "transitions": []})
+    )
     repository = FilesystemWorkflowRepository(tmp_path)
 
     with pytest.raises(WorkflowNotFound, match="start"):
-        repository.get("bez")
+        repository.get("without")
 
 
 def test_malformed_transition_raises(tmp_path):
-    (tmp_path / "spatny.json").write_text(
+    (tmp_path / "bad.json").write_text(
         json.dumps(
-            {"name": "spatny", "start": "plan", "transitions": [{"from": "plan", "to": "review"}]}
+            {"name": "bad", "start": "plan", "transitions": [{"from": "plan", "to": "review"}]}
         )
     )
     repository = FilesystemWorkflowRepository(tmp_path)
 
     with pytest.raises(WorkflowNotFound):
-        repository.get("spatny")
+        repository.get("bad")
 
 
 def test_name_with_path_separator_is_rejected(tmp_path):
     repository = FilesystemWorkflowRepository(tmp_path)
 
     with pytest.raises(WorkflowNotFound):
-        repository.get("../tajne")
+        repository.get("../secret")
 
 
 @pytest.mark.parametrize(
@@ -82,16 +84,17 @@ def test_name_with_path_separator_is_rejected(tmp_path):
     ids=["number", "null", "list", "string-containing-start"],
 )
 def test_non_dict_top_level_raises(tmp_path, raw_json):
-    """Fuzzování odhalilo, že top-level JSON nemusí být objekt. Bez explicitní
-    kontroly by `"start" not in raw` na čísle/None spadlo na TypeError a na
-    stringu, který podřetězcem obsahuje "start" (např. "start line"), by
-    kontrola prošla a spadlo by až na AttributeError z `raw.get(...)` o kus
-    níž. Obojí muselo být odchyceno dřív a převedeno na WorkflowNotFound."""
-    (tmp_path / "spatny_tvar.json").write_text(raw_json)
+    """Fuzzing revealed that top-level JSON need not be an object. Without an
+    explicit check, `"start" not in raw` would fail with TypeError on a
+    number/None, and on a string that contains "start" as a substring (e.g.
+    "start line") the check would pass and fail only later with AttributeError
+    from `raw.get(...)` further down. Both had to be caught earlier and turned
+    into WorkflowNotFound."""
+    (tmp_path / "bad_shape.json").write_text(raw_json)
     repository = FilesystemWorkflowRepository(tmp_path)
 
     with pytest.raises(WorkflowNotFound):
-        repository.get("spatny_tvar")
+        repository.get("bad_shape")
 
 
 def test_path_separator_is_rejected_even_when_escape_target_exists(tmp_path):
@@ -104,8 +107,8 @@ def test_path_separator_is_rejected_even_when_escape_target_exists(tmp_path):
     successfully instead of raising."""
     root = tmp_path / "workflows"
     root.mkdir()
-    (tmp_path / "tajne.json").write_text(json.dumps(DEFINITION))
+    (tmp_path / "secret.json").write_text(json.dumps(DEFINITION))
     repository = FilesystemWorkflowRepository(root)
 
     with pytest.raises(WorkflowNotFound):
-        repository.get("../tajne")
+        repository.get("../secret")

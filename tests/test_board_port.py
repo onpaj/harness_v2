@@ -19,7 +19,7 @@ def test_column_lookup():
 
     assert board.column("plan").tasks[0].id == "tsk_1"
     assert board.column("done").tasks == ()
-    assert board.column("neexistuje") is None
+    assert board.column("nonexistent") is None
 
 
 def test_board_serializes_tasks_as_camelcase():

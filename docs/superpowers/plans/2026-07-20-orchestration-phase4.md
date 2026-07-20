@@ -1,34 +1,37 @@
-# Fáze 4 — konektor zdroje tasků (GitHub): Implementation Plan
+# Phase 4 — task source connector (GitHub): Implementation Plan
 
-> **For agentic workers:** implementuj task po tasku. Každý task: napiš padající
-> test → spusť (červená) → implementuj → spusť (zelená) → commit. Kroky mají
+> **For agentic workers:** implement task by task. Each task: write a failing
+> test → run it (red) → implement → run it (green) → commit. Steps have a
 > checkbox (`- [ ]`).
 
-**Goal:** Task přitéká z GitHub Issues za portem `TaskSource` (`poll` /
-`report_progress` / `finish`), jeho stav se promítá zpět změnou labelů. GitHub je
-jeden driver; filesystem/Jira jsou sourozenci. Vše za porty, které jdou vyměnit.
+**Goal:** Tasks flow in from GitHub Issues behind the `TaskSource` port (`poll` /
+`report_progress` / `finish`), and their status is projected back out by changing
+labels. GitHub is one driver; filesystem/Jira are siblings. Everything sits
+behind ports that can be swapped out.
 
 **Spec:** `docs/superpowers/specs/2026-07-20-orchestration-phase4-design.md`
 
-**Tech Stack:** Python 3.11, `pytest` + `pytest-asyncio`. **Žádná nová produkční
-závislost** — reálný GitHub client jede na stdlib `urllib.request`.
+**Tech Stack:** Python 3.11, `pytest` + `pytest-asyncio`. **No new production
+dependency** — the real GitHub client runs on stdlib `urllib.request`.
 
 ## Global Constraints
 
-- **Rozhodovací role z fáze 1–2 platí.** Consumer nevětví na outcome. Status mění
-  dispatcher. Router je čistá funkce a `data.source` **nečte**.
-- **`TaskSource` neimportuje `dispatcher`/`consumer`.** Sahá na něj jen
-  `SourcePoller` (jádro, jen porty) a `SourceReflectorSink` (driver). Wiring v
-  `app.py`. Hlídá `test_architecture.py`.
-- **Projekce ven je idempotentní a izolovaná.** `report_progress` dvakrát = no-op;
-  selhání GitHubu nesmí zastavit smyčku.
-- **Původ tasku žije v `task.data.source`**, ne ve vedlejším stavu.
-- **Testy nesahají na skutečný čas ani síť.** In-memory + `FakeClock` +
-  `FakeGithubClient`. Reálný `HttpGithubClient` se v unit sadě netestuje (jen se
-  dodá; volitelný guarded integrační test smí být `skip` bez tokenu).
-- Čas je ISO 8601 UTC se sufixem `Z`.
-- Vývoj na branchi `claude/harness-github-connector-p76esm` (instrukce sezení,
-  ne konvence z `CLAUDE.md`).
+- **The decision-making roles from phases 1–2 still hold.** The consumer does not
+  branch on outcome. The dispatcher changes status. The router is a pure function
+  and **does not read** `data.source`.
+- **`TaskSource` does not import `dispatcher`/`consumer`.** Only `SourcePoller`
+  (core, ports only) and `SourceReflectorSink` (driver) touch it. Wiring lives in
+  `app.py`. Enforced by `test_architecture.py`.
+- **The outbound projection is idempotent and isolated.** `report_progress` twice
+  = no-op; a GitHub failure must not stop the loop.
+- **A task's origin lives in `task.data.source`**, not in some side state.
+- **Tests touch neither real time nor the network.** In-memory + `FakeClock` +
+  `FakeGithubClient`. The real `HttpGithubClient` is not tested in the unit suite
+  (it's just supplied; an optional guarded integration test may `skip` without a
+  token).
+- Time is ISO 8601 UTC with a `Z` suffix.
+- Development happens on branch `claude/harness-github-connector-p76esm` (session
+  instruction, not a convention from `CLAUDE.md`).
 
 ---
 
@@ -40,51 +43,55 @@ závislost** — reálný GitHub client jede na stdlib `urllib.request`.
 **Interfaces:**
 - `Progress(step: str, summary: str = "")` — frozen.
 - `FinishResult(ok: bool, pr_url: str | None = None, summary: str = "")` — frozen.
-- `TaskSource(ABC)`: atribut `kind: str`; `poll() -> list[Task]`;
+- `TaskSource(ABC)`: attribute `kind: str`; `poll() -> list[Task]`;
   `report_progress(task, progress) -> None`; `finish(task, result) -> None`.
 - `MemoryTaskSource(TaskSource)`: `kind = "memory"`.
-  - konstruktor bere `clock`, `workflow="default"`, volitelně `repository`,
+  - the constructor takes `clock`, `workflow="default"`, optionally `repository`,
     `worktree_root="/memory/worktrees"`.
-  - `submit(title, body="") -> str` (test helper) přidá „issue" do interní fronty
-    a vrátí jeho id.
-  - `poll()`: vezme dosud nezkonzumované issue, každé označí za claimed a poskládá
+  - `submit(title, body="") -> str` (test helper) adds an "issue" to the internal
+    queue and returns its id.
+  - `poll()`: take the issues not yet consumed, mark each as claimed, and assemble
     `Task(id=new_task_id(), workflow_template=workflow, created=clock.now(),
     repository=repository, worktree=f"{worktree_root}/{id}",
     data={"title","body","source":{"kind":"memory","issue":<issue-id>}})`.
-  - `report_progress`/`finish`: zapíší do `self.states: dict[str, list]`
-    (issue-id → seznam projekcí) — pro aserce. `_mine(task)` guard podle `kind`.
+  - `report_progress`/`finish`: write into `self.states: dict[str, list]`
+    (issue-id → list of projections) — for assertions. `_mine(task)` guards on
+    `kind`.
 
-- [ ] **Step 1:** Testy — dva `submit`+`poll` dají dva tasky s `data.source.kind
-  == "memory"`; druhý `poll` bez nového submitu vrátí `[]` (claim drží);
-  `report_progress`/`finish` zapíší projekci pod správné issue-id; task cizího
-  `kind` (ručně složený) je v `report_progress` ignorován (guard).
-- [ ] **Step 2:** Červená → **Step 3:** implementace → **Step 4:** zelená.
+- [ ] **Step 1:** Tests — two `submit`+`poll` yield two tasks with
+  `data.source.kind == "memory"`; a second `poll` with no new submit returns `[]`
+  (the claim holds); `report_progress`/`finish` write the projection under the
+  right issue-id; a task of a foreign `kind` (hand-assembled) is ignored by
+  `report_progress` (guard).
+- [ ] **Step 2:** Red → **Step 3:** implementation → **Step 4:** green.
 - [ ] **Step 5:** Commit `feat: port TaskSource + in-memory driver`.
 
 ---
 
-### Task 2: `SourcePoller` (jádro)
+### Task 2: `SourcePoller` (core)
 
 **Files:** `src/harness/source_poller.py`, `tests/test_source_poller.py`.
 
 **Interfaces:**
 - `SourcePoller(*, source: TaskSource, inbox: TaskQueue, events: EventSink)`.
-- `tick() -> bool`: `tasks = source.poll()`; každý `inbox.put(task)` a
+- `tick() -> bool`: `tasks = source.poll()`; for each `inbox.put(task)` and
   `events.emit("ingested", task_id=…, queue="tasks", task=task.to_dict())`;
-  vrátí `bool(tasks)`. **Výjimku z `poll()` chytit** → `events.emit("source_error",
-  source=source.kind, error=str(e))`, vrátit `False` (smyčka pak spí a zkusí zas).
-- Importuje **jen porty** (`ports.source`, `ports.queue`, `ports.events`).
+  returns `bool(tasks)`. **Catch the exception from `poll()`** →
+  `events.emit("source_error", source=source.kind, error=str(e))`, return `False`
+  (the loop then sleeps and tries again).
+- Imports **ports only** (`ports.source`, `ports.queue`, `ports.events`).
 
-- [ ] **Step 1:** Testy s `MemoryTaskSource` + `MemoryTaskQueue` +
-  `MemoryEventSink` — po `submit`+`tick` je task v inboxu a padl event `ingested`
-  s `queue="tasks"` a `task`; prázdný poll → `tick()` False; `poll` co vyhodí →
-  `tick()` False a event `source_error` (fake source s `raises=True`).
-- [ ] **Step 2:** Červená → **Step 3:** implementace → **Step 4:** zelená.
-- [ ] **Step 5:** Commit `feat: SourcePoller plní inbox ze zdroje`.
+- [ ] **Step 1:** Tests with `MemoryTaskSource` + `MemoryTaskQueue` +
+  `MemoryEventSink` — after `submit`+`tick` the task is in the inbox and an
+  `ingested` event fired with `queue="tasks"` and `task`; an empty poll →
+  `tick()` False; a `poll` that raises → `tick()` False and a `source_error`
+  event (fake source with `raises=True`).
+- [ ] **Step 2:** Red → **Step 3:** implementation → **Step 4:** green.
+- [ ] **Step 5:** Commit `feat: SourcePoller fills the inbox from the source`.
 
 ---
 
-### Task 3: `SourceReflectorSink` (projekce ven)
+### Task 3: `SourceReflectorSink` (outbound projection)
 
 **Files:** `src/harness/drivers/source_reflector.py`,
 `tests/test_source_reflector.py`.
@@ -92,55 +99,60 @@ závislost** — reálný GitHub client jede na stdlib `urllib.request`.
 **Interfaces:**
 - `SourceReflectorSink(EventSink)`: `__init__(self, sources: list[TaskSource])`.
 - `emit(name, **fields)`:
-  - potřebuje `fields["task"]` (dict) → `Task.from_dict`; jinak return.
+  - needs `fields["task"]` (dict) → `Task.from_dict`; otherwise return.
   - `name == "dispatched"`: `progress = Progress(step=fields.get("to") or
-    fields.get("queue",""), summary="")`; pro každý source `source.report_progress(task, progress)`.
+    fields.get("queue",""), summary="")`; for each source
+    `source.report_progress(task, progress)`.
   - `name == "finished"`: `finish(task, FinishResult(ok=True))`.
   - `name == "failed"`: `finish(task, FinishResult(ok=False, summary=fields.get("reason","")))`.
-  - jiné názvy: ignoruj.
-  - routing: volej **všechny** sourcey; guard `_mine` je v adapteru (cizí `kind`
-    → no-op). Reflector sám `kind` neřeší.
-- Robustnost: `emit` nesmí propadnout výjimku ven jinak, než co odchytí
-  `CompositeEventSink` — ale sink sám drží kontrakt „nezlom se o data" (chybějící
-  pole → tichý return).
+  - other names: ignore.
+  - routing: call **all** sources; the `_mine` guard lives in the adapter (foreign
+    `kind` → no-op). The reflector itself does not deal with `kind`.
+- Robustness: `emit` must not let an exception escape other than what
+  `CompositeEventSink` catches — but the sink itself upholds the "don't break on
+  data" contract (missing field → silent return).
 
-- [ ] **Step 1:** Testy s `MemoryTaskSource` — event `dispatched` s taskem
-  (`data.source.kind=="memory"`) zavolá `report_progress` s `step` z `to`;
-  `finished` → `finish(ok=True)`; `failed` → `finish(ok=False)` s reason; event
-  bez `task` → nic; task cizího kind → source ho ignoruje (přes guard).
-- [ ] **Step 2:** Červená → **Step 3:** implementace → **Step 4:** zelená.
-- [ ] **Step 5:** Commit `feat: SourceReflectorSink promítá stav do zdroje`.
+- [ ] **Step 1:** Tests with `MemoryTaskSource` — a `dispatched` event with a task
+  (`data.source.kind=="memory"`) calls `report_progress` with `step` from `to`;
+  `finished` → `finish(ok=True)`; `failed` → `finish(ok=False)` with reason; an
+  event without `task` → nothing; a task of a foreign kind → the source ignores it
+  (via the guard).
+- [ ] **Step 2:** Red → **Step 3:** implementation → **Step 4:** green.
+- [ ] **Step 5:** Commit `feat: SourceReflectorSink projects status into the source`.
 
 ---
 
-### Task 4: Wiring + e2e na in-memory driverech
+### Task 4: Wiring + e2e on in-memory drivers
 
 **Files:** `src/harness/app.py`, `tests/test_phase4_e2e.py`,
-`tests/test_app.py` (rozšíření).
+`tests/test_app.py` (extension).
 
 **Interfaces:**
-- `build(...)` získává `sources: list[TaskSource] | None = None`.
-  - default `[]` (zpětně kompatibilní).
-  - postaví `pollers = [SourcePoller(source=s, inbox=inbox, events=events) for s in sources]`.
-  - `events` composite dostane navíc `SourceReflectorSink(sources)` — přidat do
-    `CompositeEventSink(...)` **až za** `ProjectionSink`, aby projekce ven nebyla
-    před projekcí do boardu (na pořadí nezáleží funkčně, ale drž to čitelné).
-  - `Harness` dostane `pollers`; `run()` je gatheruje vedle dispatcheru/consumerů
-    (`_source_loop(poller, poll_interval, stop)` — tik/spánek jako ostatní smyčky).
-- `Harness.__init__` bere `pollers: list[SourcePoller]` (default `[]`).
+- `build(...)` gains `sources: list[TaskSource] | None = None`.
+  - default `[]` (backward compatible).
+  - builds `pollers = [SourcePoller(source=s, inbox=inbox, events=events) for s in sources]`.
+  - the `events` composite additionally receives `SourceReflectorSink(sources)` —
+    add it to `CompositeEventSink(...)` **after** `ProjectionSink`, so the outbound
+    projection doesn't run before the board projection (order doesn't matter
+    functionally, but keep it readable).
+  - `Harness` receives `pollers`; `run()` gathers them alongside the
+    dispatcher/consumers (`_source_loop(poller, poll_interval, stop)` — tick/sleep
+    like the other loops).
+- `Harness.__init__` takes `pollers: list[SourcePoller]` (default `[]`).
 
-- [ ] **Step 1:** E2E — `MemoryTaskSource.submit("Fix bug")`; `build` s tímto
+- [ ] **Step 1:** E2E — `MemoryTaskSource.submit("Fix bug")`; `build` with this
   source, in-memory workspace/artifacts/forge, `FakeClock`, `ScriptedBehavior`
-  (nebo Dummy). Pusť smyčku (vzor z `test_phase2_e2e.py` — omezený počet tiků /
-  `stop`). Ověř:
-  - task doputoval do `done`;
-  - `source.states[issue]` obsahuje aspoň jednu `report_progress` a jeden
+  (or Dummy). Run the loop (pattern from `test_phase2_e2e.py` — a bounded number of
+  ticks / `stop`). Verify:
+  - the task made it to `done`;
+  - `source.states[issue]` contains at least one `report_progress` and one
     `finish(ok=True)`;
-  - task nesl `data.source.kind == "memory"` celou cestu (projekce ven proběhla).
-  - Kontrola zpětné kompatibility: task vložený přímo do inboxu (bez source)
-    doteče taky a `source.states` o něm nic nemá.
-- [ ] **Step 2:** Červená → **Step 3:** wiring → **Step 4:** zelená (celá sada).
-- [ ] **Step 5:** Commit `feat: wiring fáze 4 — poller a reflector v běhu`.
+  - the task carried `data.source.kind == "memory"` the whole way (the outbound
+    projection ran).
+  - Backward-compatibility check: a task put directly into the inbox (with no
+    source) also flows through and `source.states` knows nothing about it.
+- [ ] **Step 2:** Red → **Step 3:** wiring → **Step 4:** green (whole suite).
+- [ ] **Step 5:** Commit `feat: phase 4 wiring — poller and reflector in the run loop`.
 
 ---
 
@@ -151,31 +163,32 @@ závislost** — reálný GitHub client jede na stdlib `urllib.request`.
 
 **Interfaces:**
 - `Issue(number, title, body, url, labels: tuple[str,...])` — frozen; `labels`
-  je tuple.
+  is a tuple.
 - `GithubClient(ABC)`: `list_issues(repo, *, label) -> list[Issue]`;
   `add_label(repo, number, label)`; `remove_label(repo, number, label)`
-  (idempotentní — chybějící label je no-op).
-- `FakeGithubClient`: issue drží v `dict[int, Issue]` (seedni v konstruktoru nebo
-  `add_issue`); `list_issues` vrátí ty se `label` v `labels`; add/remove přeskládají
-  `labels` (frozen → nová instance přes `replace`). `remove_label` chybějícího
-  ignoruje.
+  (idempotent — a missing label is a no-op).
+- `FakeGithubClient`: holds issues in `dict[int, Issue]` (seed in the constructor
+  or via `add_issue`); `list_issues` returns those with `label` in `labels`;
+  add/remove rebuild `labels` (frozen → new instance via `replace`). `remove_label`
+  ignores a missing one.
 - `HttpGithubClient(token, *, api="https://api.github.com", opener=None)`:
   - `urllib.request` (stdlib). Header `Authorization: Bearer <token>`,
     `Accept: application/vnd.github+json`.
   - `list_issues`: `GET {api}/repos/{repo}/issues?state=open&labels={label}` →
-    mapuj JSON na `Issue` (pozor: PR jsou taky „issues" — odfiltruj ty s klíčem
-    `pull_request`).
-  - `add_label`: `POST …/issues/{n}/labels` s `{"labels":[label]}`.
-  - `remove_label`: `DELETE …/issues/{n}/labels/{label}`; 404 spolkni.
-  - `opener` injektovatelný, ať jde otestovat bez sítě (fake opener vrátí
-    připravené odpovědi). **Reálné HTTP se v CI nevolá.**
+    map JSON to `Issue` (careful: PRs are also "issues" — filter out those with a
+    `pull_request` key).
+  - `add_label`: `POST …/issues/{n}/labels` with `{"labels":[label]}`.
+  - `remove_label`: `DELETE …/issues/{n}/labels/{label}`; swallow 404.
+  - `opener` injectable, so it can be tested without the network (a fake opener
+    returns canned responses). **Real HTTP is never called in CI.**
 
-- [ ] **Step 1:** Testy — `FakeGithubClient`: `list_issues` filtruje podle labelu;
-  add/remove mění `labels`; remove neexistujícího je no-op. `HttpGithubClient`
-  s fake `opener`: `list_issues` odfiltruje PR a namapuje pole; `add`/`remove`
-  sestaví správnou metodu+URL+tělo (asertuj na zachycený request z fake openeru).
-- [ ] **Step 2:** Červená → **Step 3:** implementace → **Step 4:** zelená.
-- [ ] **Step 5:** Commit `feat: GithubClient + fake a stdlib http driver`.
+- [ ] **Step 1:** Tests — `FakeGithubClient`: `list_issues` filters by label;
+  add/remove change `labels`; removing a nonexistent one is a no-op.
+  `HttpGithubClient` with a fake `opener`: `list_issues` filters out PRs and maps
+  the fields; `add`/`remove` build the right method+URL+body (assert against the
+  request captured by the fake opener).
+- [ ] **Step 2:** Red → **Step 3:** implementation → **Step 4:** green.
+- [ ] **Step 5:** Commit `feat: GithubClient + fake and stdlib http driver`.
 
 ---
 
@@ -193,7 +206,7 @@ závislost** — reálný GitHub client jede na stdlib `urllib.request`.
 - `_managed`: `{claimed_label, pr_label, failed_label, *step_labels.values()}`.
 - `poll()`: `for issue in client.list_issues(repo, label=select_label):`
   `client.remove_label(repo, issue.number, select_label)`;
-  `client.add_label(repo, issue.number, claimed_label)`; poskládej `Task` s
+  `client.add_label(repo, issue.number, claimed_label)`; assemble a `Task` with
   `data={"title":issue.title,"body":issue.body,
   "source":{"kind":"github","repo":repo,"issue":issue.number,"url":issue.url}}`.
 - `report_progress(task, progress)`: `if not _mine: return`;
@@ -205,60 +218,61 @@ závislost** — reálný GitHub client jede na stdlib `urllib.request`.
 - `_mine(task)`: `task.data.get("source",{}).get("kind") == "github"`;
   `_issue(task)`: `task.data["source"]["issue"]`.
 
-- [ ] **Step 1:** Testy s `FakeGithubClient` (seed issue #1 s `harness:todo`):
-  - `poll()` → issue #1 má `harness:queued` a ne `todo`; task má `data.source.issue==1`.
-  - druhý `poll()` (žádné nové `todo`) → `[]`.
-  - `report_progress(task, Progress("development"))` se `step_labels={"development":
-    "harness:coding"}` → issue má `harness:coding`, ne `queued`.
-  - neznámý krok (není v `step_labels`) → labely beze změny (coarse default).
+- [ ] **Step 1:** Tests with `FakeGithubClient` (seed issue #1 with `harness:todo`):
+  - `poll()` → issue #1 has `harness:queued` and not `todo`; the task has
+    `data.source.issue==1`.
+  - a second `poll()` (no new `todo`) → `[]`.
+  - `report_progress(task, Progress("development"))` with `step_labels={"development":
+    "harness:coding"}` → the issue has `harness:coding`, not `queued`.
+  - an unknown step (not in `step_labels`) → labels unchanged (coarse default).
   - `finish(ok=True)` → `harness:pr-open`; `finish(ok=False)` → `harness:failed`;
-    vždy právě jeden managed label.
-  - task bez `data.source` → `report_progress`/`finish` no-op (guard).
-- [ ] **Step 2:** Červená → **Step 3:** implementace → **Step 4:** zelená.
-- [ ] **Step 5:** Commit `feat: GithubTaskSource — issue → task, stav → label`.
+    always exactly one managed label.
+  - a task without `data.source` → `report_progress`/`finish` no-op (guard).
+- [ ] **Step 2:** Red → **Step 3:** implementation → **Step 4:** green.
+- [ ] **Step 5:** Commit `feat: GithubTaskSource — issue → task, status → label`.
 
 ---
 
-### Task 7: CLI, architektura, smoke, dokumentace
+### Task 7: CLI, architecture, smoke, documentation
 
 **Files:** `src/harness/cli.py`, `tests/test_architecture.py`,
-`tests/test_smoke_github.py` (nový), `CLAUDE.md`.
+`tests/test_smoke_github.py` (new), `CLAUDE.md`.
 
 **Interfaces:**
-- `cli.py run`: přidej `--github-repo`, `--github-label` (default `harness:todo`),
-  `--github-workflow` (default `default`), `--worktree-root`. Když je
-  `--github-repo` a `GITHUB_TOKEN` v env, sestav
+- `cli.py run`: add `--github-repo`, `--github-label` (default `harness:todo`),
+  `--github-workflow` (default `default`), `--worktree-root`. When `--github-repo`
+  and `GITHUB_TOKEN` are in the env, build
   `GithubTaskSource(client=HttpGithubClient(token), clock=SystemClock(), repo=…,
-  repository=<repo lokální cesta>, worktree_root=…, step_labels=<default map pro
-  DEFAULT_DEFINITION kroky>)` a předej `build(..., sources=[source])`. Bez toho
-  `sources=[]` (beze změny chování).
-- Default `step_labels` pro výchozí workflow: rozumná coarse mapa, např.
+  repository=<local repo path>, worktree_root=…, step_labels=<default map for
+  DEFAULT_DEFINITION steps>)` and pass `build(..., sources=[source])`. Without that,
+  `sources=[]` (behavior unchanged).
+- Default `step_labels` for the default workflow: a reasonable coarse map, e.g.
   `{"development":"harness:in-progress","review":"harness:in-review","land":"harness:landing"}`
-  (ostatní kroky bez labelu → míň šumu; je to jen default, ne zákon).
+  (other steps with no label → less noise; it's just a default, not law).
 
-- [ ] **Step 1 (architektura):** rozšiř `test_architecture.py`:
-  - `dispatcher.py`/`consumer.py` neimportují `harness.ports.source`
-    (přidej `ports.source` do kontroly, nebo nový test analogický `WORK_PORTS`).
-  - `source_poller.py` importuje jen `harness.ports.*` + `harness.models`
-    (žádný `harness.drivers`).
-  - `test_only_app_and_cli_wire_drivers` musí projít i s novými moduly (source_poller
-    je top-level a drivery neimportuje).
-- [ ] **Step 2 (smoke):** `tests/test_smoke_github.py` — plně in-memory až na
-  záměr fáze: `FakeGithubClient` se seedovaným issue `harness:todo`,
+- [ ] **Step 1 (architecture):** extend `test_architecture.py`:
+  - `dispatcher.py`/`consumer.py` do not import `harness.ports.source`
+    (add `ports.source` to the check, or a new test analogous to `WORK_PORTS`).
+  - `source_poller.py` imports only `harness.ports.*` + `harness.models`
+    (no `harness.drivers`).
+  - `test_only_app_and_cli_wire_drivers` must still pass with the new modules
+    (source_poller is top-level and imports no drivers).
+- [ ] **Step 2 (smoke):** `tests/test_smoke_github.py` — fully in-memory except for
+  the phase's intent: `FakeGithubClient` with a seeded `harness:todo` issue,
   `GithubTaskSource`, in-memory workspace/artifacts/forge, `FakeClock`,
-  `ScriptedBehavior`. Pusť smyčku (krátce, jako phase2 e2e — **bez reálného
-  spánku**, přes omezený počet tiků / `stop`). Ověř konečný stav: issue má
-  `harness:pr-open`, task v `done/`. (Tenhle smoke **nesahá na síť ani disk** —
-  je to e2e konektoru, ne reálného GitHubu.)
-- [ ] **Step 3 (docs):** `CLAUDE.md` — mapa modulů o `ports/source`,
-  `source_poller`, `source_reflector`, `github_*`; invarianty 13–16; sekce
-  „Co je za co zodpovědné" o `TaskSource` a projekci ven.
-- [ ] **Step 4:** `.venv/bin/pytest -q` — celá sada zelená.
-- [ ] **Step 5:** Commit `docs+test: architektura, smoke a CLAUDE.md pro fázi 4`.
+  `ScriptedBehavior`. Run the loop (briefly, like the phase2 e2e — **no real
+  sleep**, via a bounded number of ticks / `stop`). Verify the final state: the
+  issue has `harness:pr-open`, the task is in `done/`. (This smoke **touches
+  neither network nor disk** — it's an e2e of the connector, not of real GitHub.)
+- [ ] **Step 3 (docs):** `CLAUDE.md` — module map for `ports/source`,
+  `source_poller`, `source_reflector`, `github_*`; invariants 13–16; the "What is
+  responsible for what" section on `TaskSource` and the outbound projection.
+- [ ] **Step 4:** `.venv/bin/pytest -q` — whole suite green.
+- [ ] **Step 5:** Commit `docs+test: architecture, smoke and CLAUDE.md for phase 4`.
 
 ---
 
-## Pořadí a závislosti
+## Ordering and dependencies
 
 ```
 T1 (TaskSource + Memory) ─┬─> T2 (SourcePoller) ─┐
@@ -266,18 +280,21 @@ T1 (TaskSource + Memory) ─┬─> T2 (SourcePoller) ─┐
 T5 (GithubClient) ─────────> T6 (GithubTaskSource) ────────────────────┴─> T7 (CLI+arch+smoke+docs)
 ```
 
-T1 je základ (port + memory driver). T2/T3 stojí na T1 a jdou paralelně, ale oba
-sahají na testy s `MemoryTaskSource` — psát sériově kvůli sdílenému `memory.py`.
-T4 spojuje smyčku. T5/T6 jsou GitHub větev nezávislá na T2–T4 až do T7. T7 uzavírá
-(CLI vdrátuje reálný client, architektura + smoke + docs).
+T1 is the foundation (port + memory driver). T2/T3 build on T1 and go in parallel,
+but both touch tests with `MemoryTaskSource` — write them serially because of the
+shared `memory.py`. T4 joins the loop. T5/T6 are the GitHub branch, independent of
+T2–T4 until T7. T7 closes it out (the CLI wires the real client, architecture +
+smoke + docs).
 
-## Poznámky pro implementaci
+## Notes for implementation
 
-- **`memory.py` needituj paralelně s jiným taskem** — T1 do něj přidává
-  `MemoryTaskSource`; ostatní se ho nedotýkají.
-- **Reflector čte `to` i `queue`.** `dispatched` nese `from`/`to` (viz
-  `dispatcher._move`); `queue` je taky přítomné. Ber `to` a `queue` jako fallback.
-- **`CompositeEventSink` izoluje selhání** — projekce ven se nemusí bát, že shodí
-  smyčku, ale i tak drž `report_progress` idempotentní (reconcile zadarmo).
-- **Žádná nová produkční závislost.** `HttpGithubClient` = `urllib.request` +
-  `json`. Kdyby to svádělo k `requests`/`httpx`, nedělej to.
+- **Don't edit `memory.py` in parallel with another task** — T1 adds
+  `MemoryTaskSource` to it; the others don't touch it.
+- **The reflector reads both `to` and `queue`.** `dispatched` carries `from`/`to`
+  (see `dispatcher._move`); `queue` is present too. Take `to`, with `queue` as a
+  fallback.
+- **`CompositeEventSink` isolates failures** — the outbound projection needn't fear
+  bringing down the loop, but keep `report_progress` idempotent anyway (reconcile
+  for free).
+- **No new production dependency.** `HttpGithubClient` = `urllib.request` + `json`.
+  If you're tempted to reach for `requests`/`httpx`, don't.

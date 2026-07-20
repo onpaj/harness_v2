@@ -1,70 +1,73 @@
-# Fáze 2 — artefakty, worktree a landing: Implementation Plan
+# Phase 2 — artifacts, worktree, and landing: Implementation Plan
 
-> **For agentic workers:** implementuj task po tasku. Každý task: napiš padající
-> test → spusť (červená) → implementuj → spusť (zelená) → commit. Kroky mají
+> **For agentic workers:** implement task by task. Each task: write a failing
+> test → run it (red) → implement → run it (green) → commit. Steps have a
 > checkbox (`- [ ]`).
 
-**Goal:** Task pracuje ve worktree pojmenovaném v tasku, produkuje artefakty do
-harnessové složky, commituje po fázích se smysluplnou zprávou a na konci otevře
-PR — vše za porty, které jdou vyměnit za driver.
+**Goal:** A task works in a worktree named in the task, produces artifacts into a
+harness folder, commits per phase with a meaningful message, and at the end opens
+a PR — all behind ports that can be swapped for a driver.
 
 **Spec:** `docs/superpowers/specs/2026-07-20-orchestration-phase2-design.md`
 
-**Tech Stack:** Python 3.11, `pytest` + `pytest-asyncio`. Runtime přidává jen to,
-co už fáze 1 má (FastAPI/uvicorn/jinja2 pro board). Git driver volá systémový
-`git` přes `subprocess` — žádná nová produkční závislost.
+**Tech Stack:** Python 3.11, `pytest` + `pytest-asyncio`. The runtime adds only
+what phase 1 already has (FastAPI/uvicorn/jinja2 for the board). The git driver
+calls the system `git` via `subprocess` — no new production dependency.
 
 ## Global Constraints
 
-- **Rozhodovací role z fáze 1 platí.** Consumer nevětví na hodnotě outcome.
-  Status mění dispatcher. `lastOutcome` zapisuje consumer.
-- **`repository`/`worktree` čte jen behavior.** Router/dispatcher pořád jen
-  `(status, lastOutcome)`.
-- **Commit dělá behavior driver, ne consumer, ne LLM.**
-- **Dispatcher/consumer neimportují `Workspace`/`Forge`/`ArtifactStore`.** Wiring
-  je v `app.py`. `api/` sahá jen na `ArtifactView`. Hlídá `test_architecture.py`.
-- **Artefakty jsou attempt-indexed** — re-run kroku nepřepíše předchozí pokus.
-- **Testy nesahají na skutečný čas.** Real-driver testy (git, fs) smějí použít
-  `tmp_path` — stejně jako `test_fs_queue.py` ve fázi 1.
-- Čas je ISO 8601 UTC se sufixem `Z`.
-- Vývoj na branchi `claude/harness-phase-two-brainstorm-6u384o` (ne přímo main —
-  pro tuto fázi platí instrukce sezení, ne konvence z `CLAUDE.md`).
+- **The decision-making roles from phase 1 still hold.** The consumer does not
+  branch on the outcome value. The dispatcher changes status. `lastOutcome` is
+  written by the consumer.
+- **`repository`/`worktree` is read only by the behavior.** Router/dispatcher
+  still only `(status, lastOutcome)`.
+- **The commit is done by the behavior driver, not the consumer, not the LLM.**
+- **Dispatcher/consumer do not import `Workspace`/`Forge`/`ArtifactStore`.** Wiring
+  lives in `app.py`. `api/` touches only `ArtifactView`. Enforced by `test_architecture.py`.
+- **Artifacts are attempt-indexed** — a re-run of a step does not overwrite the
+  previous attempt.
+- **Tests do not touch real time.** Real-driver tests (git, fs) may use
+  `tmp_path` — just like `test_fs_queue.py` in phase 1.
+- Time is ISO 8601 UTC with a `Z` suffix.
+- Development on branch `claude/harness-phase-two-brainstorm-6u384o` (not directly
+  main — for this phase the session's instructions apply, not the convention from
+  `CLAUDE.md`).
 
 ---
 
-### Task 1: `BehaviorResult` a `summary` v historii
+### Task 1: `BehaviorResult` and `summary` in history
 
-Behavior přestává vracet holý `Outcome`. Cross-cutting změna, po které musí být
-celá sada zase zelená.
+The behavior stops returning a bare `Outcome`. A cross-cutting change, after which
+the whole suite must be green again.
 
 **Files:** `src/harness/models.py`, `src/harness/ports/behavior.py`,
 `src/harness/consumer.py`, `src/harness/drivers/memory.py`,
-`src/harness/drivers/dummy_behavior.py`, dotčené testy.
+`src/harness/drivers/dummy_behavior.py`, affected tests.
 
 **Interfaces:**
-- `BehaviorResult(outcome: Outcome, summary: str = "")` — frozen dataclass v `models.py`.
-- `HistoryEntry` získává `summary: str | None = None`; `to_dict` ho přidá, jen
-  když není `None`; `from_dict` čte `raw.get("summary")`.
+- `BehaviorResult(outcome: Outcome, summary: str = "")` — frozen dataclass in `models.py`.
+- `HistoryEntry` gains `summary: str | None = None`; `to_dict` adds it only when
+  it is not `None`; `from_dict` reads `raw.get("summary")`.
 - `ConsumerBehavior.run(task) -> BehaviorResult`.
-- Consumer: `result = await behavior.run(task)`; validace
+- Consumer: `result = await behavior.run(task)`; validation
   `isinstance(result, BehaviorResult) and isinstance(result.outcome, Outcome)`;
-  jinak `_fail(...)`. `_deliver` zapíše `last_outcome=result.outcome.value` a
+  otherwise `_fail(...)`. `_deliver` writes `last_outcome=result.outcome.value` and
   `HistoryEntry(..., outcome=result.outcome.value, summary=result.summary or None)`.
-  Event `consumed` dostane `summary=result.summary`.
-- `ScriptedBehavior` a `DummyBehavior` vracejí `BehaviorResult` (Scripted:
-  `BehaviorResult(outcome, summary=f"{step}")` stačí; Dummy zatím
-  `BehaviorResult(Outcome.DONE, "hotovo")`).
+  The `consumed` event gets `summary=result.summary`.
+- `ScriptedBehavior` and `DummyBehavior` return `BehaviorResult` (Scripted:
+  `BehaviorResult(outcome, summary=f"{step}")` is enough; Dummy for now
+  `BehaviorResult(Outcome.DONE, "done")`).
 
-- [ ] **Step 1:** Testy — `test_models.py`: `BehaviorResult` drží pole;
-  `HistoryEntry` se `summary` roundtripuje a bez summary klíč vynechá.
-  `test_consumer.py`: po ticku nese `inbox` řádek historie se `summary`;
-  neplatný návrat (ne `BehaviorResult`) → `failed/`. Uprav existující consumer
-  testy na nový návratový typ.
-- [ ] **Step 2:** Červená.
-- [ ] **Step 3:** Implementuj napříč soubory. Consumer smí zapsat summary — pořád
-  žádná větev na *hodnotě* outcome (invariant test to ověří).
-- [ ] **Step 4:** `.venv/bin/pytest -q` — celá sada zelená.
-- [ ] **Step 5:** Commit `feat: behavior vrací BehaviorResult (outcome + summary)`.
+- [ ] **Step 1:** Tests — `test_models.py`: `BehaviorResult` holds the fields;
+  `HistoryEntry` with `summary` round-trips and without summary omits the key.
+  `test_consumer.py`: after a tick the `inbox` carries a history entry with
+  `summary`; an invalid return (not a `BehaviorResult`) → `failed/`. Adjust the
+  existing consumer tests to the new return type.
+- [ ] **Step 2:** Red.
+- [ ] **Step 3:** Implement across the files. The consumer may write summary — still
+  no branch on the *value* of the outcome (the invariant test verifies this).
+- [ ] **Step 4:** `.venv/bin/pytest -q` — whole suite green.
+- [ ] **Step 5:** Commit `feat: behavior returns BehaviorResult (outcome + summary)`.
 
 ---
 
@@ -78,16 +81,16 @@ celá sada zase zelená.
 - `ArtifactView(ABC)`: `list(task_id) -> tuple[ArtifactRef, ...]`,
   `read(task_id, step, attempt, name) -> str | None`.
 - `ArtifactSlot(ABC)`: `attempt: int`, `put(name: str, content: str) -> None`.
-- `ArtifactStore(ArtifactView)`: `begin(task_id, step) -> ArtifactSlot` — alokuje
-  **další** attempt (0,1,2,…) pro dvojici `(task_id, step)`.
-- `MemoryArtifactStore` implementuje vše nad dictem.
+- `ArtifactStore(ArtifactView)`: `begin(task_id, step) -> ArtifactSlot` — allocates
+  the **next** attempt (0,1,2,…) for the pair `(task_id, step)`.
+- `MemoryArtifactStore` implements everything over a dict.
 
-- [ ] **Step 1:** Testy — `begin` dvakrát pro tentýž `(task, step)` dá attempt 0
-  a 1; `put`+`read` roundtrip; `list` vrátí všechny refy napříč kroky/pokusy;
-  `read` neexistujícího → `None`.
-- [ ] **Step 2:** Červená.
-- [ ] **Step 3:** Implementuj port + `MemoryArtifactStore`.
-- [ ] **Step 4:** Zelená.
+- [ ] **Step 1:** Tests — `begin` twice for the same `(task, step)` gives attempt 0
+  and 1; `put`+`read` round-trip; `list` returns all refs across steps/attempts;
+  `read` of a nonexistent one → `None`.
+- [ ] **Step 2:** Red.
+- [ ] **Step 3:** Implement the port + `MemoryArtifactStore`.
+- [ ] **Step 4:** Green.
 - [ ] **Step 5:** Commit `feat: port ArtifactStore/ArtifactView + in-memory driver`.
 
 ---
@@ -101,16 +104,16 @@ celá sada zase zelená.
 - `WorkspaceHandle(ABC)`: `path` (str/Path), `branch: str`,
   `commit(message: str) -> str | None`.
 - `Workspace(ABC)`: `attach(task: Task) -> WorkspaceHandle`.
-- `MemoryWorkspace`: `attach` vrátí handle s `branch=f"harness/{task.id}"` a
-  fiktivní `path`; `commit` zaznamená zprávu do `handle.commits: list[str]` a
-  vrátí fiktivní sha `f"sha{len(commits)}"`; „nic k commitu" simulovat nemusí
-  (na to je git driver test). `MemoryWorkspace.handles` drží vydané handly pro
-  aserce v testech.
+- `MemoryWorkspace`: `attach` returns a handle with `branch=f"harness/{task.id}"` and
+  a fictitious `path`; `commit` records the message into `handle.commits: list[str]` and
+  returns a fictitious sha `f"sha{len(commits)}"`; "nothing to commit" need not be
+  simulated (that's what the git driver test is for). `MemoryWorkspace.handles` holds
+  the issued handles for assertions in tests.
 
-- [ ] **Step 1:** Testy — `attach` dá branch odvozený z task.id; opětovný
-  `attach` téhož tasku vrátí handle se stejnou branch (znovupoužití); `commit`
-  zaznamená zprávu a vrátí sha.
-- [ ] **Step 2:** Červená → **Step 3:** implementace → **Step 4:** zelená.
+- [ ] **Step 1:** Tests — `attach` gives a branch derived from task.id; a repeat
+  `attach` of the same task returns a handle with the same branch (reuse); `commit`
+  records the message and returns a sha.
+- [ ] **Step 2:** Red → **Step 3:** implementation → **Step 4:** green.
 - [ ] **Step 5:** Commit `feat: port Workspace + in-memory driver`.
 
 ---
@@ -123,17 +126,17 @@ celá sada zase zelená.
 **Interfaces:**
 - `PullRequest(number: int, url: str, branch: str, title: str)` — frozen.
 - `Forge(ABC)`: `open_pull_request(task, *, branch, title, body) -> PullRequest`.
-- `MemoryForge`: zaznamená PR do `self.opened: list[dict]`; **idempotence** —
-  druhé volání pro stejnou `branch` vrátí stávající PR (stejné číslo).
+- `MemoryForge`: records the PR into `self.opened: list[dict]`; **idempotence** —
+  a second call for the same `branch` returns the existing PR (same number).
 
-- [ ] **Step 1:** Testy — otevření PR vrátí číslo/url/branch/titul a zaznamená;
-  druhé volání stejné branch nevytvoří nový, vrátí týž.
-- [ ] **Step 2:** Červená → **Step 3:** implementace → **Step 4:** zelená.
-- [ ] **Step 5:** Commit `feat: port Forge + in-memory driver s idempotencí PR`.
+- [ ] **Step 1:** Tests — opening a PR returns number/url/branch/title and records it;
+  a second call for the same branch does not create a new one, returns the same one.
+- [ ] **Step 2:** Red → **Step 3:** implementation → **Step 4:** green.
+- [ ] **Step 5:** Commit `feat: port Forge + in-memory driver with PR idempotence`.
 
 ---
 
-### Task 5: DummyBehavior fáze 2
+### Task 5: DummyBehavior phase 2
 
 **Files:** `src/harness/drivers/dummy_behavior.py`, `tests/test_dummy_behavior.py`.
 
@@ -144,20 +147,20 @@ celá sada zase zelená.
   1. `handle = workspace.attach(task)`
   2. `slot = artifacts.begin(task.id, task.status)`
   3. `slot.put(f"{task.status}.md", f"# {task.status}\n\n{summary}\n")`
-  4. `handle.commit(f"[{task.status}] {summary}")` (dummy může do worktree nic
-     needitovat; commit u mem driveru jen zaznamená zprávu — u git driveru je
-     „nic k commitu" povolené a vrátí `None`).
+  4. `handle.commit(f"[{task.status}] {summary}")` (the dummy may edit nothing in the
+     worktree; on the mem driver commit just records the message — on the git driver
+     "nothing to commit" is allowed and returns `None`).
   5. `return BehaviorResult(outcome, summary)`.
-- `summary` je deterministické, např. `f"{task.status}: hotovo"` a pro
-  request_changes `f"{task.status}: vyžádány změny"`.
-- request_changes-once logika z fáze 1 zůstává.
+- `summary` is deterministic, e.g. `f"{task.status}: done"` and for
+  request_changes `f"{task.status}: changes requested"`.
+- The request_changes-once logic from phase 1 stays.
 
-- [ ] **Step 1:** Testy s `MemoryWorkspace`+`MemoryArtifactStore` — po `run`
-  existuje artefakt `<task>/<step>/0/<step>.md`; workspace zaznamenal commit se
-  zprávou začínající `[<step>]`; návrat je `BehaviorResult` se summary;
-  request_changes-once vrátí REQUEST_CHANGES jen poprvně.
-- [ ] **Step 2:** Červená → **Step 3:** implementace → **Step 4:** zelená.
-- [ ] **Step 5:** Commit `feat: DummyBehavior píše artefakt a commituje práci`.
+- [ ] **Step 1:** Tests with `MemoryWorkspace`+`MemoryArtifactStore` — after `run`
+  an artifact `<task>/<step>/0/<step>.md` exists; the workspace recorded a commit
+  with a message starting with `[<step>]`; the return is a `BehaviorResult` with a
+  summary; request_changes-once returns REQUEST_CHANGES only the first time.
+- [ ] **Step 2:** Red → **Step 3:** implementation → **Step 4:** green.
+- [ ] **Step 5:** Commit `feat: DummyBehavior writes an artifact and commits the work`.
 
 ---
 
@@ -171,135 +174,135 @@ celá sada zase zelená.
   dest="docs/tasks")`.
 - `run(task)`:
   1. `handle = workspace.attach(task)`
-  2. Pro každý `ArtifactRef` z `artifacts.list(task.id)` zapiš obsah do
-     `handle.path / dest / task.id / step / attempt / name` (u mem workspace stačí
-     zaznamenat „přiklopené" cesty — viz níže) a `handle.commit("[land] artefakty tasku")`.
-  3. `body = _compose_body(task.history)` — agregace `summary` z consumer řádků.
+  2. For each `ArtifactRef` from `artifacts.list(task.id)` write the content to
+     `handle.path / dest / task.id / step / attempt / name` (on the mem workspace it's
+     enough to record the "landed" paths — see below) and `handle.commit("[land] task artifacts")`.
+  3. `body = _compose_body(task.history)` — aggregation of `summary` from consumer entries.
   4. `pr = forge.open_pull_request(task, branch=handle.branch,
      title=_title(task), body=body)`
-  5. `return BehaviorResult(Outcome.DONE, f"otevřen PR {pr.url}")`.
-- `MemoryWorkspace.WorkspaceHandle` dostane `staged: list[tuple[str,str]]` pro
-  aserci přiklopených souborů (cesta, obsah), aby landing šel testovat bez disku.
+  5. `return BehaviorResult(Outcome.DONE, f"opened PR {pr.url}")`.
+- `MemoryWorkspace.WorkspaceHandle` gets `staged: list[tuple[str,str]]` for
+  asserting the landed files (path, content), so that landing can be tested without disk.
 
-- [ ] **Step 1:** Testy — po `run` forge eviduje jeden PR pro branch tasku;
-  tělo PR obsahuje summary z historie; handle má přiklopené artefakty; návrat
-  nese url PR. Idempotence: druhý `run` nevytvoří druhý PR.
-- [ ] **Step 2:** Červená → **Step 3:** implementace → **Step 4:** zelená.
-- [ ] **Step 5:** Commit `feat: LandingBehavior přiklopí artefakty a otevře PR`.
+- [ ] **Step 1:** Tests — after `run` the forge records one PR for the task's branch;
+  the PR body contains the summaries from history; the handle has the landed artifacts;
+  the return carries the PR url. Idempotence: a second `run` does not create a second PR.
+- [ ] **Step 2:** Red → **Step 3:** implementation → **Step 4:** green.
+- [ ] **Step 5:** Commit `feat: LandingBehavior lands artifacts and opens a PR`.
 
 ---
 
-### Task 7: Wiring, `land` krok a e2e
+### Task 7: Wiring, `land` step, and e2e
 
 **Files:** `src/harness/app.py`, `src/harness/cli.py`,
 `tests/test_app.py` / `tests/test_phase2_e2e.py`.
 
 **Interfaces:**
-- `build(...)` staví `ArtifactStore`, `Workspace`, `Forge` (fáze 2 default:
-  in-memory pro `build` bez rootu není — pro fs běh git+fs+fake). Přidej
-  parametry `workspace`, `artifacts`, `forge`, `landing_step="land"`.
-- Per-step behavior: consumer kroku `landing_step` dostane `LandingBehavior`,
-  ostatní `DummyBehavior`. `build` sestaví `behaviors: dict[str, ConsumerBehavior]`
-  a předá každému consumeru ten jeho.
-- Výchozí workflow v `cli.py` (`DEFAULT_DEFINITION`) dostane `land` mezi `review`
-  a `end`.
-- Consumer konstruktor: přidej `behavior` per instance (už teď ho bere) — jen
-  wiring předá různé.
+- `build(...)` builds `ArtifactStore`, `Workspace`, `Forge` (phase 2 default:
+  in-memory for `build` without a root does not exist — for an fs run it's git+fs+fake).
+  Add the parameters `workspace`, `artifacts`, `forge`, `landing_step="land"`.
+- Per-step behavior: the consumer of the `landing_step` step gets `LandingBehavior`,
+  the others `DummyBehavior`. `build` assembles `behaviors: dict[str, ConsumerBehavior]`
+  and passes each consumer its own.
+- The default workflow in `cli.py` (`DEFAULT_DEFINITION`) gets `land` between `review`
+  and `end`.
+- Consumer constructor: add `behavior` per instance (it already takes it) — only
+  the wiring passes different ones.
 
-- [ ] **Step 1:** E2E test na in-memory driverech (Memory Workspace/Artifacts/
-  Forge, FakeClock, ScriptedBehavior nahradí Dummy tam, kde je potřeba řídit
-  smyčku — ale pro artefakty/commity použij Dummy). Task proteče
-  `plan→…→review→land→end`; jedna `request_changes` smyčka. Ověř:
-  - task skončí v `done`;
-  - artefakty mají druhý attempt u `development` i `review`;
-  - workspace nese per-fázové commity;
-  - forge eviduje právě jeden PR;
-  - historie nese `summary` u consumer řádků.
-- [ ] **Step 2:** Červená → **Step 3:** wiring → **Step 4:** zelená (celá sada).
-- [ ] **Step 5:** Commit `feat: wiring fáze 2, krok land a e2e průtok`.
+- [ ] **Step 1:** E2E test on in-memory drivers (Memory Workspace/Artifacts/
+  Forge, FakeClock, ScriptedBehavior replaces Dummy where the loop needs to be
+  steered — but for artifacts/commits use Dummy). The task flows through
+  `plan→…→review→land→end`; one `request_changes` loop. Verify:
+  - the task ends in `done`;
+  - the artifacts have a second attempt at both `development` and `review`;
+  - the workspace carries per-phase commits;
+  - the forge records exactly one PR;
+  - the history carries `summary` on the consumer entries.
+- [ ] **Step 2:** Red → **Step 3:** wiring → **Step 4:** green (whole suite).
+- [ ] **Step 5:** Commit `feat: phase 2 wiring, land step, and e2e flow`.
 
 ---
 
-### Task 8: Reálné drivery — `FilesystemArtifactStore` a `GitWorkspace`
+### Task 8: Real drivers — `FilesystemArtifactStore` and `GitWorkspace`
 
 **Files:** `src/harness/drivers/fs_artifacts.py`,
 `src/harness/drivers/git_workspace.py`, `src/harness/drivers/fake_forge.py`,
 `tests/test_fs_artifacts.py`, `tests/test_git_workspace.py`.
 
 **Interfaces:**
-- `FilesystemArtifactStore(root: Path)`: attempt = počet existujících podadresářů
-  `<root>/<task>/<step>/`; `begin` založí `<root>/<task>/<step>/<attempt>/`;
-  `put` zapíše soubor; `list`/`read` čtou z disku.
+- `FilesystemArtifactStore(root: Path)`: attempt = number of existing subdirectories
+  `<root>/<task>/<step>/`; `begin` creates `<root>/<task>/<step>/<attempt>/`;
+  `put` writes a file; `list`/`read` read from disk.
 - `GitWorkspace(repos_root: Path | None = None)`:
   - `attach(task)`: `worktree = Path(task.worktree)`, `repo = task.repository`.
-    Neexistuje-li worktree, `git -C <repo> worktree add <worktree> -b
-    harness/<task_id>` (base = aktuální HEAD repa); jinak reuse. Handle drží
+    If the worktree does not exist, `git -C <repo> worktree add <worktree> -b
+    harness/<task_id>` (base = the repo's current HEAD); otherwise reuse. The handle holds
     `path`, `branch`.
-  - `commit(message)`: `git -C <path> add -A`; pokud `git status --porcelain`
-    prázdné → `None`; jinak `git -C <path> commit -m message` a vrať sha
-    (`git rev-parse HEAD`). Nastav `GIT_AUTHOR_*`/`committer` env, ať test nepadá
-    na chybějící identitě.
-- `FakeForge`: jako `MemoryForge`, ale pro fs běh (může pushnout branch do
-  konfigurovaného bare remote nebo jen zaznamenat do souboru). Ve fázi 2 stačí
-  záznam do `<root>/prs.json`.
+  - `commit(message)`: `git -C <path> add -A`; if `git status --porcelain` is
+    empty → `None`; otherwise `git -C <path> commit -m message` and return the sha
+    (`git rev-parse HEAD`). Set `GIT_AUTHOR_*`/`committer` env so the test doesn't fail
+    on a missing identity.
+- `FakeForge`: like `MemoryForge`, but for an fs run (may push the branch to
+  a configured bare remote or just record to a file). In phase 2 a record into
+  `<root>/prs.json` is enough.
 
-- [ ] **Step 1:** Testy s `tmp_path`. `fs_artifacts`: attempt roste na disku;
-  roundtrip. `git_workspace`: založ tmp git repo s jedním commitem, `attach`
-  vytvoří worktree na `harness/<id>` branchi; edituj soubor, `commit` vrátí sha
-  a `git log` na branchi ho ukáže; `commit` bez změny vrátí `None`.
-- [ ] **Step 2:** Červená → **Step 3:** implementace → **Step 4:** zelená.
-- [ ] **Step 5:** Commit `feat: fs artefakty a git worktree driver`.
+- [ ] **Step 1:** Tests with `tmp_path`. `fs_artifacts`: attempt grows on disk;
+  round-trip. `git_workspace`: create a tmp git repo with a single commit, `attach`
+  creates a worktree on the `harness/<id>` branch; edit a file, `commit` returns a sha
+  and `git log` on the branch shows it; `commit` without a change returns `None`.
+- [ ] **Step 2:** Red → **Step 3:** implementation → **Step 4:** green.
+- [ ] **Step 5:** Commit `feat: fs artifacts and git worktree driver`.
 
 ---
 
-### Task 9: Board — pohled na artefakty
+### Task 9: Board — a view of artifacts
 
-**Files:** `src/harness/ports/board.py` nebo nový `ArtifactView` už z Tasku 2;
+**Files:** `src/harness/ports/board.py` or the new `ArtifactView` already from Task 2;
 `src/harness/api/routes.py`, `src/harness/api/app.py`, template, `tests/test_api_*`.
 
 **Interfaces:**
 - `create_app(view=..., artifacts: ArtifactView, clock=...)`.
 - Route `GET /tasks/{id}/artifacts` → JSON `[{step, attempt, name}]`.
-- Route obsahu `GET /tasks/{id}/artifacts/{step}/{attempt}/{name}` → text.
-- Detail tasku v HTML ukáže seznam artefaktů (odkazy na obsah).
-- `api/` importuje **jen** `ArtifactView`, ne driver — `test_architecture.py`.
+- Content route `GET /tasks/{id}/artifacts/{step}/{attempt}/{name}` → text.
+- The task detail in HTML shows the list of artifacts (links to the content).
+- `api/` imports **only** `ArtifactView`, not a driver — `test_architecture.py`.
 
-- [ ] **Step 1:** Testy — JSON list vrátí artefakty tasku; obsah vrátí text;
-  neexistující → 404. Architektura: `api/` nesahá na driver.
-- [ ] **Step 2:** Červená → **Step 3:** implementace → **Step 4:** zelená.
-- [ ] **Step 5:** Commit `feat: board ukazuje artefakty tasku`.
+- [ ] **Step 1:** Tests — the JSON list returns the task's artifacts; the content returns text;
+  a nonexistent one → 404. Architecture: `api/` does not touch a driver.
+- [ ] **Step 2:** Red → **Step 3:** implementation → **Step 4:** green.
+- [ ] **Step 5:** Commit `feat: board shows a task's artifacts`.
 
 ---
 
-### Task 10: Architektura, smoke a dokumentace
+### Task 10: Architecture, smoke, and documentation
 
-**Files:** `tests/test_architecture.py`, `tests/test_smoke.py` (nebo
+**Files:** `tests/test_architecture.py`, `tests/test_smoke.py` (or
 `test_smoke_git.py`), `CLAUDE.md`.
 
-- [ ] **Step 1:** Architektonické testy: `dispatcher.py`/`consumer.py`
-  neimportují `ports/workspace`, `ports/forge`, `ports/artifacts` ani drivery;
-  `api/` importuje jen `ArtifactView`. Consumer pořád nevětví na outcome.
-- [ ] **Step 2:** Smoke na skutečném gitu: init repo v `tmp_path`, submit task s
-  `repository`/`worktree`, spusť smyčku se zkráceným intervalem, počkej, ověř —
-  task v `done/`, worktree má commity, `prs.json` má PR, artefakty na disku.
-  (Poluje reálným krátkým `asyncio.sleep` jako stávající smoke; **jediná** výjimka
-  z „nespat v reálném čase".)
-- [ ] **Step 3:** Aktualizuj `CLAUDE.md` — mapa modulů o nové porty/drivery,
-  invarianty 8–12, sekce „Co je za co zodpovědné" o dvě plochy a landing.
-- [ ] **Step 4:** `.venv/bin/pytest -q` — vše zelené.
-- [ ] **Step 5:** Commit `docs: CLAUDE.md pro fázi 2; smoke na skutečném gitu`.
+- [ ] **Step 1:** Architecture tests: `dispatcher.py`/`consumer.py`
+  do not import `ports/workspace`, `ports/forge`, `ports/artifacts` nor drivers;
+  `api/` imports only `ArtifactView`. The consumer still does not branch on outcome.
+- [ ] **Step 2:** Smoke on real git: init a repo in `tmp_path`, submit a task with
+  `repository`/`worktree`, run the loop with a shortened interval, wait, verify —
+  the task in `done/`, the worktree has commits, `prs.json` has the PR, artifacts on disk.
+  (Polls with a real short `asyncio.sleep` like the existing smoke; the **only** exception
+  to "don't sleep in real time".)
+- [ ] **Step 3:** Update `CLAUDE.md` — the module map for the new ports/drivers,
+  invariants 8–12, the section "What is responsible for what" about the two surfaces and landing.
+- [ ] **Step 4:** `.venv/bin/pytest -q` — everything green.
+- [ ] **Step 5:** Commit `docs: CLAUDE.md for phase 2; smoke on real git`.
 
 ---
 
-## Pořadí a závislosti
+## Order and dependencies
 
 ```
 T1 (BehaviorResult) ─┬─> T5 (DummyBehavior) ─┐
 T2 (ArtifactStore) ──┤                        ├─> T7 (wiring+e2e) ─> T9 (board) ─> T10 (smoke+docs)
 T3 (Workspace) ──────┼─> T6 (Landing) ───────┘         │
-T4 (Forge) ──────────┘                                  └─> T8 (fs+git drivery)
+T4 (Forge) ──────────┘                                  └─> T8 (fs+git drivers)
 ```
 
-T1–T4 jsou nezávislé základy (kromě sdíleného `memory.py` — psát sériově, ať se
-needitují naráz). T5/T6 stojí na základech. T7 spojuje. T8 (reálné drivery) a T9
-(board) jsou nezávislé. T10 uzavírá.
+T1–T4 are independent foundations (except for the shared `memory.py` — write them
+serially, so they aren't edited at once). T5/T6 stand on the foundations. T7 joins them.
+T8 (real drivers) and T9 (board) are independent. T10 closes it out.

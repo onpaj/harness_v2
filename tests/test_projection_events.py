@@ -65,6 +65,6 @@ def test_event_with_task_but_no_queue_is_ignored():
 def test_malformed_task_snapshot_does_not_raise():
     projection, sink = build()
 
-    sink.emit("dispatched", queue="plan", task={"neco": "jineho"})
+    sink.emit("dispatched", queue="plan", task={"something": "else"})
 
     assert projection.snapshot().revision == 0

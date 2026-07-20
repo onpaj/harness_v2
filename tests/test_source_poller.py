@@ -1,4 +1,4 @@
-"""SourcePoller — jádro plnící inbox ze zdroje."""
+"""SourcePoller — the core that fills the inbox from the source."""
 
 from harness.drivers.memory import FakeClock, MemoryEventSink, MemoryTaskQueue, MemoryTaskSource
 from harness.ports.source import TaskSource
@@ -9,12 +9,12 @@ class RaisingSource(TaskSource):
     kind = "boom"
 
     def poll(self):
-        raise RuntimeError("GitHub je dole")
+        raise RuntimeError("GitHub is down")
 
-    def report_progress(self, task, progress):  # pragma: no cover - nevolá se
+    def report_progress(self, task, progress):  # pragma: no cover - not called
         pass
 
-    def finish(self, task, result):  # pragma: no cover - nevolá se
+    def finish(self, task, result):  # pragma: no cover - not called
         pass
 
 
@@ -58,4 +58,4 @@ def test_poll_that_raises_returns_false_and_emits_source_error():
     assert len(errors) == 1
     _, fields = errors[0]
     assert fields["source"] == "boom"
-    assert "GitHub je dole" in fields["error"]
+    assert "GitHub is down" in fields["error"]

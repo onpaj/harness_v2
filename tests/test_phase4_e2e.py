@@ -1,8 +1,8 @@
-"""End-to-end fáze 4 na in-memory driverech.
+"""End-to-end phase 4 on in-memory drivers.
 
-Issue-ekvivalent (MemoryTaskSource) → task → smyčka → done → terminální projekce
-ven. Ověřuje se celý konektor: poll plní inbox, reflector promítá stav do zdroje.
-Bez disku (kromě front) a bez reálného čekání.
+Issue-equivalent (MemoryTaskSource) → task → loop → done → terminal projection
+outward. This exercises the whole connector: poll fills the inbox, the reflector
+projects state into the source. No disk (except the queues) and no real waiting.
 """
 
 import json
@@ -52,7 +52,7 @@ async def drive_until_quiet(harness: Harness) -> int:
                 acted = True
         if not acted:
             return step
-    raise AssertionError("smyčka se nezklidnila")
+    raise AssertionError("loop did not settle")
 
 
 def build_harness(tmp_path, source):
@@ -77,14 +77,14 @@ async def test_task_from_source_reaches_done_and_is_projected_out(tmp_path):
 
     await drive_until_quiet(harness)
 
-    # task doputoval do done
+    # the task made it to done
     done_files = list((tmp_path / "done").glob("*.json"))
     assert len(done_files) == 1
     finished = Task.from_dict(json.loads(done_files[0].read_text()))
     assert finished.status == "end"
     assert finished.data["source"]["kind"] == "memory"
 
-    # projekce ven: aspoň jedna progress + finish(ok=True)
+    # projection outward: at least one progress + finish(ok=True)
     projections = source.states[issue]
     assert ("finish", True) in projections
     assert any(kind == "progress" for kind, _ in projections)
@@ -94,12 +94,12 @@ async def test_submit_task_without_source_flows_through_untouched(tmp_path):
     source = MemoryTaskSource(clock=FakeClock())
     harness = build_harness(tmp_path, source)
 
-    # task vložený přímo do inboxu (bez data.source) — zpětná kompatibilita
+    # task inserted straight into the inbox (without data.source) — backward compatibility
     task = Task(
         id="tsk_plain",
         workflow_template="default",
         created="2026-07-20T10:00:00Z",
-        data={"title": "ruční task"},
+        data={"title": "manual task"},
     )
     (tmp_path / "tasks" / "tsk_plain.json").write_text(json.dumps(task.to_dict()))
 
@@ -109,5 +109,5 @@ async def test_submit_task_without_source_flows_through_untouched(tmp_path):
         json.loads((tmp_path / "done" / "tsk_plain.json").read_text())
     )
     assert finished.status == "end"
-    # zdroj o něm nic neví — projekce ven neproběhla
+    # the source knows nothing about it — no projection outward happened
     assert source.states == {}

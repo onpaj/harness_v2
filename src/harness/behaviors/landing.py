@@ -1,7 +1,7 @@
-"""Landing: přiklopí artefakty do worktree a otevře PR.
+"""Landing: folds the artifacts into the worktree and opens a PR.
 
-Poslední krok před `end`. Je to normální behavior — může selhat a spadnout do
-`failed/` stejně jako kterýkoli jiný krok. `end` zůstává čistý terminál.
+The last step before `end`. It's a normal behavior — it can fail and drop into
+`failed/` like any other step. `end` stays a clean terminal.
 """
 
 from __future__ import annotations
@@ -35,9 +35,10 @@ class LandingBehavior(ConsumerBehavior):
     async def run(self, task: Task) -> BehaviorResult:
         handle = self._workspace.attach(task)
 
-        # Fáze 3: artefakty už jsou versované ve worktree (agent je psal
-        # přímo do `.artifacts/`), takže je není kam kopírovat — jen otevřít
-        # PR. Fáze 2 (oddělený artifact store) je pořád kopíruje a commitne.
+        # Phase 3: the artifacts are already versioned in the worktree (the
+        # agent wrote them straight into `.artifacts/`), so there's nowhere to
+        # copy them — just open the PR. Phase 2 (a separate artifact store)
+        # still copies and commits them.
         if self._copy_artifacts:
             for ref in self._artifacts.list(task.id):
                 content = self._artifacts.read(task.id, ref.step, ref.attempt, ref.name)
@@ -45,7 +46,7 @@ class LandingBehavior(ConsumerBehavior):
                     continue
                 relpath = f"{self._dest}/{task.id}/{ref.step}/{ref.attempt}/{ref.name}"
                 handle.write(relpath, content)
-            handle.commit("[land] artefakty tasku")
+            handle.commit("[land] task artifacts")
 
         pull = self._forge.open_pull_request(
             task,
@@ -53,7 +54,7 @@ class LandingBehavior(ConsumerBehavior):
             title=self._title(task),
             body=self._body(task),
         )
-        return BehaviorResult(Outcome.DONE, f"otevřen PR {pull.url}")
+        return BehaviorResult(Outcome.DONE, f"opened PR {pull.url}")
 
     @staticmethod
     def _title(task: Task) -> str:
@@ -65,8 +66,8 @@ class LandingBehavior(ConsumerBehavior):
 
     @staticmethod
     def _body(task: Task) -> str:
-        """Tělo PR z agregovaných summary consumer řádků historie."""
-        lines = ["## Co task udělal", ""]
+        """PR body aggregated from the summaries of consumer history entries."""
+        lines = ["## What the task did", ""]
         for entry in task.history:
             if entry.actor.startswith("consumer:") and entry.summary:
                 lines.append(f"- **{entry.from_step}** — {entry.summary}")

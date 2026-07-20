@@ -18,24 +18,24 @@ def test_put_read_roundtrip(tmp_path):
     store = FilesystemArtifactStore(tmp_path)
 
     slot = store.begin("tsk_1", "design")
-    slot.put("design.md", "# návrh\n")
+    slot.put("design.md", "# design\n")
 
     assert (tmp_path / "tsk_1" / "design" / "0" / "design.md").read_text(
         encoding="utf-8"
-    ) == "# návrh\n"
-    assert store.read("tsk_1", "design", 0, "design.md") == "# návrh\n"
+    ) == "# design\n"
+    assert store.read("tsk_1", "design", 0, "design.md") == "# design\n"
 
 
 def test_second_attempt_does_not_overwrite_first(tmp_path):
     store = FilesystemArtifactStore(tmp_path)
 
     first = store.begin("tsk_1", "design")
-    first.put("design.md", "první")
+    first.put("design.md", "first")
     second = store.begin("tsk_1", "design")
-    second.put("design.md", "druhý")
+    second.put("design.md", "second")
 
-    assert store.read("tsk_1", "design", 0, "design.md") == "první"
-    assert store.read("tsk_1", "design", 1, "design.md") == "druhý"
+    assert store.read("tsk_1", "design", 0, "design.md") == "first"
+    assert store.read("tsk_1", "design", 1, "design.md") == "second"
 
 
 def test_list_across_steps_and_attempts(tmp_path):
@@ -59,5 +59,5 @@ def test_list_across_steps_and_attempts(tmp_path):
 def test_read_missing_returns_none(tmp_path):
     store = FilesystemArtifactStore(tmp_path)
 
-    assert store.read("tsk_1", "design", 0, "chybí.md") is None
-    assert store.list("neznámý_task") == ()
+    assert store.read("tsk_1", "design", 0, "missing.md") is None
+    assert store.list("unknown_task") == ()

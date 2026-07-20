@@ -1,4 +1,4 @@
-"""Dispatcher: rozhoduje, KAM task jde. Nikdy ne, co se s ním stalo."""
+"""Dispatcher: decides WHERE a task goes. Never what happened to it."""
 
 from __future__ import annotations
 
@@ -47,7 +47,7 @@ class Dispatcher:
         self._clock = clock
 
     def tick(self) -> bool:
-        """Zpracuj nejvýš jeden task. True, když se něco zpracovalo."""
+        """Process at most one task. True when something was processed."""
         selected = self._strategy.select(self._inbox.list())
         if selected is None:
             return False
@@ -71,7 +71,7 @@ class Dispatcher:
         elif isinstance(decision, MoveTo):
             destination = self._step_queues.get(decision.step)
             if destination is None:
-                self._fail(task, f"krok {decision.step!r} nemá frontu")
+                self._fail(task, f"step {decision.step!r} has no queue")
             else:
                 self._move(task, decision.step, destination)
 

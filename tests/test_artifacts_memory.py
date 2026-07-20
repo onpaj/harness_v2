@@ -23,9 +23,9 @@ def test_put_then_read_roundtrip():
     store = MemoryArtifactStore()
     slot = store.begin("tsk_1", "plan")
 
-    slot.put("plan.md", "# plán\n")
+    slot.put("plan.md", "# plan\n")
 
-    assert store.read("tsk_1", "plan", 0, "plan.md") == "# plán\n"
+    assert store.read("tsk_1", "plan", 0, "plan.md") == "# plan\n"
 
 
 def test_read_missing_returns_none():
@@ -46,13 +46,13 @@ def test_list_returns_refs_across_steps_and_attempts():
     assert ArtifactRef("development", 0, "code.py") in refs
     assert ArtifactRef("development", 1, "code.py") in refs
     assert ArtifactRef("review", 0, "review.md") in refs
-    assert all(ref.step != "plan" for ref in refs)  # tsk_2 se nemíchá
+    assert all(ref.step != "plan" for ref in refs)  # tsk_2 is not mixed in
 
 
 def test_second_attempt_does_not_overwrite_first():
     store = MemoryArtifactStore()
-    store.begin("tsk_1", "review").put("review.md", "první")
-    store.begin("tsk_1", "review").put("review.md", "druhý")
+    store.begin("tsk_1", "review").put("review.md", "first")
+    store.begin("tsk_1", "review").put("review.md", "second")
 
-    assert store.read("tsk_1", "review", 0, "review.md") == "první"
-    assert store.read("tsk_1", "review", 1, "review.md") == "druhý"
+    assert store.read("tsk_1", "review", 0, "review.md") == "first"
+    assert store.read("tsk_1", "review", 1, "review.md") == "second"

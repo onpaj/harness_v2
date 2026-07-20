@@ -6,10 +6,10 @@ from harness.models import Workflow
 
 
 class WorkflowNotFound(Exception):
-    """Workflow daného jména neexistuje."""
+    """No workflow by that name exists."""
 
 
 class WorkflowRepository(ABC):
     @abstractmethod
     def get(self, name: str) -> Workflow:
-        """Načti workflow. Neexistuje-li, vyhoď WorkflowNotFound."""
+        """Load a workflow. If it does not exist, raise WorkflowNotFound."""

@@ -10,9 +10,9 @@ from harness.ports.agent import AgentRun, AgentRunner, AgentSpec
 from harness.ports.workspace import Workspace, WorkspaceHandle
 
 
-# --- Real-FS test double: handle nad skutečným tmp worktree, aby `next_attempt`
-#     skenoval reálné soubory na disku (jako fáze 2 smoke). `write` zapisuje na
-#     disk a `commit` jen zaznamená zprávu. -----------------------------------
+# --- Real-FS test double: a handle over a real tmp worktree, so `next_attempt`
+#     scans actual files on disk (like the phase 2 smoke). `write` writes to
+#     disk and `commit` just records the message. ------------------------------
 
 
 class RealFsHandle(WorkspaceHandle):
@@ -42,7 +42,7 @@ class RealFsHandle(WorkspaceHandle):
 
 
 class RealFsWorkspace(Workspace):
-    """Opětovný attach téhož tasku vrací týž handle nad `root` (reálná cesta)."""
+    """Re-attaching the same task returns the same handle over `root` (real path)."""
 
     def __init__(self, root: Path) -> None:
         self._root = root
@@ -63,7 +63,7 @@ def make_task(status: str = "development") -> Task:
         created="2026-07-20T10:00:00Z",
         repository="app-backend",
         status=status,
-        data={"request": "přidej rate limiting"},
+        data={"request": "add rate limiting"},
     )
 
 
@@ -71,7 +71,7 @@ ARTIFACT_01 = ".artifacts/tsk_1/development-01.md"
 
 
 def build(tmp_path: Path, *, runner: AgentRunner, spec: AgentSpec | None = None):
-    spec = spec or AgentSpec(name="development", prompt="jsi vývojář")
+    spec = spec or AgentSpec(name="development", prompt="you are a developer")
     workspace = RealFsWorkspace(tmp_path)
     behavior = ClaudeCliBehavior(
         clock=FakeClock(), workspace=workspace, runner=runner, spec=spec
@@ -81,8 +81,8 @@ def build(tmp_path: Path, *, runner: AgentRunner, spec: AgentSpec | None = None)
 
 def dev_runner() -> FakeAgentRunner:
     return FakeAgentRunner(
-        runs={"development": AgentRun(Outcome.DONE, "dev: hotovo", raw="…")},
-        writes={"development": {ARTIFACT_01: "# development\n\nkód\n"}},
+        runs={"development": AgentRun(Outcome.DONE, "dev: done", raw="…")},
+        writes={"development": {ARTIFACT_01: "# development\n\ncode\n"}},
     )
 
 
@@ -115,7 +115,7 @@ async def test_agent_artifact_written_and_committed_with_summary(tmp_path):
     await behavior.run(make_task())
 
     assert (tmp_path / ARTIFACT_01).exists()
-    assert workspace.handles["tsk_1"].commits == ["dev: hotovo"]
+    assert workspace.handles["tsk_1"].commits == ["dev: done"]
 
 
 async def test_returns_behavior_result_from_agent_run(tmp_path):
@@ -124,15 +124,15 @@ async def test_returns_behavior_result_from_agent_run(tmp_path):
 
     result = await behavior.run(make_task())
 
-    assert result == BehaviorResult(Outcome.DONE, "dev: hotovo")
+    assert result == BehaviorResult(Outcome.DONE, "dev: done")
 
 
 async def test_second_run_of_same_step_increments_attempt(tmp_path):
     runner = dev_runner()
     behavior, _, _ = build(tmp_path, runner=runner)
 
-    await behavior.run(make_task())  # zapíše development-01.md na disk
-    await behavior.run(make_task())  # skenuje reálné soubory → alokuje -02
+    await behavior.run(make_task())  # writes development-01.md to disk
+    await behavior.run(make_task())  # scans real files → allocates -02
 
     assert ARTIFACT_01 in runner.calls[0]["prompt"]
     assert ".artifacts/tsk_1/development-02.md" in runner.calls[1]["prompt"]
@@ -140,7 +140,7 @@ async def test_second_run_of_same_step_increments_attempt(tmp_path):
 
 class RaisingRunner(AgentRunner):
     async def run(self, *, prompt, spec, cwd, timeout):
-        raise AgentError("claude spadl")
+        raise AgentError("claude crashed")
 
 
 async def test_runner_exception_propagates_and_skips_commit(tmp_path):
@@ -149,14 +149,14 @@ async def test_runner_exception_propagates_and_skips_commit(tmp_path):
     with pytest.raises(AgentError):
         await behavior.run(make_task())
 
-    # Nic se nespolklo a commit se nekonal — task půjde do failed/.
+    # Nothing was swallowed and no commit happened — the task will go to failed/.
     assert workspace.handles["tsk_1"].commits == []
 
 
 def test_compose_prompt_mentions_task_artifacts_and_allowed_outcomes():
     spec = AgentSpec(
         name="reviewer",
-        prompt="jsi reviewer",
+        prompt="you are a reviewer",
         allowed_outcomes=(Outcome.DONE, Outcome.REQUEST_CHANGES),
     )
     prompt = compose_prompt(
@@ -167,7 +167,7 @@ def test_compose_prompt_mentions_task_artifacts_and_allowed_outcomes():
     )
 
     assert "review" in prompt
-    assert "přidej rate limiting" in prompt
+    assert "add rate limiting" in prompt
     assert ".artifacts/tsk_1/review-01.md" in prompt
     assert ".artifacts/tsk_1/" in prompt
     assert "done" in prompt and "request_changes" in prompt
