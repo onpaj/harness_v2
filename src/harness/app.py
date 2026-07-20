@@ -21,6 +21,7 @@ from harness.drivers.memory import (
     MemoryWorkspace,
 )
 from harness.drivers.projection_events import ProjectionSink
+from harness.drivers.source_reflector import SourceReflectorSink
 from harness.drivers.stdout_events import StdoutEventSink
 from harness.drivers.system_clock import SystemClock
 from harness.models import Workflow
@@ -31,8 +32,10 @@ from harness.ports.clock import Clock
 from harness.ports.events import EventSink
 from harness.ports.forge import Forge
 from harness.ports.queue import TaskQueue
+from harness.ports.source import TaskSource
 from harness.ports.workspace import Workspace
 from harness.projection import BoardProjection
+from harness.source_poller import SourcePoller
 
 LANDING_STEP = "land"
 """Krok, kterému wiring přiřadí LandingBehavior místo DummyBehavior."""
@@ -91,11 +94,13 @@ class Harness:
         artifacts: ArtifactView,
         events: EventSink,
         clock: Clock,
+        pollers: list[SourcePoller] | None = None,
     ) -> None:
         self.layout = layout
         self.workflow = workflow
         self.dispatcher = dispatcher
         self.consumers = consumers
+        self.pollers = pollers or []
         self.projection = projection
         self.artifacts = artifacts
         self._inbox = inbox
@@ -127,6 +132,7 @@ class Harness:
         await asyncio.gather(
             self._dispatcher_loop(poll_interval, stop),
             *(self._consumer_loop(consumer, poll_interval, stop) for consumer in self.consumers),
+            *(self._source_loop(poller, poll_interval, stop) for poller in self.pollers),
         )
         self._events.emit("stopped")
 
@@ -146,6 +152,15 @@ class Harness:
             else:
                 await asyncio.sleep(0)
 
+    async def _source_loop(
+        self, poller: SourcePoller, poll_interval: float, stop: asyncio.Event
+    ) -> None:
+        while not stop.is_set():
+            if not poller.tick():
+                await asyncio.sleep(poll_interval)
+            else:
+                await asyncio.sleep(0)
+
 
 def build(
     root: Path,
@@ -161,6 +176,7 @@ def build(
     catalog: AgentCatalog | None = None,
     agent_timeout: float = 600.0,
     artifact_view: ArtifactView | None = None,
+    sources: list[TaskSource] | None = None,
     landing_step: str = LANDING_STEP,
     delay: float = 5.0,
     request_changes_once_at: str | None = None,
@@ -168,6 +184,7 @@ def build(
     layout = HarnessLayout(Path(root))
     events = events or StdoutEventSink()
     clock = clock or SystemClock()
+    sources = sources or []
     strategy = FifoStrategy()
 
     # Pracovní drivery: default je in-memory (substrát dummy behavioru, stejně
@@ -181,7 +198,10 @@ def build(
     workflow = workflows.get(workflow_name)
 
     projection = BoardProjection(workflow)
-    events = CompositeEventSink(events, ProjectionSink(projection))
+    # Reflector až za ProjectionSink: projekce ven nesmí předběhnout board.
+    events = CompositeEventSink(
+        events, ProjectionSink(projection), SourceReflectorSink(sources)
+    )
 
     failed = FilesystemTaskQueue(name="failed", root=layout.failed, events=events)
     done = FilesystemTaskQueue(name="done", root=layout.done, events=events)
@@ -256,6 +276,10 @@ def build(
         for step, queue in step_queues.items()
     ]
 
+    pollers = [
+        SourcePoller(source=source, inbox=inbox, events=events) for source in sources
+    ]
+
     return Harness(
         layout=layout,
         workflow=workflow,
@@ -269,4 +293,5 @@ def build(
         artifacts=view,
         events=events,
         clock=clock,
+        pollers=pollers,
     )

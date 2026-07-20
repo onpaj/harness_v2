@@ -67,6 +67,28 @@ WORK_DRIVERS = (
 )
 
 
+def test_orchestration_does_not_import_source_port():
+    """Vnější svět tasků (TaskSource) nezná dispatcher/consumer. Sahá na něj jen
+    SourcePoller (jádro) a SourceReflectorSink (driver), drátované v app.py."""
+    for name in ("dispatcher.py", "consumer.py"):
+        assert "harness.ports.source" not in imported_modules(SOURCE / name), (
+            f"{name} importuje ports.source"
+        )
+
+
+def test_source_poller_imports_only_ports_and_models():
+    """SourcePoller je jádro: zná jen porty a modely, žádný driver."""
+    imports = {
+        module
+        for module in imported_modules(SOURCE / "source_poller.py")
+        if module.startswith("harness")
+    }
+    assert all(
+        module == "harness.models" or module.startswith("harness.ports")
+        for module in imports
+    ), f"source_poller.py importuje mimo porty/modely: {imports}"
+
+
 def test_orchestration_does_not_import_work_ports():
     """Worktree, forge, artefakty, agent ani registr rep nezná dispatcher/
     consumer — sahá na ně jen behavior. Jinak by orchestrace věděla o payloadu,
