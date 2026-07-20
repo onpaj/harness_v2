@@ -1,8 +1,8 @@
-"""Port úložiště artefaktů.
+"""Artifact store port.
 
-Harnessem vlastněná složka, kam fáze píší artefakty (plán, design, review).
-Neverzovaná během tasku, čitelná pro UI. Artefakty jsou attempt-indexed —
-re-run kroku nikdy nepřepíše předchozí pokus.
+A harness-owned directory where phases write artifacts (plan, design, review).
+Unversioned during the task, readable by the UI. Artifacts are attempt-indexed —
+re-running a step never overwrites a previous attempt.
 """
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ from typing import Any
 
 @dataclass(frozen=True)
 class ArtifactRef:
-    """Adresa jednoho artefaktu: krok, pokus, jméno."""
+    """The address of a single artifact: step, attempt, name."""
 
     step: str
     attempt: int
@@ -25,33 +25,33 @@ class ArtifactRef:
 
 
 class ArtifactSlot(ABC):
-    """Jeden pokus daného kroku. Vše zapsané sem patří k témuž běhu."""
+    """A single attempt of a step. Everything written here belongs to one run."""
 
     @property
     @abstractmethod
     def attempt(self) -> int:
-        """Pořadové číslo pokusu (0, 1, 2, …)."""
+        """Attempt sequence number (0, 1, 2, …)."""
 
     @abstractmethod
     def put(self, name: str, content: str) -> None:
-        """Zapiš artefakt do tohoto pokusu."""
+        """Write an artifact into this attempt."""
 
 
 class ArtifactView(ABC):
-    """Read-only pohled na artefakty. Jediné, co o úložišti ví UI."""
+    """Read-only view of artifacts. All the UI knows about the store."""
 
     @abstractmethod
     def list(self, task_id: str) -> tuple[ArtifactRef, ...]:
-        """Všechny artefakty tasku napříč kroky a pokusy."""
+        """All of a task's artifacts across steps and attempts."""
 
     @abstractmethod
     def read(self, task_id: str, step: str, attempt: int, name: str) -> str | None:
-        """Obsah artefaktu, nebo None když neexistuje."""
+        """The artifact's content, or None if it does not exist."""
 
 
 class ArtifactStore(ArtifactView):
-    """Zápisová strana úložiště."""
+    """The write side of the store."""
 
     @abstractmethod
     def begin(self, task_id: str, step: str) -> ArtifactSlot:
-        """Alokuj další pokus pro dvojici (task, step) a vrať slot."""
+        """Allocate the next attempt for the (task, step) pair and return a slot."""

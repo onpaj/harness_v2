@@ -1,11 +1,12 @@
-"""Dummy behavior fáze 2: napíše artefakt, commitne práci, vrátí (outcome, summary).
+"""Phase 2 dummy behavior: writes an artifact, commits the work, returns (outcome, summary).
 
-Skutečná práce (agent) se sem vloží ve fázi 3 — záměnou driveru. Zvenčí se
-kontrakt nezmění: připojí se k worktree, píše do složky artefaktů, commituje.
+The real work (agent) is slotted in here in phase 3 — by swapping the driver.
+From the outside the contract does not change: it attaches to the worktree,
+writes into the artifacts folder, commits.
 
-Vrací DONE deterministicky. Volitelně pro jeden krok vrátí při prvním průchodu
-REQUEST_CHANGES, aby se zpětná hrana workflow proklepla — ale jen jednou, jinak
-by se smyčka točila donekonečna.
+Returns DONE deterministically. Optionally, for one step, it returns
+REQUEST_CHANGES on the first pass so the workflow's back edge gets exercised —
+but only once, otherwise the loop would spin forever.
 """
 
 from __future__ import annotations
@@ -46,13 +47,14 @@ class DummyBehavior(ConsumerBehavior):
         if asks_changes:
             self._already_asked.add(task.id)
             outcome = Outcome.REQUEST_CHANGES
-            summary = f"{step}: vyžádány změny"
+            summary = f"{step}: changes requested"
         else:
             outcome = Outcome.DONE
-            summary = f"{step}: hotovo"
+            summary = f"{step}: done"
 
-        # Artefakt do harnessové složky (attempt-indexed), práce do worktree,
-        # commit. Commit dělá tenhle driver, ne consumer ani LLM.
+        # Artifact into the harness folder (attempt-indexed), work into the
+        # worktree, commit. The commit is done by this driver, not the consumer
+        # or the LLM.
         slot = self._artifacts.begin(task.id, step)
         slot.put(f"{step}.md", f"# {step}\n\n{summary}\n")
 

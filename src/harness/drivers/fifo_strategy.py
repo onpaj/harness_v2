@@ -1,4 +1,4 @@
-"""FIFO podle created. Shody rozhoduje id, aby byl výběr deterministický."""
+"""FIFO by created. Ties are broken by id so the selection is deterministic."""
 
 from __future__ import annotations
 

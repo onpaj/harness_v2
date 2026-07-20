@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="cs">
+<html lang="en">
 <head>
   <meta charset="utf-8">
   <title>harness board</title>
@@ -39,11 +39,11 @@
       if (event.target.id === 'detail') { event.target.close(); }
     });
 
-    // Revision de-dup: klient si pamatuje poslední vykreslenou revizi a
-    // swap přeskočí, když se nezměnila. Musí se zaregistrovat dřív než
-    // htmx zpracuje hx-trigger na #board (htmx čeká na DOMContentLoaded,
-    // tenhle skript běží při parsování stránky), aby stopImmediatePropagation
-    // stihla zastavit htmx dřív, než sama vyvolá /fragment/board.
+    // Revision de-dup: the client remembers the last rendered revision and
+    // skips the swap when it hasn't changed. It must register before htmx
+    // processes the hx-trigger on #board (htmx waits for DOMContentLoaded,
+    // this script runs while the page is parsed), so that
+    // stopImmediatePropagation can stop htmx before it fires /fragment/board.
     (function () {
       var boardEl = document.getElementById('board');
       var initial = parseInt(boardEl.getAttribute('data-revision'), 10);

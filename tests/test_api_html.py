@@ -78,8 +78,8 @@ def test_card_shows_working_badge_only_when_locked(client):
     body = client.get("/fragment/board").text
 
     card_one, card_two = body.split("tsk_2", 1)
-    assert "zpracovává se" in card_one
-    assert "zpracovává se" not in card_two
+    assert "processing" in card_one
+    assert "processing" not in card_two
 
 
 def test_card_shows_last_outcome(client):

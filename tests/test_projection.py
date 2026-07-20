@@ -88,7 +88,7 @@ def test_apply_to_terminal_columns():
 def test_unknown_column_is_ignored():
     projection = BoardProjection(WORKFLOW)
 
-    projection.apply("nesmysl", make_task(status="nesmysl"))
+    projection.apply("nonsense", make_task(status="nonsense"))
 
     assert projection.get("tsk_1") is None
 
@@ -108,7 +108,7 @@ def test_get_returns_full_task():
     projection.apply("plan", make_task(status="plan", last_outcome="done"))
 
     assert projection.get("tsk_1").last_outcome == "done"
-    assert projection.get("neznamy") is None
+    assert projection.get("unknown") is None
 
 
 def test_revision_grows_monotonically():

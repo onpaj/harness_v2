@@ -10,14 +10,14 @@ def test_open_pull_request_records_details():
     forge = MemoryForge()
 
     pull = forge.open_pull_request(
-        make_task(), branch="harness/tsk_1", title="přidat rate limiting", body="tělo"
+        make_task(), branch="harness/tsk_1", title="add rate limiting", body="body"
     )
 
     assert pull.branch == "harness/tsk_1"
-    assert pull.title == "přidat rate limiting"
+    assert pull.title == "add rate limiting"
     assert pull.number == 1
     assert forge.opened == [pull]
-    assert forge.bodies["harness/tsk_1"] == "tělo"
+    assert forge.bodies["harness/tsk_1"] == "body"
 
 
 def test_open_pull_request_is_idempotent_per_branch():

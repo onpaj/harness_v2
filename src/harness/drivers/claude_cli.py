@@ -1,17 +1,20 @@
-"""Reálný `AgentRunner` kolem `claude -p` (headless CLI).
+"""Real `AgentRunner` around `claude -p` (headless CLI).
 
-Driver se skládá ze dvou čistých funkcí a tenké subprocess slupky:
+The driver is made of two pure functions and a thin subprocess shell:
 
-- `build_argv` složí argv pro `claude -p` z persony a `AgentSpec`u. Čistá
-  funkce — testovatelná bez subprocessu.
-- `parse_verdict` vytáhne z JSON obálky `claude -p` finální text agenta a z něj
-  strojově čitelný verdikt `{outcome, summary}`. Čistá funkce.
-- `ClaudeCliRunner` je spojí: složí argv, spustí `claude` v `cwd`, ohlídá
-  timeout a exit kód, a vrátí `parse_verdict` výsledku.
+- `build_argv` assembles the argv for `claude -p` from the persona and the
+  `AgentSpec`. A pure function — testable without a subprocess.
+- `parse_verdict` pulls the agent's final text out of the `claude -p` JSON
+  envelope and from it a machine-readable verdict `{outcome, summary}`. A pure
+  function.
+- `ClaudeCliRunner` ties them together: assembles the argv, runs `claude` in
+  `cwd`, watches the timeout and exit code, and returns `parse_verdict` of the
+  result.
 
-Volá systémový `claude` přes `asyncio.create_subprocess_exec` — žádná nová
-produkční závislost. Reálný `claude` v test sadě NEBĚŽÍ; čisté funkce se testují
-napřímo, subprocess slupku pokrývá opt-in smoke.
+Calls the system `claude` via `asyncio.create_subprocess_exec` — no new
+production dependency. The real `claude` DOES NOT RUN in the test suite; the
+pure functions are tested directly and the subprocess shell is covered by an
+opt-in smoke test.
 """
 
 from __future__ import annotations
@@ -25,25 +28,26 @@ from pathlib import Path
 from harness.models import Outcome
 from harness.ports.agent import AgentRun, AgentRunner, AgentSpec
 
-# Poslední fenced ```json ... ``` blok ve finálním textu agenta.
+# Last fenced ```json ... ``` block in the agent's final text.
 _FENCED_JSON = re.compile(r"```json\s*(.*?)```", re.DOTALL)
 
 
 class AgentError(Exception):
-    """`claude` proces selhal — nenulový exit, pád, nebo timeout."""
+    """The `claude` process failed — non-zero exit, crash, or timeout."""
 
 
 class VerdictError(Exception):
-    """Výstup `claude -p` nese nečitelný, chybějící nebo nepovolený verdikt."""
+    """`claude -p` output carries an unreadable, missing, or disallowed verdict."""
 
 
 def build_argv(
     *, prompt: str, spec: AgentSpec, output_format: str = "json"
 ) -> list[str]:
-    """Složí argv pro `claude -p`. Čistá funkce, žádné I/O.
+    """Assemble the argv for `claude -p`. A pure function, no I/O.
 
-    Base flagy jsou vždy; `--model`, `--fallback-model` a `--allowedTools` se
-    přidají jen když je spec nese. Persona jde přes `--append-system-prompt`.
+    The base flags are always present; `--model`, `--fallback-model` and
+    `--allowedTools` are added only when the spec carries them. The persona goes
+    through `--append-system-prompt`.
     """
     argv = [
         "claude",
@@ -68,10 +72,10 @@ def build_argv(
 
 
 def _extract_verdict(result: str) -> dict:
-    """Z finálního textu agenta vytáhni `{outcome, summary}`.
+    """Pull `{outcome, summary}` out of the agent's final text.
 
-    Bere poslední fenced ```json``` blok; není-li žádný, zkusí naparsovat celý
-    text jako JSON. Nečitelný → `VerdictError`.
+    Takes the last fenced ```json``` block; if there is none, tries to parse the
+    whole text as JSON. Unreadable → `VerdictError`.
     """
     blocks = _FENCED_JSON.findall(result)
     candidate = blocks[-1] if blocks else result
@@ -79,67 +83,68 @@ def _extract_verdict(result: str) -> dict:
         verdict = json.loads(candidate)
     except (json.JSONDecodeError, ValueError) as error:
         raise VerdictError(
-            f"verdikt není čitelný JSON: {candidate!r}"
+            f"verdict is not readable JSON: {candidate!r}"
         ) from error
     if not isinstance(verdict, dict):
-        raise VerdictError(f"verdikt není objekt: {verdict!r}")
+        raise VerdictError(f"verdict is not an object: {verdict!r}")
     return verdict
 
 
 def parse_verdict(stdout: str, *, allowed: tuple[Outcome, ...]) -> AgentRun:
-    """Z JSON obálky `claude -p` vytáhni verdikt a namapuj ho na `AgentRun`.
+    """Pull the verdict out of the `claude -p` JSON envelope and map it to `AgentRun`.
 
-    Vnější JSON nese `result` (finální text agenta) a `is_error`. Chybí-li
-    `result`, je-li `is_error`, nebo je-li obálka/verdikt nečitelný či outcome
-    mimo `allowed` → `VerdictError`. `raw` nese celé `stdout`.
+    The outer JSON carries `result` (the agent's final text) and `is_error`. If
+    `result` is missing, if `is_error` is set, or if the envelope/verdict is
+    unreadable or the outcome is outside `allowed` → `VerdictError`. `raw`
+    carries the whole `stdout`.
     """
     try:
         envelope = json.loads(stdout)
     except (json.JSONDecodeError, ValueError) as error:
         raise VerdictError(
-            f"výstup claude není čitelný JSON: {stdout!r}"
+            f"claude output is not readable JSON: {stdout!r}"
         ) from error
     if not isinstance(envelope, dict):
-        raise VerdictError(f"obálka claude není objekt: {envelope!r}")
+        raise VerdictError(f"claude envelope is not an object: {envelope!r}")
     if envelope.get("is_error"):
-        raise VerdictError(f"claude ohlásil chybu: {stdout!r}")
+        raise VerdictError(f"claude reported an error: {stdout!r}")
     if "result" not in envelope:
-        raise VerdictError(f"obálka claude nemá pole 'result': {stdout!r}")
+        raise VerdictError(f"claude envelope has no 'result' field: {stdout!r}")
 
     verdict = _extract_verdict(envelope["result"])
     if "outcome" not in verdict:
-        raise VerdictError(f"verdikt nemá pole 'outcome': {verdict!r}")
+        raise VerdictError(f"verdict has no 'outcome' field: {verdict!r}")
     try:
         outcome = Outcome(verdict["outcome"])
     except ValueError as error:
         raise VerdictError(
-            f"neznámý outcome {verdict['outcome']!r}"
+            f"unknown outcome {verdict['outcome']!r}"
         ) from error
     if outcome not in allowed:
         raise VerdictError(
-            f"outcome {outcome.value!r} není v allowed {allowed!r}"
+            f"outcome {outcome.value!r} is not in allowed {allowed!r}"
         )
     return AgentRun(outcome, summary=verdict.get("summary", ""), raw=stdout)
 
 
 class ClaudeCliRunner(AgentRunner):
-    """Spustí `claude -p` v `cwd` a vrátí verdikt.
+    """Run `claude -p` in `cwd` and return the verdict.
 
-    Timeout vede na `AgentError` (ne `VerdictError`): vypršelý čas je selhání
-    procesu, ne vada jeho výstupu — symetricky s nenulovým exit kódem. Verdikt
-    ještě neexistuje, takže o něm nemá co tvrdit. Obojí končí přes `_fail`
-    v `failed/`, jen s jasnějším typem chyby.
+    A timeout leads to `AgentError` (not `VerdictError`): elapsed time is a
+    process failure, not a defect in its output — symmetric with a non-zero exit
+    code. The verdict does not exist yet, so there is nothing to assert about it.
+    Both end up in `failed/` via `_fail`, just with a clearer error type.
     """
 
     async def run(
         self, *, prompt: str, spec: AgentSpec, cwd: Path, timeout: float
     ) -> AgentRun:
         argv = build_argv(prompt=prompt, spec=spec)
-        # `bypassPermissions` (headless autonomie, žádný člověk u konzole) se
-        # mapuje na `--dangerously-skip-permissions`, které claude pod rootem
-        # odmítne, dokud mu `IS_SANDBOX=1` nepotvrdí, že běží v izolovaném
-        # prostředí. Harness agenty pouští právě tam (container/CI), proto to
-        # nastavujeme tady, ne na volajícím.
+        # `bypassPermissions` (headless autonomy, no human at the console) maps
+        # to `--dangerously-skip-permissions`, which claude running as root
+        # refuses until `IS_SANDBOX=1` confirms it is running in an isolated
+        # environment. The harness runs agents exactly there (container/CI), so
+        # we set it here, not on the caller.
         env = {**os.environ, "IS_SANDBOX": "1"}
         proc = await asyncio.create_subprocess_exec(
             *argv,
@@ -155,10 +160,10 @@ class ClaudeCliRunner(AgentRunner):
         except asyncio.TimeoutError as error:
             proc.kill()
             await proc.wait()
-            raise AgentError(f"claude timeout po {timeout}s") from error
+            raise AgentError(f"claude timed out after {timeout}s") from error
         if proc.returncode != 0:
             raise AgentError(
-                f"claude skončil s exit {proc.returncode}: "
+                f"claude exited with {proc.returncode}: "
                 f"{stderr.decode().strip()}"
             )
         return parse_verdict(stdout.decode(), allowed=spec.allowed_outcomes)

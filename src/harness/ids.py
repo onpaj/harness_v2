@@ -1,4 +1,4 @@
-"""Generátory identit. Jediné místo, kde vzniká náhoda."""
+"""Identity generators. The only place where randomness originates."""
 
 from __future__ import annotations
 

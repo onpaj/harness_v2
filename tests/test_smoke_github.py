@@ -1,9 +1,10 @@
-"""Smoke fáze 4 — konektor end-to-end na fake GitHubu.
+"""Phase 4 smoke — the connector end-to-end on a fake GitHub.
 
-Plně in-memory až na záměr fáze: seedovaný issue s `harness:todo` proteče
-smyčkou přes GithubTaskSource a skončí jako `harness:pr-open` s taskem v `done/`.
-Tenhle smoke NESAHÁ na síť ani disk (kromě front) — je to e2e konektoru, ne
-reálného GitHubu. Reálné HTTP je záměna clientu (HttpGithubClient).
+Fully in-memory apart from the phase's intent: a seeded issue with `harness:todo`
+flows through the loop via GithubTaskSource and ends up as `harness:pr-open` with
+the task in `done/`. This smoke DOES NOT touch the network or disk (except the
+queues) — it's an e2e of the connector, not of real GitHub. Real HTTP is a swap
+of the client (HttpGithubClient).
 """
 
 import json
@@ -54,13 +55,13 @@ async def drive_until_quiet(harness) -> None:
                 acted = True
         if not acted:
             return
-    raise AssertionError("smyčka se nezklidnila")
+    raise AssertionError("loop did not settle")
 
 
 async def test_issue_flows_to_pr_open_and_done(tmp_path):
     seed(tmp_path)
     client = FakeGithubClient(
-        [Issue(1, "Fix bug", "detaily", "https://gh/o/r/issues/1", ("harness:todo",))]
+        [Issue(1, "Fix bug", "details", "https://gh/o/r/issues/1", ("harness:todo",))]
     )
     source = GithubTaskSource(
         client=client,
@@ -88,10 +89,10 @@ async def test_issue_flows_to_pr_open_and_done(tmp_path):
 
     await drive_until_quiet(harness)
 
-    # issue skončil na pr-open, ostatní managed labely pryč, cizí nedotčené
+    # the issue ended up at pr-open, other managed labels gone, foreign ones untouched
     assert set(client._issues[1].labels) == {"harness:pr-open"}
 
-    # task doputoval do done/
+    # the task made it to done/
     done_files = list((tmp_path / "done").glob("*.json"))
     assert len(done_files) == 1
     finished = Task.from_dict(json.loads(done_files[0].read_text()))

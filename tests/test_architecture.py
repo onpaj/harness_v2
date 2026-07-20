@@ -34,32 +34,32 @@ def test_ports_do_not_import_drivers():
     for path in (SOURCE / "ports").glob("*.py"):
         assert not any(
             module.startswith("harness.drivers") for module in imported_modules(path)
-        ), f"{path.name} importuje driver"
+        ), f"{path.name} imports a driver"
 
 
 def test_orchestration_does_not_import_drivers():
-    """Dispatcher a consumer znají jen porty. Wiring patří do app.py."""
+    """Dispatcher and consumer know only ports. Wiring belongs in app.py."""
     for name in ("dispatcher.py", "consumer.py"):
         assert not any(
             module.startswith("harness.drivers")
             for module in imported_modules(SOURCE / name)
-        ), f"{name} importuje driver"
+        ), f"{name} imports a driver"
 
 
 WORK_PORTS = (
     "harness.ports.workspace",
     "harness.ports.forge",
     "harness.ports.artifacts",
-    # Fáze 3: agent, katalog person a registr rep jsou taky práce, ne
-    # orchestrace — sahá na ně jen behavior / wiring.
+    # Phase 3: the agent, the persona catalog and the repo registry are also
+    # work, not orchestration — only behavior / wiring reaches for them.
     "harness.ports.agent",
     "harness.ports.repos",
 )
 
 WORK_DRIVERS = (
-    # Fáze 3 drivery za work-porty. Generický `test_orchestration_does_not_
-    # import_drivers` je pokrývá jako každý driver; tady jsou jmenovitě, aby
-    # regrese byla čitelná (dispatcher/consumer se nesmí navázat na agenta).
+    # Phase 3 drivers behind the work ports. The generic `test_orchestration_
+    # does_not_import_drivers` covers them like any driver; here they are listed
+    # by name so a regression is readable (dispatcher/consumer must not bind to the agent).
     "harness.drivers.claude_cli",
     "harness.drivers.fs_agents",
     "harness.drivers.fs_repos",
@@ -68,16 +68,17 @@ WORK_DRIVERS = (
 
 
 def test_orchestration_does_not_import_source_port():
-    """Vnější svět tasků (TaskSource) nezná dispatcher/consumer. Sahá na něj jen
-    SourcePoller (jádro) a SourceReflectorSink (driver), drátované v app.py."""
+    """The outside world of tasks (TaskSource) is unknown to dispatcher/consumer.
+    Only SourcePoller (core) and SourceReflectorSink (driver) reach for it,
+    wired in app.py."""
     for name in ("dispatcher.py", "consumer.py"):
         assert "harness.ports.source" not in imported_modules(SOURCE / name), (
-            f"{name} importuje ports.source"
+            f"{name} imports ports.source"
         )
 
 
 def test_source_poller_imports_only_ports_and_models():
-    """SourcePoller je jádro: zná jen porty a modely, žádný driver."""
+    """SourcePoller is core: it knows only ports and models, no driver."""
     imports = {
         module
         for module in imported_modules(SOURCE / "source_poller.py")
@@ -86,13 +87,13 @@ def test_source_poller_imports_only_ports_and_models():
     assert all(
         module == "harness.models" or module.startswith("harness.ports")
         for module in imports
-    ), f"source_poller.py importuje mimo porty/modely: {imports}"
+    ), f"source_poller.py imports outside ports/models: {imports}"
 
 
 def test_orchestration_does_not_import_work_ports():
-    """Worktree, forge, artefakty, agent ani registr rep nezná dispatcher/
-    consumer — sahá na ně jen behavior. Jinak by orchestrace věděla o payloadu,
-    na kterém task pracuje, i o tom, čím se práce vykonává."""
+    """Worktree, forge, artifacts, agent and the repo registry are unknown to
+    dispatcher/consumer — only behavior reaches for them. Otherwise orchestration
+    would know about the payload a task works on, and about how the work is done."""
     for name in ("dispatcher.py", "consumer.py"):
         imports = imported_modules(SOURCE / name)
         leaked = [
@@ -100,16 +101,16 @@ def test_orchestration_does_not_import_work_ports():
             for module in (*WORK_PORTS, *WORK_DRIVERS)
             if module in imports
         ]
-        assert not leaked, f"{name} importuje {leaked}"
+        assert not leaked, f"{name} imports {leaked}"
 
 
 def test_behaviors_import_only_ports_not_drivers():
-    """Behaviory (behaviors/) sahají na porty a modely, ne na jiné drivery."""
+    """Behaviors (behaviors/) reach for ports and models, not for other drivers."""
     for path in (SOURCE / "behaviors").glob("*.py"):
         assert not any(
             module.startswith("harness.drivers")
             for module in imported_modules(path)
-        ), f"{path.name} importuje driver"
+        ), f"{path.name} imports a driver"
 
 
 def test_only_app_and_cli_wire_drivers():
@@ -119,29 +120,28 @@ def test_only_app_and_cli_wire_drivers():
             continue
         assert not any(
             module.startswith("harness.drivers") for module in imported_modules(path)
-        ), f"{path.name} importuje driver mimo wiring"
+        ), f"{path.name} imports a driver outside wiring"
 
 
-# --- Consumer musí jen doručit outcome, nikdy o něm nerozhodovat -----------
+# --- Consumer must only deliver the outcome, never decide on it -------------
 #
-# Nahrazuje `test_consumer_has_no_branch_on_outcome_value` z tests/test_consumer.py,
-# která hledala tři string literály přes `inspect.getsource(Consumer)`. To
-# selhávalo na:
-#   - `if outcome == "done":`               (kontrolovalo se jen "request_changes")
-#   - alias importu (`from ... import Outcome as O`, pak `O.DONE`)
-#   - větev přesunutou do modulové funkce mimo tělo třídy Consumer
-#     (`inspect.getsource(Consumer)` pokrývá jen tělo třídy)
+# Replaces `test_consumer_has_no_branch_on_outcome_value` from tests/test_consumer.py,
+# which searched for three string literals via `inspect.getsource(Consumer)`. That
+# failed on:
+#   - `if outcome == "done":`               (only "request_changes" was checked)
+#   - import alias (`from ... import Outcome as O`, then `O.DONE`)
+#   - a branch moved into a module function outside the Consumer class body
+#     (`inspect.getsource(Consumer)` covers only the class body)
 #
-# Tahle verze parsuje `ast` celého modulu (ne jen třídy) a hledá JAKÉKOLI
-# porovnání (`ast.Compare`), jehož operand se odvozuje od outcome — ať už jde
-# o proměnnou/atribut obsahující "outcome" (case-insensitive, chytí i
-# `last_outcome`), nebo o člena enumu `Outcome` naimportovaného pod libovolným
-# aliasem.
+# This version parses the `ast` of the whole module (not just the class) and looks
+# for ANY comparison (`ast.Compare`) whose operand derives from outcome — whether
+# a variable/attribute containing "outcome" (case-insensitive, catches even
+# `last_outcome`), or a member of the `Outcome` enum imported under any alias.
 
 
 def _outcome_import_aliases(tree: ast.Module) -> set[str]:
-    """Lokální jména, pod kterými je v tomto modulu dostupný `harness.models.Outcome`
-    (i přes `as` alias), aby `O.DONE` bylo poznat stejně jako `Outcome.DONE`."""
+    """Local names under which `harness.models.Outcome` is available in this module
+    (including via an `as` alias), so `O.DONE` is recognized the same as `Outcome.DONE`."""
     aliases = {"Outcome"}
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom) and node.module == "harness.models":
@@ -163,10 +163,10 @@ def _derives_from_outcome(expr: ast.AST, aliases: set[str]) -> bool:
 
 
 def test_consumer_has_no_branch_on_outcome_value():
-    """Rozhodování patří do ConsumerBehavior (co se stalo) a dispatcheru (kam
-    to jde) — consumer.py smí outcome jen doručit. Hledá se v celém modulu
-    (funkce i třídy), ne jen v těle Consumer, protože se to větví přesunout
-    i mimo třídu."""
+    """Decision-making belongs to ConsumerBehavior (what happened) and the
+    dispatcher (where it goes) — consumer.py may only deliver the outcome. We
+    search the whole module (functions and classes), not just the Consumer body,
+    because the branch could be moved outside the class."""
     tree = ast.parse((SOURCE / "consumer.py").read_text(encoding="utf-8"))
     aliases = _outcome_import_aliases(tree)
 
@@ -179,13 +179,13 @@ def test_consumer_has_no_branch_on_outcome_value():
             offending.append(node)
 
     assert not offending, (
-        "consumer.py obsahuje porovnání odvozené od outcome na řádku "
-        f"{offending[0].lineno} — rozhodování patří do ConsumerBehavior/dispatcheru"
+        "consumer.py contains a comparison derived from outcome on line "
+        f"{offending[0].lineno} — decision-making belongs to ConsumerBehavior/dispatcher"
     )
 
 
 def test_projection_does_not_import_drivers():
-    """Read model sahá na porty, ne na drivery."""
+    """The read model reaches for ports, not drivers."""
     assert not any(
         module.startswith("harness.drivers")
         for module in imported_modules(SOURCE / "projection.py")
@@ -193,15 +193,15 @@ def test_projection_does_not_import_drivers():
 
 
 def test_api_does_not_import_drivers():
-    """UI nesmí vědět nic o driverech, na kterých harness běží."""
+    """The UI must know nothing about the drivers the harness runs on."""
     for path in (SOURCE / "api").rglob("*.py"):
         assert not any(
             module.startswith("harness.drivers") for module in imported_modules(path)
-        ), f"{path.name} importuje driver"
+        ), f"{path.name} imports a driver"
 
 
 def _imported_names_from(path: Path, module: str) -> set[str]:
-    """Jména importovaná z `module` v souboru `path` (`from module import X`)."""
+    """Names imported from `module` in file `path` (`from module import X`)."""
     tree = ast.parse(path.read_text(encoding="utf-8"))
     names: set[str] = set()
     for node in ast.walk(tree):
@@ -211,11 +211,12 @@ def _imported_names_from(path: Path, module: str) -> set[str]:
 
 
 def test_api_reads_artifacts_only_through_view():
-    """`api/` čte artefakty jen přes `ArtifactView` (read-side). Zápisový
-    `ArtifactStore` ani jeho drivery do UI nepatří — board nesmí umět artefakt
-    vytvořit, jen ho ukázat. Fáze 3: read-side driver je `WorktreeArtifactView`,
-    ale `api/` o něm neví, sahá jen na port."""
+    """`api/` reads artifacts only through `ArtifactView` (read-side). The
+    write-side `ArtifactStore` and its drivers do not belong in the UI — the
+    board must not be able to create an artifact, only show it. Phase 3: the
+    read-side driver is `WorktreeArtifactView`, but `api/` doesn't know about it,
+    it reaches only for the port."""
     for path in (SOURCE / "api").rglob("*.py"):
         names = _imported_names_from(path, "harness.ports.artifacts")
-        assert "ArtifactStore" not in names, f"{path.name} importuje ArtifactStore"
-        assert "ArtifactSlot" not in names, f"{path.name} importuje ArtifactSlot"
+        assert "ArtifactStore" not in names, f"{path.name} imports ArtifactStore"
+        assert "ArtifactSlot" not in names, f"{path.name} imports ArtifactSlot"

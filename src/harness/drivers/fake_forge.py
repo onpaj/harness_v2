@@ -1,8 +1,9 @@
-"""Forge pro filesystémový běh — zapisuje PR do souboru.
+"""Forge for a filesystem run — writes PRs to a file.
 
-Otevřené PR se ukládají jako JSON list do `<root>/prs.json`. Idempotence podle
-branch: existuje-li už PR pro danou branch, vrátí se místo založení dalšího.
-Skutečný forge (GitHub apod.) se doplní později; tohle stačí pro e2e a smoke.
+Opened PRs are stored as a JSON list in `<root>/prs.json`. Idempotent by branch:
+if a PR for the given branch already exists, it is returned instead of creating
+another. A real forge (GitHub etc.) comes later; this is enough for e2e and
+smoke.
 """
 
 from __future__ import annotations
@@ -15,7 +16,7 @@ from harness.ports.forge import Forge, PullRequest
 
 
 class FakeForge(Forge):
-    """Zaznamenává PR do `<root>/prs.json`. Idempotentní podle branch."""
+    """Records PRs into `<root>/prs.json`. Idempotent by branch."""
 
     def __init__(self, root: Path) -> None:
         self._root = Path(root)

@@ -1,4 +1,4 @@
-"""SourceReflectorSink — překlad proudu eventů na projekci do zdroje."""
+"""SourceReflectorSink — translating the event stream into a projection to the source."""
 
 from harness.drivers.memory import FakeClock, MemoryTaskSource
 from harness.drivers.source_reflector import SourceReflectorSink
@@ -56,7 +56,7 @@ def test_failed_projects_finish_not_ok():
     reflector = SourceReflectorSink([source])
 
     reflector.emit(
-        "failed", task_id=task.id, reason="rozbil se git", queue="failed", task=task.to_dict()
+        "failed", task_id=task.id, reason="git broke", queue="failed", task=task.to_dict()
     )
 
     issue = task.data["source"]["issue"]

@@ -1,8 +1,9 @@
-"""GithubTaskSource: issue → task, stav tasku → label na issue.
+"""GithubTaskSource: issue → task, task status → label on the issue.
 
-Jediné místo se znalostí GitHubu na straně zdroje. Přehození labelu v `poll()`
-je dvojče atomického `rename` ve `fs_queue.claim()` — další poll issue s claim
-labelem nevrátí, což dává ingesci „nanejvýš jednou" bez vedlejšího ledgeru.
+The single place with GitHub knowledge on the source side. Swapping the label in
+`poll()` is the twin of the atomic `rename` in `fs_queue.claim()` — a later poll
+won't return an issue with the claim label, which gives "at most once" ingestion
+without a side ledger.
 """
 
 from __future__ import annotations
@@ -43,8 +44,8 @@ class GithubTaskSource(TaskSource):
         self._pr_label = pr_label
         self._failed_label = failed_label
         self._step_labels = step_labels or {}
-        # Množina labelů, které tenhle zdroj spravuje. Jen z ní `_set_state`
-        # odebírá — cizí labely (bug, priority) zůstanou nedotčené.
+        # The set of labels this source manages. `_set_state` only removes from
+        # it — foreign labels (bug, priority) stay untouched.
         self._managed = {
             claimed_label,
             pr_label,
@@ -55,7 +56,7 @@ class GithubTaskSource(TaskSource):
     def poll(self) -> list[Task]:
         tasks: list[Task] = []
         for issue in self._client.list_issues(self._repo, label=self._select_label):
-            # Claim: přehoď label dřív, než task odejde do inboxu.
+            # Claim: swap the label before the task heads to the inbox.
             self._client.remove_label(self._repo, issue.number, self._select_label)
             self._client.add_label(self._repo, issue.number, self._claimed_label)
             task_id = new_task_id()
@@ -84,7 +85,7 @@ class GithubTaskSource(TaskSource):
         if not self._mine(task):
             return
         label = self._step_labels.get(progress.step)
-        if label:  # neznámý krok → bez labelu (coarse default, míň šumu)
+        if label:  # unknown step → no label (coarse default, less noise)
             self._set_state(self._issue(task), label)
 
     def finish(self, task: Task, result: FinishResult) -> None:

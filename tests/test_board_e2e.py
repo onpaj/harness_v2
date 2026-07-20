@@ -18,11 +18,11 @@ DEFINITION = {
 }
 
 MAX_STEPS = 1000
-"""Pojistka proti nekonečné smyčce, ne mechanismus čekání.
+"""A safeguard against an infinite loop, not a waiting mechanism.
 
-Zdravý běh testu potřebuje řádově jednotky kroků; stovky navíc je prostor
-pro to, aby selhání bylo hlasité, ne tichý strop, který by na pomalejším
-stroji vypadal jako falešný pád.
+A healthy test run needs a handful of steps; the extra hundreds give room
+for a failure to be loud, not a silent ceiling that would look like a false
+crash on a slower machine.
 """
 
 
@@ -33,11 +33,11 @@ def seed(tmp_path):
 
 
 async def drive_until_quiet(harness: Harness, *, on_tick=None) -> int:
-    """Prožene dispatcher a všechny consumery, dokud je co dělat.
+    """Drives the dispatcher and all consumers until there is nothing to do.
 
-    Žádné `sleep` ani polling na reálném čase — každý krok buď něco
-    zpracoval (a smyčka pokračuje), nebo ne (a je hotovo). `on_tick` se
-    zavolá po každém kroku, kdy je vidět nejnovější stav boardu.
+    No `sleep` or real-time polling — each step either processed something
+    (and the loop continues) or didn't (and we're done). `on_tick` is called
+    after every step, when the latest board state is visible.
     """
     for step in range(MAX_STEPS):
         acted = harness.dispatcher.tick()
@@ -49,17 +49,17 @@ async def drive_until_quiet(harness: Harness, *, on_tick=None) -> int:
         if not acted:
             return step
     raise AssertionError(
-        f"harness se nezastavil ani po {MAX_STEPS} tazích dispatcheru "
-        "a consumerů — podezření na nekonečnou smyčku v routingu"
+        f"harness did not stop even after {MAX_STEPS} ticks of the dispatcher "
+        "and consumers — suspected infinite loop in routing"
     )
 
 
 def hydrate_from_queues(harness: Harness) -> None:
-    """Recovery PŘED hydratací — jinak se ztratí tasky z `.processing/`.
+    """Recovery BEFORE hydration — otherwise tasks from `.processing/` are lost.
 
-    `Harness.run()` dělá totéž interně (viz app.py); tady to voláme ručně,
-    protože `run()` samo běží přes real-time polling smyčku a test ho
-    nahrazuje přímými tiky dispatcheru a consumerů.
+    `Harness.run()` does the same internally (see app.py); here we call it by
+    hand, because `run()` itself runs through a real-time polling loop and the
+    test replaces it with direct ticks of the dispatcher and consumers.
     """
     harness.recover()
     harness.projection.hydrate(
@@ -119,5 +119,5 @@ async def test_failed_task_lands_in_failed_column(tmp_path):
 
     columns = client.get("/api/board").json()["columns"]
     failed = next(item for item in columns if item["name"] == "failed")
-    assert failed["tasks"], "task s neznámým workflow nedoputoval do sloupce failed"
+    assert failed["tasks"], "task with an unknown workflow did not reach the failed column"
     assert failed["tasks"][0]["id"] == "tsk_2"

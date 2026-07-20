@@ -1,4 +1,4 @@
-"""Datové modely. Tento modul neimportuje nic z balíku harness."""
+"""Data models. This module imports nothing from the harness package."""
 
 from __future__ import annotations
 
@@ -7,16 +7,16 @@ from enum import Enum
 from typing import Any, Union
 
 END = "end"
-"""Vyhrazené jméno terminálního uzlu. Nemá frontu ani odchozí hrany."""
+"""Reserved name of the terminal node. It has no queue and no outgoing edges."""
 
 FAILED = "failed"
-"""Vyhrazený terminální status tasku, který skončil ve frontě `failed/`.
-Stejně jako END nemá žádné odchozí hrany — jen tu navíc žádný workflow
-nezná jako svůj krok."""
+"""Reserved terminal status of a task that ended up in the `failed/` queue.
+Like END it has no outgoing edges — it just additionally isn't known to any
+workflow as one of its steps."""
 
 
 class Outcome(str, Enum):
-    """Jediné hodnoty, které smí ConsumerBehavior vrátit."""
+    """The only values a ConsumerBehavior may return."""
 
     DONE = "done"
     REQUEST_CHANGES = "request_changes"
@@ -24,10 +24,10 @@ class Outcome(str, Enum):
 
 @dataclass(frozen=True)
 class BehaviorResult:
-    """Návrat behavioru: co se stalo (outcome) a co se udělalo (summary).
+    """A behavior's return value: what happened (outcome) and what was done (summary).
 
-    `outcome` je řídicí signál, na který routuje dispatcher. `summary` je krátký
-    terminální výrok o běhu — zpráva commitu, řádek historie, tělo PR, board.
+    `outcome` is the control signal the dispatcher routes on. `summary` is a short
+    terminal statement about the run — commit message, history line, PR body, board.
     """
 
     outcome: Outcome
@@ -36,7 +36,7 @@ class BehaviorResult:
 
 @dataclass(frozen=True)
 class HistoryEntry:
-    """Jeden řádek audit logu tasku."""
+    """A single line of the task's audit log."""
 
     at: str
     actor: str
@@ -76,7 +76,7 @@ class HistoryEntry:
 
 @dataclass(frozen=True)
 class Task:
-    """Jednotka práce. Putuje mezi frontami, nese svá metadata."""
+    """Unit of work. Travels between queues, carries its own metadata."""
 
     id: str
     workflow_template: str
@@ -123,7 +123,7 @@ class Task:
 
 @dataclass(frozen=True)
 class Transition:
-    """Jedna hrana state machine: z kroku, na outcome, do kroku."""
+    """A single state-machine edge: from step, on outcome, to step."""
 
     from_step: str
     on: str
@@ -137,14 +137,14 @@ class Workflow:
     transitions: tuple[Transition, ...]
 
     def target(self, status: str, outcome: str) -> str | None:
-        """Cíl hrany, nebo None když žádná nesedí."""
+        """Target of the matching edge, or None when none matches."""
         for transition in self.transitions:
             if transition.from_step == status and transition.on == outcome:
                 return transition.to_step
         return None
 
     def steps(self) -> tuple[str, ...]:
-        """Všechny kroky, které potřebují frontu. END mezi ně nepatří."""
+        """All steps that need a queue. END is not one of them."""
         found: list[str] = []
         for transition in self.transitions:
             for step in (transition.from_step, transition.to_step):
@@ -157,19 +157,19 @@ class Workflow:
 
 @dataclass(frozen=True)
 class MoveTo:
-    """Task jde do fronty kroku."""
+    """The task goes to a step's queue."""
 
     step: str
 
 
 @dataclass(frozen=True)
 class Finished:
-    """Task doputoval na END."""
+    """The task has reached END."""
 
 
 @dataclass(frozen=True)
 class Failed:
-    """Task nelze směrovat."""
+    """The task cannot be routed."""
 
     reason: str
 

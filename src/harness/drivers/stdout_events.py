@@ -1,4 +1,4 @@
-"""Eventy jako řádky na stdout. V dalších fázích nahradí OTel."""
+"""Events as lines on stdout. In later phases OTel will replace this."""
 
 from __future__ import annotations
 

@@ -34,7 +34,7 @@ def test_reattach_returns_same_handle():
 def test_commit_records_message_and_returns_sha():
     handle = MemoryWorkspace().attach(make_task())
 
-    sha = handle.commit("[development] hotovo")
+    sha = handle.commit("[development] done")
 
     assert sha is not None
-    assert handle.commits == ["[development] hotovo"]
+    assert handle.commits == ["[development] done"]

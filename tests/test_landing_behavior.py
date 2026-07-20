@@ -16,7 +16,7 @@ def make_task() -> Task:
         repository="app-backend",
         worktree="/work/tsk_1",
         status="land",
-        data={"title": "přidat rate limiting"},
+        data={"title": "add rate limiting"},
         history=(
             HistoryEntry(
                 at="t",
@@ -24,7 +24,7 @@ def make_task() -> Task:
                 from_step="design",
                 to_step=None,
                 outcome="done",
-                summary="design: hotovo",
+                summary="design: done",
             ),
             HistoryEntry(
                 at="t",
@@ -32,7 +32,7 @@ def make_task() -> Task:
                 from_step="development",
                 to_step=None,
                 outcome="done",
-                summary="development: přidán retry",
+                summary="development: added retry",
             ),
         ),
     )
@@ -57,7 +57,7 @@ async def test_opens_pull_request_for_task_branch():
 
     assert len(forge.opened) == 1
     assert forge.opened[0].branch == "harness/tsk_1"
-    assert forge.opened[0].title == "přidat rate limiting"
+    assert forge.opened[0].title == "add rate limiting"
     assert result.outcome is Outcome.DONE
     assert "PR" in result.summary
 
@@ -68,8 +68,8 @@ async def test_pr_body_aggregates_history_summaries():
     await behavior.run(make_task())
 
     body = forge.bodies["harness/tsk_1"]
-    assert "design: hotovo" in body
-    assert "development: přidán retry" in body
+    assert "design: done" in body
+    assert "development: added retry" in body
 
 
 async def test_stages_artifacts_into_worktree():
@@ -81,7 +81,7 @@ async def test_stages_artifacts_into_worktree():
     staged = {relpath for relpath, _ in handle.writes}
     assert "docs/tasks/tsk_1/design/0/design.md" in staged
     assert "docs/tasks/tsk_1/review/0/review.md" in staged
-    assert "[land] artefakty tasku" in handle.commits
+    assert "[land] task artifacts" in handle.commits
 
 
 async def test_landing_is_idempotent():
@@ -111,6 +111,6 @@ async def test_copy_artifacts_false_skips_copy_but_opens_pr():
 
     handle = workspace.handles["tsk_1"]
     assert handle.writes == []
-    assert "[land] artefakty tasku" not in handle.commits
+    assert "[land] task artifacts" not in handle.commits
     assert len(forge.opened) == 1
     assert result.outcome is Outcome.DONE

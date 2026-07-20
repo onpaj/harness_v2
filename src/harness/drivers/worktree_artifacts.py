@@ -1,8 +1,9 @@
-"""Read-side pohled na artefakty ve worktree pro UI.
+"""Read-side view of the artifacts in the worktree for the UI.
 
-Layout a konvenci pojmenování vlastní `harness.artifacts_layout`; tento driver
-z ní čte. Zápisová strana `ArtifactStore` z fáze 2 zaniká — artefakty píše
-agent přímo do worktree, číslo pokusu počítá `artifacts_layout.next_attempt`.
+The layout and naming convention are owned by `harness.artifacts_layout`; this
+driver reads from it. The write side `ArtifactStore` from phase 2 goes away —
+the agent writes artifacts straight into the worktree, and the attempt number is
+computed by `artifacts_layout.next_attempt`.
 """
 
 from __future__ import annotations
@@ -14,7 +15,7 @@ from harness.ports.artifacts import ArtifactRef, ArtifactView
 
 
 class WorktreeArtifactView(ArtifactView):
-    """Read-only pohled na `.artifacts/` ve worktree tasku."""
+    """Read-only view of `.artifacts/` in the task's worktree."""
 
     def __init__(self, worktrees_root: Path) -> None:
         self._worktrees_root = Path(worktrees_root)

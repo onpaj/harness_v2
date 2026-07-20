@@ -1,8 +1,9 @@
-"""Filesystémové úložiště artefaktů.
+"""Filesystem artifact store.
 
-Struktura na disku: `<root>/<task_id>/<step>/<attempt>/<name>`. Attempt je
-pořadové číslo pokusu — počet už existujících podadresářů kroku. Re-run kroku
-proto nikdy nepřepíše předchozí pokus; jen založí další.
+On-disk layout: `<root>/<task_id>/<step>/<attempt>/<name>`. Attempt is the
+ordinal of the attempt — the count of already existing subdirectories of the
+step. A step re-run therefore never overwrites a previous attempt; it just
+creates the next one.
 """
 
 from __future__ import annotations
@@ -13,7 +14,7 @@ from harness.ports.artifacts import ArtifactRef, ArtifactSlot, ArtifactStore
 
 
 class FilesystemArtifactSlot(ArtifactSlot):
-    """Jeden pokus na disku. `put` zapíše soubor do adresáře pokusu."""
+    """A single attempt on disk. `put` writes a file into the attempt's directory."""
 
     def __init__(self, directory: Path, attempt: int) -> None:
         self._directory = directory
@@ -28,7 +29,7 @@ class FilesystemArtifactSlot(ArtifactSlot):
 
 
 class FilesystemArtifactStore(ArtifactStore):
-    """Artefakty jako stromová struktura adresářů pod `root`."""
+    """Artifacts as a tree of directories under `root`."""
 
     def __init__(self, root: Path) -> None:
         self._root = Path(root)

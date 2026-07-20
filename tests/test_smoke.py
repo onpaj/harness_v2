@@ -1,13 +1,14 @@
-"""Jeden běh na skutečném filesystemu se zkráceným intervalem.
+"""A single run on the real filesystem with a shortened interval.
 
-Obě testovací funkce ženou smyčku přes `asyncio.create_task` a čekají na
-`(tmp_path / "done" / ...).exists()` přes ohraničené pollování — to samo o
-sobě čeká nejvýš 6 s (600 × 0.01 s). Jenže `stop.set(); await runner` na konci
-na nic takového ohraničené není: pokud by regrese v `Harness.run`/`_dispatcher_loop`/
-`_consumer_loop` přestala respektovat `stop`, `await runner` visí navždy a test
-zamrzne, místo aby selhal. `asyncio.wait_for` kolem `await runner` to řeší —
-při timeoutu `runner` zruší a test spadne s jasnou `TimeoutError` během pár
-vteřin, ne že se zavěsí na neurčito. Viz mutation-check v task-11-report.md."""
+Both test functions drive the loop via `asyncio.create_task` and wait for
+`(tmp_path / "done" / ...).exists()` through bounded polling — which on its own
+waits at most 6 s (600 × 0.01 s). But `stop.set(); await runner` at the end is
+bounded by nothing of the sort: if a regression in `Harness.run`/`_dispatcher_loop`/
+`_consumer_loop` stopped respecting `stop`, `await runner` would hang forever and
+the test would freeze instead of failing. `asyncio.wait_for` around `await runner`
+handles that — on timeout it cancels `runner` and the test fails with a clear
+`TimeoutError` within a few seconds, rather than hanging indefinitely. See the
+mutation-check in task-11-report.md."""
 
 import asyncio
 import json
@@ -60,7 +61,7 @@ async def test_task_travels_from_submit_to_done(tmp_path, capsys):
 async def test_unknown_workflow_lands_in_failed_and_loop_survives(tmp_path):
     main(["init", "--root", str(tmp_path)])
     broken = Task(
-        id="tsk_broken", workflow_template="neexistuje", created="2026-07-19T10:00:00Z"
+        id="tsk_broken", workflow_template="nonexistent", created="2026-07-19T10:00:00Z"
     )
     (tmp_path / "tasks" / "tsk_broken.json").write_text(json.dumps(broken.to_dict()))
     healthy = Task(

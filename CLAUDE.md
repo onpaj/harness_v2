@@ -1,186 +1,195 @@
-# harness_v2 — orientace pro Claude
+# harness_v2 — orientation for Claude
 
-Orchestrační harness pro více agentů. Jednotkou práce je **task**, který putuje
-mezi frontami podle **workflow** — malého state machine s explicitními hranami.
+An orchestration harness for multiple agents. The unit of work is a **task**, which
+travels between queues according to a **workflow** — a small state machine with
+explicit edges.
 
-Spec fáze 1: `docs/superpowers/specs/2026-07-19-orchestration-phase1-design.md`
-Plán fáze 1: `docs/superpowers/plans/2026-07-19-orchestration-phase1.md`
-Spec fáze 2: `docs/superpowers/specs/2026-07-20-orchestration-phase2-design.md`
-Plán fáze 2: `docs/superpowers/plans/2026-07-20-orchestration-phase2.md`
-Spec fáze 3: `docs/superpowers/specs/2026-07-20-orchestration-phase3-design.md`
-Plán fáze 3: `docs/superpowers/plans/2026-07-20-orchestration-phase3.md`
+> **Project language is English — always.** All code, comments, docstrings,
+> string literals, tests, docs, commit messages and PRs are written in English.
+> Do not introduce any other language, even when the prompt or an issue is in one.
 
-Projekt se staví **po fázích**. Fáze 1 je POC orchestrační smyčky. Fáze 2 přidává
-**worktree, artefakty a landing**: každá fáze pracuje ve worktree, píše artefakty,
-commituje po fázích a na konci otevře PR. Fáze 3 vyměňuje `DummyBehavior` za
-**skutečného agenta přes `claude -p`**: personu kroku (`AgentSpec`) spustí sdílený
-`AgentRunner`, `task.repository` je jméno (cestu řeší `RepositoryRegistry`) a
-artefakty se stěhují **do worktree** pod `.artifacts/<id>/`, verzované. Skutečný
-GitHub je pořád jen driver (forge), který se vymění dál.
+Phase 1 spec: `docs/superpowers/specs/2026-07-19-orchestration-phase1-design.md`
+Phase 1 plan: `docs/superpowers/plans/2026-07-19-orchestration-phase1.md`
+Phase 2 spec: `docs/superpowers/specs/2026-07-20-orchestration-phase2-design.md`
+Phase 2 plan: `docs/superpowers/plans/2026-07-20-orchestration-phase2.md`
+Phase 3 spec: `docs/superpowers/specs/2026-07-20-orchestration-phase3-design.md`
+Phase 3 plan: `docs/superpowers/plans/2026-07-20-orchestration-phase3.md`
 
-## Invarianty — nerozbíjet
+The project is built **phase by phase**. Phase 1 is a POC of the orchestration loop.
+Phase 2 adds **worktrees, artifacts and landing**: each phase works in a worktree,
+writes artifacts, commits per phase and opens a PR at the end. Phase 3 swaps
+`DummyBehavior` for a **real agent via `claude -p`**: a step's persona (`AgentSpec`)
+is run by the shared `AgentRunner`, `task.repository` is a name (the path is
+resolved by `RepositoryRegistry`), and artifacts move **into the worktree** under
+`.artifacts/<id>/`, versioned. Real GitHub is still just a driver (forge) that gets
+swapped out later.
 
-1. **Vyměnit se smí driver, nikdy jeho okolí.** Každá pohyblivá část leží za
-   portem v `ports/`. `dispatcher.py` ani `consumer.py` nesmí importovat nic
-   z `drivers/` — wiring patří výhradně do `app.py`. Hlídá to
+## Invariants — do not break
+
+1. **You may swap a driver, never its surroundings.** Every moving part sits behind
+   a port in `ports/`. Neither `dispatcher.py` nor `consumer.py` may import anything
+   from `drivers/` — wiring belongs exclusively in `app.py`. This is guarded by
    `tests/test_architecture.py`.
-2. **Rozhodování má tři oddělené role.** `ConsumerBehavior` říká *co se stalo*,
-   dispatcher *kam to jde dál*, consumer nerozhoduje nic. V `consumer.py` nesmí
-   být větev závislá na hodnotě outcome; test to kontroluje čtením zdrojáku.
-3. **Status mění dispatcher — s jednou výjimkou.** Rozhodnutí *kam task jde dál*
-   (krok, `end`) patří výhradně dispatcheru. Jediná výjimka: když consumer sám
-   nedokáže task doručit (behavior vyhodí výjimku, nebo vrátí neplatný
-   outcome), zapíše mu terminální status `failed` sám — symetricky k tomu, jak
-   `Dispatcher._fail` dělá totéž, když selže routing. `lastOutcome` zapisuje
-   výhradně consumer.
-4. **Router je čistá funkce.** `route()` nesmí sáhnout na I/O, čas ani stav.
-5. **`api/` ani `projection.py` neimportují `drivers/`.** UI nesmí vědět, na čem harness běží.
-6. **V `Harness.run()` jde `recover()` před `hydrate()`.** Obráceně se ztratí tasky z `.processing/`.
-7. **Event o pohybu tasku nese `task` i `queue`.** Bez toho projekce neuvidí tasky vzniklé po startu.
-8. **`repository`/`worktree` čte jen behavior.** Router a dispatcher pořád rozhodují výhradně podle `(status, lastOutcome)`.
-9. **Commit dělá behavior driver, ne consumer a ne LLM.** Consumer nezná git.
-10. **Artefakty jsou attempt-indexed** (`<task>/<step>/<attempt>/`). Re-run kroku nikdy nepřepíše předchozí pokus — jinak by smyčka `request_changes` z audit trailu zmizela.
-11. **`Workspace`/`Forge`/`ArtifactStore` nezná dispatcher ani consumer.** Sahá na ně jen behavior; wiring v `app.py`. `api/` sahá jen na `ArtifactView`. Hlídá `test_architecture.py`.
-12. **Landing je krok, ne magie.** Přiklopí artefakty do worktree a otevře PR; může selhat do `failed/`. `end` zůstává čistý terminál. Fáze 3: artefakty už ve worktree jsou, landing je nekopíruje — jen otevře PR.
-13. **Agent je za `AgentRunner`.** `ClaudeCliBehavior` nezná subprocess ani CLI flagy; test ho pohání `FakeAgentRunner`em, jako fáze 1 čas `FakeClock`em.
-14. **Persona je data, ne kód.** V `behaviors/agent.py` není větev podle jména agenta — rozdíl mezi personami je obsah `AgentSpec`u dodaného při konstrukci.
-15. **`task.repository` je jméno, ne cesta.** Cesty řeší `RepositoryRegistry` — machine-specific config (`repos.json`), mimo task. Worktree cestu odvodí harness (`<worktrees_root>/<task_id>`).
-16. **Artefakty žijí ve worktree pod `.artifacts/<id>/`, verzované.** Píše je agent, commituje worker. Číslování pokusů (`<step>-NN`) je gapless přes reset-on-reattach.
-17. **`AgentRunner`/`AgentCatalog`/`RepositoryRegistry` nezná dispatcher ani consumer.** Sahá na ně jen behavior / wiring. Hlídá `test_architecture.py`.
-18. **Vnější svět tasků je jeden port `TaskSource` (`poll`/`report_progress`/`finish`).** GitHub je driver; jak se stav renderuje (label), zná jen driver.
-19. **Původ tasku žije v `task.data.source`** (`{kind, repo, issue, url}`). Projekce ven ho čte odtud, ne z vedlejšího stavu. Router ani dispatcher `data.source` nečtou.
-20. **`TaskSource` sahá jen `SourcePoller` (jádro) a `SourceReflectorSink` (driver)**, drátované v `app.py`. `dispatcher.py`/`consumer.py` port neimportují — hlídá `test_architecture.py`.
-21. **Projekce ven je idempotentní a neblokuje rozhodování.** `report_progress` dvakrát je no-op; selhání zdroje izoluje `CompositeEventSink` (a `SourcePoller.tick` chytí výjimku z `poll()`).
+2. **Decision-making has three separate roles.** `ConsumerBehavior` says *what
+   happened*, the dispatcher *where it goes next*, the consumer decides nothing.
+   `consumer.py` must not contain a branch that depends on the outcome value; a test
+   checks this by reading the source.
+3. **The dispatcher changes status — with one exception.** The decision *where the
+   task goes next* (step, `end`) belongs exclusively to the dispatcher. The one
+   exception: when the consumer itself cannot deliver the task (the behavior raises
+   an exception, or returns an invalid outcome), it writes the terminal status
+   `failed` itself — symmetrically to how `Dispatcher._fail` does the same when
+   routing fails. `lastOutcome` is written exclusively by the consumer.
+4. **The router is a pure function.** `route()` must not touch I/O, time or state.
+5. **Neither `api/` nor `projection.py` imports `drivers/`.** The UI must not know what the harness runs on.
+6. **In `Harness.run()`, `recover()` comes before `hydrate()`.** The other way round loses tasks from `.processing/`.
+7. **A task-movement event carries both `task` and `queue`.** Without it the projection won't see tasks created after startup.
+8. **`repository`/`worktree` is read only by the behavior.** The router and dispatcher still decide solely on `(status, lastOutcome)`.
+9. **The commit is done by the behavior driver, not the consumer and not the LLM.** The consumer knows no git.
+10. **Artifacts are attempt-indexed** (`<task>/<step>/<attempt>/`). A step re-run never overwrites the previous attempt — otherwise the `request_changes` loop would vanish from the audit trail.
+11. **`Workspace`/`Forge`/`ArtifactStore` are unknown to the dispatcher and consumer.** Only the behavior touches them; wiring in `app.py`. `api/` touches only `ArtifactView`. Guarded by `test_architecture.py`.
+12. **Landing is a step, not magic.** It lands the artifacts into the worktree and opens a PR; it may fail into `failed/`. `end` stays a clean terminal. Phase 3: the artifacts are already in the worktree, landing doesn't copy them — it just opens a PR.
+13. **The agent lives behind `AgentRunner`.** `ClaudeCliBehavior` knows nothing of subprocesses or CLI flags; a test drives it with `FakeAgentRunner`, the way phase 1 drove time with `FakeClock`.
+14. **The persona is data, not code.** `behaviors/agent.py` has no branch on the agent's name — the difference between personas is the content of the `AgentSpec` supplied at construction.
+15. **`task.repository` is a name, not a path.** Paths are resolved by `RepositoryRegistry` — machine-specific config (`repos.json`), outside the task. The worktree path is derived by the harness (`<worktrees_root>/<task_id>`).
+16. **Artifacts live in the worktree under `.artifacts/<id>/`, versioned.** The agent writes them, the worker commits them. Attempt numbering (`<step>-NN`) is gapless across reset-on-reattach.
+17. **`AgentRunner`/`AgentCatalog`/`RepositoryRegistry` are unknown to the dispatcher and consumer.** Only the behavior / wiring touches them. Guarded by `test_architecture.py`.
+18. **The outside world of tasks is a single port `TaskSource` (`poll`/`report_progress`/`finish`).** GitHub is a driver; how the state is rendered (a label) is known only to the driver.
+19. **A task's origin lives in `task.data.source`** (`{kind, repo, issue, url}`). The outward projection reads it from there, not from side state. Neither router nor dispatcher reads `data.source`.
+20. **`TaskSource` is touched only by `SourcePoller` (core) and `SourceReflectorSink` (driver)**, wired in `app.py`. `dispatcher.py`/`consumer.py` don't import the port — guarded by `test_architecture.py`.
+21. **The outward projection is idempotent and doesn't block decision-making.** `report_progress` twice is a no-op; a source failure is isolated by `CompositeEventSink` (and `SourcePoller.tick` catches the exception from `poll()`).
 
-## Práce tady
+## Working here
 
 ```sh
 .venv/bin/pytest -q
 ```
 
-Python je **3.11** (`/Users/rem/.local/bin/python3.11`), na stroji **není `uv`** —
-plain `venv` + `pip install -e ".[dev]"`. Runtime nemá žádné produkční závislosti.
+Python is **3.11** (`/Users/rem/.local/bin/python3.11`), the machine **has no `uv`** —
+plain `venv` + `pip install -e ".[dev]"`. The runtime has no production dependencies.
 
-Unit a integrační testy běží na in-memory driverech a `FakeClock` — bez disku
-a bez skutečného čekání. Nikdy do nich nepiš test, který spí v reálném čase.
+Unit and integration tests run on in-memory drivers and `FakeClock` — no disk
+and no real waiting. Never write a test into them that sleeps in real time.
 
-Záměrnou výjimkou jsou `tests/test_smoke.py` (reálný FS) a
-`tests/test_smoke_git.py` (fáze 3: reálný git worktree + artefakty ve worktree +
-fake forge, práci kroku pohání `ClaudeCliBehavior` s lokálním test-runnerem, ne
-reálný `claude`). Oba poluí reálným `asyncio.sleep(0.01)` — je to jediné pokrytí
-reálných FS/git driverů naživo. Neuklízej je do in-memory podoby; tím by to
-pokrytí zmizelo.
+The deliberate exceptions are `tests/test_smoke.py` (real FS) and
+`tests/test_smoke_git.py` (phase 3: real git worktree + artifacts in the worktree +
+fake forge, the step's work driven by `ClaudeCliBehavior` with a local test-runner,
+not real `claude`). Both crawl along on a real `asyncio.sleep(0.01)` — it's the only
+coverage of the real FS/git drivers live. Don't tidy them into an in-memory shape;
+that coverage would vanish.
 
-`tests/test_smoke_claude.py` je **opt-in** smoke se skutečným `claude -p` — běží
-jen s `HARNESS_SMOKE_CLAUDE=1`, jinak se přeskočí a `pytest -q` ho nespustí.
-Kryje tenkou subprocess slupku `ClaudeCliRunner`u, kterou fake runnery obcházejí.
+`tests/test_smoke_claude.py` is an **opt-in** smoke with real `claude -p` — it runs
+only with `HARNESS_SMOKE_CLAUDE=1`, otherwise it's skipped and `pytest -q` won't run it.
+It covers the thin subprocess shell of `ClaudeCliRunner` that the fake runners bypass.
 
-## Git konvence
+## Git conventions
 
-**Commituj přímo do `main`.** V této fázi je to zamýšlený postup — nezakládej
-branch, neotevírej PR a neptej se. Platí to pro repo harnessu samotného.
+**Commit straight into `main`.** In this phase that's the intended approach — don't
+create a branch, don't open a PR, and don't ask. This applies to the harness's own repo.
 
-## Mapa modulů
+## Module map
 
-Závislosti tečou striktně dolů, cykly nejsou.
+Dependencies flow strictly downward, no cycles.
 
-| Vrstva | Moduly |
+| Layer | Modules |
 |---|---|
-| Základ | `models` (neimportuje nic z balíku), `ids` |
-| Logika | `router` (zná jen `models`) |
-| Základ (bez balíku) | `models`, `ids`, `artifacts_layout` (konvence `.artifacts/<id>/<step>-NN`) |
-| Porty | `ports/{queue,workflows,strategy,behavior,events,clock,workspace,artifacts,forge,board,agent,repos,source}` |
-| Orchestrace | `dispatcher`, `consumer`, `source_poller` — znají jen porty (a ne `workspace`/`forge`/`artifacts`/`agent`/`repos`/`drivers`) |
-| Behaviory | `behaviors/{landing,agent}` — sahají na porty, ne na drivery |
-| Drivery | `drivers/{fs_queue,fs_workflows,fifo_strategy,dummy_behavior,stdout_events,system_clock,memory,fs_artifacts,git_workspace,fake_forge,claude_cli,fs_agents,fs_repos,worktree_artifacts,source_reflector,github_client,github_source}` |
-| Okraje | `app` (wiring), `cli` |
+| Base | `models` (imports nothing from the package), `ids` |
+| Logic | `router` (knows only `models`) |
+| Base (package-free) | `models`, `ids`, `artifacts_layout` (the `.artifacts/<id>/<step>-NN` convention) |
+| Ports | `ports/{queue,workflows,strategy,behavior,events,clock,workspace,artifacts,forge,board,agent,repos,source}` |
+| Orchestration | `dispatcher`, `consumer`, `source_poller` — know only ports (and not `workspace`/`forge`/`artifacts`/`agent`/`repos`/`drivers`) |
+| Behaviors | `behaviors/{landing,agent}` — touch ports, not drivers |
+| Drivers | `drivers/{fs_queue,fs_workflows,fifo_strategy,dummy_behavior,stdout_events,system_clock,memory,fs_artifacts,git_workspace,fake_forge,claude_cli,fs_agents,fs_repos,worktree_artifacts,source_reflector,github_client,github_source}` |
+| Edges | `app` (wiring), `cli` |
 
-- `projection.py` — in-memory read model boardu; hydratace z front + proud eventů
-- `artifacts_layout.py` — jediné místo pravdy o rozmístění artefaktů ve worktree (`next_attempt`, `artifacts_dir`); čte z něj behavior i `WorktreeArtifactView`
-- `ports/board.py` — port `BoardView`, kterým se dívá UI
-- `ports/artifacts.py` — `ArtifactStore` (zápis, fáze 2) a `ArtifactView` (čtení pro UI); fáze 3 čte přes `WorktreeArtifactView`
+- `projection.py` — in-memory read model of the board; hydration from queues + event stream
+- `artifacts_layout.py` — the single source of truth for artifact placement in the worktree (`next_attempt`, `artifacts_dir`); read by both the behavior and `WorktreeArtifactView`
+- `ports/board.py` — the `BoardView` port through which the UI looks
+- `ports/artifacts.py` — `ArtifactStore` (writing, phase 2) and `ArtifactView` (reading for the UI); phase 3 reads via `WorktreeArtifactView`
 - `ports/workspace.py` — `Workspace.attach(task) -> WorkspaceHandle` (worktree + commit)
-- `ports/forge.py` — `Forge.open_pull_request(...)` (landing navrhne PR)
-- `ports/agent.py` — `AgentRunner.run(...)`, `AgentCatalog.get(name)`, `AgentSpec` (persona jako data)
-- `ports/repos.py` — `RepositoryRegistry.resolve(name) -> Path` (jméno repa → cesta)
-- `behaviors/agent.py` — `ClaudeCliBehavior`: attach worktree → alokuj attempt → spusť agenta → worker commitne
-- `ports/source.py` — port `TaskSource` (`poll`/`report_progress`/`finish`) + `Progress`/`FinishResult`
-- `source_poller.py` — `SourcePoller`: jádro plnící inbox ze zdroje (zná jen porty)
-- `drivers/source_reflector.py` — `SourceReflectorSink(EventSink)`: proud eventů → projekce do zdroje
+- `ports/forge.py` — `Forge.open_pull_request(...)` (landing proposes a PR)
+- `ports/agent.py` — `AgentRunner.run(...)`, `AgentCatalog.get(name)`, `AgentSpec` (persona as data)
+- `ports/repos.py` — `RepositoryRegistry.resolve(name) -> Path` (repo name → path)
+- `behaviors/agent.py` — `ClaudeCliBehavior`: attach worktree → allocate attempt → run the agent → the worker commits
+- `ports/source.py` — the `TaskSource` port (`poll`/`report_progress`/`finish`) + `Progress`/`FinishResult`
+- `source_poller.py` — `SourcePoller`: the core that fills the inbox from the source (knows only ports)
+- `drivers/source_reflector.py` — `SourceReflectorSink(EventSink)`: event stream → projection into the source
 - `drivers/github_client.py` — `GithubClient` (ABC), `Issue`, `FakeGithubClient`, `HttpGithubClient` (stdlib `urllib`)
-- `drivers/github_source.py` — `GithubTaskSource`: issue → task, stav → label
-- `api/` — FastAPI board; vidí jen `BoardView` a `ArtifactView`, nikdy driver ani `ArtifactStore`
+- `drivers/github_source.py` — `GithubTaskSource`: issue → task, state → label
+- `api/` — FastAPI board; sees only `BoardView` and `ArtifactView`, never a driver or `ArtifactStore`
 
-## Co je za co zodpovědné
+## What is responsible for what
 
-- **`TaskQueue`** — inbox, fronty kroků, `done/` i `failed/` jsou instance téhož
-  portu. Terminální stavy jsou prostě fronty, které nikdo nekonzumuje.
-- **`claim()`** je atomický `rename` do `<queue>/.processing/`. Jedna operace řeší
-  lease, idempotenci i původ po pádu.
-- **`END = "end"`** je vyhrazený uzel. Není to „stav bez odchozích hran" —
-  překlep by tak tiše vypadal jako úspěch.
-- **Task má dvě pracovní plochy** (fáze 2). **Worktree** (`repository`/`worktree`)
-  drží kód, verzuje ho git branch tasku. **Složka artefaktů** (harnessová,
-  neverzovaná do landingu, čitelná pro UI) drží plán/design/review. Oddělené
-  záměrně — worktree zůstane čistý, UI čte bez gitu, `git clean` artefakty
-  nesmaže. Detaily viz spec fáze 2.
-- **`BehaviorResult(outcome, summary)`** je návrat behavioru. `outcome` routuje
-  dispatcher; `summary` je zpráva commitu, řádek historie, tělo PR i board.
-- **Task je transakce.** Práce žije v izolovaném worktree/složce; na konci
-  **landing** přiklopí artefakty a otevře PR. Harness se nedotkne `main` — jen
-  navrhuje. Merge strategii řeší člověk.
-- **Agent** (fáze 3) je persona jako data: `AgentSpec` nese prompt, model,
-  nástroje a `allowed_outcomes`. `AgentCatalog` mapuje jméno kroku na spec
-  (default identita jméno==krok), sdílený `AgentRunner` ho spustí. Model je per
-  fronta, ne per třída — přidání agenta = nový soubor v katalogu, ne nová třída.
-  `reviewer` smí `done`+`request_changes`, ostatní jen `done`.
-- **`RepositoryRegistry`** překládá jméno repa na cestu na tomhle stroji
-  (`repos.json`, machine-specific, necommitnuté). Task nese jen jméno; worktree
-  cestu (`<worktrees_root>/<task_id>`) odvodí harness. Reattach špinavý worktree
-  resetuje na HEAD (reset-on-reattach).
-- **Artefakty ve worktree** (fáze 3): agent je píše do `.artifacts/<id>/`,
-  **commituje je worker** spolu s kódem (jedou v git historii a v PR). Číslování
-  pokusů (`<step>-NN`) je gapless — rozdělaný pokus zahodí reset-on-reattach a
-  re-run alokuje stejné číslo znovu.
-- **`harness init`** zapíše default agenty (`agents/<step>.json`, persona
-  instruuje verdikt blok + psaní artefaktu) a prázdný `repos.json`. `harness run`
-  injektuje `ClaudeCliRunner`, `Filesystem{AgentCatalog,RepositoryRegistry}`,
-  `GitWorkspace` a `WorktreeArtifactView`.
-- **`TaskSource`** (fáze 4) je vnější svět řízení práce za jedním portem se třemi
-  slovesy: `poll()` přinese nové tasky (druhý producent inboxu vedle `submit`),
-  `report_progress`/`finish` promítnou stav ven. GitHub adapter to dělá labely,
-  filesystem přesunem JSON — záměna driveru, ne okolí. Původ tasku cestuje s ním
-  v `task.data.source`; projekci ven routuje `SourceReflectorSink` podle `kind`,
-  cizí task (jiný `kind` / bez `source`) adapter tiše ignoruje, takže tasky z
-  `harness submit` projdou bez jediného volání ven. `poll()` claimuje přehozením
-  labelu (GitHubí dvojče atomického `rename` ve `fs_queue.claim()`) — ingesce
-  „nanejvýš jednou" bez vedlejšího ledgeru.
+- **`TaskQueue`** — the inbox, the step queues, `done/` and `failed/` are all
+  instances of the same port. Terminal states are simply queues that nobody consumes.
+- **`claim()`** is an atomic `rename` into `<queue>/.processing/`. A single operation
+  handles the lease, idempotency and provenance after a crash.
+- **`END = "end"`** is a reserved node. It is not a "state with no outgoing edges" —
+  a typo would then quietly pass for success.
+- **A task has two workspaces** (phase 2). The **worktree** (`repository`/`worktree`)
+  holds the code, versioned by the task's git branch. The **artifact folder**
+  (harness-owned, not versioned into landing, readable by the UI) holds the
+  plan/design/review. Deliberately separate — the worktree stays clean, the UI reads
+  without git, `git clean` won't delete the artifacts. See the phase 2 spec for details.
+- **`BehaviorResult(outcome, summary)`** is the behavior's return value. `outcome` is
+  routed by the dispatcher; `summary` is the commit message, the history line, the PR
+  body and the board text.
+- **A task is a transaction.** The work lives in an isolated worktree/folder; at the
+  end, **landing** lands the artifacts and opens a PR. The harness never touches
+  `main` — it only proposes. The merge strategy is a human's call.
+- **The agent** (phase 3) is a persona as data: `AgentSpec` carries the prompt, model,
+  tools and `allowed_outcomes`. `AgentCatalog` maps a step's name to a spec (default
+  identity name==step), the shared `AgentRunner` runs it. The model is per queue, not
+  per class — adding an agent = a new file in the catalog, not a new class. `reviewer`
+  may return `done`+`request_changes`, the others only `done`.
+- **`RepositoryRegistry`** translates a repo name into a path on this machine
+  (`repos.json`, machine-specific, uncommitted). The task carries only the name; the
+  worktree path (`<worktrees_root>/<task_id>`) is derived by the harness. Reattaching a
+  dirty worktree resets it to HEAD (reset-on-reattach).
+- **Artifacts in the worktree** (phase 3): the agent writes them to `.artifacts/<id>/`,
+  **the worker commits them** together with the code (they ride in the git history and
+  in the PR). Attempt numbering (`<step>-NN`) is gapless — an unfinished attempt is
+  discarded by reset-on-reattach and the re-run allocates the same number again.
+- **`harness init`** writes the default agents (`agents/<step>.json`, the persona
+  instructs the verdict block + writing an artifact) and an empty `repos.json`.
+  `harness run` injects `ClaudeCliRunner`, `Filesystem{AgentCatalog,RepositoryRegistry}`,
+  `GitWorkspace` and `WorktreeArtifactView`.
+- **`TaskSource`** (phase 4) is the outside world of work control behind a single port
+  with three verbs: `poll()` brings new tasks (a second inbox producer alongside
+  `submit`), `report_progress`/`finish` project state outward. The GitHub adapter does
+  it with labels, the filesystem one by moving JSON — a swap of driver, not
+  surroundings. The task's origin travels with it in `task.data.source`; the outward
+  projection is routed by `SourceReflectorSink` per `kind`, a foreign task (a different
+  `kind` / no `source`) is silently ignored by the adapter, so tasks from
+  `harness submit` pass through without a single outward call. `poll()` claims by
+  flipping the label (GitHub's twin of the atomic `rename` in `fs_queue.claim()`) —
+  "at most once" ingestion without a side ledger.
 
 ## Gotchas
 
-- **`.processing/` má každá fronta vlastní.** Proto se po pádu nemusí nikam
-  ukládat, odkud task pochází — recovery ho vrátí do fronty, pod kterou leží.
-- **Prohraný závod o `claim()` není chyba.** `os.replace` vyhodí
-  `FileNotFoundError`, driver vrátí `None` a smyčka si vezme další task.
-- **Rozbitý JSON nemá komu připsat historii.** Soubor se přesune do `failed/`
-  tak, jak je, a důvod nese jen event.
-- **`DummyBehavior` musí vracet `done` deterministicky.** `request_changes_once_at`
-  vrátí `REQUEST_CHANGES` jen při prvním průchodu daného tasku daným krokem;
-  jinak by se smyčka točila donekonečna.
-- **`build()` má default pracovní drivery in-memory.** Substrát dummy behavioru,
-  stejně jako dummy sám je fake. `build` s `catalog` přepne agentní kroky na
-  `ClaudeCliBehavior`; skutečný běh (`cli._run`) vstříkne `GitWorkspace`,
+- **Each queue has its own `.processing/`.** So after a crash there's no need to record
+  anywhere where the task came from — recovery returns it to the queue it sits under.
+- **Losing the race for `claim()` is not an error.** `os.replace` raises
+  `FileNotFoundError`, the driver returns `None` and the loop takes the next task.
+- **Broken JSON has no one to attribute history to.** The file is moved into `failed/`
+  as-is, and only the event carries the reason.
+- **`DummyBehavior` must return `done` deterministically.** `request_changes_once_at`
+  returns `REQUEST_CHANGES` only on a given task's first pass through a given step;
+  otherwise the loop would spin forever.
+- **`build()` has default working drivers in-memory.** The substrate of the dummy
+  behavior, like the dummy itself, is fake. `build` with a `catalog` switches the agent
+  steps to `ClaudeCliBehavior`; the real run (`cli._run`) injects `GitWorkspace`,
   `ClaudeCliRunner`, `WorktreeArtifactView`, `Filesystem{AgentCatalog,Repository‑
-  Registry}` a `FakeForge` — záměna driveru, ne okolí.
-- **Landing je idempotentní.** Forge při existujícím PR pro branch vrátí ten
-  stávající. Re-run po pádu tak neotevře druhý PR.
-- **`ArtifactStore.begin(task, step)` alokuje další attempt.** Zápis do jednoho
-  slotu patří jednomu běhu; druhý průchod (smyčka) dostane nový podadresář.
+  Registry}` and `FakeForge` — a swap of driver, not surroundings.
+- **Landing is idempotent.** For an existing PR on a branch the forge returns the
+  existing one. So a re-run after a crash won't open a second PR.
+- **`ArtifactStore.begin(task, step)` allocates the next attempt.** Writing into one
+  slot belongs to one run; the second pass (the loop) gets a new subdirectory.
 
-## Operátor
+## Operator
 
-Ondrej Pajgrt — „Ondrej" / „Rem". GitHub `onpaj`. Europe/Prague. Kontext stroje
-(NanoClaw, podman) je v `~/CLAUDE.md`.
+Ondrej Pajgrt — "Ondrej" / "Rem". GitHub `onpaj`. Europe/Prague. The machine context
+(NanoClaw, podman) is in `~/CLAUDE.md`.
 
-Předchozí pokus o tuto myšlenku leží v historii tohoto repa na commitu `7bc0e6e`;
-`main` byl vyprázdněn commitem `b7cab63`, aby se stavělo po fázích od začátku.
+A previous attempt at this idea lives in this repo's history at commit `7bc0e6e`;
+`main` was emptied by commit `b7cab63` so it could be built phase by phase from scratch.

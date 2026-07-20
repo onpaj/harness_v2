@@ -1,35 +1,35 @@
-# Fáze 1 — orchestrační smyčka
+# Phase 1 — orchestration loop
 
-Status: schváleno
-Datum: 2026-07-19
+Status: approved
+Date: 2026-07-19
 
-## Cíl
+## Goal
 
-Funkční program, který polluje zdrojovou složku s tasky a rozřazuje je podle
-workflow do jednotlivých output queues, kde je přebírají consumeři a vracejí
-zpět. Task proteče celým workflow od `start` do `end`.
+A working program that polls a source directory of tasks and routes them, according
+to a workflow, into individual output queues, where consumers pick them up and hand
+them back. A task flows through the entire workflow from `start` to `end`.
 
-Toto je POC. Většina pohyblivých částí se v dalších fázích vymění — JSON soubory
-za úložiště, stdout za OTel, adresáře za storage queues, dummy behavior za
-skutečného agenta. **Architektonický požadavek: vyměnit se smí vždy jen driver,
-nikdy jeho okolí.**
+This is a POC. Most of the moving parts get swapped out in later phases — JSON files
+for a datastore, stdout for OTel, directories for storage queues, the dummy behavior
+for a real agent. **Architectural requirement: only ever the driver may be swapped,
+never its surroundings.**
 
-### Co je mimo rozsah fáze 1
+### Out of scope for phase 1
 
-- Git. Harness nic neverzuje, nepoužívá worktrees. `repository` a `worktree` jsou
-  neprůhledná metadata, která se pouze vozí.
-- Skutečné volání agentů. `ConsumerBehavior` je dummy.
-- Perzistentní úložiště, HTTP API, dashboard, scheduler, retry politiky,
+- Git. The harness versions nothing and uses no worktrees. `repository` and `worktree`
+  are opaque metadata that merely ride along.
+- Real agent calls. `ConsumerBehavior` is a dummy.
+- Persistent storage, HTTP API, dashboard, scheduler, retry policies,
   rate limiting.
-- Více procesů. Fáze 1 běží v jednom procesu.
+- Multiple processes. Phase 1 runs in a single process.
 
-## Základní teze (ARD1)
+## Core thesis (ARD1)
 
-Jednotkou práce je **task**. Task nese svá metadata a putuje mezi frontami.
-Modularita znamená, že každá pohyblivá část leží za portem a je nahraditelná
-záměnou driveru.
+The unit of work is the **task**. A task carries its own metadata and travels between
+queues. Modularity means that every moving part sits behind a port and is replaceable
+by swapping the driver.
 
-## Datové modely
+## Data models
 
 ### Task
 
@@ -48,26 +48,26 @@ záměnou driveru.
 }
 ```
 
-| Pole | Význam |
+| Field | Meaning |
 |---|---|
-| `id` | Identita tasku. Stabilní po celý život. |
-| `repository` | Neprůhledné. Harness nečte. |
-| `worktree` | Neprůhledné. Harness nečte. |
-| `workflowTemplate` | Jméno workflow. `WorkflowRepository` podle něj načte definici. |
-| `status` | Aktuální krok. `null` u nového tasku. Mění **výhradně dispatcher**. |
-| `lastOutcome` | Výsledek posledního běhu behavioru. Zapisuje **výhradně consumer**. |
-| `lockId` | Identita držitele leasu, `null` když task nikdo nedrží. |
+| `id` | Task identity. Stable for its entire life. |
+| `repository` | Opaque. The harness does not read it. |
+| `worktree` | Opaque. The harness does not read it. |
+| `workflowTemplate` | Workflow name. `WorkflowRepository` loads the definition by it. |
+| `status` | Current step. `null` for a new task. Changed **only by the dispatcher**. |
+| `lastOutcome` | Result of the last behavior run. Written **only by the consumer**. |
+| `lockId` | Identity of the lease holder, `null` when no one holds the task. |
 | `created` | ISO 8601 UTC. |
-| `history` | Audit log, viz níže. |
-| `data` | Neprůhledný payload. Harness nečte. |
+| `history` | Audit log, see below. |
+| `data` | Opaque payload. The harness does not read it. |
 
-Pole `workflow` (inline definice workflow v tasku) je pro MVP vynecháno.
-Používá se pouze `workflowTemplate`.
+The `workflow` field (an inline workflow definition in the task) is omitted for the MVP.
+Only `workflowTemplate` is used.
 
 ### HistoryEntry
 
-`history` je audit log, nikoli seznam navštívených fází. Položka se připisuje při
-**každé** změně stavu, včetně chybových.
+`history` is an audit log, not a list of visited phases. An entry is appended on
+**every** status change, including error ones.
 
 ```json
 {
@@ -79,14 +79,14 @@ Používá se pouze `workflowTemplate`.
 }
 ```
 
-- `actor` — `dispatcher` nebo `consumer:<krok>`.
-- `from` / `to` — kroky; `null` na začátku, `"end"` / `"failed"` na konci.
-- `outcome` — outcome, na jehož základě se rozhodovalo; u consumera outcome,
-  který behavior vrátil. U chyby nese `to` hodnotu `"failed"` a přibývá pole
-  `reason` s textem důvodu.
+- `actor` — `dispatcher` or `consumer:<step>`.
+- `from` / `to` — steps; `null` at the start, `"end"` / `"failed"` at the end.
+- `outcome` — the outcome the decision was based on; for a consumer, the outcome
+  the behavior returned. On an error `to` carries the value `"failed"` and a
+  `reason` field is added with the reason text.
 
-Cena je vyšší objem záznamů. Přínos je, že z tasku je vidět celý jeho příběh
-včetně toho, proč spadl.
+The cost is a higher volume of records. The benefit is that a task's whole story is
+visible, including why it failed.
 
 ### Workflow
 
@@ -105,32 +105,32 @@ včetně toho, proč spadl.
 }
 ```
 
-Workflow je malý state machine. Každý přechod je trojice `(from, on, to)`, takže
-zpětné hrany jsou explicitní a **nemusí být symetrické** — `review` se vrací na
-`development`, ale `architecture` se může vracet třeba rovnou na `plan`.
+A workflow is a small state machine. Each transition is a triple `(from, on, to)`, so
+backward edges are explicit and **need not be symmetric** — `review` goes back to
+`development`, but `architecture` could go back straight to `plan`, say.
 
-- `start` — krok, do kterého jde task se `status == null`.
-- `end` — vyhrazené jméno terminálního uzlu. `to: "end"` znamená přesun do `done/`.
-  Uzel `end` nemá odchozí hrany a nemá vlastní frontu.
-- Retry téhož kroku se vyjádří jako `to == from`; žádná zvláštní konstrukce
-  není potřeba.
+- `start` — the step a task with `status == null` goes into.
+- `end` — the reserved name of the terminal node. `to: "end"` means a move into `done/`.
+  The `end` node has no outgoing edges and no queue of its own.
+- Retrying the same step is expressed as `to == from`; no special construct is needed.
 
-`end` je vyhrazený uzel **záměrně**, místo pravidla „stav bez odchozích hran je
-konec". Překlep ve jméně kroku by při implicitním pravidle tiše vypadal jako
-úspěch; s vyhrazeným `end` spadne task do `failed/`, kde ho uvidíš.
+`end` is a reserved node **deliberately**, instead of a rule that "a state with no
+outgoing edges is the end". A typo in a step name would, under the implicit rule,
+silently look like success; with a reserved `end`, the task drops into `failed/`,
+where you'll see it.
 
 ### Outcome
 
-Uzavřený výčet: `done` | `request_changes`. Jiná hodnota z behavioru je chyba
-a posílá task do `failed/`.
+A closed enumeration: `done` | `request_changes`. Any other value from a behavior is
+an error and sends the task to `failed/`.
 
-## Topologie — všechno je fronta
+## Topology — everything is a queue
 
 ```
 <root>/
   workflows/
     default.json
-  tasks/                 # inbox dispatchera
+  tasks/                 # dispatcher inbox
     .processing/
   queues/
     plan/
@@ -147,47 +147,48 @@ a posílá task do `failed/`.
   failed/
 ```
 
-`tasks/`, `queues/*`, `done/` i `failed/` jsou instance **téhož** portu
-`TaskQueue`. „Hotovo" a „selhalo" jsou prostě fronty, které nikdo nekonzumuje —
-pro terminální stavy neexistuje zvláštní kód.
+`tasks/`, `queues/*`, `done/`, and `failed/` are instances of the **same** port
+`TaskQueue`. "Done" and "failed" are simply queues that no one consumes — there is no
+special code for terminal states.
 
-Fronty pod `queues/` se zakládají podle workflow: jedna na každý krok, který se
-vyskytne jako `from` nebo `to` v přechodech, kromě `end`.
+The queues under `queues/` are created from the workflow: one for each step that
+appears as a `from` or `to` in the transitions, except `end`.
 
-## Tok
+## Flow
 
 ```
-tasks/ ──dispatcher──> queues/<krok>/ ──consumer──> tasks/ ──dispatcher──> …
+tasks/ ──dispatcher──> queues/<step>/ ──consumer──> tasks/ ──dispatcher──> …
                                                                     │
-                                                              done/ nebo failed/
+                                                              done/ or failed/
 ```
 
-1. **Dispatcher** vybere přes `EnqueueStrategy` jeden task z `tasks/` (nebo žádný).
-2. Zabere ho (`claim`).
-3. Načte workflow podle `workflowTemplate`.
-4. Zavolá čistou funkci `route(task, workflow)`.
-5. Podle rozhodnutí přepíše `status`, připíše `history` a přesune task do cílové
-   fronty / `done/` / `failed/`.
-6. **Consumer** nad frontou `<krok>` task zabere, předá ho `ConsumerBehavior`,
-   dostane outcome, zapíše `lastOutcome` a `history`, vrátí task do `tasks/`.
+1. The **dispatcher** picks one task from `tasks/` via `EnqueueStrategy` (or none).
+2. Claims it (`claim`).
+3. Loads the workflow by `workflowTemplate`.
+4. Calls the pure function `route(task, workflow)`.
+5. Per the decision, overwrites `status`, appends to `history`, and moves the task to
+   the target queue / `done/` / `failed/`.
+6. The **consumer** over the `<step>` queue claims the task, hands it to
+   `ConsumerBehavior`, gets an outcome, writes `lastOutcome` and `history`, and returns
+   the task to `tasks/`.
 
-### Rozdělení rozhodování
+### Division of decision-making
 
-Každý článek zná jen svůj kousek a nesmí sahat vedle:
+Each link knows only its own piece and must not reach next door:
 
 ```
-ConsumerBehavior  →  co se stalo     (done | request_changes)
-Consumer          →  jen to doručí   (žádné rozhodnutí)
-Dispatcher        →  kam to jde dál  (lookup ve workflow)
+ConsumerBehavior  →  what happened   (done | request_changes)
+Consumer          →  just delivers   (no decision)
+Dispatcher        →  where it goes   (lookup in the workflow)
 ```
 
-- **`ConsumerBehavior` je jediné místo, kde outcome vzniká.** Jak k němu dojde,
-  je jeho vnitřní věc — dnes sleep, zítra agent čtoucí diff.
-- **Consumer je tenká obálka.** Nemá **žádnou** větev kódu závislou na hodnotě
-  outcome; jen ho zapíše. Objeví-li se v consumeru `if outcome == ...`, prosákla
-  odpovědnost přes hranici.
-- **Consumer nikdy nemění `status`.** To umí výhradně dispatcher.
-- **Dispatcher nikdy nezkoumá `data`.** Rozhoduje jen podle `(status, lastOutcome)`.
+- **`ConsumerBehavior` is the only place an outcome is born.** How it arrives at one
+  is its internal business — today a sleep, tomorrow an agent reading a diff.
+- **The consumer is a thin wrapper.** It has **no** code branch that depends on the
+  outcome value; it just writes it. If an `if outcome == ...` shows up in the consumer,
+  responsibility has leaked across the boundary.
+- **The consumer never changes `status`.** Only the dispatcher can do that.
+- **The dispatcher never inspects `data`.** It decides solely from `(status, lastOutcome)`.
 
 ## Router
 
@@ -195,96 +196,96 @@ Dispatcher        →  kam to jde dál  (lookup ve workflow)
 def route(task: Task, workflow: Workflow) -> Decision
 ```
 
-Čistá funkce. Žádné I/O, žádný filesystem, žádný čas. `Decision` je jedno z:
+A pure function. No I/O, no filesystem, no time. `Decision` is one of:
 
-| Decision | Kdy | Důsledek |
+| Decision | When | Consequence |
 |---|---|---|
-| `MoveTo(step)` | našla se hrana | task jde do `queues/<step>/` |
-| `Finished` | cíl hrany je `end` | task jde do `done/` |
-| `Failed(reason)` | žádná hrana nesedí | task jde do `failed/` |
+| `MoveTo(step)` | an edge was found | the task goes to `queues/<step>/` |
+| `Finished` | the edge target is `end` | the task goes to `done/` |
+| `Failed(reason)` | no edge matches | the task goes to `failed/` |
 
-Pravidla:
+Rules:
 
 - `status is None` → `MoveTo(workflow.start)`.
-- Jinak lookup `(status, lastOutcome)`. Nenajde-li se, `Failed`.
-- `lastOutcome is None` u tasku, který už status má, je nekonzistence →
+- Otherwise, look up `(status, lastOutcome)`. If none is found, `Failed`.
+- `lastOutcome is None` for a task that already has a status is an inconsistency →
   `Failed`.
 
-Celá routovací logika včetně zpětných hran a chybových cest je tím testovatelná
-bez jediného souboru na disku.
+The entire routing logic — including backward edges and error paths — is thereby
+testable without a single file on disk.
 
-## Porty a drivery
+## Ports and drivers
 
-| Port | Odpovědnost | Driver ve fázi 1 | Vymění se za |
+| Port | Responsibility | Driver in phase 1 | Swapped for |
 |---|---|---|---|
-| `TaskQueue` | `list()`, `claim(task)`, `put(task)`, `recover()` | adresář s JSON soubory | storage queue |
-| `EnqueueStrategy` | `select(tasks) -> Task \| None` | FIFO podle `created` | priority, fair-share |
+| `TaskQueue` | `list()`, `claim(task)`, `put(task)`, `recover()` | a directory of JSON files | storage queue |
+| `EnqueueStrategy` | `select(tasks) -> Task \| None` | FIFO by `created` | priority, fair-share |
 | `WorkflowRepository` | `get(name) -> Workflow` | `workflows/<name>.json` | DB, API |
-| `ConsumerBehavior` | `run(task) -> Outcome` | sleep 5 s → `done` | skutečný agent |
-| `EventSink` | `emit(event)` | řádky na stdout | OTel |
-| `Clock` | `now()`, `sleep(s)` | reálný čas | — (existuje kvůli testům) |
+| `ConsumerBehavior` | `run(task) -> Outcome` | sleep 5 s → `done` | a real agent |
+| `EventSink` | `emit(event)` | lines on stdout | OTel |
+| `Clock` | `now()`, `sleep(s)` | real time | — (exists for tests) |
 
-Ke každému portu vzniká i **in-memory driver pro testy**. Celá smyčka pak jede
-bez disku a bez pětisekundových čekání; testy nesmí sahat na skutečný čas.
+Every port also gets an **in-memory driver for tests**. The whole loop then runs
+without a disk and without five-second waits; tests must not touch real time.
 
-### Poznámky k portům
+### Notes on the ports
 
-- `EnqueueStrategy` dostává už načtený seznam tasků a vrací vybraný. Výběr je tím
-  oddělen od toho, jak se fronta čte.
-- `EventSink` dostává strukturovaný event (jméno, task id, pole), ne
-  naformátovaný řetězec. Formátování je věc driveru — jinak by OTel driver
-  parsoval text.
-- `DummyBehavior` vrací `done` **deterministicky**, s konfigurovatelnou výjimkou:
-  pro jeden zvolený krok vrátí při prvním průchodu `request_changes` a napodruhé
-  `done`. Bez toho by se zpětná hrana nikdy neproklepla; bez determinismu by se
-  smyčka mohla točit donekonečna.
+- `EnqueueStrategy` receives an already-loaded list of tasks and returns the chosen one.
+  Selection is thereby decoupled from how the queue is read.
+- `EventSink` receives a structured event (name, task id, fields), not a formatted
+  string. Formatting is the driver's job — otherwise the OTel driver would be parsing
+  text.
+- `DummyBehavior` returns `done` **deterministically**, with a configurable exception:
+  for one chosen step it returns `request_changes` on the first pass and `done` on the
+  second. Without that the backward edge would never be exercised; without determinism
+  the loop could spin forever.
 
-## Souběh, lease a pády
+## Concurrency, leases, and crashes
 
-Jeden proces, asyncio: jeden dispatcher task a jeden consumer task na každý krok
-workflow, všechny ve stejném event loopu. Polling s konfigurovatelným intervalem.
+One process, asyncio: one dispatcher task and one consumer task per workflow step, all
+in the same event loop. Polling with a configurable interval.
 
-**`claim()` je atomický `rename` do `<queue>/.processing/`.** Jedna operace řeší
-tři věci najednou:
+**`claim()` is an atomic `rename` into `<queue>/.processing/`.** A single operation
+handles three things at once:
 
-- **lease** — soubor zmizí z fronty, nikdo jiný ho nevybere; `lockId` se zapíše
-  do tasku,
-- **idempotenci** — přesun buď proběhl, nebo ne; mezistav neexistuje,
-- **původ** — protože má `.processing/` každá fronta vlastní, je po pádu vidět,
-  odkud task pochází, aniž by se to kamkoli ukládalo.
+- **lease** — the file vanishes from the queue, no one else picks it up; `lockId` is
+  written into the task,
+- **idempotency** — the move either happened or it didn't; there is no intermediate
+  state,
+- **provenance** — because each queue has its own `.processing/`, after a crash it's
+  visible where the task came from, without storing that anywhere.
 
-Prohraje-li proces závod o soubor (`rename` selže, protože už tam není), není to
-chyba — jen si vezme další.
+If a process loses the race for a file (`rename` fails because it's no longer there),
+that's not an error — it just takes the next one.
 
-**Recovery při startu:** každá fronta vrátí obsah svého `.processing/` zpátky
-k sobě a vynuluje `lockId`. Protože je práce ve fázi 1 idempotentní, stačí to.
+**Recovery at startup:** each queue returns the contents of its `.processing/` back to
+itself and clears `lockId`. Because the work in phase 1 is idempotent, that suffices.
 
-TTL leasu se ve fázi 1 neimplementuje — jeden proces, který spadl, se zotaví při
-startu. `lockId` v modelu ale je, protože ho fáze 2 bude potřebovat.
+A lease TTL is not implemented in phase 1 — a single process that crashed recovers at
+startup. `lockId` is in the model anyway, because phase 2 will need it.
 
-## Chybové stavy
+## Error states
 
-Vše níže posílá task do `failed/`, připíše `history` s `reason` a vyemituje
-event. **Jeden vadný task nesmí zastavit smyčku.**
+Everything below sends the task to `failed/`, appends to `history` with a `reason`, and
+emits an event. **One bad task must not stop the loop.**
 
-| Situace | Detekce |
+| Situation | Detection |
 |---|---|
-| Neznámý `workflowTemplate` | `WorkflowRepository.get` nenajde |
-| `status` bez odpovídající hrany | router vrátí `Failed` |
-| Neplatný outcome z behavioru | validace proti výčtu |
-| Rozbitý nebo nečitelný JSON | při načtení z fronty |
-| Výjimka z `ConsumerBehavior` | zachycena v consumeru |
+| Unknown `workflowTemplate` | `WorkflowRepository.get` finds nothing |
+| `status` with no matching edge | the router returns `Failed` |
+| Invalid outcome from the behavior | validation against the enumeration |
+| Broken or unreadable JSON | on load from the queue |
+| Exception from `ConsumerBehavior` | caught in the consumer |
 
-Rozbitý JSON je zvláštní případ: task se nedá deserializovat, takže mu nelze
-připsat historii. Soubor se přesune do `failed/` tak, jak je, a důvod jde jen do
-eventu.
+Broken JSON is a special case: the task can't be deserialized, so it can't be given any
+history. The file is moved into `failed/` as is, and the reason goes only into the event.
 
-## Struktura kódu
+## Code structure
 
 ```
 src/harness/
   models.py            # Task, HistoryEntry, Workflow, Transition, Outcome, Decision
-  router.py            # čistá route()
+  router.py            # pure route()
   dispatcher.py
   consumer.py
   ports/
@@ -300,46 +301,47 @@ src/harness/
     fifo_strategy.py
     dummy_behavior.py
     stdout_events.py
-    memory.py          # in-memory drivery pro testy
+    memory.py          # in-memory drivers for tests
   app.py               # wiring + asyncio runtime
   cli.py
 ```
 
-Závislosti tečou striktně dolů. `models.py` neimportuje nic z balíku.
-`ports/` neimportuje `drivers/`. `dispatcher.py` a `consumer.py` znají jen porty,
-nikdy konkrétní driver — veškeré wiring je v `app.py`.
+Dependencies flow strictly downward. `models.py` imports nothing from the package.
+`ports/` does not import `drivers/`. `dispatcher.py` and `consumer.py` know only the
+ports, never a concrete driver — all wiring lives in `app.py`.
 
-Balík se jmenuje `harness`.
+The package is named `harness`.
 
-## Testovací strategie
+## Testing strategy
 
-| Vrstva | Jak |
+| Layer | How |
 |---|---|
-| `router.py` | tabulkové unit testy — dopředné hrany, zpětné, `start`, `end`, chybějící hrana, nekonzistentní stav |
-| Dispatcher, consumer | in-memory drivery, fake clock, žádný disk |
-| Filesystem drivery | tmp adresář; zvlášť atomicita `claim` a recovery z `.processing/` |
-| End-to-end | celý průtok `start → end` na in-memory driverech, včetně jednoho `request_changes` |
-| Smoke | jeden běh na skutečném filesystemu se zkráceným intervalem |
+| `router.py` | table-driven unit tests — forward edges, backward, `start`, `end`, missing edge, inconsistent state |
+| Dispatcher, consumer | in-memory drivers, fake clock, no disk |
+| Filesystem drivers | tmp directory; `claim` atomicity and recovery from `.processing/` separately |
+| End-to-end | the whole flow `start → end` on in-memory drivers, including one `request_changes` |
+| Smoke | one run on a real filesystem with a shortened interval |
 
-Test, který ověří, že `dispatcher.py` ani `consumer.py` neimportují nic
-z `drivers/`, hlídá hlavní architektonický invariant.
+A test that verifies `dispatcher.py` and `consumer.py` import nothing from `drivers/`
+guards the main architectural invariant.
 
-## Ověření hotovosti
+## Done criteria
 
-Fáze 1 je hotová, když:
+Phase 1 is done when:
 
-1. `harness init` založí strom adresářů podle workflow.
-2. Vložení jednoho task JSONu do `tasks/` vede k tomu, že task doputuje do
-   `done/`, přičemž prošel všemi pěti kroky a jednou zpětnou hranou.
-3. Na stdout je z eventů čitelné, co se s taskem v každém kroku stalo.
-4. `history` doputovaného tasku ten průběh věrně popisuje.
-5. Task s neznámým `workflowTemplate` skončí v `failed/` a smyčka běží dál.
-6. Zabití procesu uprostřed běhu a restart vede k dokončení tasku.
+1. `harness init` sets up the directory tree per the workflow.
+2. Dropping a single task JSON into `tasks/` leads to the task reaching `done/`, having
+   passed through all five steps and one backward edge.
+3. From the events on stdout it's readable what happened to the task at each step.
+4. The `history` of the arrived task faithfully describes that course.
+5. A task with an unknown `workflowTemplate` ends up in `failed/` and the loop keeps
+   running.
+6. Killing the process mid-run and restarting leads to the task completing.
 
 ## Stack
 
 Python 3.11 (`/Users/rem/.local/bin/python3.11`), `venv` + `pip install -e ".[dev]"`.
-Na stroji není `uv`. Testy `pytest`.
+There is no `uv` on the machine. Tests with `pytest`.
 
-`CLAUDE.md` v repu popisuje mrtvou architekturu předchozího pokusu a bude
-přepsán jako součást fáze 1.
+The `CLAUDE.md` in the repo describes the dead architecture of the previous attempt and
+will be rewritten as part of phase 1.

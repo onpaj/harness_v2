@@ -54,8 +54,8 @@ async def test_commits_work_with_step_prefixed_message():
     await behavior.run(make_task("development"))
 
     handle = workspace.handles["tsk_1"]
-    assert handle.commits == ["[development] development: hotovo"]
-    assert handle.writes  # něco se zapsalo do worktree
+    assert handle.commits == ["[development] development: done"]
+    assert handle.writes  # something was written to the worktree
 
 
 async def test_configured_step_asks_for_changes_only_once():
@@ -68,7 +68,7 @@ async def test_configured_step_asks_for_changes_only_once():
 
 
 async def test_loop_produces_second_attempt():
-    """Druhý průchod stejným krokem = attempt 1, nepřepíše attempt 0."""
+    """A second pass through the same step = attempt 1, does not overwrite attempt 0."""
     behavior, _, artifacts = build(delay=0.0)
     task = make_task("development")
 

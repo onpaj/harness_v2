@@ -5,17 +5,17 @@ from pathlib import Path
 
 
 class RepositoryNotFound(Exception):
-    """Repo daného jména není v registru."""
+    """No repo by that name is in the registry."""
 
 
 class RepositoryRegistry(ABC):
-    """Mapa logické jméno repa → jeho kořen na disku.
+    """A map from a repo's logical name → its root on disk.
 
-    Mapa je machine-specific: kde repo na tomhle stroji leží, ví jen tenhle
-    registr. Task nese pouze logické jméno (`"harness_v2"`), nikdy cestu — tím
-    zůstává přenositelný mezi stroji a layout konkrétního disku do něj
-    neprosakuje."""
+    The map is machine-specific: only this registry knows where the repo lives
+    on this machine. A task carries only the logical name (`"harness_v2"`),
+    never a path — that keeps it portable across machines and stops a specific
+    disk's layout from leaking into it."""
 
     @abstractmethod
     def resolve(self, name: str) -> Path:
-        """Vrať kořen repa pro jméno. Neznámé jméno → RepositoryNotFound."""
+        """Return the repo root for the name. Unknown name → RepositoryNotFound."""

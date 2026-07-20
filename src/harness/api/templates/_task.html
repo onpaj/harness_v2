@@ -10,9 +10,9 @@
   <tr><th>data</th><td><pre>{{ task.data }}</pre></td></tr>
 </table>
 
-<h3>historie</h3>
+<h3>history</h3>
 <table>
-  <tr><th>čas</th><th>actor</th><th>z</th><th>do</th><th>outcome</th><th>důvod</th></tr>
+  <tr><th>time</th><th>actor</th><th>from</th><th>to</th><th>outcome</th><th>reason</th></tr>
   {% for entry in task.history %}
   <tr>
     <td>{{ entry.at }}</td>
@@ -25,9 +25,9 @@
   {% endfor %}
 </table>
 
-<h3>artefakty</h3>
+<h3>artifacts</h3>
 <table>
-  <tr><th>krok</th><th>pokus</th><th>jméno</th></tr>
+  <tr><th>step</th><th>attempt</th><th>name</th></tr>
   {% for ref in artifacts %}
   <tr>
     <td>{{ ref.step }}</td>

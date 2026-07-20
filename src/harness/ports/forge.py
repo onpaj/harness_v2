@@ -1,7 +1,7 @@
-"""Port forge — otevírání pull requestů.
+"""Forge port — opening pull requests.
 
-Landing přes něj navrhne změnu. Harness se nikdy nedotkne cílové branch; jen
-otevře PR. Merge strategii řeší člověk.
+Landing proposes a change through it. The harness never touches the target
+branch; it only opens a PR. The merge strategy is a human's call.
 """
 
 from __future__ import annotations
@@ -25,5 +25,5 @@ class Forge(ABC):
     def open_pull_request(
         self, task: Task, *, branch: str, title: str, body: str
     ) -> PullRequest:
-        """Otevři PR pro branch. Idempotentní — existuje-li PR pro branch,
-        vrať ho místo založení dalšího."""
+        """Open a PR for the branch. Idempotent — if a PR for the branch already
+        exists, return it instead of creating another."""

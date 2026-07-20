@@ -1,94 +1,102 @@
-# Fáze 3 — skutečný agent přes `claude -p`
+# Phase 3 — a real agent via `claude -p`
 
-Status: návrh
-Datum: 2026-07-20
+Status: draft
+Date: 2026-07-20
 
-## Cíl
+## Goal
 
-Vyměnit `DummyBehavior` za driver, který skutečnou práci kroku svěří **agentovi
-spuštěnému přes `claude` CLI** (`claude -p`, headless), **ne přes API**. Každá
-fronta má svého agenta (`architect`, `planner`, `reviewer`, …) — jiná persona,
-jiný model, jiná sada nástrojů. Volání CLI je jeden sdílený wrapper; to, co se
-liší frontu od fronty, je **konfigurace agenta jako data**.
+Replace `DummyBehavior` with a driver that hands the real work of a step to an
+**agent launched through the `claude` CLI** (`claude -p`, headless), **not through
+the API**. Each queue has its own agent (`architect`, `planner`, `reviewer`, …) —
+a different persona, a different model, a different tool set. The CLI call is one
+shared wrapper; what differs from queue to queue is the **agent's configuration
+as data**.
 
-Fáze 3 mění výhradně to, *jak vzniká `BehaviorResult`*. Smyčka, dispatcher,
-router, fronty, projekce ani porty z fází 1–2 se nemění — platí invariant 1:
-**vyměňuje se driver, nikdy jeho okolí.** Skutečný agent je driver za portem.
+Phase 3 changes only *how a `BehaviorResult` comes to be*. The loop, dispatcher,
+router, queues, projection, and ports from phases 1–2 do not change — invariant 1
+holds: **you swap the driver, never its surroundings.** The real agent is a driver
+behind a port.
 
-## Co je ve fázi 3 nově
+## What's new in phase 3
 
-- **`AgentRunner` (port).** Sdílený wrapper kolem `claude -p`. Dostane invokaci
-  `(prompt, agent_spec, cwd, timeout)`, spustí subprocess, vrátí strukturovaný
-  výsledek. Reálný driver skládá CLI flagy; fake driver vrací připravený výstup
-  pro testy — **žádný subprocess, žádná síť, žádné peníze v test sadě.**
-- **`AgentCatalog` (port) + `AgentSpec` (data).** Pojmenované definice agentů.
-  `AgentSpec` nese personu, model, nástroje a povolené outcomes. Vazba
-  fronta→agent je defaultně identitou jména.
-- **`ClaudeCliBehavior`.** Generický behavior konstruovaný `(agent_spec, runner,
-  workspace)`. Nahrazuje `DummyBehavior`: připojí worktree, spustí agenta,
-  namapuje jeho verdikt na `BehaviorResult`, worker commitne.
-- **`RepositoryRegistry` (port).** Mapa jméno repa → cesta na disku, **specifická
-  pro stroj**. Task nese jen jméno repa; cestu k worktree odvodí harness sám.
-- **Artefakty se stěhují do worktree.** Fáze žádá agenta, ať píše artefakty
-  (plán, ADR, review) do `.artifacts/<task-id>/` uvnitř worktree. Jsou
-  **verzované** — worker je commitne spolu s kódem. Předchozí kroky je tím vidí
-  jako obyčejné soubory ve svém cwd.
+- **`AgentRunner` (port).** A shared wrapper around `claude -p`. It receives an
+  invocation `(prompt, agent_spec, cwd, timeout)`, launches the subprocess, and
+  returns a structured result. The real driver assembles the CLI flags; the fake
+  driver returns canned output for tests — **no subprocess, no network, no money
+  in the test suite.**
+- **`AgentCatalog` (port) + `AgentSpec` (data).** Named agent definitions.
+  `AgentSpec` carries the persona, model, tools, and allowed outcomes. The
+  queue→agent binding defaults to name identity.
+- **`ClaudeCliBehavior`.** A generic behavior constructed from `(agent_spec, runner,
+  workspace)`. It replaces `DummyBehavior`: attach the worktree, run the agent,
+  map its verdict onto a `BehaviorResult`, and the worker commits.
+- **`RepositoryRegistry` (port).** A map from repo name → path on disk,
+  **machine-specific**. The task carries only the repo name; the harness derives
+  the worktree path itself.
+- **Artifacts move into the worktree.** The phase asks the agent to write artifacts
+  (plan, ADR, review) into `.artifacts/<task-id>/` inside the worktree. They are
+  **versioned** — the worker commits them alongside the code. Earlier steps
+  therefore see them as ordinary files in their cwd.
 
-## Co je pořád mimo rozsah
+## What's still out of scope
 
-- **Skutečný GitHub.** Landing pořád jde přes `Forge`; ostrý běh má fake / lokální
-  driver. GitHub driver je čistý follow-up — záměna forge driveru.
-- **Více procesů, TTL leasu, distribuovaný běh.** Jeden proces, recovery při
-  startu, jako dřív.
-- **Retry politiky nad rámec `fallback_model`.** Tranzientní chyby (rate-limit,
-  timeout) padají do `failed/`; sofistikovanější retry je vědomě odložený
-  (viz Otevřené otázky).
+- **Real GitHub.** Landing still goes through `Forge`; a live run uses a fake /
+  local driver. The GitHub driver is a clean follow-up — a swap of the forge
+  driver.
+- **Multiple processes, lease TTL, distributed execution.** One process, recovery
+  at startup, as before.
+- **Retry policies beyond `fallback_model`.** Transient errors (rate-limit,
+  timeout) fall into `failed/`; more sophisticated retry is deliberately deferred
+  (see Open questions).
 
-## Nosná teze (ARD3): agent je driver, persona jsou data
+## Load-bearing thesis (ARD3): the agent is a driver, the persona is data
 
-Rozhodování „co se stalo" (`Outcome`) i „co se udělalo" (`summary`) vzniká pořád
-na jediném místě — v behavioru. Fáze 1 to řešila `sleep`em, fáze 2 dummym, fáze 3
-skutečným agentem. Z pohledu consumeru, dispatcheru a routeru se **nic nemění**;
-pořád dostávají `BehaviorResult` a routují podle `(status, lastOutcome)`.
+The decision about "what happened" (`Outcome`) and "what was done" (`summary`)
+still arises in one place — the behavior. Phase 1 handled it with `sleep`, phase 2
+with the dummy, phase 3 with a real agent. From the consumer's, dispatcher's, and
+router's point of view **nothing changes**; they still receive a `BehaviorResult`
+and route on `(status, lastOutcome)`.
 
-Dvě věci, které z toho plynou a které fáze 3 chrání:
+Two things follow from this that phase 3 protects:
 
-1. **Agent je za `AgentRunner`.** `ClaudeCliBehavior` nezná subprocess ani flagy;
-   zná jen port. Test ho pohání `FakeAgentRunner`em — stejně jako fáze 1 pohání
-   čas `FakeClock`em. Bez tohoto řezu je behavior netestovatelný.
-2. **Persona je konfigurace, ne kód.** V `ClaudeCliBehavior` není větev podle
-   jména agenta. Rozdíl mezi `architect` a `reviewer` je obsah `AgentSpec`u,
-   který dostal při konstrukci. Přidání agenta = nový soubor v katalogu, ne
-   nová třída.
+1. **The agent lives behind `AgentRunner`.** `ClaudeCliBehavior` knows nothing of
+   the subprocess or the flags; it knows only the port. A test drives it with a
+   `FakeAgentRunner` — just as phase 1 drives time with a `FakeClock`. Without
+   this seam the behavior is untestable.
+2. **The persona is configuration, not code.** There is no branch on the agent's
+   name inside `ClaudeCliBehavior`. The difference between `architect` and
+   `reviewer` is the content of the `AgentSpec` it was constructed with. Adding an
+   agent = a new file in the catalog, not a new class.
 
-## Repository registry — kde repa na tomhle stroji leží
+## Repository registry — where repos live on this machine
 
-Fáze 2 bere `task.repository` i `task.worktree` jako **holé filesystémové cesty**
-(`GitWorkspace.attach`: `repo = Path(task.repository)`). Tím prosakuje layout
-konkrétního stroje do tasku a task přestává být přenositelný.
+Phase 2 treats both `task.repository` and `task.worktree` as **bare filesystem
+paths** (`GitWorkspace.attach`: `repo = Path(task.repository)`). This leaks a
+particular machine's layout into the task, and the task stops being portable.
 
-Fáze 3 to rozděluje:
+Phase 3 splits this apart:
 
-- **`task.repository` je logické jméno** (`"harness_v2"`), ne cesta.
-- **`RepositoryRegistry.resolve(name) -> Path`** — mapa jméno → kořen repa na
-  disku. Machine-specific config (`~/.harness/repos.json` nebo env), **mimo task,
-  necommitnutá.**
-- **Worktree cestu odvodí harness**, ne submitter: `<worktrees_root>/<task_id>`.
-  `task.worktree` přestává být povinný vstup — je odvozený.
+- **`task.repository` is a logical name** (`"harness_v2"`), not a path.
+- **`RepositoryRegistry.resolve(name) -> Path`** — a map from name → the repo root
+  on disk. Machine-specific config (`~/.harness/repos.json` or env), **outside the
+  task, uncommitted.**
+- **The harness derives the worktree path**, not the submitter:
+  `<worktrees_root>/<task_id>`. `task.worktree` stops being a required input — it's
+  derived.
 
-`Workspace.attach(task)` pak: `base = registry.resolve(task.repository)` →
-`git worktree add <worktrees_root>/<task_id> -b harness/<task_id>` z `base`.
+`Workspace.attach(task)` then does: `base = registry.resolve(task.repository)` →
+`git worktree add <worktrees_root>/<task_id> -b harness/<task_id>` from `base`.
 
-Driver fáze 3: `FilesystemRepositoryRegistry` (čte JSON). In-memory driver pro
-testy. Dispatcher ani consumer registry nezná — sahá na ni jen `Workspace` přes
-wiring.
+The phase-3 driver: `FilesystemRepositoryRegistry` (reads JSON). An in-memory
+driver for tests. Neither the dispatcher nor the consumer knows the registry —
+only `Workspace` touches it, through wiring.
 
-## Artefakty ve worktree — verzované, ploché, attempt-suffixované
+## Artifacts in the worktree — versioned, flat, attempt-suffixed
 
-Fáze 2 psala artefakty do harnessem vlastněné složky *mimo* worktree. Reálný
-subprocess agent ale vidí **jen svoje cwd** — plán architekta v externí složce
-by developer nepřečetl. Proto se artefakty stěhují **do worktree**, kde je každý
-další krok vidí jako obyčejné soubory.
+Phase 2 wrote artifacts into a harness-owned folder *outside* the worktree. But a
+real subprocess agent sees **only its own cwd** — the architect's plan in an
+external folder would be invisible to the developer. So the artifacts move **into
+the worktree**, where every subsequent step sees them as ordinary files.
 
 ### Layout
 
@@ -102,53 +110,56 @@ další krok vidí jako obyčejné soubory.
   review-02.md
 ```
 
-- **Kořen `.artifacts/`** — dot-prefix signalizuje „harnessová metadata, ne
-  zdroják"; většina nástrojů (pytest, lintery, coverage) dot-adresáře přeskakuje,
-  takže artefakty neznečistí tooling cílového repa.
-- **Ploché soubory, žádná hierarchie.** Pokus je v suffixu jména, ne v podadresáři
-  — listing se lexikálně řadí po kroku a pak po pokusu, smyčka je čitelná na první
-  pohled. Kdyby krok potřeboval víc souborů na pokus, prefix `development-02`
-  je stejně seskupí; hierarchie by zbytečně zamykala tvar.
-- **Task-level = holé jméno** (`plan.md`), **step-attempt = `<step>-NN`**
-  (dvouciferný zero-pad, per-step counter). Kroky, do kterých se workflow vrací
-  smyčkou, dostávají číslo; run-once kroky holé jméno.
+- **The `.artifacts/` root** — the dot-prefix signals "harness metadata, not source
+  code"; most tools (pytest, linters, coverage) skip dot-directories, so the
+  artifacts don't pollute the target repo's tooling.
+- **Flat files, no hierarchy.** The attempt is in the filename suffix, not a
+  subdirectory — the listing sorts lexically by step and then by attempt, so the
+  loop is legible at a glance. Should a step need several files per attempt, the
+  `development-02` prefix groups them anyway; a hierarchy would needlessly lock in
+  the shape.
+- **Task-level = bare name** (`plan.md`), **step-attempt = `<step>-NN`**
+  (two-digit zero-pad, per-step counter). Steps the workflow returns to via the
+  loop get a number; run-once steps get the bare name.
 
-### Kdo počítá `NN`
+### Who counts `NN`
 
-Behavior driver před spuštěním agenta oskenuje `.artifacts/<task-id>/`, spočítá
-existující `<step>-*.md` a alokuje další číslo. Je to zbytek `ArtifactStore.begin()`
-z fáze 2 scvrknutý na malý helper nad worktree filesystémem — samostatný store
-zápisově zaniká.
+Before launching the agent, the behavior driver scans `.artifacts/<task-id>/`,
+counts the existing `<step>-*.md`, and allocates the next number. It's the remnant
+of phase 2's `ArtifactStore.begin()` shrunk to a small helper over the worktree
+filesystem — the standalone store disappears on the write side.
 
-### Verzování a commit
+### Versioning and commit
 
-Agent artefakty **zapíše**; `git add`/`commit` nespouští (invariant 9 platí dál).
-Worker po doběhu agenta commitne vše — kód i `.artifacts/**` — se `summary` jako
-zprávou. `GitWorkspace.commit` už dnes dělá `git add -A`, takže artefakty
-posbírá bez úprav; reálná změna je jen *kam agent píše*, ne *jak se commituje*.
+The agent **writes** the artifacts; it does not run `git add`/`commit` (invariant
+9 still holds). Once the agent finishes, the worker commits everything — code and
+`.artifacts/**` — with `summary` as the message. `GitWorkspace.commit` already
+does `git add -A` today, so it picks up the artifacts unchanged; the only real
+change is *where the agent writes*, not *how the commit happens*.
 
-Důsledek: artefakty jedou v git historii a přistanou v PR jako dokumentace
-návrhu. Přežijí zbourání worktree (jsou v branchi), takže board i audit je vidí
-i po dokončení tasku. Landing tím ztrácí kopírovací krok — artefakty už ve
-worktree jsou; landing jen otevře PR.
+Consequence: the artifacts ride along in git history and land in the PR as design
+documentation. They survive the worktree being torn down (they're in the branch),
+so the board and the audit log see them even after the task is done. Landing
+thereby loses its copy step — the artifacts are already in the worktree; landing
+just opens the PR.
 
-### Recovery — gapless číslování zadarmo
+### Recovery — gapless numbering for free
 
-Rozdělaný pokus (`development-02.md`, který agent píše) je do workerova commitu
-**necommitnutý**. Když agent v půlce spadne, recovery udělá `reset --hard HEAD`
-(viz níže) → necommitnutý `development-02.md` zmizí → re-run spočítá commitnuté
-`development-*` = `01` → znovu alokuje `02`. Stejné číslo, žádná díra, žádný
-půlnapsaný artefakt. Tři rozhodnutí (indexování + commit + reset) do sebe
-zapadají.
+An in-progress attempt (`development-02.md` that the agent is writing) is
+**uncommitted** until the worker's commit. When the agent crashes halfway,
+recovery does `reset --hard HEAD` (see below) → the uncommitted `development-02.md`
+vanishes → the re-run counts the committed `development-*` = `01` → and allocates
+`02` again. Same number, no gap, no half-written artifact. Three decisions
+(indexing + commit + reset) fit together.
 
-## Agent — katalog, spec, vazba na frontu
+## Agent — catalog, spec, binding to the queue
 
 ### `AgentSpec` (data)
 
 ```python
 @dataclass(frozen=True)
 class AgentSpec:
-    name: str                      # = jméno fronty (default vazba)
+    name: str                      # = queue name (default binding)
     prompt: str                    # persona
     model: str | None = None       # None → harness-level default
     fallback_model: str | None = None
@@ -156,26 +167,28 @@ class AgentSpec:
     allowed_outcomes: tuple[Outcome, ...] = (Outcome.DONE,)
 ```
 
-- `allowed_outcomes` je **náš** koncept, ne CLI flag. `architect`/`planner`
-  smí jen `DONE`; `reviewer` `DONE`/`REQUEST_CHANGES`. Verdikt mimo množinu →
-  výjimka → `failed/`. Kontrakt tím sedí u agenta, ne rozházený po workflow.
+- `allowed_outcomes` is **our** concept, not a CLI flag. `architect`/`planner` may
+  only return `DONE`; `reviewer` may return `DONE`/`REQUEST_CHANGES`. A verdict
+  outside the set → exception → `failed/`. This keeps the contract next to the
+  agent, not scattered across the workflow.
 
 ### `AgentCatalog` (port)
 
-`get(name) -> AgentSpec`. Driver fáze 3 `FilesystemAgentCatalog` čte
-`agents/<name>.json` (**náš** formát, ať je katalog jediný zdroj pravdy).
-In-memory driver pro testy. Neplatné/chybějící jméno → `AgentNotFound`, symetricky
-k `WorkflowNotFound`.
+`get(name) -> AgentSpec`. The phase-3 driver `FilesystemAgentCatalog` reads
+`agents/<name>.json` (**our** format, so the catalog is the single source of
+truth). An in-memory driver for tests. An invalid/missing name → `AgentNotFound`,
+symmetric to `WorkflowNotFound`.
 
-### Vazba fronta → agent
+### Queue → agent binding
 
-Defaultně **identita**: jméno kroku == jméno agenta (`architect` fronta →
-`architect` spec). Indirekci (dvě fronty sdílí agenta) řeší volitelná mapa
-`step → agent` — buď pole `"agent"` u kroku ve workflow JSONu, nebo zvlášť.
-Wiring z fáze 2 už má hák `behavior_for(step)`; ve fázi 3 z něj bude
-`ClaudeCliBehavior(spec=catalog.get(agent_of(step)), runner=shared, …)`.
+By default **identity**: step name == agent name (`architect` queue → `architect`
+spec). Indirection (two queues share an agent) is handled by an optional
+`step → agent` map — either an `"agent"` field on the step in the workflow JSON,
+or kept separately. The phase-2 wiring already has a `behavior_for(step)` hook; in
+phase 3 it becomes `ClaudeCliBehavior(spec=catalog.get(agent_of(step)),
+runner=shared, …)`.
 
-## `AgentRunner` — wrapper kolem `claude -p`
+## `AgentRunner` — a wrapper around `claude -p`
 
 Port:
 
@@ -188,157 +201,168 @@ class AgentRunner(ABC):
 class AgentRun:
     outcome: Outcome
     summary: str
-    raw: str          # syrový výstup pro audit / event stream
+    raw: str          # raw output for audit / event stream
 ```
 
-### Driver `ClaudeCliRunner` — mapování na flagy
+### Driver `ClaudeCliRunner` — mapping onto flags
 
-Ověřeno proti `claude 2.1.211`:
+Verified against `claude 2.1.211`:
 
-| `AgentSpec` / kontext | Flag |
+| `AgentSpec` / context | Flag |
 |---|---|
-| `prompt` (persona) | `--append-system-prompt` *nebo* `--agents '<json>' --agent <name>` |
-| `model` | `--model` (alias i plné ID) |
+| `prompt` (persona) | `--append-system-prompt` *or* `--agents '<json>' --agent <name>` |
+| `model` | `--model` (alias or full ID) |
 | `fallback_model` | `--fallback-model` |
 | `allowed_tools` | `--allowedTools` |
-| pracovní prompt (task + krok) | pozicní `-p "<prompt>"` |
-| cwd | worktree cesta z `RepositoryRegistry` |
-| — | `--output-format json` (strojově čitelný výsledek) |
-| — | `--permission-mode bypassPermissions` (headless, bez člověka) |
-| — | `--setting-sources project` (determinismus, viz níže) |
+| work prompt (task + step) | positional `-p "<prompt>"` |
+| cwd | worktree path from `RepositoryRegistry` |
+| — | `--output-format json` (machine-readable result) |
+| — | `--permission-mode bypassPermissions` (headless, no human) |
+| — | `--setting-sources project` (determinism, see below) |
 
-Verdikt: agent v personě dostane instrukci skončit strojově čitelným
-`{outcome, summary}`. Runner ho vytáhne z JSON obálky. Chybějící/nečitelný/mimo
-`allowed_outcomes` → výjimka → `failed/`. `BehaviorResult(outcome, summary)` z
-fáze 2 je pro tenhle verdikt skoro 1:1 — model se kvůli fázi 3 nemění.
+Verdict: the agent, in its persona, is instructed to finish with a machine-readable
+`{outcome, summary}`. The runner extracts it from the JSON envelope. A
+missing/unreadable verdict, or one outside `allowed_outcomes` → exception →
+`failed/`. Phase 2's `BehaviorResult(outcome, summary)` is almost 1:1 for this
+verdict — the model doesn't change on account of phase 3.
 
 ### Timeout
 
-`claude -p` běží minuty, ne milisekundy. Runner vlastní timeout → kill
-subprocessu → výjimka → `failed/`. Žádný port fáze 1–2 timeout nezná; přidává se
-tady, uvnitř runneru.
+`claude -p` runs for minutes, not milliseconds. The runner owns the timeout →
+kills the subprocess → exception → `failed/`. No port from phases 1–2 knows about
+a timeout; it's added here, inside the runner.
 
-## `ClaudeCliBehavior` — tok
+## `ClaudeCliBehavior` — the flow
 
 ```
-attach worktree (Workspace, cwd z RepositoryRegistry)
-  → alokuj attempt číslo v .artifacts/<id>/
-  → prompt = compose(task, step, ukazatele na .artifacts/ předchozích kroků)
-  → run = await runner.run(prompt, spec, cwd, timeout)     # agent píše kód + artefakty
-  → worker: handle.commit(run.summary)                     # commit dělá driver, ne agent
+attach worktree (Workspace, cwd from RepositoryRegistry)
+  → allocate attempt number in .artifacts/<id>/
+  → prompt = compose(task, step, pointers to .artifacts/ of earlier steps)
+  → run = await runner.run(prompt, spec, cwd, timeout)     # agent writes code + artifacts
+  → worker: handle.commit(run.summary)                     # the driver commits, not the agent
   → BehaviorResult(run.outcome, run.summary)
 ```
 
-Behavior nevětví na hodnotě outcome (invariant 2 platí dál). Commit dělá driver,
-ne agent (invariant 9). `attach`/`commit`/`failed` cesty jsou beze změny z fáze 2.
+The behavior does not branch on the outcome value (invariant 2 still holds). The
+driver commits, not the agent (invariant 9). The `attach`/`commit`/`failed` paths
+are unchanged from phase 2.
 
-## Determinismus prostředí
+## Environment determinism
 
-`claude -p` z cwd **automaticky natáhne `CLAUDE.md` cílového repa, jeho skilly,
-pluginy, MCP**. To může být žádoucí (agent ctí konvence repa), ale i zdroj
-nedeterminismu a průsaku operátorovy globální konfigurace. Fáze 3 volí
-`--setting-sources project` — natáhne projektovou konfiguraci repa, ne
-uživatelskou. Per-agent override (`setting_sources` ve specu) je otevřená otázka.
+From its cwd, `claude -p` **automatically pulls in the target repo's `CLAUDE.md`,
+its skills, plugins, and MCP**. That can be desirable (the agent honors the repo's
+conventions), but it's also a source of nondeterminism and of the operator's global
+config leaking in. Phase 3 chooses `--setting-sources project` — it pulls the
+repo's project config, not the user's. A per-agent override (`setting_sources` in
+the spec) is an open question.
 
 ## Recovery
 
-`Workspace.attach` fáze 2 worktree jen znovupoužije. Reálný agent, který spadl v
-půlce, ale nechá **špinavý worktree**; re-run by se na něj navrstvil. Fáze 3
-proto při re-attach dělá `git reset --hard HEAD` + `git clean -fd` (bez `-x`,
-ať přežijí případné ignorované soubory) — vrátí worktree na poslední per-krok
-commit a rozdělanou práci zahodí. To zároveň drží gapless číslování artefaktů
-(viz výše). Commitnuté artefakty i kód přežijí; jen rozdělaný běh se přehraje.
+Phase 2's `Workspace.attach` merely reuses the worktree. But a real agent that
+crashed halfway leaves a **dirty worktree**; a re-run would layer on top of it.
+Phase 3 therefore does `git reset --hard HEAD` + `git clean -fd` (without `-x`, so
+any ignored files survive) on re-attach — it returns the worktree to the last
+per-step commit and throws away work-in-progress. This also keeps artifact
+numbering gapless (see above). Committed artifacts and code survive; only the
+in-progress run is replayed.
 
-## Chybové stavy (přibývá k fázím 1–2)
+## Error states (added to phases 1–2)
 
-| Situace | Detekce | Kam |
+| Situation | Detection | Where |
 |---|---|---|
-| `RepositoryRegistry.resolve` selže (repo neznámé) | výjimka z behavioru | `failed/` |
-| `claude` skončí nenulově / spadne | runner vyhodí | `failed/` |
-| timeout agenta | runner kill → výjimka | `failed/` |
-| verdikt chybí / nečitelný JSON | runner vyhodí | `failed/` |
-| verdikt mimo `allowed_outcomes` | behavior validuje | `failed/` |
-| `AgentCatalog.get` selže | výjimka při wiring/behavioru | `failed/` |
+| `RepositoryRegistry.resolve` fails (unknown repo) | exception from the behavior | `failed/` |
+| `claude` exits nonzero / crashes | runner raises | `failed/` |
+| agent timeout | runner kill → exception | `failed/` |
+| verdict missing / unreadable JSON | runner raises | `failed/` |
+| verdict outside `allowed_outcomes` | behavior validates | `failed/` |
+| `AgentCatalog.get` fails | exception during wiring/behavior | `failed/` |
 
-Vše přes stávající `_fail` cestu — jeden vadný task nezastaví smyčku.
+All through the existing `_fail` path — one bad task does not stop the loop.
 
-## Nové porty a drivery
+## New ports and drivers
 
-| Port | Odpovědnost | Driver fáze 3 | Vymění se za |
+| Port | Responsibility | Phase-3 driver | Swapped out for |
 |---|---|---|---|
-| `AgentRunner` | `run(prompt, spec, cwd, timeout) -> AgentRun` | `ClaudeCliRunner` (`claude -p`) | jiný agent CLI / API |
+| `AgentRunner` | `run(prompt, spec, cwd, timeout) -> AgentRun` | `ClaudeCliRunner` (`claude -p`) | another agent CLI / API |
 | `AgentCatalog` | `get(name) -> AgentSpec` | `FilesystemAgentCatalog` | DB, remote |
 | `RepositoryRegistry` | `resolve(name) -> Path` | `FilesystemRepositoryRegistry` | — |
 
-Ke každému in-memory driver pro testy. Orchestrace (dispatcher, consumer) žádný z
-nich nezná — sahá na ně jen behavior / wiring. `api/` beze změny.
+Each with an in-memory driver for tests. Orchestration (dispatcher, consumer)
+knows none of them — only the behavior / wiring touches them. `api/` is unchanged.
 
-## Co se z fáze 2 mění
+## What changes from phase 2
 
-- **`ArtifactStore` (zápisová strana) retiruje.** Artefakty píše agent do
-  worktree; `begin/put` nahrazuje path-konvence + attempt helper. `ArtifactView`
-  (čtení pro board) **zůstává**, jen jeho driver čte `.artifacts/` ve worktree
-  místo oddělené složky (invariant 11 — `api/` sahá jen na `ArtifactView`).
-- **Landing** ztrácí kopírovací krok (artefakty už ve worktree jsou); jen otevře
-  PR.
-- **`GitWorkspace.attach`** resolvuje jméno repa přes `RepositoryRegistry` a
-  resetuje worktree na re-attach.
+- **`ArtifactStore` (the write side) retires.** The agent writes artifacts into
+  the worktree; a path convention + attempt helper replaces `begin/put`.
+  `ArtifactView` (reading for the board) **stays**, only its driver reads
+  `.artifacts/` in the worktree instead of a separate folder (invariant 11 — `api/`
+  touches only `ArtifactView`).
+- **Landing** loses its copy step (the artifacts are already in the worktree); it
+  just opens the PR.
+- **`GitWorkspace.attach`** resolves the repo name through `RepositoryRegistry` and
+  resets the worktree on re-attach.
 
-## Testovací story
+## Testing story
 
-- **`FakeAgentRunner`** vrací připravený `AgentRun` — `ClaudeCliBehavior` jde
-  testovat bez subprocessu, bez sítě, bez `claude`. Unit i integrační testy
-  běží in-memory a na `FakeClock`, jako celá sada.
-- **In-memory `AgentCatalog` / `RepositoryRegistry`** pro testy.
-- **Žádný reálný `claude` v test sadě** — nedeterministický, drahý, vyžaduje
-  auth. Volitelný smoke s reálným `claude` je za env flagem, mimo `pytest -q`
-  (viz Otevřené otázky).
-- `tests/test_smoke_git.py` z fáze 2 (reálný git) zůstává; artefakty se v něm
-  přesunou do worktree.
+- **`FakeAgentRunner`** returns a canned `AgentRun` — `ClaudeCliBehavior` is
+  testable without a subprocess, without a network, without `claude`. Unit and
+  integration tests run in-memory and on `FakeClock`, like the whole suite.
+- **In-memory `AgentCatalog` / `RepositoryRegistry`** for tests.
+- **No real `claude` in the test suite** — nondeterministic, expensive, and it
+  requires auth. An optional smoke test with a real `claude` sits behind an env
+  flag, outside `pytest -q` (see Open questions).
+- `tests/test_smoke_git.py` from phase 2 (real git) stays; the artifacts move into
+  the worktree in it.
 
-## Invarianty — nové/upřesněné
+## Invariants — new/refined
 
-Rozšiřují seznam z `CLAUDE.md` (1–12), neruší ho.
+These extend the list in `CLAUDE.md` (1–12), they don't cancel it.
 
-13. **Agent je za `AgentRunner`.** `ClaudeCliBehavior` nezná subprocess ani CLI
-    flagy; test ho pohání fake runnerem.
-14. **Persona je data, ne kód.** V behavioru není větev podle jména agenta.
-15. **`task.repository` je jméno, ne cesta.** Cesty řeší `RepositoryRegistry`,
-    machine-specific, mimo task.
-16. **Artefakty žijí ve worktree pod `.artifacts/<id>/`, verzované.** Píše je
-    agent, commituje worker. Číslování pokusů je gapless přes reset-on-reattach.
-17. **`AgentRunner`/`AgentCatalog`/`RepositoryRegistry` nezná dispatcher ani
-    consumer.** Sahá na ně jen behavior / wiring.
+13. **The agent lives behind `AgentRunner`.** `ClaudeCliBehavior` knows nothing of
+    the subprocess or the CLI flags; a test drives it with a fake runner.
+14. **The persona is data, not code.** There is no branch on the agent's name in
+    the behavior.
+15. **`task.repository` is a name, not a path.** Paths are handled by
+    `RepositoryRegistry`, machine-specific, outside the task.
+16. **Artifacts live in the worktree under `.artifacts/<id>/`, versioned.** The
+    agent writes them, the worker commits them. Attempt numbering is gapless
+    thanks to reset-on-reattach.
+17. **`AgentRunner`/`AgentCatalog`/`RepositoryRegistry` know neither dispatcher nor
+    consumer.** Only the behavior / wiring touches them.
 
-## Otevřené otázky
+## Open questions
 
-- **Retry tranzientních chyb.** Default fáze 3: žádný, vše nešťastné → `failed/`,
-  `fallback_model` jako částečná pojistka proti přetížení modelu. Zavést
-  rozlišení transient/permanent a backoff, nebo počkat na fázi víceprocesů?
-- **Reálný smoke.** Chceme opt-in test s živým `claude` (za env flagem), nebo
-  stačí fake runner + ruční ověření ostrého běhu?
-- **Per-agent `permission_mode` / `setting_sources`.** Globálně
-  (`bypassPermissions`, `project`), nebo pole ve `AgentSpec`?
-- **Persona přes `--append-system-prompt` vs `--agents`+`--agent`.** Obojí
-  deterministické; první jednodušší, druhé nese i model/tools v jedné definici.
+- **Retry of transient errors.** Phase 3 default: none, everything unfortunate →
+  `failed/`, with `fallback_model` as a partial hedge against model overload.
+  Introduce a transient/permanent distinction and backoff, or wait for the
+  multi-process phase?
+- **A real smoke test.** Do we want an opt-in test with a live `claude` (behind an
+  env flag), or does a fake runner + manual verification of the live run suffice?
+- **Per-agent `permission_mode` / `setting_sources`.** Global
+  (`bypassPermissions`, `project`), or a field in `AgentSpec`?
+- **Persona via `--append-system-prompt` vs `--agents`+`--agent`.** Both
+  deterministic; the first is simpler, the second also carries model/tools in a
+  single definition.
 
-## Ověření hotovosti
+## Done criteria
 
-Fáze 3 je hotová, když:
+Phase 3 is done when:
 
-1. Task se jménem repa proteče workflow, kde každý krok obsluhuje **skutečný
-   `claude -p` agent** dané persony a modelu (ověřeno opt-in smokem nebo ručně).
-2. `RepositoryRegistry` přeloží jméno repa na cestu; worktree vznikne na
-   odvozené cestě, task nenese absolutní cesty.
-3. Každá fáze zapsala artefakt do `.artifacts/<id>/` ve worktree; předchozí
-   kroky ho čtou jako soubor v cwd; worker ho commitnul se `summary`.
-4. Zpětná hrana (`request_changes`) vytvoří `development-02` / `review-02` vedle
-   `-01`; všechny pokusy jsou ve worktree a v git historii.
-5. `reviewer` umí vrátit `REQUEST_CHANGES`; `architect`/`planner` jen `DONE`;
-   verdikt mimo `allowed_outcomes` skončí v `failed/`.
-6. Pád agenta / timeout / nečitelný verdikt → `failed/`, smyčka běží dál.
-7. Zabití procesu uprostřed a restart vede k dokončení tasku (reset-on-reattach,
-   gapless attempt).
-8. `ClaudeCliBehavior` je zelený s `FakeAgentRunner`em, bez skutečného `claude`.
-9. Architektonické testy: dispatcher/consumer neimportují nové porty ani drivery;
-   `api/` sahá jen na `ArtifactView`; behavior nevětví na outcome.
+1. A task with a repo name flows through a workflow where every step is served by a
+   **real `claude -p` agent** of the given persona and model (verified by an
+   opt-in smoke test or manually).
+2. `RepositoryRegistry` translates the repo name into a path; the worktree is
+   created at the derived path, and the task carries no absolute paths.
+3. Every phase wrote an artifact into `.artifacts/<id>/` in the worktree; earlier
+   steps read it as a file in cwd; the worker committed it with `summary`.
+4. The back edge (`request_changes`) creates `development-02` / `review-02`
+   alongside `-01`; all attempts are in the worktree and in git history.
+5. `reviewer` can return `REQUEST_CHANGES`; `architect`/`planner` only `DONE`; a
+   verdict outside `allowed_outcomes` ends up in `failed/`.
+6. An agent crash / timeout / unreadable verdict → `failed/`, and the loop keeps
+   running.
+7. Killing the process midway and restarting leads to the task completing
+   (reset-on-reattach, gapless attempt).
+8. `ClaudeCliBehavior` is green with `FakeAgentRunner`, without a real `claude`.
+9. Architecture tests: dispatcher/consumer don't import the new ports or drivers;
+   `api/` touches only `ArtifactView`; the behavior doesn't branch on the outcome.

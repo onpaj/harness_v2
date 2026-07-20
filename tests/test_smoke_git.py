@@ -1,16 +1,17 @@
-"""Smoke fáze 3 na skutečném gitu a filesystému.
+"""Phase 3 smoke on real git and filesystem.
 
-Jako `test_smoke.py` poluje reálným krátkým `asyncio.sleep` — je to jediné
-místo (vedle fázeI smoke), které ověřuje git/fs/forge drivery naživo,
-end-to-end. Neuklízet do in-memory podoby; tím by zmizelo jediné pokrytí
-reálného worktree.
+Like `test_smoke.py`, it polls with a real short `asyncio.sleep` — it's the only
+place (alongside the phase-1 smoke) that verifies the git/fs/forge drivers live,
+end-to-end. Don't tidy it into an in-memory form; that would remove the only
+coverage of a real worktree.
 
-Fáze 3: práci kroku svěří `ClaudeCliBehavior` **skutečnému** `AgentRunner`u —
-tady ale ne reálnému `claude` (ten NEBĚŽÍ, je nedeterministický a drahý), nýbrž
-lokálnímu `EchoRunner`, který z promptu vyparsuje cestu artefaktu a fyzicky ji
-zapíše do worktree. Reálný je git, filesystém a forge. Artefakty tak musí
-skončit versované v `.artifacts/<id>/` ve worktree (ne v oddělené složce),
-per-krok commity nese branch tasku a PR se zapíše do `prs.json`.
+Phase 3: the step's work is entrusted by `ClaudeCliBehavior` to a **real**
+`AgentRunner` — here, though, not the real `claude` (which DOES NOT RUN, is
+non-deterministic and expensive), but a local `EchoRunner` that parses the artifact
+path out of the prompt and physically writes it into the worktree. Git, the
+filesystem, and the forge are real. The artifacts must therefore end up versioned
+in `.artifacts/<id>/` inside the worktree (not in a separate folder), the per-step
+commits are carried by the task branch, and the PR is written to `prs.json`.
 """
 
 import asyncio
@@ -45,18 +46,18 @@ DEFINITION = {
     ],
 }
 
-# `.artifacts/<task_id>/<step>-<NN>.md`, jak ji `compose_prompt` vloží do promptu.
+# `.artifacts/<task_id>/<step>-<NN>.md`, the way `compose_prompt` inserts it into the prompt.
 _RELPATH = re.compile(
     r"\.artifacts/(?P<task>[^/\s]+)/(?P<step>[^/\s]+)-(?P<nn>\d+)\.md"
 )
 
 
 class EchoRunner(AgentRunner):
-    """Fake agent: zapíše artefakt na cestu z promptu a vrátí verdikt kroku.
+    """Fake agent: writes the artifact to the path from the prompt and returns the step's verdict.
 
-    `review` vrátí `REQUEST_CHANGES` při prvním průchodu daného tasku (zpětná
-    hrana na `development`), jinak `DONE`. Tím development i review běží dvakrát
-    a jejich artefakty dostanou attempt 01 i 02. Bez subprocessu, bez `claude`.
+    `review` returns `REQUEST_CHANGES` on the first pass of a given task (the back
+    edge to `development`), otherwise `DONE`. That way development and review both
+    run twice and their artifacts get attempt 01 and 02. No subprocess, no `claude`.
     """
 
     def __init__(self) -> None:
@@ -69,19 +70,19 @@ class EchoRunner(AgentRunner):
         self.calls.append({"spec": spec, "cwd": cwd})
 
         match = _RELPATH.search(prompt)
-        assert match is not None, "prompt neobsahuje cestu artefaktu"
+        assert match is not None, "prompt does not contain an artifact path"
         relpath = match.group(0)
         task_id = match.group("task")
         target = Path(cwd) / relpath
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(f"# {spec.name} artefakt\n", encoding="utf-8")
+        target.write_text(f"# {spec.name} artifact\n", encoding="utf-8")
 
         outcome = Outcome.DONE
         if spec.name == "review" and task_id not in self._review_seen:
             self._review_seen.add(task_id)
             outcome = Outcome.REQUEST_CHANGES
         assert outcome in spec.allowed_outcomes
-        return AgentRun(outcome, summary=f"{spec.name}: hotovo")
+        return AgentRun(outcome, summary=f"{spec.name}: done")
 
 
 def _git(repo, *args):
@@ -93,7 +94,7 @@ def _make_repo(path):
     _git(path, "init", "-q")
     _git(path, "config", "user.email", "t@t")
     _git(path, "config", "user.name", "t")
-    (path / "README.md").write_text("# projekt\n")
+    (path / "README.md").write_text("# project\n")
     _git(path, "add", "-A")
     _git(path, "commit", "-q", "-m", "init")
 
@@ -102,7 +103,7 @@ def _catalog() -> MemoryAgentCatalog:
     def spec(step: str, *outcomes: Outcome) -> AgentSpec:
         return AgentSpec(
             name=step,
-            prompt=f"Persona kroku {step}.",
+            prompt=f"Persona for the {step} step.",
             allowed_outcomes=outcomes or (Outcome.DONE,),
         )
 
@@ -123,7 +124,7 @@ async def test_task_lands_as_pull_request_on_real_git(tmp_path):
     worktrees_root = tmp_path / "wt"
     _make_repo(repo)
 
-    # Workflow na disku a task v inboxu — bez CLI, přímo do stromu.
+    # Workflow on disk and a task in the inbox — no CLI, straight into the tree.
     (root / "workflows").mkdir(parents=True)
     (root / "workflows" / "default.json").write_text(json.dumps(DEFINITION))
     task = Task(
@@ -131,7 +132,7 @@ async def test_task_lands_as_pull_request_on_real_git(tmp_path):
         workflow_template="default",
         created="2026-07-20T10:00:00Z",
         repository="app",
-        data={"title": "přidat rate limiting"},
+        data={"title": "add rate limiting"},
     )
     (root / "tasks").mkdir(parents=True)
     (root / "tasks" / f"{task.id}.json").write_text(json.dumps(task.to_dict()))
@@ -163,7 +164,7 @@ async def test_task_lands_as_pull_request_on_real_git(tmp_path):
     )
     assert finished.status == "end"
 
-    # worktree existuje na odvozené cestě a nese per-krok commity na task branchi
+    # the worktree exists at the derived path and carries per-step commits on the task branch
     worktree = worktrees_root / task_id
     assert worktree.is_dir()
     branch = subprocess.run(
@@ -179,13 +180,13 @@ async def test_task_lands_as_pull_request_on_real_git(tmp_path):
         capture_output=True,
         text=True,
     ).stdout
-    assert "plan: hotovo" in log
-    assert "development: hotovo" in log
-    assert "review: hotovo" in log
+    assert "plan: done" in log
+    assert "development: done" in log
+    assert "review: done" in log
 
-    # artefakty jsou VE WORKTREE pod `.artifacts/<id>/`, versované (git je vidí),
-    # ne v oddělené složce. Smyčka (request_changes) dala development i review
-    # attempt 01 i 02.
+    # the artifacts are IN THE WORKTREE under `.artifacts/<id>/`, versioned (git sees
+    # them), not in a separate folder. The loop (request_changes) gave development and
+    # review attempt 01 and 02.
     tracked = subprocess.run(
         ["git", "-C", str(worktree), "ls-files"],
         check=True,
@@ -194,10 +195,10 @@ async def test_task_lands_as_pull_request_on_real_git(tmp_path):
     ).stdout
     for name in ("plan-01", "development-01", "development-02", "review-01", "review-02"):
         assert f".artifacts/{task_id}/{name}.md" in tracked
-    # Žádná oddělená složka artefaktů mimo worktree.
+    # No separate artifacts folder outside the worktree.
     assert not (root / "artifacts").exists()
 
-    # PR zaznamenán ve forge
+    # PR recorded in the forge
     prs = json.loads((root / "forge" / "prs.json").read_text())
     assert len(prs) == 1
     assert prs[0]["branch"] == f"harness/{task_id}"

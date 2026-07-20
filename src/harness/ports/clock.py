@@ -4,12 +4,12 @@ from abc import ABC, abstractmethod
 
 
 class Clock(ABC):
-    """Čas za portem, aby testy nemusely spát."""
+    """Time behind a port, so tests don't have to sleep."""
 
     @abstractmethod
     def now(self) -> str:
-        """Aktuální čas jako ISO 8601 UTC se sufixem Z."""
+        """The current time as ISO 8601 UTC with a Z suffix."""
 
     @abstractmethod
     async def sleep(self, seconds: float) -> None:
-        """Počkej."""
+        """Wait."""

@@ -6,12 +6,12 @@ from harness.models import BehaviorResult, Task
 
 
 class ConsumerBehavior(ABC):
-    """Jediné místo, kde vzniká outcome.
+    """The only place an outcome is produced.
 
-    Jak k rozhodnutí dojde, je vnitřní věc implementace — dnes sleep,
-    v dalších fázích skutečný agent. Zvenčí se to neliší.
+    How the decision is reached is an implementation detail — today a sleep,
+    in later phases a real agent. From the outside it makes no difference.
     """
 
     @abstractmethod
     async def run(self, task: Task) -> BehaviorResult:
-        """Vykonej práci a vrať, co se stalo a co se udělalo."""
+        """Do the work and return what happened and what was done."""

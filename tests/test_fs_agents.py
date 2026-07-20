@@ -11,7 +11,7 @@ def test_roundtrip_reads_full_spec(tmp_path):
     (tmp_path / "reviewer.json").write_text(
         json.dumps(
             {
-                "prompt": "jsi reviewer",
+                "prompt": "you are a reviewer",
                 "model": "opus",
                 "fallback_model": "sonnet",
                 "allowed_tools": ["Read", "Grep"],
@@ -25,7 +25,7 @@ def test_roundtrip_reads_full_spec(tmp_path):
     spec = catalog.get("reviewer")
 
     assert spec.name == "reviewer"
-    assert spec.prompt == "jsi reviewer"
+    assert spec.prompt == "you are a reviewer"
     assert spec.model == "opus"
     assert spec.fallback_model == "sonnet"
     assert spec.allowed_tools == ("Read", "Grep")
@@ -34,7 +34,7 @@ def test_roundtrip_reads_full_spec(tmp_path):
 
 def test_defaults_when_fields_missing(tmp_path):
     (tmp_path / "planner.json").write_text(
-        json.dumps({"prompt": "jsi planner"}), encoding="utf-8"
+        json.dumps({"prompt": "you are a planner"}), encoding="utf-8"
     )
     catalog = FilesystemAgentCatalog(tmp_path)
 
@@ -50,15 +50,15 @@ def test_missing_file_raises(tmp_path):
     catalog = FilesystemAgentCatalog(tmp_path)
 
     with pytest.raises(AgentNotFound):
-        catalog.get("chybi")
+        catalog.get("missing")
 
 
 def test_malformed_json_raises(tmp_path):
-    (tmp_path / "rozbity.json").write_text("{tohle neni json", encoding="utf-8")
+    (tmp_path / "broken.json").write_text("{this is not json", encoding="utf-8")
     catalog = FilesystemAgentCatalog(tmp_path)
 
     with pytest.raises(AgentNotFound):
-        catalog.get("rozbity")
+        catalog.get("broken")
 
 
 def test_invalid_name_raises(tmp_path):
@@ -69,11 +69,11 @@ def test_invalid_name_raises(tmp_path):
 
 
 def test_unknown_outcome_raises(tmp_path):
-    (tmp_path / "divny.json").write_text(
-        json.dumps({"prompt": "x", "allowed_outcomes": ["done", "vymysleny"]}),
+    (tmp_path / "weird.json").write_text(
+        json.dumps({"prompt": "x", "allowed_outcomes": ["done", "invented"]}),
         encoding="utf-8",
     )
     catalog = FilesystemAgentCatalog(tmp_path)
 
     with pytest.raises(AgentNotFound):
-        catalog.get("divny")
+        catalog.get("weird")

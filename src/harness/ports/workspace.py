@@ -1,8 +1,8 @@
-"""Port pracovní plochy — worktree, ve kterém fáze upravují kód.
+"""Workspace port — the worktree where phases modify code.
 
-`attach` připojí task k worktree pojmenovanému v tasku (`repository`/`worktree`).
-Handle umí zapsat soubor a commitnout. Commit dělá behavior driver, nikdy
-consumer ani LLM.
+`attach` connects the task to the worktree named in the task
+(`repository`/`worktree`). The handle can write a file and commit. Committing is
+the behavior driver's job, never the consumer's or the LLM's.
 """
 
 from __future__ import annotations
@@ -14,33 +14,33 @@ from harness.models import Task
 
 
 class WorkspaceHandle(ABC):
-    """Připojený worktree tasku."""
+    """A task's attached worktree."""
 
     @property
     @abstractmethod
     def path(self) -> Path:
-        """Pracovní adresář."""
+        """The working directory."""
 
     @property
     @abstractmethod
     def branch(self) -> str:
-        """Task branch, na které commity leží."""
+        """The task branch the commits sit on."""
 
     @abstractmethod
     def write(self, relpath: str, content: str) -> None:
-        """Zapiš soubor relativně k worktree.
+        """Write a file relative to the worktree.
 
-        Používá se i landingem k přiklopení artefaktů — proto je to metoda
-        handle, ne přímý zápis přes `path`: memory driver ji zaznamená, takže
-        landing jde testovat bez disku.
+        Landing also uses this to lay artifacts down — that's why it's a handle
+        method rather than a direct write through `path`: the memory driver
+        records it, so landing can be tested without a disk.
         """
 
     @abstractmethod
     def commit(self, message: str) -> str | None:
-        """Stageuj vše a commitni. Vrať sha, nebo None když není co commitovat."""
+        """Stage everything and commit. Return the sha, or None if there is nothing to commit."""
 
 
 class Workspace(ABC):
     @abstractmethod
     def attach(self, task: Task) -> WorkspaceHandle:
-        """Připoj task k jeho worktree. Neexistuje-li, založ ho na task branchi."""
+        """Attach the task to its worktree. If none exists, create it on the task branch."""

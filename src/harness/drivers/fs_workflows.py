@@ -1,4 +1,4 @@
-"""Workflow jako <root>/<name>.json."""
+"""A workflow as <root>/<name>.json."""
 
 from __future__ import annotations
 
@@ -10,11 +10,11 @@ from harness.ports.workflows import WorkflowNotFound, WorkflowRepository
 
 
 def invalid_workflow_name(name: str) -> bool:
-    """Jméno nesmí obsahovat cestový oddělovač a nesmí to být "", "." nebo "..".
+    """The name must not contain a path separator and must not be "", "." or "..".
 
-    Jediné místo, kde tohle pravidlo žije — `cli.py` ho importuje, aby ho mohlo
-    ověřit ještě před zápisem definičního souboru, tedy dřív, než se vůbec
-    dostane k této repository."""
+    The single place this rule lives — `cli.py` imports it to check the name
+    before writing the definition file, i.e. before it ever reaches this
+    repository."""
     return "/" in name or "\\" in name or name in ("", ".", "..")
 
 
@@ -24,26 +24,26 @@ class FilesystemWorkflowRepository(WorkflowRepository):
 
     def get(self, name: str) -> Workflow:
         if invalid_workflow_name(name):
-            raise WorkflowNotFound(f"neplatné jméno workflow: {name!r}")
+            raise WorkflowNotFound(f"invalid workflow name: {name!r}")
 
         path = self._root / f"{name}.json"
         try:
             raw = json.loads(path.read_text(encoding="utf-8"))
         except FileNotFoundError:
-            raise WorkflowNotFound(f"workflow {name!r} neexistuje ({path})") from None
+            raise WorkflowNotFound(f"workflow {name!r} does not exist ({path})") from None
         except json.JSONDecodeError as error:
             raise WorkflowNotFound(
-                f"workflow {name!r} má rozbitou definici: {error}"
+                f"workflow {name!r} has a broken definition: {error}"
             ) from None
 
         if not isinstance(raw, dict):
             raise WorkflowNotFound(
-                f"workflow {name!r} má neplatnou definici: očekáván objekt, "
-                f"nalezeno {type(raw).__name__}"
+                f"workflow {name!r} has an invalid definition: expected object, "
+                f"got {type(raw).__name__}"
             )
 
         if "start" not in raw:
-            raise WorkflowNotFound(f"workflow {name!r} nemá start")
+            raise WorkflowNotFound(f"workflow {name!r} has no start")
 
         try:
             transitions = tuple(
@@ -54,7 +54,7 @@ class FilesystemWorkflowRepository(WorkflowRepository):
             )
         except (KeyError, TypeError) as error:
             raise WorkflowNotFound(
-                f"workflow {name!r} má neplatný přechod: {error}"
+                f"workflow {name!r} has an invalid transition: {error}"
             ) from None
 
         return Workflow(

@@ -52,7 +52,7 @@ def make_task(status=None, last_outcome=None, template="default") -> Task:
         created="2026-07-19T10:00:00Z",
         status=status,
         last_outcome=last_outcome,
-        data={"payload": "nedotknutelné"},
+        data={"payload": "untouchable"},
     )
 
 
@@ -116,21 +116,21 @@ def test_end_node_lands_in_done():
 
 
 def test_unknown_workflow_template_lands_in_failed():
-    dispatcher, _, _, _, failed, events = build(make_task(template="neznamy"))
+    dispatcher, _, _, _, failed, events = build(make_task(template="unknown"))
 
     assert dispatcher.tick() is True
 
     task = failed.list()[0]
     assert task.history[-1].to_step == "failed"
-    assert "neznamy" in task.history[-1].reason
+    assert "unknown" in task.history[-1].reason
     assert "failed" in events.names()
 
 
 def test_unknown_workflow_template_task_carries_terminal_failed_status():
-    """Task s neznámým workflowTemplate nemá status; failed/ ho ale musí
-    nést jako terminální 'failed', ne nechat status na None — jinak by
-    cokoli čtoucí status bez procházení history vidělo lež."""
-    dispatcher, _, _, _, failed, _ = build(make_task(template="neznamy"))
+    """A task with an unknown workflowTemplate has no status; failed/ must
+    still carry it as terminal 'failed' rather than leaving status at None —
+    otherwise anything reading status without walking history would see a lie."""
+    dispatcher, _, _, _, failed, _ = build(make_task(template="unknown"))
 
     dispatcher.tick()
 
@@ -146,9 +146,9 @@ def test_missing_edge_lands_in_failed():
 
 
 def test_mid_workflow_failure_task_carries_terminal_failed_status():
-    """Task, který selže uprostřed workflow (chybějící hrana), nesmí ve
-    failed/ zůstat se starým jménem kroku ('plan') — status musí přepsat
-    na terminální 'failed', stejně jako _finish přepisuje na 'end'."""
+    """A task that fails mid-workflow (missing edge) must not stay in failed/
+    with the old step name ('plan') — status must be overwritten to terminal
+    'failed', just as _finish overwrites it to 'end'."""
     dispatcher, _, _, _, failed, _ = build(make_task("plan", "request_changes"))
 
     dispatcher.tick()
@@ -159,7 +159,7 @@ def test_mid_workflow_failure_task_carries_terminal_failed_status():
 def test_step_without_queue_lands_in_failed():
     workflow = Workflow(
         name="default",
-        start="chybejici",
+        start="missing",
         transitions=(Transition(from_step="plan", on="done", to_step=END),),
     )
     inbox = MemoryTaskQueue("tasks")
@@ -178,12 +178,12 @@ def test_step_without_queue_lands_in_failed():
 
     dispatcher.tick()
 
-    assert "chybejici" in failed.list()[0].history[-1].reason
+    assert "missing" in failed.list()[0].history[-1].reason
 
 
 def test_one_bad_task_does_not_stop_the_loop():
     dispatcher, inbox, step_queues, _, failed, _ = build()
-    inbox.put(make_task(template="neznamy"))
+    inbox.put(make_task(template="unknown"))
     inbox.put(
         Task(id="tsk_2", workflow_template="default", created="2026-07-19T10:00:01Z")
     )
@@ -200,7 +200,7 @@ def test_dispatcher_does_not_touch_payload():
 
     dispatcher.tick()
 
-    assert step_queues["plan"].list()[0].data == {"payload": "nedotknutelné"}
+    assert step_queues["plan"].list()[0].data == {"payload": "untouchable"}
 
 
 def test_dispatched_event_carries_task_snapshot_and_queue():
@@ -226,7 +226,7 @@ def test_finished_event_carries_done_queue():
 
 
 def test_failed_event_carries_failed_queue():
-    dispatcher, _, _, _, _, events = build(make_task(template="neznamy"))
+    dispatcher, _, _, _, _, events = build(make_task(template="unknown"))
 
     dispatcher.tick()
 

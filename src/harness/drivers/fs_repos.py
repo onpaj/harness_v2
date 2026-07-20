@@ -1,4 +1,4 @@
-"""Registr rep z JSON configu `{"<jméno>": "<cesta>"}`."""
+"""Repository registry from a JSON config `{"<name>": "<path>"}`."""
 
 from __future__ import annotations
 
@@ -17,24 +17,24 @@ class FilesystemRepositoryRegistry(RepositoryRegistry):
             raw = json.loads(self._config.read_text(encoding="utf-8"))
         except FileNotFoundError:
             raise RepositoryNotFound(
-                f"config rep neexistuje ({self._config})"
+                f"repos config does not exist ({self._config})"
             ) from None
         except json.JSONDecodeError as error:
             raise RepositoryNotFound(
-                f"config rep má rozbitý JSON ({self._config}): {error}"
+                f"repos config has broken JSON ({self._config}): {error}"
             ) from None
 
         if not isinstance(raw, dict):
             raise RepositoryNotFound(
-                f"config rep má neplatný tvar: očekáván objekt, "
-                f"nalezeno {type(raw).__name__}"
+                f"repos config has an invalid shape: expected object, "
+                f"got {type(raw).__name__}"
             )
 
         try:
             path = raw[name]
         except KeyError:
             raise RepositoryNotFound(
-                f"repo {name!r} není v registru ({self._config})"
+                f"repo {name!r} is not in the registry ({self._config})"
             ) from None
 
         return Path(path).expanduser()

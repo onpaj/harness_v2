@@ -5,10 +5,10 @@ from harness.app import HarnessLayout, build
 from harness.drivers.memory import MemoryEventSink
 from harness.models import Task
 
-# `await runner` čeká na `asyncio.gather` uvnitř Harness.run, které skončí jen
-# když obě smyčky uvidí `stop.is_set()`. Kdyby to regresí přestalo platit,
-# `await runner` by visel navždy a test by zamrzl místo aby selhal.
-# `asyncio.wait_for` to promění na rychlé, jasné selhání.
+# `await runner` waits on the `asyncio.gather` inside Harness.run, which finishes
+# only when both loops see `stop.is_set()`. If a regression broke that, `await
+# runner` would hang forever and the test would freeze instead of failing.
+# `asyncio.wait_for` turns that into a fast, clear failure.
 RUNNER_TIMEOUT = 5.0
 
 DEFINITION = {
@@ -52,7 +52,7 @@ def test_build_creates_inbox_done_and_failed(tmp_path):
 
 
 def test_build_without_sources_has_no_pollers(tmp_path):
-    """Zpětná kompatibilita: default sources=[] → žádný poller, chování jako dřív."""
+    """Backward compatibility: default sources=[] → no poller, behavior as before."""
     seed(tmp_path)
 
     harness = build(tmp_path, "default", events=MemoryEventSink())

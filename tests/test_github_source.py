@@ -1,4 +1,4 @@
-"""GithubTaskSource — issue → task, stav → label."""
+"""GithubTaskSource — issue → task, status → label."""
 
 from harness.drivers.github_client import FakeGithubClient, Issue
 from harness.drivers.github_source import GithubTaskSource
@@ -25,7 +25,7 @@ def _labels(client, number):
 
 def test_poll_claims_issue_and_builds_task():
     client = FakeGithubClient(
-        [Issue(1, "Fix bug", "detaily", "https://gh/o/r/issues/1", ("harness:todo",))]
+        [Issue(1, "Fix bug", "details", "https://gh/o/r/issues/1", ("harness:todo",))]
     )
     source = build_source(client)
 
@@ -39,7 +39,7 @@ def test_poll_claims_issue_and_builds_task():
         "url": "https://gh/o/r/issues/1",
     }
     assert task.data["title"] == "Fix bug"
-    assert task.data["body"] == "detaily"
+    assert task.data["body"] == "details"
     assert task.repository == "/repos/r"
     assert task.worktree == f"/wt/{task.id}"
 
@@ -72,7 +72,7 @@ def test_report_progress_unknown_step_leaves_labels_unchanged():
     source = build_source(client)
     [task] = source.poll()  # queued
 
-    source.report_progress(task, Progress(step="plan"))  # není v step_labels
+    source.report_progress(task, Progress(step="plan"))  # not in step_labels
 
     assert _labels(client, 1) == {"harness:queued"}
 

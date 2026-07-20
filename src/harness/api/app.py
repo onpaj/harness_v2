@@ -1,4 +1,4 @@
-"""Factory API. BoardView přichází zvenčí — proto o driverech neví."""
+"""API factory. BoardView comes from outside — so it knows nothing about drivers."""
 
 from __future__ import annotations
 
@@ -14,9 +14,9 @@ from harness.ports.clock import Clock
 
 
 class _EmptyArtifactView(ArtifactView):
-    """Prázdný pohled pro board bez úložiště artefaktů. Drží `create_app`
-    zpětně kompatibilní — kdo artefakty nevkládá, dostane prázdný seznam.
-    Sedí za portem, takže api/ dál nezná žádný driver."""
+    """Empty view for a board without an artifact store. Keeps `create_app`
+    backward compatible — whoever doesn't supply artifacts gets an empty list.
+    It sits behind the port, so api/ still knows no driver."""
 
     def list(self, task_id: str) -> tuple[ArtifactRef, ...]:
         return ()

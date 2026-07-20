@@ -1,4 +1,4 @@
-"""Endpointy. Vidí výhradně port BoardView."""
+"""Endpoints. Sees only the BoardView port."""
 
 from __future__ import annotations
 
@@ -20,11 +20,12 @@ TEMPLATES = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 async def board_event_stream(
     view: BoardView, clock: Clock, coalesce_seconds: float
 ) -> AsyncIterator[str]:
-    """SSE rámce. Nesou jen číslo revize — data si klient natáhne sám.
+    """SSE frames. They carry only the revision number — the client fetches
+    the data itself.
 
-    Po každém rámci se čeká coalesce_seconds; změny, které mezitím
-    nastanou, se slijí do jedné notifikace. Bez toho by pět consumerů
-    dokázalo tepat překreslováním.
+    After each frame it waits coalesce_seconds; changes that happen in the
+    meantime are merged into a single notification. Without this, five
+    consumers could hammer the board with redraws.
     """
     async for revision in view.subscribe():
         yield f"event: board\ndata: {json.dumps({'revision': revision})}\n\n"
@@ -42,7 +43,7 @@ def build_json_router(view: BoardView, artifacts: ArtifactView) -> APIRouter:
     def task(task_id: str) -> dict:
         found = view.get(task_id)
         if found is None:
-            raise HTTPException(status_code=404, detail=f"task {task_id} neexistuje")
+            raise HTTPException(status_code=404, detail=f"task {task_id} does not exist")
         return found.to_dict()
 
     @router.get("/tasks/{task_id}/artifacts")
@@ -57,7 +58,7 @@ def build_json_router(view: BoardView, artifacts: ArtifactView) -> APIRouter:
         content = artifacts.read(task_id, step, attempt, name)
         if content is None:
             raise HTTPException(
-                status_code=404, detail=f"artefakt {name} neexistuje"
+                status_code=404, detail=f"artifact {name} does not exist"
             )
         return PlainTextResponse(content)
 
@@ -85,7 +86,7 @@ def build_html_router(
     def fragment_task(request: Request, task_id: str) -> HTMLResponse:
         found = view.get(task_id)
         if found is None:
-            raise HTTPException(status_code=404, detail=f"task {task_id} neexistuje")
+            raise HTTPException(status_code=404, detail=f"task {task_id} does not exist")
         return TEMPLATES.TemplateResponse(
             request=request,
             name="_task.html",

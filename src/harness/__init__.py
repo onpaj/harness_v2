@@ -1,1 +1,1 @@
-"""Orchestrační harness pro více agentů."""
+"""Orchestration harness for multiple agents."""

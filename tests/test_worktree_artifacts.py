@@ -13,7 +13,7 @@ def test_next_attempt_empty_starts_at_one(tmp_path):
 def test_next_attempt_grows_after_existing_file(tmp_path):
     artifacts = tmp_path / ".artifacts" / "tsk_1"
     artifacts.mkdir(parents=True)
-    (artifacts / "development-01.md").write_text("první", encoding="utf-8")
+    (artifacts / "development-01.md").write_text("first", encoding="utf-8")
 
     nn, relpath = next_attempt(tmp_path, "tsk_1", "development")
 
@@ -73,19 +73,19 @@ def test_view_list_distinguishes_step_attempt_and_task_level(tmp_path):
 def test_view_list_missing_dir_is_empty(tmp_path):
     view = WorktreeArtifactView(tmp_path)
 
-    assert view.list("neznámý") == ()
+    assert view.list("unknown") == ()
 
 
 def test_view_read_returns_content(tmp_path):
     artifacts = tmp_path / "tsk_1" / ".artifacts" / "tsk_1"
     artifacts.mkdir(parents=True)
-    (artifacts / "development-01.md").write_text("# vývoj\n", encoding="utf-8")
-    (artifacts / "plan.md").write_text("# plán\n", encoding="utf-8")
+    (artifacts / "development-01.md").write_text("# development\n", encoding="utf-8")
+    (artifacts / "plan.md").write_text("# plan\n", encoding="utf-8")
 
     view = WorktreeArtifactView(tmp_path)
 
-    assert view.read("tsk_1", "development", 1, "development-01.md") == "# vývoj\n"
-    assert view.read("tsk_1", "plan", 0, "plan.md") == "# plán\n"
+    assert view.read("tsk_1", "development", 1, "development-01.md") == "# development\n"
+    assert view.read("tsk_1", "plan", 0, "plan.md") == "# plan\n"
 
 
 def test_view_read_missing_returns_none(tmp_path):
@@ -94,4 +94,4 @@ def test_view_read_missing_returns_none(tmp_path):
 
     view = WorktreeArtifactView(tmp_path)
 
-    assert view.read("tsk_1", "development", 1, "chybí.md") is None
+    assert view.read("tsk_1", "development", 1, "missing.md") is None

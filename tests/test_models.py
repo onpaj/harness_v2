@@ -14,10 +14,10 @@ from harness.models import (
 
 
 def test_behavior_result_carries_outcome_and_summary():
-    result = BehaviorResult(Outcome.DONE, summary="přidán retry s backoffem")
+    result = BehaviorResult(Outcome.DONE, summary="added retry with backoff")
 
     assert result.outcome is Outcome.DONE
-    assert result.summary == "přidán retry s backoffem"
+    assert result.summary == "added retry with backoff"
 
 
 def test_behavior_result_summary_defaults_empty():
@@ -31,12 +31,12 @@ def test_history_entry_roundtrips_summary():
         from_step="design",
         to_step=None,
         outcome="done",
-        summary="hotovo",
+        summary="done",
     )
 
     raw = entry.to_dict()
 
-    assert raw["summary"] == "hotovo"
+    assert raw["summary"] == "done"
     assert HistoryEntry.from_dict(raw) == entry
 
 

@@ -57,23 +57,23 @@ def test_write_and_commit_returns_sha_and_logs_message(tmp_path):
     workspace = _workspace(tmp_path)
     handle = workspace.attach(_make_task())
 
-    handle.write("feature.txt", "ahoj\n")
-    sha = handle.commit("[design] práce")
+    handle.write("feature.txt", "hi\n")
+    sha = handle.commit("[design] work")
 
     assert sha is not None
     assert len(sha) == 40
     log = _git(["log", "--oneline"], handle.path)
-    assert "[design] práce" in log
-    assert (handle.path / "feature.txt").read_text(encoding="utf-8") == "ahoj\n"
+    assert "[design] work" in log
+    assert (handle.path / "feature.txt").read_text(encoding="utf-8") == "hi\n"
 
 
 def test_commit_without_changes_returns_none(tmp_path):
     workspace = _workspace(tmp_path)
     handle = workspace.attach(_make_task())
 
-    handle.write("feature.txt", "ahoj\n")
-    first = handle.commit("[design] práce")
-    second = handle.commit("[design] nic nového")
+    handle.write("feature.txt", "hi\n")
+    first = handle.commit("[design] work")
+    second = handle.commit("[design] nothing new")
 
     assert first is not None
     assert second is None
@@ -84,14 +84,14 @@ def test_reattach_reuses_existing_worktree(tmp_path):
     task = _make_task()
 
     first = workspace.attach(task)
-    first.write("feature.txt", "ahoj\n")
-    first.commit("[design] práce")
+    first.write("feature.txt", "hi\n")
+    first.commit("[design] work")
 
     second = workspace.attach(task)
 
     assert second.path == first.path
     assert second.branch == "harness/tsk_1"
-    assert (second.path / "feature.txt").read_text(encoding="utf-8") == "ahoj\n"
+    assert (second.path / "feature.txt").read_text(encoding="utf-8") == "hi\n"
 
 
 def test_reattach_resets_dirty_worktree(tmp_path):
@@ -99,8 +99,8 @@ def test_reattach_resets_dirty_worktree(tmp_path):
     task = _make_task()
 
     first = workspace.attach(task)
-    # Netrackovaný soubor přidaný mimo commit — druhý attach ho musí smazat.
-    (first.path / "scratch.txt").write_text("rozdělaná práce\n", encoding="utf-8")
+    # Untracked file added outside a commit — the second attach must delete it.
+    (first.path / "scratch.txt").write_text("work in progress\n", encoding="utf-8")
     assert (first.path / "scratch.txt").exists()
 
     second = workspace.attach(task)

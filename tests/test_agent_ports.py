@@ -15,10 +15,10 @@ def make_task(status: str = "design", task_id: str = "tsk_1") -> Task:
 
 
 def test_agent_spec_holds_fields_and_defaults():
-    spec = AgentSpec(name="reviewer", prompt="Zrecenzuj to.")
+    spec = AgentSpec(name="reviewer", prompt="Review it.")
 
     assert spec.name == "reviewer"
-    assert spec.prompt == "Zrecenzuj to."
+    assert spec.prompt == "Review it."
     assert spec.model is None
     assert spec.fallback_model is None
     assert spec.allowed_tools == ()
@@ -42,7 +42,7 @@ def test_agent_spec_accepts_overrides():
 
 
 def test_memory_catalog_get_returns_spec():
-    spec = AgentSpec(name="planner", prompt="Naplánuj.")
+    spec = AgentSpec(name="planner", prompt="Plan it.")
     catalog = MemoryAgentCatalog({"plan": spec})
 
     assert catalog.get("plan") is spec
@@ -57,17 +57,17 @@ def test_memory_catalog_unknown_raises_not_found():
 
 async def test_fake_runner_returns_scripted_run_and_records_call(tmp_path):
     spec = AgentSpec(name="planner", prompt="p")
-    scripted = AgentRun(Outcome.DONE, "hotovo", raw="{}")
+    scripted = AgentRun(Outcome.DONE, "done", raw="{}")
     runner = FakeAgentRunner(runs={"planner": scripted})
 
     result = await runner.run(
-        prompt="udělej to", spec=spec, cwd=tmp_path, timeout=60.0
+        prompt="do it", spec=spec, cwd=tmp_path, timeout=60.0
     )
 
     assert result is scripted
     assert len(runner.calls) == 1
     call = runner.calls[0]
-    assert call["prompt"] == "udělej to"
+    assert call["prompt"] == "do it"
     assert call["spec"] is spec
     assert call["cwd"] == tmp_path
     assert call["timeout"] == 60.0
@@ -96,12 +96,12 @@ async def test_fake_runner_fallback_when_nothing_configured(tmp_path):
 async def test_fake_runner_writes_files_into_cwd(tmp_path):
     spec = AgentSpec(name="dev", prompt="p")
     runner = FakeAgentRunner(
-        writes={"dev": {".artifacts/tsk_1/dev-01.md": "obsah", "src/main.py": "print(1)"}}
+        writes={"dev": {".artifacts/tsk_1/dev-01.md": "content", "src/main.py": "print(1)"}}
     )
 
     await runner.run(prompt="x", spec=spec, cwd=tmp_path, timeout=1.0)
 
     artifact = tmp_path / ".artifacts" / "tsk_1" / "dev-01.md"
     code = tmp_path / "src" / "main.py"
-    assert artifact.read_text() == "obsah"
+    assert artifact.read_text() == "content"
     assert code.read_text() == "print(1)"

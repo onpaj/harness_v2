@@ -1,5 +1,5 @@
-"""Behaviory — konkrétní implementace ConsumerBehavior mimo prosté drivery.
+"""Behaviors — concrete ConsumerBehavior implementations beyond plain drivers.
 
-Sahají jen na porty a modely. Wiring je v app.py; dispatcher ani consumer je
-neznají.
+They touch only ports and models. Wiring lives in app.py; neither the dispatcher
+nor the consumer knows about them.
 """

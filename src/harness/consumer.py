@@ -1,7 +1,7 @@
-"""Consumer: tenká obálka kolem ConsumerBehavior.
+"""Consumer: a thin wrapper around ConsumerBehavior.
 
-Nemá žádnou větev závislou na hodnotě outcome — jen ho doručí. Objeví-li se
-tu `if outcome == ...`, prosákla odpovědnost přes hranici.
+It has no branch that depends on the outcome value — it just delivers it. If an
+`if outcome == ...` shows up here, responsibility has leaked across the boundary.
 """
 
 from __future__ import annotations
@@ -51,7 +51,7 @@ class Consumer:
         return f"consumer:{self._step}"
 
     async def tick(self) -> bool:
-        """Zpracuj nejvýš jeden task. True, když se něco zpracovalo."""
+        """Process at most one task. True when something was processed."""
         selected = self._strategy.select(self._queue.list())
         if selected is None:
             return False
@@ -70,14 +70,14 @@ class Consumer:
 
         try:
             result = await self._behavior.run(task)
-        except Exception as error:  # noqa: BLE001 - jeden vadný task nesmí zastavit smyčku
-            self._fail(task, f"behavior vyhodil výjimku: {error}")
+        except Exception as error:  # noqa: BLE001 - one bad task must not stop the loop
+            self._fail(task, f"behavior raised an exception: {error}")
             return True
 
         if not isinstance(result, BehaviorResult) or not isinstance(
             result.outcome, Outcome
         ):
-            self._fail(task, f"behavior vrátil neplatný výsledek: {result!r}")
+            self._fail(task, f"behavior returned an invalid result: {result!r}")
             return True
 
         self._deliver(task, result)

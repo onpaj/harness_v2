@@ -17,8 +17,8 @@ def test_memory_resolves_known_name():
 def test_memory_unknown_name_raises():
     registry = MemoryRepositoryRegistry({})
 
-    with pytest.raises(RepositoryNotFound, match="neznamy"):
-        registry.resolve("neznamy")
+    with pytest.raises(RepositoryNotFound, match="unknown"):
+        registry.resolve("unknown")
 
 
 def test_fs_resolves_known_name(tmp_path):
@@ -42,12 +42,12 @@ def test_fs_unknown_name_raises(tmp_path):
     config.write_text(json.dumps({"harness_v2": "/repos/harness_v2"}))
     registry = FilesystemRepositoryRegistry(config)
 
-    with pytest.raises(RepositoryNotFound, match="neznamy"):
-        registry.resolve("neznamy")
+    with pytest.raises(RepositoryNotFound, match="unknown"):
+        registry.resolve("unknown")
 
 
 def test_fs_missing_config_raises(tmp_path):
-    registry = FilesystemRepositoryRegistry(tmp_path / "chybi.json")
+    registry = FilesystemRepositoryRegistry(tmp_path / "missing.json")
 
     with pytest.raises(RepositoryNotFound):
         registry.resolve("harness_v2")
@@ -55,7 +55,7 @@ def test_fs_missing_config_raises(tmp_path):
 
 def test_fs_malformed_json_raises(tmp_path):
     config = tmp_path / "repos.json"
-    config.write_text("{tohle neni json")
+    config.write_text("{this is not json")
     registry = FilesystemRepositoryRegistry(config)
 
     with pytest.raises(RepositoryNotFound):

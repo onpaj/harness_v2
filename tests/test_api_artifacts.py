@@ -28,7 +28,7 @@ def store() -> MemoryArtifactStore:
     slot = store.begin("tsk_1", "plan")
     slot.put("plan.md", "the plan")
     slot.put("notes.txt", "some notes")
-    # jiný task nesmí prosáknout do výpisu tsk_1
+    # another task must not leak into the tsk_1 listing
     other = store.begin("tsk_2", "plan")
     other.put("plan.md", "not mine")
     return store
@@ -67,7 +67,7 @@ def test_content_route_returns_stored_text(client):
 
 def test_content_route_404s_for_missing_artifact(client):
     assert client.get("/api/tasks/tsk_1/artifacts/plan/0/chybi.md").status_code == 404
-    # špatný attempt je taky 404
+    # a wrong attempt is also a 404
     assert client.get("/api/tasks/tsk_1/artifacts/plan/9/plan.md").status_code == 404
 
 
@@ -100,9 +100,9 @@ def _imported_modules(path: Path) -> set[str]:
 
 
 def test_api_imports_only_the_artifact_port_not_drivers():
-    """api/ smí znát artefakty jen přes port, nikdy přes driver."""
+    """api/ may know artifacts only through the port, never through a driver."""
     for path in (SOURCE / "api").rglob("*.py"):
         modules = _imported_modules(path)
         assert not any(m.startswith("harness.drivers") for m in modules), (
-            f"{path.name} importuje driver"
+            f"{path.name} imports a driver"
         )
