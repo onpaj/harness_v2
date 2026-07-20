@@ -18,8 +18,29 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from typing import Any
 
 from harness.models import Task
+
+
+def source_key(task: Task) -> tuple[Any, ...] | None:
+    """The task's unique identity in its source, or None if it has none.
+
+    A task's origin lives in `task.data.source` (invariant #19). Two tasks with
+    the same `(kind, repo, issue)` are the *same* piece of outside work — a
+    GitHub issue must never yield two tasks, no matter how often it is polled or
+    how many times the harness restarts. Hand-submitted tasks (`harness submit`)
+    carry no `source` and are intentionally never deduplicated: each submit is a
+    fresh unit of work.
+    """
+    src = task.data.get("source")
+    if not isinstance(src, dict):
+        return None
+    kind = src.get("kind")
+    issue = src.get("issue")
+    if kind is None or issue is None:
+        return None
+    return (kind, src.get("repo"), issue)
 
 
 @dataclass(frozen=True)
