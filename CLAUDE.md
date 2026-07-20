@@ -154,7 +154,10 @@ Závislosti tečou striktně dolů, cykly nejsou.
   cizí task (jiný `kind` / bez `source`) adapter tiše ignoruje, takže tasky z
   `harness submit` projdou bez jediného volání ven. `poll()` claimuje přehozením
   labelu (GitHubí dvojče atomického `rename` ve `fs_queue.claim()`) — ingesce
-  „nanejvýš jednou" bez vedlejšího ledgeru.
+  „nanejvýš jednou" přes restarty. Uvnitř procesu ale `list_issues` čte s
+  read-after-write lagem (na rozdíl od `rename`), tak si `GithubTaskSource` drží
+  in-process ledger claimnutých čísel (`_claimed`), aby rychlý poll neclaimoval
+  totéž issue dvakrát.
 
 ## Gotchas
 
