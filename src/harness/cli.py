@@ -19,6 +19,7 @@ from harness.drivers.fs_agents import FilesystemAgentCatalog
 from harness.drivers.fs_repos import FilesystemRepositoryRegistry
 from harness.drivers.fs_workflows import invalid_workflow_name
 from harness.drivers.git_workspace import GitWorkspace
+from harness.drivers.git_workspace import git_remote_url
 from harness.drivers.github_client import HttpGithubClient
 from harness.drivers.github_source import GithubTaskSource, slug_from_source
 from harness.drivers.system_clock import SystemClock
@@ -170,28 +171,29 @@ def _github_slug_and_repository(
 ) -> tuple[str, str] | None:
     """Odvoď (GitHub slug `owner/name`, jméno repa pro task) z argumentů.
 
-    Preferuje `--repo <jméno>`: repo se dohledá v `repos.json` a jeho `source`
-    (GitHub URL nastavené uživatelem) se přeloží na slug; `task.repository` je
-    pak logické jméno, takže `GitWorkspace` z registru vytáhne lokální složku —
-    složka i zdroj jednoho repa drží pohromadě v definici. `--github-repo`
-    zůstává explicitním override slugu i cestou pro repo mimo registr."""
+    Preferuje `--repo <jméno>`: repo se dohledá v `repos.json` (lokální složka)
+    a jeho zdroj se **přečte z git remotu té složky** — URL už v checkoutu je,
+    nedrží se zvlášť. `task.repository` je pak logické jméno, takže `GitWorkspace`
+    z registru vytáhne tutéž složku. `--github-repo` zůstává explicitním override
+    slugu (fork, jiný remote) i cestou pro repo mimo registr."""
     if args.repo:
         try:
-            definition = registry.get(args.repo)
+            path = registry.resolve(args.repo)
         except RepositoryNotFound as error:
             print(f"varování: {error}, GitHub zdroj vypnut", file=sys.stderr)
             return None
         slug = args.github_repo
         if not slug:
-            if not definition.source:
+            url = git_remote_url(path)
+            if not url:
                 print(
-                    f"varování: repo {args.repo!r} nemá 'source' (GitHub URL), "
-                    "zdroj vypnut",
+                    f"varování: repo {args.repo!r} ({path}) nemá git remote "
+                    "'origin', GitHub zdroj vypnut",
                     file=sys.stderr,
                 )
                 return None
             try:
-                slug = slug_from_source(definition.source)
+                slug = slug_from_source(url)
             except ValueError as error:
                 print(f"varování: {error}, GitHub zdroj vypnut", file=sys.stderr)
                 return None
@@ -330,7 +332,7 @@ def main(argv: list[str] | None = None) -> int:
     run.add_argument(
         "--repo",
         default=None,
-        help="jméno repa z repos.json; jeho 'source' (GitHub URL) zapne zdroj tasků",
+        help="jméno repa z repos.json; GitHub zdroj se odvodí z jeho git remotu",
     )
     run.add_argument(
         "--github-repo",

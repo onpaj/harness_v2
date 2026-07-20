@@ -54,6 +54,19 @@ def _git(args: list[str], *, cwd: Path | None = None, env_extra: dict[str, str] 
     return result.stdout
 
 
+def git_remote_url(path: Path, remote: str = "origin") -> str | None:
+    """URL remotu repa v `path` (default `origin`) — původ repa venku (GitHub).
+
+    Zdroj repa se nedrží zvlášť v configu; je už tady, v checkoutu. Chybí-li
+    remote (nebo `path` není git repo), vrať `None` — volající to přeloží na
+    „zdroj vypnut", ne na pád."""
+    try:
+        url = _git(["-C", str(path), "remote", "get-url", remote])
+    except GitError:
+        return None
+    return url.strip() or None
+
+
 class GitWorkspaceHandle(WorkspaceHandle):
     """Připojený git worktree."""
 

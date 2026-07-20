@@ -1,6 +1,6 @@
 import subprocess
 
-from harness.drivers.git_workspace import GitWorkspace
+from harness.drivers.git_workspace import GitWorkspace, git_remote_url
 from harness.drivers.memory import MemoryRepositoryRegistry
 from harness.models import Task
 
@@ -92,6 +92,27 @@ def test_reattach_reuses_existing_worktree(tmp_path):
     assert second.path == first.path
     assert second.branch == "harness/tsk_1"
     assert (second.path / "feature.txt").read_text(encoding="utf-8") == "ahoj\n"
+
+
+def test_git_remote_url_reads_origin(tmp_path):
+    repo = tmp_path / "repo"
+    _make_repo(repo)
+    # Host bez rewrite (github.com by git v tomhle prostředí přepsal na proxy).
+    url = "https://git.example.com/onpaj/harness_v2.git"
+    _git(["remote", "add", "origin", url], repo)
+
+    assert git_remote_url(repo) == url
+
+
+def test_git_remote_url_none_without_remote(tmp_path):
+    repo = tmp_path / "repo"
+    _make_repo(repo)
+
+    assert git_remote_url(repo) is None
+
+
+def test_git_remote_url_none_when_not_a_repo(tmp_path):
+    assert git_remote_url(tmp_path / "nic") is None
 
 
 def test_reattach_resets_dirty_worktree(tmp_path):

@@ -44,7 +44,7 @@ GitHub je pořád jen driver (forge), který se vymění dál.
 12. **Landing je krok, ne magie.** Přiklopí artefakty do worktree a otevře PR; může selhat do `failed/`. `end` zůstává čistý terminál. Fáze 3: artefakty už ve worktree jsou, landing je nekopíruje — jen otevře PR.
 13. **Agent je za `AgentRunner`.** `ClaudeCliBehavior` nezná subprocess ani CLI flagy; test ho pohání `FakeAgentRunner`em, jako fáze 1 čas `FakeClock`em.
 14. **Persona je data, ne kód.** V `behaviors/agent.py` není větev podle jména agenta — rozdíl mezi personami je obsah `AgentSpec`u dodaného při konstrukci.
-15. **`task.repository` je jméno, ne cesta.** Definice repa (lokální složka `path` + nepovinný `source` = GitHub URL) řeší `RepositoryRegistry` — machine-specific config (`repos.json`), mimo task. Worktree cestu odvodí harness (`<worktrees_root>/<task_id>`). `source` je neprůhledný řetězec; jako GitHub ho čte až driver (`slug_from_source`).
+15. **`task.repository` je jméno, ne cesta.** Cesty řeší `RepositoryRegistry` — machine-specific config (`repos.json`), mimo task. Worktree cestu odvodí harness (`<worktrees_root>/<task_id>`). Zdroj repa venku (GitHub URL) se nedrží v configu — je už v checkoutu jako git remote, driver ho odvodí (`git_remote_url` → `slug_from_source`).
 16. **Artefakty žijí ve worktree pod `.artifacts/<id>/`, verzované.** Píše je agent, commituje worker. Číslování pokusů (`<step>-NN`) je gapless přes reset-on-reattach.
 17. **`AgentRunner`/`AgentCatalog`/`RepositoryRegistry` nezná dispatcher ani consumer.** Sahá na ně jen behavior / wiring. Hlídá `test_architecture.py`.
 18. **Vnější svět tasků je jeden port `TaskSource` (`poll`/`report_progress`/`finish`).** GitHub je driver; jak se stav renderuje (label), zná jen driver.
@@ -102,7 +102,7 @@ Závislosti tečou striktně dolů, cykly nejsou.
 - `ports/workspace.py` — `Workspace.attach(task) -> WorkspaceHandle` (worktree + commit)
 - `ports/forge.py` — `Forge.open_pull_request(...)` (landing navrhne PR)
 - `ports/agent.py` — `AgentRunner.run(...)`, `AgentCatalog.get(name)`, `AgentSpec` (persona jako data)
-- `ports/repos.py` — `RepositoryRegistry.get(name) -> RepositoryDefinition` (jméno → složka `path` + nepovinný `source`/GitHub URL); `resolve(name) -> Path` je zkratka na `get(name).path`
+- `ports/repos.py` — `RepositoryRegistry.resolve(name) -> Path` (jméno repa → lokální složka); zdroj (GitHub URL) se nedrží tady, odvodí ho driver z git remotu složky
 - `behaviors/agent.py` — `ClaudeCliBehavior`: attach worktree → alokuj attempt → spusť agenta → worker commitne
 - `ports/source.py` — port `TaskSource` (`poll`/`report_progress`/`finish`) + `Progress`/`FinishResult`
 - `source_poller.py` — `SourcePoller`: jádro plnící inbox ze zdroje (zná jen porty)
@@ -134,13 +134,13 @@ Závislosti tečou striktně dolů, cykly nejsou.
   (default identita jméno==krok), sdílený `AgentRunner` ho spustí. Model je per
   fronta, ne per třída — přidání agenta = nový soubor v katalogu, ne nová třída.
   `reviewer` smí `done`+`request_changes`, ostatní jen `done`.
-- **`RepositoryRegistry`** překládá jméno repa na jeho definici na tomhle stroji
-  (`repos.json`, machine-specific, necommitnuté): **lokální složku** (`path`) a
-  **nepovinný zdroj** (`source` = GitHub URL / slug `owner/name`, odkud tečou
-  issue a kam míří PR). Zápis je buď zkratka `"<jméno>": "<cesta>"`, nebo plný
-  objekt `{"path": ..., "source": ...}`. Task nese jen jméno; worktree cestu
-  (`<worktrees_root>/<task_id>`) odvodí harness. Reattach špinavý worktree
-  resetuje na HEAD (reset-on-reattach).
+- **`RepositoryRegistry`** překládá jméno repa na **lokální složku** na tomhle
+  stroji (`repos.json`, machine-specific, necommitnuté, `{"<jméno>": "<cesta>"}`).
+  Zdroj repa venku (GitHub URL, odkud tečou issue a kam míří PR) se **nedrží
+  zvlášť** — je už v checkoutu jako git remote, driver ho odvodí
+  (`git_remote_url` → `slug_from_source`), ať pravda o původu repa není na dvou
+  místech. Task nese jen jméno; worktree cestu (`<worktrees_root>/<task_id>`)
+  odvodí harness. Reattach špinavý worktree resetuje na HEAD (reset-on-reattach).
 - **Artefakty ve worktree** (fáze 3): agent je píše do `.artifacts/<id>/`,
   **commituje je worker** spolu s kódem (jedou v git historii a v PR). Číslování
   pokusů (`<step>-NN`) je gapless — rozdělaný pokus zahodí reset-on-reattach a
