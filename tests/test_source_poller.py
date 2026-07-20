@@ -44,6 +44,7 @@ def _issue_task(task_id, issue, repo="o/r"):
         id=task_id,
         workflow_template="default",
         created="2026-07-20T10:00:00Z",
+        dedup_key=f"github:{repo}:{issue}",
         data={"source": {"kind": "github", "repo": repo, "issue": issue}},
     )
 

@@ -4,14 +4,15 @@ A second producer of the same queue alongside `harness submit`. The core stays
 GitHub-blind — the poller knows only ports (`TaskSource`, `TaskQueue`,
 `EventSink`), never a driver.
 
-Deduplication is by the task's unique identity in its source (`source_key`,
-read from `task.data.source`), not by anything the harness assigns. The label
-swap in `GithubTaskSource.poll()` gives at-most-once *within* a run, but the
-in-process ledger is lost on restart and the GitHub label state can drift (a
-failed issue re-labelled `harness:todo`, read-after-write lag). So the poller
-keeps a persistent `_seen` set, seeded at startup from the tasks already on
-disk (`seed`), and never ingests a source identity it has already ingested —
-one GitHub issue yields exactly one task across the lifetime of the harness.
+Deduplication is by `Task.dedup_key` — the stable identity the source stamps
+onto the task and that is persisted with it on disk. The label swap in
+`GithubTaskSource.poll()` gives at-most-once *within* a run, but its in-process
+ledger is lost on restart and the GitHub label state can drift (a failed issue
+re-labelled `harness:todo`, read-after-write lag). So the poller keeps a
+`_seen` set of dedup keys, seeded at startup from the tasks already on disk
+(`seed`), and never ingests a key it has already ingested — one GitHub issue
+yields exactly one task across restarts, because the key rides on the task,
+not in transient memory.
 """
 
 from __future__ import annotations
@@ -22,7 +23,7 @@ from harness.models import Task
 from harness.ports.board import TODO_COLUMN
 from harness.ports.events import EventSink
 from harness.ports.queue import TaskQueue
-from harness.ports.source import TaskSource, source_key
+from harness.ports.source import TaskSource
 
 
 class SourcePoller:
@@ -32,21 +33,21 @@ class SourcePoller:
         self._source = source
         self._inbox = inbox
         self._events = events
-        # Source identities already ingested. Seeded from disk at startup so it
-        # survives restarts; a task without a source (`harness submit`) has no
-        # key and is never deduplicated.
-        self._seen: set[tuple] = set()
+        # Dedup keys already ingested. Seeded from disk at startup so it survives
+        # restarts; a task without a `dedup_key` (`harness submit`) is never
+        # deduplicated.
+        self._seen: set[str] = set()
 
     def seed(self, tasks: Iterable[Task]) -> None:
         """Register already-ingested tasks so their sources aren't re-ingested.
 
         Called once at startup with every task on disk (across all queues, done
-        and failed). This is what makes deduplication survive a restart.
+        and failed). Each task's persisted `dedup_key` is what makes
+        deduplication survive a restart.
         """
         for task in tasks:
-            key = source_key(task)
-            if key is not None:
-                self._seen.add(key)
+            if task.dedup_key is not None:
+                self._seen.add(task.dedup_key)
 
     def tick(self) -> bool:
         """Fetch tasks from the source and put them into the inbox. True if something arrived.
@@ -65,7 +66,7 @@ class SourcePoller:
 
         ingested = False
         for task in tasks:
-            key = source_key(task)
+            key = task.dedup_key
             if key is not None and key in self._seen:
                 # Already ingested this source identity (restart, label drift or
                 # read-after-write lag). Drop the duplicate — one source item is

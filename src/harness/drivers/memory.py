@@ -27,7 +27,7 @@ from harness.ports.events import EventSink
 from harness.ports.forge import Forge, PullRequest
 from harness.ports.queue import TaskQueue
 from harness.ports.repos import RepositoryNotFound, RepositoryRegistry
-from harness.ports.source import FinishResult, Progress, TaskSource
+from harness.ports.source import FinishResult, Progress, TaskSource, dedup_key
 from harness.ports.workflows import WorkflowNotFound, WorkflowRepository
 from harness.ports.workspace import Workspace, WorkspaceHandle
 
@@ -237,6 +237,7 @@ class MemoryTaskSource(TaskSource):
                     created=self._clock.now(),
                     repository=self._repository,
                     worktree=f"{self._worktree_root}/{task_id}",
+                    dedup_key=dedup_key(self.kind, issue_id),
                     data={
                         "title": title,
                         "body": body,

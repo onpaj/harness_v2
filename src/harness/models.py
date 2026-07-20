@@ -76,7 +76,15 @@ class HistoryEntry:
 
 @dataclass(frozen=True)
 class Task:
-    """Unit of work. Travels between queues, carries its own metadata."""
+    """Unit of work. Travels between queues, carries its own metadata.
+
+    `dedup_key` is the task's stable identity in the outside world that produced
+    it (e.g. a GitHub issue). It is stamped once by the `TaskSource` at creation
+    and persisted with the task, so a source item ingested once is never
+    ingested again — the guarantee survives a harness restart because the key
+    lives on the task on disk, not in a transient in-process ledger. A task with
+    no external origin (`harness submit`) has none: each submit is fresh work.
+    """
 
     id: str
     workflow_template: str
@@ -86,6 +94,7 @@ class Task:
     status: str | None = None
     last_outcome: str | None = None
     lock_id: str | None = None
+    dedup_key: str | None = None
     history: tuple[HistoryEntry, ...] = ()
     data: dict[str, Any] = field(default_factory=dict)
 
@@ -98,6 +107,7 @@ class Task:
             "status": self.status,
             "lastOutcome": self.last_outcome,
             "lockId": self.lock_id,
+            "dedupKey": self.dedup_key,
             "created": self.created,
             "history": [entry.to_dict() for entry in self.history],
             "data": self.data,
@@ -114,6 +124,7 @@ class Task:
             status=raw.get("status"),
             last_outcome=raw.get("lastOutcome"),
             lock_id=raw.get("lockId"),
+            dedup_key=raw.get("dedupKey"),
             history=tuple(
                 HistoryEntry.from_dict(entry) for entry in raw.get("history", [])
             ),

@@ -24,6 +24,7 @@ class ReplaySource(TaskSource):
                 id=f"tsk_replay_{self._n}",
                 workflow_template="default",
                 created="2026-07-20T10:00:00Z",
+                dedup_key=f"github:o/r:{self._issue}",
                 data={"source": {"kind": "github", "repo": "o/r", "issue": self._issue}},
             )
         ]
@@ -167,6 +168,7 @@ def test_seed_pollers_collects_from_every_queue(tmp_path):
         id="tsk_done",
         workflow_template="default",
         created="2026-07-20T09:00:00Z",
+        dedup_key="github:o/r:1",
         data={"source": {"kind": "github", "repo": "o/r", "issue": 1}},
     )
     (tmp_path / "done" / "tsk_done.json").write_text(json.dumps(done_task.to_dict()))

@@ -55,6 +55,7 @@ def test_task_roundtrips_through_camelcase_json():
         status="design",
         last_outcome="done",
         lock_id="lck_1",
+        dedup_key="github:o/r:42",
         data={"request": "add rate limiting"},
     )
 
@@ -63,6 +64,7 @@ def test_task_roundtrips_through_camelcase_json():
     assert raw["workflowTemplate"] == "default"
     assert raw["lastOutcome"] == "done"
     assert raw["lockId"] == "lck_1"
+    assert raw["dedupKey"] == "github:o/r:42"
     assert Task.from_dict(raw) == task
 
 
@@ -72,6 +74,7 @@ def test_new_task_has_null_status_and_empty_history():
     assert task.status is None
     assert task.last_outcome is None
     assert task.lock_id is None
+    assert task.dedup_key is None
     assert task.history == ()
     assert task.data == {}
 
