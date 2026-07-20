@@ -139,6 +139,25 @@ class HttpGithubClient(GithubClient):
             "Accept": "application/vnd.github+json",
         }
 
+    def _json_headers(self) -> dict[str, str]:
+        """Headers for a request that carries a JSON body (POST/PATCH)."""
+        return {**self._headers(), "Content-Type": "application/json"}
+
+    @staticmethod
+    def _pr_head(item: dict, fallback: str) -> str:
+        """The `owner:branch` label as the server reported it.
+
+        Falls back to the caller's `head` argument when the response is missing
+        the field or it isn't shaped as expected, so a partial response degrades
+        instead of raising.
+        """
+        head = item.get("head")
+        if isinstance(head, dict):
+            label = head.get("label")
+            if isinstance(label, str):
+                return label
+        return fallback
+
     def list_issues(self, repo: str, *, label: str) -> list[Issue]:
         query = urllib.parse.urlencode({"state": "open", "labels": label})
         url = f"{self._api}/repos/{repo}/issues?{query}"
@@ -165,7 +184,7 @@ class HttpGithubClient(GithubClient):
         url = f"{self._api}/repos/{repo}/issues/{number}/labels"
         body = json.dumps({"labels": [label]}).encode("utf-8")
         request = urllib.request.Request(
-            url, data=body, headers=self._headers(), method="POST"
+            url, data=body, headers=self._json_headers(), method="POST"
         )
         self._opener.open(request)
 
@@ -194,7 +213,9 @@ class HttpGithubClient(GithubClient):
             raw = json.loads(response.read())
         for item in raw:
             return PullRequestRef(
-                number=item["number"], url=item.get("html_url", ""), head=head
+                number=item["number"],
+                url=item.get("html_url", ""),
+                head=self._pr_head(item, head),
             )
         return None
 
@@ -208,11 +229,13 @@ class HttpGithubClient(GithubClient):
         request = urllib.request.Request(
             url,
             data=payload,
-            headers={**self._headers(), "Content-Type": "application/json"},
+            headers=self._json_headers(),
             method="POST",
         )
         with self._opener.open(request) as response:
             item = json.loads(response.read())
         return PullRequestRef(
-            number=item["number"], url=item.get("html_url", ""), head=head
+            number=item["number"],
+            url=item.get("html_url", ""),
+            head=self._pr_head(item, head),
         )
