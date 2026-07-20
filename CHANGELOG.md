@@ -1,6 +1,23 @@
 # CHANGELOG
 
 
+## v0.2.1 (2026-07-20)
+
+### Bug Fixes
+
+- Locate the task's repository through the registry, not task.worktree
+  ([`29c6aec`](https://github.com/onpaj/harness_v2/commit/29c6aec8fe26549402bb69c9dea755caccbdc729))
+
+A live run failed at land with "has no worktree": GithubForge read task.worktree, but `harness
+  submit` never sets it — only GithubTaskSource does. Every unit test happened to build tasks with
+  one, so the gap was invisible.
+
+`task.repository` is a name and resolving names to paths is the registry's job (invariant 15); the
+  worktree stays as a fallback.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+
+
 ## v0.2.0 (2026-07-20)
 
 ### Bug Fixes
