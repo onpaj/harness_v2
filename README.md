@@ -140,6 +140,20 @@ harness submit --root /tmp/harness-demo --repo app-backend \
 harness run --root /tmp/harness-demo --delay 0.5 --request-changes-at review
 ```
 
+### Running without an agent
+
+Every step shells out to `claude`, so an unavailable or unauthenticated CLI
+fails every task. To exercise the pipeline itself — worktree, commits, push,
+pull request — without it:
+
+```sh
+harness run --root ~/harness-root --agent dummy
+```
+
+The step behaviors become stubs that write an artifact and commit; everything
+around them stays real, including the PR that `land` opens. Pair it with
+`--forge fake` if you want no GitHub calls at all.
+
 ## Board
 
 Alongside the orchestration loop, `harness run` serves a read-only board at

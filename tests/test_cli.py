@@ -582,3 +582,25 @@ def test_build_forge_with_a_token_wires_the_http_client(tmp_path, monkeypatch):
     monkeypatch.setenv("GITHUB_TOKEN", "tok")
 
     assert isinstance(_build_forge("github", tmp_path)._client, HttpGithubClient)
+
+
+def test_run_agent_defaults_to_claude_and_accepts_dummy(tmp_path, monkeypatch):
+    """`--agent dummy` runs the real pipeline (worktree, push, forge) with a stub
+    step behavior — the only way to exercise landing where claude is unusable."""
+    main(["init", "--root", str(tmp_path)])
+    seen = {}
+
+    def fake_build(*args, **kwargs):
+        seen.update(kwargs)
+        raise SystemExit(0)  # stop before the event loop
+
+    monkeypatch.setattr("harness.cli.build", fake_build)
+
+    with pytest.raises(SystemExit):
+        main(["run", "--root", str(tmp_path), "--agent", "dummy", "--api-port", "0"])
+    assert seen["catalog"] is None and seen["runner"] is None
+
+    seen.clear()
+    with pytest.raises(SystemExit):
+        main(["run", "--root", str(tmp_path), "--api-port", "0"])
+    assert seen["catalog"] is not None and seen["runner"] is not None

@@ -652,8 +652,13 @@ def _run(args: argparse.Namespace) -> int:
     # versioned in the worktree, and a real GitHub forge (`--forge fake` swaps
     # in prs.json for offline runs and tests).
     registry = FilesystemRepositoryRegistry(layout.repos)
-    catalog = FilesystemAgentCatalog(layout.agents)
-    runner = ClaudeCliRunner()
+    # `--agent dummy` leaves catalog/runner unset, which makes `build()` fall
+    # back to DummyBehavior for the step queues while everything around it stays
+    # real: real worktree, real commits, real push, real PR. That exercises the
+    # whole pipeline on a machine where `claude` is unavailable or unauthenticated.
+    use_agent = args.agent == "claude"
+    catalog = FilesystemAgentCatalog(layout.agents) if use_agent else None
+    runner = ClaudeCliRunner() if use_agent else None
     workspace = GitWorkspace(registry, layout.worktrees)
     artifact_view = WorktreeArtifactView(layout.worktrees)
     forge = _build_forge(args.forge, root)
@@ -772,6 +777,12 @@ def main(argv: list[str] | None = None) -> int:
         type=int,
         default=8420,
         help="board port; 0 disables the board",
+    )
+    run.add_argument(
+        "--agent",
+        choices=("claude", "dummy"),
+        default="claude",
+        help="who does the work in each step (dummy: no claude, for testing the pipeline)",
     )
     run.add_argument(
         "--forge",
