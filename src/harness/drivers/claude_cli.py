@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 from pathlib import Path
 
@@ -134,9 +135,16 @@ class ClaudeCliRunner(AgentRunner):
         self, *, prompt: str, spec: AgentSpec, cwd: Path, timeout: float
     ) -> AgentRun:
         argv = build_argv(prompt=prompt, spec=spec)
+        # `bypassPermissions` (headless autonomie, žádný člověk u konzole) se
+        # mapuje na `--dangerously-skip-permissions`, které claude pod rootem
+        # odmítne, dokud mu `IS_SANDBOX=1` nepotvrdí, že běží v izolovaném
+        # prostředí. Harness agenty pouští právě tam (container/CI), proto to
+        # nastavujeme tady, ne na volajícím.
+        env = {**os.environ, "IS_SANDBOX": "1"}
         proc = await asyncio.create_subprocess_exec(
             *argv,
             cwd=str(cwd),
+            env=env,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
