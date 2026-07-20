@@ -161,6 +161,7 @@ class MemoryWorkspaceHandle(WorkspaceHandle):
         self._path = Path("/memory/worktrees") / task_id
         self.writes: list[tuple[str, str]] = []
         self.commits: list[str] = []
+        self.pushes: list[str] = []
 
     @property
     def path(self) -> Path:
@@ -176,6 +177,9 @@ class MemoryWorkspaceHandle(WorkspaceHandle):
     def commit(self, message: str) -> str | None:
         self.commits.append(message)
         return f"sha{len(self.commits)}"
+
+    def push(self) -> None:
+        self.pushes.append(self._branch)
 
 
 class MemoryWorkspace(Workspace):

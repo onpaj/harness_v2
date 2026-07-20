@@ -1,6 +1,8 @@
 import subprocess
 
-from harness.drivers.git_workspace import GitWorkspace
+import pytest
+
+from harness.drivers.git_workspace import GitError, GitWorkspace
 from harness.drivers.memory import MemoryRepositoryRegistry
 from harness.models import Task
 
@@ -106,3 +108,55 @@ def test_reattach_resets_dirty_worktree(tmp_path):
     second = workspace.attach(task)
 
     assert not (second.path / "scratch.txt").exists()
+
+
+def _make_bare_remote(path):
+    path.mkdir(parents=True, exist_ok=True)
+    _git(["init", "--bare"], path)
+
+
+def test_push_publishes_the_task_branch_to_origin(tmp_path):
+    repo = tmp_path / "repo"
+    _make_repo(repo)
+    remote = tmp_path / "remote.git"
+    _make_bare_remote(remote)
+    _git(["remote", "add", "origin", str(remote)], repo)
+    registry = MemoryRepositoryRegistry({"app": repo})
+    workspace = GitWorkspace(registry, worktrees_root=tmp_path / "wt")
+
+    handle = workspace.attach(_make_task())
+    handle.write("app.py", "print('hi')\n")
+    handle.commit("work")
+    handle.push()
+
+    branches = _git(["branch", "--list"], remote)
+    assert "harness/tsk_1" in branches
+
+
+def test_push_twice_is_a_noop(tmp_path):
+    repo = tmp_path / "repo"
+    _make_repo(repo)
+    remote = tmp_path / "remote.git"
+    _make_bare_remote(remote)
+    _git(["remote", "add", "origin", str(remote)], repo)
+    registry = MemoryRepositoryRegistry({"app": repo})
+    workspace = GitWorkspace(registry, worktrees_root=tmp_path / "wt")
+
+    handle = workspace.attach(_make_task())
+    handle.write("app.py", "print('hi')\n")
+    handle.commit("work")
+    handle.push()
+    handle.push()  # must not raise
+
+    assert "harness/tsk_1" in _git(["branch", "--list"], remote)
+
+
+def test_push_without_a_remote_raises(tmp_path):
+    workspace = _workspace(tmp_path)  # no origin configured
+
+    handle = workspace.attach(_make_task())
+    handle.write("app.py", "x\n")
+    handle.commit("work")
+
+    with pytest.raises(GitError):
+        handle.push()

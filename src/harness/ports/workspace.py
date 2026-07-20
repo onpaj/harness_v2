@@ -39,6 +39,15 @@ class WorkspaceHandle(ABC):
     def commit(self, message: str) -> str | None:
         """Stage everything and commit. Return the sha, or None if there is nothing to commit."""
 
+    @abstractmethod
+    def push(self) -> None:
+        """Publish the task branch to `origin`.
+
+        Landing calls this before proposing a PR — a forge cannot open one for
+        a ref the remote has never seen. Idempotent: pushing an already-current
+        branch is a no-op.
+        """
+
 
 class Workspace(ABC):
     @abstractmethod
