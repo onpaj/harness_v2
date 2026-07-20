@@ -441,3 +441,53 @@ def test_update_reports_a_failed_upgrade(monkeypatch, capsys):
 
     assert main(["update"]) == 1
     assert "uv tool upgrade failed" in capsys.readouterr().err
+
+
+def test_version_string_includes_the_source_commit(monkeypatch):
+    """pyproject carries one static version, so two installs both say 0.1.0 —
+    the commit from PEP 610 direct_url.json is what tells them apart."""
+    from harness import cli
+
+    class Dist:
+        @staticmethod
+        def read_text(name):
+            assert name == "direct_url.json"
+            return json.dumps(
+                {
+                    "url": "https://github.com/onpaj/harness_v2.git",
+                    "vcs_info": {"vcs": "git", "commit_id": "e427b9fafaa15f26c5ec"},
+                }
+            )
+
+    monkeypatch.setattr(cli.metadata, "version", lambda name: "0.1.0")
+    monkeypatch.setattr(cli.metadata, "distribution", lambda name: Dist())
+
+    assert cli.version_string() == "0.1.0 (git e427b9f)"
+
+
+def test_version_string_without_vcs_info_is_just_the_version(monkeypatch):
+    from harness import cli
+
+    class Dist:
+        @staticmethod
+        def read_text(name):
+            return json.dumps({"url": "file:///tmp/harness", "dir_info": {}})
+
+    monkeypatch.setattr(cli.metadata, "version", lambda name: "0.1.0")
+    monkeypatch.setattr(cli.metadata, "distribution", lambda name: Dist())
+
+    assert cli.version_string() == "0.1.0"
+
+
+def test_version_string_survives_a_missing_direct_url(monkeypatch):
+    from harness import cli
+
+    class Dist:
+        @staticmethod
+        def read_text(name):
+            return None  # editable/source installs have no direct_url.json
+
+    monkeypatch.setattr(cli.metadata, "version", lambda name: "0.1.0")
+    monkeypatch.setattr(cli.metadata, "distribution", lambda name: Dist())
+
+    assert cli.version_string() == "0.1.0"

@@ -398,12 +398,35 @@ def service_path_entries(harness: Path) -> list[str]:
     ]
 
 
-def version_string() -> str:
-    """The installed package version, or a marker when running from a checkout."""
+def installed_commit() -> str | None:
+    """The git commit a `uv tool install git+...` came from, or None.
+
+    `pyproject.toml` carries a single static version, so two different installs
+    both report `0.1.0` and `--version` alone cannot tell you whether an update
+    landed. pip/uv record the source in `direct_url.json` (PEP 610); the commit
+    from there is the only honest answer.
+    """
     try:
-        return metadata.version(PACKAGE_NAME)
+        raw = metadata.distribution(PACKAGE_NAME).read_text("direct_url.json")
+    except metadata.PackageNotFoundError:
+        return None
+    if not raw:
+        return None
+    try:
+        commit = json.loads(raw).get("vcs_info", {}).get("commit_id")
+    except json.JSONDecodeError:
+        return None
+    return commit[:7] if isinstance(commit, str) and commit else None
+
+
+def version_string() -> str:
+    """The installed version, with the source commit when there is one."""
+    try:
+        version = metadata.version(PACKAGE_NAME)
     except metadata.PackageNotFoundError:  # running from source without an install
         return "unknown (not installed)"
+    commit = installed_commit()
+    return f"{version} (git {commit})" if commit else version
 
 
 def uv_shim() -> Path:
