@@ -23,23 +23,29 @@ class LandingBehavior(ConsumerBehavior):
         artifacts: ArtifactView,
         forge: Forge,
         dest: str = "docs/tasks",
+        copy_artifacts: bool = True,
     ) -> None:
         self._clock = clock
         self._workspace = workspace
         self._artifacts = artifacts
         self._forge = forge
         self._dest = dest
+        self._copy_artifacts = copy_artifacts
 
     async def run(self, task: Task) -> BehaviorResult:
         handle = self._workspace.attach(task)
 
-        for ref in self._artifacts.list(task.id):
-            content = self._artifacts.read(task.id, ref.step, ref.attempt, ref.name)
-            if content is None:
-                continue
-            relpath = f"{self._dest}/{task.id}/{ref.step}/{ref.attempt}/{ref.name}"
-            handle.write(relpath, content)
-        handle.commit("[land] artefakty tasku")
+        # Fáze 3: artefakty už jsou versované ve worktree (agent je psal
+        # přímo do `.artifacts/`), takže je není kam kopírovat — jen otevřít
+        # PR. Fáze 2 (oddělený artifact store) je pořád kopíruje a commitne.
+        if self._copy_artifacts:
+            for ref in self._artifacts.list(task.id):
+                content = self._artifacts.read(task.id, ref.step, ref.attempt, ref.name)
+                if content is None:
+                    continue
+                relpath = f"{self._dest}/{task.id}/{ref.step}/{ref.attempt}/{ref.name}"
+                handle.write(relpath, content)
+            handle.commit("[land] artefakty tasku")
 
         pull = self._forge.open_pull_request(
             task,

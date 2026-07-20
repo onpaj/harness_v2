@@ -12,12 +12,15 @@ from pathlib import Path
 import uvicorn
 
 from harness.api.app import create_app
-from harness.app import HarnessLayout, build
+from harness.app import LANDING_STEP, HarnessLayout, build
+from harness.drivers.claude_cli import ClaudeCliRunner
 from harness.drivers.fake_forge import FakeForge
-from harness.drivers.fs_artifacts import FilesystemArtifactStore
+from harness.drivers.fs_agents import FilesystemAgentCatalog
+from harness.drivers.fs_repos import FilesystemRepositoryRegistry
 from harness.drivers.fs_workflows import invalid_workflow_name
 from harness.drivers.git_workspace import GitWorkspace
 from harness.drivers.system_clock import SystemClock
+from harness.drivers.worktree_artifacts import WorktreeArtifactView
 from harness.ids import new_task_id
 from harness.models import Task
 from harness.ports.workflows import WorkflowNotFound
@@ -68,9 +71,58 @@ def _init(args: argparse.Namespace) -> int:
         print(f"chyba: {error}", file=sys.stderr)
         return 2
 
+    _write_default_agents(layout, harness.workflow)
+    _write_default_repos(layout)
+
     print(f"harness připraven v {root}")
     print(f"kroky: {', '.join(harness.workflow.steps())}")
     return 0
+
+
+def _agent_persona(step: str) -> str:
+    return (
+        f"Jsi agent kroku '{step}'. Nejdřív si přečti existující artefakty "
+        f"předchozích kroků v adresáři .artifacts/<task_id>/ ve svém pracovním "
+        f"adresáři. Svůj výstup zapiš do souboru, na který tě nasměruje prompt "
+        f"úkolu. Až budeš hotov, skonči přesně strojově čitelným verdikt blokem "
+        f'```json {{"outcome": "...", "summary": "..."}}``` a ničím za ním.'
+    )
+
+
+def _allowed_outcomes_for(workflow, step: str) -> list[str]:
+    """Unikátní outcomes hran vycházejících z kroku (v pořadí definice)."""
+    seen: list[str] = []
+    for transition in workflow.transitions:
+        if transition.from_step == step and transition.on not in seen:
+            seen.append(transition.on)
+    return seen
+
+
+def _write_default_agents(layout: HarnessLayout, workflow) -> None:
+    layout.agents.mkdir(parents=True, exist_ok=True)
+    for step in workflow.steps():
+        if step == LANDING_STEP:
+            continue
+        path = layout.agents / f"{step}.json"
+        if path.exists():
+            continue
+        definition = {
+            "prompt": _agent_persona(step),
+            "model": None,
+            "fallback_model": None,
+            "allowed_tools": [],
+            "allowed_outcomes": _allowed_outcomes_for(workflow, step),
+        }
+        path.write_text(
+            json.dumps(definition, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+
+
+def _write_default_repos(layout: HarnessLayout) -> None:
+    if not layout.repos.exists():
+        layout.repos.write_text(
+            json.dumps({}, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
 
 
 def _submit(args: argparse.Namespace) -> int:
@@ -103,18 +155,27 @@ def _submit(args: argparse.Namespace) -> int:
 
 def _run(args: argparse.Namespace) -> int:
     root = _root(args.root)
-    # Skutečný běh: git worktree, artefakty na disku, fake forge (PR do
-    # prs.json). GitHub driver je čistý follow-up — záměna forge driveru.
-    workspace = GitWorkspace()
-    artifacts = FilesystemArtifactStore(root / "artifacts")
+    layout = HarnessLayout(root)
+    # Skutečný běh fáze 3: agent za `claude -p`, git worktree pod společným
+    # kořenem, repo jméno→cesta z `repos.json`, persony z `agents/`, artefakty
+    # versované ve worktree, fake forge (PR do prs.json). GitHub driver je čistý
+    # follow-up — záměna forge driveru.
+    registry = FilesystemRepositoryRegistry(layout.repos)
+    catalog = FilesystemAgentCatalog(layout.agents)
+    runner = ClaudeCliRunner()
+    workspace = GitWorkspace(registry, layout.worktrees)
+    artifact_view = WorktreeArtifactView(layout.worktrees)
     forge = FakeForge(root / "forge")
     try:
         harness = build(
             root,
             args.workflow,
             workspace=workspace,
-            artifacts=artifacts,
             forge=forge,
+            runner=runner,
+            catalog=catalog,
+            artifact_view=artifact_view,
+            agent_timeout=args.agent_timeout,
             delay=args.delay,
             request_changes_once_at=args.request_changes_at,
         )
@@ -180,6 +241,7 @@ def main(argv: list[str] | None = None) -> int:
     run.add_argument("--workflow", default=DEFAULT_WORKFLOW)
     run.add_argument("--delay", type=float, default=5.0)
     run.add_argument("--poll", type=float, default=0.2)
+    run.add_argument("--agent-timeout", type=float, default=600.0, dest="agent_timeout")
     run.add_argument("--request-changes-at", default=None, dest="request_changes_at")
     run.add_argument(
         "--api-port",

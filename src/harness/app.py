@@ -6,6 +6,7 @@ import asyncio
 from dataclasses import dataclass
 from pathlib import Path
 
+from harness.behaviors.agent import ClaudeCliBehavior
 from harness.behaviors.landing import LandingBehavior
 from harness.consumer import Consumer
 from harness.dispatcher import Dispatcher
@@ -23,7 +24,8 @@ from harness.drivers.projection_events import ProjectionSink
 from harness.drivers.stdout_events import StdoutEventSink
 from harness.drivers.system_clock import SystemClock
 from harness.models import Workflow
-from harness.ports.artifacts import ArtifactStore
+from harness.ports.agent import AgentCatalog, AgentRunner
+from harness.ports.artifacts import ArtifactStore, ArtifactView
 from harness.ports.behavior import ConsumerBehavior
 from harness.ports.clock import Clock
 from harness.ports.events import EventSink
@@ -60,6 +62,18 @@ class HarnessLayout:
     def failed(self) -> Path:
         return self.root / "failed"
 
+    @property
+    def worktrees(self) -> Path:
+        return self.root / "worktrees"
+
+    @property
+    def agents(self) -> Path:
+        return self.root / "agents"
+
+    @property
+    def repos(self) -> Path:
+        return self.root / "repos.json"
+
 
 class Harness:
     def __init__(
@@ -74,7 +88,7 @@ class Harness:
         done: TaskQueue,
         failed: TaskQueue,
         projection: BoardProjection,
-        artifacts: ArtifactStore,
+        artifacts: ArtifactView,
         events: EventSink,
         clock: Clock,
     ) -> None:
@@ -143,6 +157,10 @@ def build(
     workspace: Workspace | None = None,
     artifacts: ArtifactStore | None = None,
     forge: Forge | None = None,
+    runner: AgentRunner | None = None,
+    catalog: AgentCatalog | None = None,
+    agent_timeout: float = 600.0,
+    artifact_view: ArtifactView | None = None,
     landing_step: str = LANDING_STEP,
     delay: float = 5.0,
     request_changes_once_at: str | None = None,
@@ -177,6 +195,11 @@ def build(
         for step in workflow.steps()
     }
 
+    # Read-side artefaktů: když je předaný (fáze 3: `WorktreeArtifactView`),
+    # dostane ho i landing i `api/`; jinak zůstává zápisový store (taky
+    # `ArtifactView`), jako ve fázi 2.
+    view: ArtifactView = artifact_view or artifacts
+
     work = behavior or DummyBehavior(
         clock=clock,
         workspace=workspace,
@@ -184,12 +207,29 @@ def build(
         delay=delay,
         request_changes_once_at=request_changes_once_at,
     )
+    # Když je landingu předán read-side pohled na worktree, artefakty už tam
+    # jsou versované — landing je nekopíruje, jen otevře PR.
     landing = LandingBehavior(
-        clock=clock, workspace=workspace, artifacts=artifacts, forge=forge
+        clock=clock,
+        workspace=workspace,
+        artifacts=view,
+        forge=forge,
+        copy_artifacts=artifact_view is None,
     )
 
     def behavior_for(step: str) -> ConsumerBehavior:
-        return landing if step == landing_step else work
+        if step == landing_step:
+            return landing
+        if catalog is not None:
+            # Chybějící spec → AgentNotFound probublá už při buildu (fail fast).
+            return ClaudeCliBehavior(
+                clock=clock,
+                workspace=workspace,
+                runner=runner,
+                spec=catalog.get(step),
+                timeout=agent_timeout,
+            )
+        return work
 
     dispatcher = Dispatcher(
         inbox=inbox,
@@ -226,7 +266,7 @@ def build(
         done=done,
         failed=failed,
         projection=projection,
-        artifacts=artifacts,
+        artifacts=view,
         events=events,
         clock=clock,
     )

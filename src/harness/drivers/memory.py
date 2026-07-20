@@ -7,6 +7,13 @@ from pathlib import Path
 from typing import Any
 
 from harness.models import BehaviorResult, Outcome, Task, Workflow
+from harness.ports.agent import (
+    AgentCatalog,
+    AgentNotFound,
+    AgentRun,
+    AgentRunner,
+    AgentSpec,
+)
 from harness.ports.artifacts import (
     ArtifactRef,
     ArtifactSlot,
@@ -17,6 +24,7 @@ from harness.ports.clock import Clock
 from harness.ports.events import EventSink
 from harness.ports.forge import Forge, PullRequest
 from harness.ports.queue import TaskQueue
+from harness.ports.repos import RepositoryNotFound, RepositoryRegistry
 from harness.ports.workflows import WorkflowNotFound, WorkflowRepository
 from harness.ports.workspace import Workspace, WorkspaceHandle
 
@@ -203,3 +211,66 @@ class MemoryForge(Forge):
         self.opened.append(pull)
         self.bodies[branch] = body
         return pull
+
+
+class MemoryAgentCatalog(AgentCatalog):
+    """Katalog nad dictem jméno → spec."""
+
+    def __init__(self, specs: dict[str, AgentSpec]) -> None:
+        self._specs = specs
+
+    def get(self, name: str) -> AgentSpec:
+        try:
+            return self._specs[name]
+        except KeyError:
+            raise AgentNotFound(f"agent {name!r} neexistuje") from None
+
+
+class FakeAgentRunner(AgentRunner):
+    """Skriptovaný runner bez subprocessu.
+
+    `runs` mapuje jméno agenta na jeho verdikt; `default` je fallback, když
+    jméno není ve `runs`. `writes` mapuje jméno agenta na soubory (relpath →
+    obsah), které se při běhu zapíší do `cwd` — simuluje agenta píšícího
+    artefakty a kód. Každé volání se zaznamená do `self.calls`.
+    """
+
+    def __init__(
+        self,
+        runs: dict[str, AgentRun] | None = None,
+        default: AgentRun | None = None,
+        writes: dict[str, dict[str, str]] | None = None,
+    ) -> None:
+        self._runs = runs or {}
+        self._default = default
+        self._writes = writes or {}
+        self.calls: list[dict[str, Any]] = []
+
+    async def run(
+        self, *, prompt: str, spec: AgentSpec, cwd: Path, timeout: float
+    ) -> AgentRun:
+        self.calls.append(
+            {"prompt": prompt, "spec": spec, "cwd": cwd, "timeout": timeout}
+        )
+        for relpath, content in self._writes.get(spec.name, {}).items():
+            target = Path(cwd) / relpath
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(content)
+        if spec.name in self._runs:
+            return self._runs[spec.name]
+        if self._default is not None:
+            return self._default
+        return AgentRun(Outcome.DONE, f"{spec.name}: hotovo")
+
+
+class MemoryRepositoryRegistry(RepositoryRegistry):
+    """Registr rep nad dictem jméno → cesta."""
+
+    def __init__(self, repos: dict[str, Path]) -> None:
+        self._repos = repos
+
+    def resolve(self, name: str) -> Path:
+        try:
+            return self._repos[name]
+        except KeyError:
+            raise RepositoryNotFound(f"repo {name!r} není v registru") from None

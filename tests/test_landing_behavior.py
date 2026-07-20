@@ -92,3 +92,25 @@ async def test_landing_is_idempotent():
     await behavior.run(task)
 
     assert len(forge.opened) == 1
+
+
+async def test_copy_artifacts_false_skips_copy_but_opens_pr():
+    workspace = MemoryWorkspace()
+    artifacts = MemoryArtifactStore()
+    forge = MemoryForge()
+    artifacts.begin("tsk_1", "design").put("design.md", "# design\n")
+    behavior = LandingBehavior(
+        clock=FakeClock(),
+        workspace=workspace,
+        artifacts=artifacts,
+        forge=forge,
+        copy_artifacts=False,
+    )
+
+    result = await behavior.run(make_task())
+
+    handle = workspace.handles["tsk_1"]
+    assert handle.writes == []
+    assert "[land] artefakty tasku" not in handle.commits
+    assert len(forge.opened) == 1
+    assert result.outcome is Outcome.DONE
