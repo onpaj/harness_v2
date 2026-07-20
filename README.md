@@ -26,6 +26,30 @@ flags: `--root DIR` (harness home, mirrors `harness --root`; default
 `$HARNESS_HOME` or `~/.harness`), `--workflow NAME`, and `--yes` for a
 non-interactive run that skips the `repos.json` wizard. See `./install.sh --help`.
 
+### Running it as a service
+
+`harness run` in a terminal dies with the terminal. To keep the loop supervised
+and bring it back at login, add `--service` (macOS launchd):
+
+```sh
+./install.sh --service --root ~/harness-root
+```
+
+That generates a wrapper and a LaunchAgent, then starts it. Afterwards:
+
+```sh
+harness service status      # loaded? pid? last exit code?
+harness service uninstall   # stop it and remove the agent
+```
+
+The service needs a GitHub token to ingest issues. It does **not** store one:
+the generated wrapper takes `GITHUB_TOKEN` if it is already set, and otherwise
+asks `gh auth token` for the one in your keyring — so `gh auth login` is the
+only setup. Without a token the harness still runs; it just stops pulling
+issues, and `harness submit` keeps working.
+
+Logs land in `<root>/logs/harness.log` and `<root>/logs/harness.error.log`.
+
 Prefer to do it by hand? The installer is a thin wrapper over:
 
 ```sh

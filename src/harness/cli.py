@@ -22,6 +22,16 @@ from harness.drivers.git_remote import github_slug
 from harness.drivers.git_workspace import GitWorkspace
 from harness.drivers.github_client import GithubClient, HttpGithubClient
 from harness.drivers.github_source import GithubTaskSource
+from harness.drivers.launchd import (
+    DEFAULT_LABEL,
+    ServiceError,
+    load,
+    plist_bytes,
+    plist_path,
+    status,
+    unload,
+    wrapper_script,
+)
 from harness.drivers.system_clock import SystemClock
 from harness.drivers.worktree_artifacts import WorktreeArtifactView
 from harness.ids import new_task_id
@@ -362,6 +372,142 @@ def _github_sources(
     return sources
 
 
+def service_path_entries(harness: Path) -> list[str]:
+    """`PATH` for the service: the venv's bin first, then the usual locations.
+
+    launchd starts a process with a minimal `PATH`, so `git`, `gh` and `claude`
+    would all be missing. `~/.npm-global/bin` and `~/.local/bin` are here
+    because that is where a user-installed `claude` and `python3.11` land.
+    """
+    home = Path.home()
+    return [
+        str(harness.parent),
+        str(home / ".npm-global" / "bin"),
+        str(home / ".local" / "bin"),
+        "/usr/local/bin",
+        "/opt/homebrew/bin",
+        "/usr/bin",
+        "/bin",
+        "/usr/sbin",
+        "/sbin",
+    ]
+
+
+def _require_macos() -> str | None:
+    """The error message for a non-macOS host, or None when launchd is available."""
+    if sys.platform != "darwin":
+        return (
+            f"`harness service` needs macOS launchd; this is {sys.platform}. "
+            "Run `harness run` under your own supervisor (systemd, supervisord)."
+        )
+    return None
+
+
+def _service_install(args: argparse.Namespace) -> int:
+    problem = _require_macos()
+    if problem:
+        print(f"error: {problem}", file=sys.stderr)
+        return 2
+
+    root = _root(args.root)
+    layout = HarnessLayout(root)
+    if not layout.tasks.is_dir():
+        print(f"error: {root} is not initialized, run `harness init`", file=sys.stderr)
+        return 2
+
+    # Derive the entry point from the running interpreter, not argv[0]: the
+    # service must hold an absolute path into the venv that installed it, and
+    # argv[0] is whatever the caller happened to type (or `pytest`).
+    harness = Path(sys.executable).resolve().parent / "harness"
+    if not harness.is_file():
+        print(
+            f"error: cannot locate the harness entry point at {harness} — "
+            "install the package into this environment first",
+            file=sys.stderr,
+        )
+        return 2
+
+    home = Path.home()
+    log_dir = root / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+
+    wrapper = root / "harness-run.sh"
+    wrapper.write_text(
+        wrapper_script(
+            harness=harness,
+            root=root,
+            api_port=args.api_port,
+            path_entries=service_path_entries(harness),
+        ),
+        encoding="utf-8",
+    )
+    wrapper.chmod(0o755)
+
+    target = plist_path(home, args.label)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(
+        plist_bytes(
+            label=args.label,
+            wrapper=wrapper,
+            working_dir=root,
+            log_dir=log_dir,
+            home=home,
+        )
+    )
+
+    try:
+        load(os.getuid(), target, args.label)
+    except ServiceError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+
+    print(f"service {args.label} installed and started")
+    print(f"  wrapper: {wrapper}")
+    print(f"  plist:   {target}")
+    print(f"  logs:    {log_dir}/harness.log, {log_dir}/harness.error.log")
+    print(f"  board:   http://127.0.0.1:{args.api_port}/")
+    return 0
+
+
+def _service_uninstall(args: argparse.Namespace) -> int:
+    problem = _require_macos()
+    if problem:
+        print(f"error: {problem}", file=sys.stderr)
+        return 2
+
+    was_loaded = unload(os.getuid(), args.label)
+    target = plist_path(Path.home(), args.label)
+    existed = target.exists()
+    target.unlink(missing_ok=True)
+
+    if not was_loaded and not existed:
+        print(f"service {args.label} was not installed")
+        return 0
+    print(f"service {args.label} removed")
+    return 0
+
+
+def _service_status(args: argparse.Namespace) -> int:
+    problem = _require_macos()
+    if problem:
+        print(f"error: {problem}", file=sys.stderr)
+        return 2
+
+    target = plist_path(Path.home(), args.label)
+    report = status(os.getuid(), args.label)
+    print(f"label:  {args.label}")
+    print(f"plist:  {target} ({'present' if target.exists() else 'missing'})")
+    if report is None:
+        print("state:  not loaded")
+        return 1
+    for line in report.splitlines():
+        stripped = line.strip()
+        if stripped.startswith(("state =", "pid =", "last exit code =")):
+            print(f"        {stripped}")
+    print("state:  loaded")
+    return 0
+
+
 def _run(args: argparse.Namespace) -> int:
     root = _root(args.root)
     layout = HarnessLayout(root)
@@ -487,6 +633,34 @@ def main(argv: list[str] | None = None) -> int:
         help="board port; 0 disables the board",
     )
     run.set_defaults(handler=_run)
+
+    service = subparsers.add_parser(
+        "service", help="run the harness as a background service (macOS launchd)"
+    )
+    service_actions = service.add_subparsers(dest="action", required=True)
+
+    service_install = service_actions.add_parser(
+        "install", help="write the LaunchAgent and start it"
+    )
+    service_install.add_argument("--root", default=None)
+    service_install.add_argument("--label", default=DEFAULT_LABEL)
+    service_install.add_argument(
+        "--api-port", type=int, default=8420, dest="api_port"
+    )
+    service_install.set_defaults(handler=_service_install)
+
+    service_uninstall = service_actions.add_parser(
+        "uninstall", help="stop the service and remove its LaunchAgent"
+    )
+    service_uninstall.add_argument("--label", default=DEFAULT_LABEL)
+    service_uninstall.set_defaults(handler=_service_uninstall)
+
+    service_status = service_actions.add_parser(
+        "status", help="report whether the service is loaded"
+    )
+    service_status.add_argument("--root", default=None)
+    service_status.add_argument("--label", default=DEFAULT_LABEL)
+    service_status.set_defaults(handler=_service_status)
 
     args = parser.parse_args(argv)
     return args.handler(args)

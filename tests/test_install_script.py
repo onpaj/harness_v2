@@ -68,3 +68,21 @@ def test_installer_python_floor_matches_requires_python() -> None:
 def test_readme_documents_the_installer() -> None:
     readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
     assert "install.sh" in readme, "README should point users at install.sh"
+
+
+def test_installer_offers_the_service_flag() -> None:
+    text = _script()
+    assert "--service" in text, "installer must expose the --service step"
+
+
+def test_installer_delegates_the_service_to_the_cli() -> None:
+    """Generating a launchd plist in shell means hand-rolling XML.
+
+    `harness service install` builds it with plistlib and is unit-tested, so the
+    installer must call it rather than write the plist itself.
+    """
+    text = _script()
+    assert re.search(r'service\s+install', text), (
+        "installer must delegate to `harness service install`"
+    )
+    assert "<plist" not in text, "the installer must not hand-roll plist XML"

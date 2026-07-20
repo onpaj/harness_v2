@@ -9,19 +9,24 @@
 #      extras,
 #   3. runs `harness init` to write the workflow, the default agent personas
 #      and an empty repos.json,
-#   4. walks you through populating repos.json (repo name -> local path).
+#   4. walks you through populating repos.json (repo name -> local path),
+#   5. optionally installs the loop as a background service (--service).
 #
 # It is safe to re-run: an existing venv is reused, `harness init` never
-# overwrites existing files, and the repos.json step only adds entries.
+# overwrites existing files, the repos.json step only adds entries, and
+# --service regenerates and reloads the agent in place.
 #
 # Usage:
-#   ./install.sh [--root DIR] [--workflow NAME] [--yes] [--help]
+#   ./install.sh [--root DIR] [--workflow NAME] [--yes] [--service] [--help]
 #
 #   --root DIR        harness home to initialize (default: $HARNESS_HOME or
 #                     ~/.harness). Mirrors `harness --root`.
 #   --workflow NAME   workflow to initialize (default: default).
 #   --yes, -y         non-interactive: skip the repos.json wizard and just
 #                     print how to populate it by hand.
+#   --service         also install and start the background service, so the
+#                     loop survives closing the terminal and comes back at
+#                     login (macOS launchd; see `harness service --help`).
 #   --help, -h        show this help and exit.
 
 set -euo pipefail
@@ -40,6 +45,7 @@ MIN_PY_MINOR=11  # requires-python = ">=3.11" in pyproject.toml
 ROOT=""
 WORKFLOW="default"
 INTERACTIVE=1
+SERVICE=0
 
 usage() {
     sed -n '2,/^set -euo/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//; s/^#$//' | sed '$d'
@@ -65,6 +71,10 @@ while [ $# -gt 0 ]; do
             ;;
         -y|--yes)
             INTERACTIVE=0
+            shift
+            ;;
+        --service)
+            SERVICE=1
             shift
             ;;
         -h|--help)
@@ -253,6 +263,19 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# 5. Background service (optional)
+# ---------------------------------------------------------------------------
+#
+# Delegated to the CLI rather than written here: generating a launchd plist in
+# shell means hand-rolling XML, while `harness service install` builds it with
+# plistlib and is covered by unit tests.
+
+if [ "${SERVICE}" -eq 1 ]; then
+    say "Installing the background service"
+    "${HARNESS}" service install --root "${ROOT}"
+fi
+
+# ---------------------------------------------------------------------------
 # Done
 # ---------------------------------------------------------------------------
 
@@ -265,6 +288,8 @@ Next steps:
   - Submit a task:       harness submit --root ${ROOT} --repo <name> --data '{"request": "..."}'
   - Start the loop:      harness run --root ${ROOT}
     The board is served at http://127.0.0.1:8420/ (use --api-port 0 to disable).
+  - Or run it supervised: ./install.sh --service --root ${ROOT}
+    (then: harness service status | uninstall)
 
 Repos are configured in ${REPOS_JSON}.
 EOF

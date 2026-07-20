@@ -273,3 +273,48 @@ async def test_serve_returns_when_uvicorn_stops_before_the_loop(monkeypatch):
 
     assert harness.stop_seen is not None
     assert harness.stop_seen.is_set()
+
+
+# --- harness service -------------------------------------------------------
+
+
+def test_service_install_refuses_an_uninitialized_root(tmp_path, capsys):
+    code = main(["service", "install", "--root", str(tmp_path / "nope")])
+
+    assert code == 2
+    assert "not initialized" in capsys.readouterr().err
+
+
+def test_service_install_refuses_a_non_macos_host(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr("harness.cli.sys.platform", "linux")
+
+    code = main(["service", "install", "--root", str(tmp_path)])
+
+    assert code == 2
+    err = capsys.readouterr().err
+    assert "launchd" in err and "linux" in err
+
+
+def test_service_status_refuses_a_non_macos_host(monkeypatch, capsys):
+    monkeypatch.setattr("harness.cli.sys.platform", "linux")
+
+    assert main(["service", "status"]) == 2
+    assert "launchd" in capsys.readouterr().err
+
+
+def test_service_requires_an_action():
+    import pytest
+
+    with pytest.raises(SystemExit):
+        main(["service"])
+
+
+def test_service_path_entries_lead_with_the_venv_bin():
+    from harness.cli import service_path_entries
+
+    entries = service_path_entries(Path("/opt/app/.venv/bin/harness"))
+
+    assert entries[0] == "/opt/app/.venv/bin"
+    # git and gh live in these; without them the service cannot work at all.
+    assert "/usr/local/bin" in entries
+    assert "/usr/bin" in entries

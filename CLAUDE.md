@@ -101,7 +101,7 @@ Dependencies flow strictly downward, no cycles.
 | Ports | `ports/{queue,workflows,strategy,behavior,events,clock,workspace,artifacts,forge,board,agent,repos,source}` |
 | Orchestration | `dispatcher`, `consumer`, `source_poller` — know only ports (and not `workspace`/`forge`/`artifacts`/`agent`/`repos`/`drivers`) |
 | Behaviors | `behaviors/{landing,agent}` — touch ports, not drivers |
-| Drivers | `drivers/{fs_queue,fs_workflows,fifo_strategy,dummy_behavior,stdout_events,system_clock,memory,fs_artifacts,git_workspace,fake_forge,claude_cli,fs_agents,fs_repos,worktree_artifacts,source_reflector,github_client,github_source}` |
+| Drivers | `drivers/{fs_queue,fs_workflows,fifo_strategy,dummy_behavior,stdout_events,system_clock,memory,fs_artifacts,git_workspace,fake_forge,claude_cli,fs_agents,fs_repos,worktree_artifacts,source_reflector,github_client,github_source,launchd}` |
 | Edges | `app` (wiring), `cli` |
 
 - `projection.py` — in-memory read model of the board; hydration from queues + event stream
@@ -118,6 +118,9 @@ Dependencies flow strictly downward, no cycles.
 - `drivers/source_reflector.py` — `SourceReflectorSink(EventSink)`: event stream → projection into the source
 - `drivers/github_client.py` — `GithubClient` (ABC), `Issue`, `FakeGithubClient`, `HttpGithubClient` (stdlib `urllib`)
 - `drivers/github_source.py` — `GithubTaskSource`: issue → task, state → label
+- `drivers/launchd.py` — the background service on macOS: pure `wrapper_script`/
+  `plist_bytes` builders (unit-tested) plus a thin `launchctl` shell; driven by
+  `harness service install|uninstall|status`
 - `api/` — FastAPI board; sees only `BoardView` and `ArtifactView`, never a driver or `ArtifactStore`
 
 ## What is responsible for what
@@ -190,6 +193,15 @@ Dependencies flow strictly downward, no cycles.
   existing one. So a re-run after a crash won't open a second PR.
 - **`ArtifactStore.begin(task, step)` allocates the next attempt.** Writing into one
   slot belongs to one run; the second pass (the loop) gets a new subdirectory.
+- **The service holds no secret.** launchd hands a process almost no environment, so
+  `harness service install` generates a wrapper that resolves `GITHUB_TOKEN` at
+  start-up — an explicit variable first, else `gh auth token` from the keyring. The
+  plist itself never contains a token; a test asserts that. No token is not fatal:
+  GitHub ingestion goes quiet and `harness submit` still works.
+- **The service `PATH` is explicit.** launchd's default `PATH` has no `git`, `gh` or
+  `claude`, so the wrapper exports one built by `cli.service_path_entries` (venv bin
+  first, then `~/.npm-global/bin`, `~/.local/bin`, `/usr/local/bin`, …). A "claude not
+  found" failure deep in a run is usually this.
 
 ## Operator
 
