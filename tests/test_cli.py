@@ -318,3 +318,17 @@ def test_service_path_entries_lead_with_the_venv_bin():
     # git and gh live in these; without them the service cannot work at all.
     assert "/usr/local/bin" in entries
     assert "/usr/bin" in entries
+
+
+def test_service_entry_point_lives_in_this_environment():
+    """Regression: resolving sys.executable follows the venv symlink out to the
+    base interpreter (uv-managed CPython), where no `harness` script exists."""
+    import sys
+
+    from harness.cli import service_entry_point
+
+    entry = service_entry_point()
+
+    assert entry == Path(sys.prefix) / "bin" / "harness"
+    assert str(entry).startswith(sys.prefix)
+    assert entry.is_file(), "the running environment must have the harness script"

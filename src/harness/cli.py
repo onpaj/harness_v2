@@ -393,6 +393,18 @@ def service_path_entries(harness: Path) -> list[str]:
     ]
 
 
+def service_entry_point() -> Path:
+    """Absolute path to the `harness` script of the environment we are running in.
+
+    `sys.prefix` is the venv root; `sys.executable` is not usable here because
+    resolving it follows the venv's python symlink out to the base interpreter
+    (with uv-managed CPython that lands in `~/.local/share/uv/...`, where no
+    `harness` script exists). `sys.argv[0]` is no good either — it is whatever
+    the caller typed, or `pytest`.
+    """
+    return Path(sys.prefix) / "bin" / "harness"
+
+
 def _require_macos() -> str | None:
     """The error message for a non-macOS host, or None when launchd is available."""
     if sys.platform != "darwin":
@@ -415,10 +427,7 @@ def _service_install(args: argparse.Namespace) -> int:
         print(f"error: {root} is not initialized, run `harness init`", file=sys.stderr)
         return 2
 
-    # Derive the entry point from the running interpreter, not argv[0]: the
-    # service must hold an absolute path into the venv that installed it, and
-    # argv[0] is whatever the caller happened to type (or `pytest`).
-    harness = Path(sys.executable).resolve().parent / "harness"
+    harness = service_entry_point()
     if not harness.is_file():
         print(
             f"error: cannot locate the harness entry point at {harness} — "
