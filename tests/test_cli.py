@@ -144,7 +144,7 @@ def test_harness_home_used_only_when_root_absent(tmp_path, monkeypatch):
 
 
 def _github_args(**overrides):
-    """Minimální namespace, jaký `run` parser předá do `_github_source`."""
+    """The minimal namespace the `run` parser hands to `_github_source`."""
     base = dict(
         github_repo="onpaj/Anela.Heblo",
         github_repository="heblo",
@@ -157,21 +157,22 @@ def _github_args(**overrides):
 
 
 def test_github_source_stamps_repository_name_not_root_path(monkeypatch, tmp_path):
-    """`task.repository` je jméno pro `repos.json` (invariant 15), ne cesta
-    `<root>/repo`. Zdroj bere jméno z `--github-repository`."""
+    """`task.repository` is a name for `repos.json` (invariant 15), not the path
+    `<root>/repo`. The source takes the name from `--github-repository`."""
     monkeypatch.setenv("GITHUB_TOKEN", "t0ken")
 
     source = _github_source(_github_args(github_repository="heblo"), tmp_path)
 
     assert source is not None
     assert source._repository == "heblo"
-    # a rozhodně ne stará napevno drátovaná cesta
+    # and definitely not the old hard-wired path
     assert source._repository != str(tmp_path / "repo")
 
 
 def test_github_source_disabled_without_repository_name(monkeypatch, tmp_path, capsys):
-    """`--github-repo` bez `--github-repository` nemá jak resolvnout worktree —
-    zdroj se vypne s hláškou, symetricky k chybějícímu tokenu."""
+    """`--github-repo` without `--github-repository` has no way to resolve the
+    worktree — the source is disabled with a message, symmetrically to a missing
+    token."""
     monkeypatch.setenv("GITHUB_TOKEN", "t0ken")
 
     assert _github_source(_github_args(github_repository=None), tmp_path) is None
@@ -183,13 +184,28 @@ def test_run_accepts_api_port(monkeypatch, tmp_path):
     main(["init", "--root", str(tmp_path)])
     captured = {}
 
-    async def fake_serve(harness, port, poll_interval):
+    async def fake_serve(harness, port, poll_interval, source_interval=30.0):
         captured["port"] = port
+        captured["source_interval"] = source_interval
 
     monkeypatch.setattr("harness.cli.serve", fake_serve)
 
     assert main(["run", "--root", str(tmp_path), "--api-port", "9123"]) == 0
     assert captured["port"] == 9123
+    assert captured["source_interval"] == 30.0
+
+
+def test_run_forwards_source_poll(monkeypatch, tmp_path):
+    main(["init", "--root", str(tmp_path)])
+    captured = {}
+
+    async def fake_serve(harness, port, poll_interval, source_interval=30.0):
+        captured["source_interval"] = source_interval
+
+    monkeypatch.setattr("harness.cli.serve", fake_serve)
+
+    assert main(["run", "--root", str(tmp_path), "--source-poll", "5"]) == 0
+    assert captured["source_interval"] == 5.0
 
 
 async def test_serve_returns_when_uvicorn_stops_before_the_loop(monkeypatch):
@@ -212,7 +228,7 @@ async def test_serve_returns_when_uvicorn_stops_before_the_loop(monkeypatch):
             self.control = FakeTaskControl()
             self.stop_seen: asyncio.Event | None = None
 
-        async def run(self, poll_interval, stop):
+        async def run(self, poll_interval, source_interval=30.0, stop=None):
             self.stop_seen = stop
             while not stop.is_set():
                 await asyncio.sleep(0.01)

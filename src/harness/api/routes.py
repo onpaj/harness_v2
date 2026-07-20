@@ -19,10 +19,10 @@ TEMPLATES = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 
 
 def _basename(value: str | None) -> str:
-    """Poslední segment cesty. Jméno bez lomítka projde beze změny.
+    """The last path segment. A name without a slash passes through unchanged.
 
-    `repository` má být jméno (invariant 15), `worktree` je cesta
-    `<root>/<task_id>` — obojí se v UI ukazuje jako holé jméno, ne cesta.
+    `repository` is meant to be a name (invariant 15), `worktree` is the path
+    `<root>/<task_id>` — both are shown in the UI as a bare name, not a path.
     """
     if not value:
         return ""

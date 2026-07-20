@@ -122,8 +122,15 @@ class Harness:
         return total
 
     async def run(
-        self, poll_interval: float = 0.2, stop: asyncio.Event | None = None
+        self,
+        poll_interval: float = 0.2,
+        source_interval: float = 30.0,
+        stop: asyncio.Event | None = None,
     ) -> None:
+        # The internal loops (dispatcher, consumers) poll local queues off disk,
+        # so a tight `poll_interval` keeps the board responsive. A `TaskSource`,
+        # by contrast, is a remote API with rate limits (GitHub), so its loop
+        # gets its own, much slower `source_interval`.
         stop = stop or asyncio.Event()
         self.recover()
         self.projection.hydrate(
@@ -136,7 +143,7 @@ class Harness:
         await asyncio.gather(
             self._dispatcher_loop(poll_interval, stop),
             *(self._consumer_loop(consumer, poll_interval, stop) for consumer in self.consumers),
-            *(self._source_loop(poller, poll_interval, stop) for poller in self.pollers),
+            *(self._source_loop(poller, source_interval, stop) for poller in self.pollers),
         )
         self._events.emit("stopped")
 
@@ -157,11 +164,11 @@ class Harness:
                 await asyncio.sleep(0)
 
     async def _source_loop(
-        self, poller: SourcePoller, poll_interval: float, stop: asyncio.Event
+        self, poller: SourcePoller, source_interval: float, stop: asyncio.Event
     ) -> None:
         while not stop.is_set():
             if not poller.tick():
-                await asyncio.sleep(poll_interval)
+                await asyncio.sleep(source_interval)
             else:
                 await asyncio.sleep(0)
 

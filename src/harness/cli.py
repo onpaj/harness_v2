@@ -333,8 +333,8 @@ def _github_source(args: argparse.Namespace, root: Path) -> TaskSource | None:
         return None
     if not args.github_repository:
         print(
-            "varování: --github-repo bez --github-repository (jméno repa "
-            "v repos.json), zdroj vypnut",
+            "warning: --github-repo without --github-repository (the repo name "
+            "in repos.json), source disabled",
             file=sys.stderr,
         )
         return None
@@ -384,16 +384,22 @@ def _run(args: argparse.Namespace) -> int:
         return 2
 
     try:
-        asyncio.run(serve(harness, args.api_port, args.poll))
+        asyncio.run(serve(harness, args.api_port, args.poll, args.source_poll))
     except KeyboardInterrupt:
         return 0
     return 0
 
 
-async def serve(harness, port: int, poll_interval: float) -> None:
+async def serve(
+    harness, port: int, poll_interval: float, source_interval: float = 30.0
+) -> None:
     """The loop and the board in a single event loop."""
     stop = asyncio.Event()
-    loop = asyncio.create_task(harness.run(poll_interval=poll_interval, stop=stop))
+    loop = asyncio.create_task(
+        harness.run(
+            poll_interval=poll_interval, source_interval=source_interval, stop=stop
+        )
+    )
 
     if port == 0:
         await loop
@@ -445,6 +451,14 @@ def main(argv: list[str] | None = None) -> int:
     run.add_argument("--workflow", default=DEFAULT_WORKFLOW)
     run.add_argument("--delay", type=float, default=5.0)
     run.add_argument("--poll", type=float, default=0.2)
+    run.add_argument(
+        "--source-poll",
+        type=float,
+        default=30.0,
+        dest="source_poll",
+        help="interval (s) for polling the task source (e.g. GitHub); kept "
+        "well above --poll to respect remote API rate limits",
+    )
     run.add_argument("--agent-timeout", type=float, default=600.0, dest="agent_timeout")
     run.add_argument("--request-changes-at", default=None, dest="request_changes_at")
     run.add_argument(
@@ -456,8 +470,8 @@ def main(argv: list[str] | None = None) -> int:
         "--github-repository",
         default=None,
         dest="github_repository",
-        help="jméno repa v repos.json, jímž se resolvne worktree cesta "
-        "(nutné s --github-repo)",
+        help="the repo name in repos.json used to resolve the worktree path "
+        "(required with --github-repo)",
     )
     run.add_argument(
         "--github-label",
