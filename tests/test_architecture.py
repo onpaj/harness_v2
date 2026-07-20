@@ -77,6 +77,16 @@ def test_orchestration_does_not_import_source_port():
         )
 
 
+def test_orchestration_does_not_import_control():
+    """The operator-control port (TaskControl) is not orchestration. Only the
+    task-control service, the API and the wiring reach for it — never the
+    dispatcher or consumer."""
+    for name in ("dispatcher.py", "consumer.py"):
+        assert "harness.ports.control" not in imported_modules(SOURCE / name), (
+            f"{name} imports ports.control"
+        )
+
+
 def test_source_poller_imports_only_ports_and_models():
     """SourcePoller is core: it knows only ports and models, no driver."""
     imports = {

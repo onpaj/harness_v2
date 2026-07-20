@@ -5,7 +5,7 @@ from harness.api.app import create_app
 from harness.drivers.memory import FakeClock
 from harness.models import HistoryEntry, Task
 from harness.ports.board import Board, BoardColumn
-from tests.fakes import FakeBoardView
+from tests.fakes import FakeBoardView, FakeTaskControl
 
 WORKING = Task(
     id="tsk_1",
@@ -44,17 +44,37 @@ TITLED = Task(
 )
 
 
+BROKEN = Task(
+    id="tsk_9",
+    workflow_template="default",
+    created="2026-07-19T10:00:03Z",
+    status="failed",
+    history=(
+        HistoryEntry(
+            at="2026-07-19T10:00:09Z",
+            actor="dispatcher",
+            from_step="plan",
+            to_step="failed",
+            reason="step 'plan' has no queue",
+        ),
+    ),
+)
+
+
 @pytest.fixture
 def client() -> TestClient:
     board = Board(
         revision=9,
         columns=(
+            BoardColumn(name="todo", tasks=()),
             BoardColumn(name="development", tasks=(WORKING, WAITING, TITLED)),
             BoardColumn(name="done", tasks=()),
             BoardColumn(name="failed", tasks=()),
         ),
     )
-    view = FakeBoardView(board, {"tsk_1": WORKING})
+    # BROKEN is retrievable via get() (for the detail fragment) without cluttering
+    # the rendered columns, so the board-rendering tests stay undisturbed.
+    view = FakeBoardView(board, {"tsk_1": WORKING, "tsk_9": BROKEN})
     return TestClient(create_app(view=view, clock=FakeClock()))
 
 
@@ -150,3 +170,54 @@ def test_static_files_are_served(client):
 def test_no_endpoint_mutates(client):
     assert client.post("/api/board").status_code == 405
     assert client.delete("/api/tasks/tsk_1").status_code == 405
+
+
+# --- Restart a failed task -------------------------------------------------
+
+
+def _board_with_broken() -> Board:
+    return Board(
+        revision=9,
+        columns=(
+            BoardColumn(name="todo", tasks=()),
+            BoardColumn(name="development", tasks=(WORKING,)),
+            BoardColumn(name="failed", tasks=(BROKEN,)),
+        ),
+    )
+
+
+def test_restart_button_shown_only_for_failed_task(client):
+    failed_body = client.get("/fragment/task/tsk_9").text
+    working_body = client.get("/fragment/task/tsk_1").text
+
+    assert "/tasks/tsk_9/restart" in failed_body
+    assert "Restart" in failed_body
+    assert "/tasks/tsk_1/restart" not in working_body
+
+
+def test_restart_invokes_control_and_returns_refreshed_fragment():
+    view = FakeBoardView(_board_with_broken(), {"tsk_9": BROKEN})
+    control = FakeTaskControl(result=True)
+    api = TestClient(create_app(view=view, control=control, clock=FakeClock()))
+
+    response = api.post("/tasks/tsk_9/restart")
+
+    assert response.status_code == 200
+    assert control.restarted == ["tsk_9"]
+    assert "tsk_9" in response.text
+
+
+def test_restart_returns_404_when_control_reports_nothing():
+    view = FakeBoardView(_board_with_broken(), {"tsk_9": BROKEN})
+    control = FakeTaskControl(result=False)
+    api = TestClient(create_app(view=view, control=control, clock=FakeClock()))
+
+    response = api.post("/tasks/tsk_9/restart")
+
+    assert response.status_code == 404
+    assert control.restarted == ["tsk_9"]
+
+
+def test_restart_without_control_reports_nothing(client):
+    # The default board is wired with the null control (create_app default).
+    assert client.post("/tasks/tsk_9/restart").status_code == 404

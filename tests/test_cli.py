@@ -7,6 +7,7 @@ from harness.cli import DEFAULT_WORKFLOW, main, serve
 from harness.drivers.memory import MemoryArtifactStore
 from harness.models import END, Task, Transition, Workflow
 from harness.projection import BoardProjection
+from tests.fakes import FakeTaskControl
 
 SERVE_TEST_WORKFLOW = Workflow(
     name="default",
@@ -171,6 +172,7 @@ async def test_serve_returns_when_uvicorn_stops_before_the_loop(monkeypatch):
         def __init__(self):
             self.projection = BoardProjection(SERVE_TEST_WORKFLOW)
             self.artifacts = MemoryArtifactStore()
+            self.control = FakeTaskControl()
             self.stop_seen: asyncio.Event | None = None
 
         async def run(self, poll_interval, stop):

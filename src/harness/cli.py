@@ -393,7 +393,10 @@ async def serve(harness, port: int, poll_interval: float) -> None:
         return
 
     app = create_app(
-        view=harness.projection, artifacts=harness.artifacts, clock=SystemClock()
+        view=harness.projection,
+        artifacts=harness.artifacts,
+        control=harness.control,
+        clock=SystemClock(),
     )
     config = uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning")
     server = asyncio.create_task(uvicorn.Server(config).serve())

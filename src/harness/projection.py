@@ -14,6 +14,7 @@ from harness.models import END, Task, Workflow
 from harness.ports.board import (
     DONE_COLUMN,
     FAILED_COLUMN,
+    TODO_COLUMN,
     Board,
     BoardColumn,
     BoardView,
@@ -43,7 +44,7 @@ def column_order(workflow: Workflow) -> tuple[str, ...]:
         if step not in order:
             order.append(step)
 
-    return tuple(order) + (DONE_COLUMN, FAILED_COLUMN)
+    return (TODO_COLUMN,) + tuple(order) + (DONE_COLUMN, FAILED_COLUMN)
 
 
 class BoardProjection(BoardView):
@@ -75,8 +76,9 @@ class BoardProjection(BoardView):
         for task in failed.list():
             self._store(FAILED_COLUMN, task)
         for task in inbox.list():
-            if task.status is not None:
-                self._store(task.status, task)
+            # A fresh task (never dispatched) shows in `todo`; one transiting the
+            # inbox between steps keeps the column of the step it just left.
+            self._store(task.status if task.status is not None else TODO_COLUMN, task)
         self._bump()
 
     def apply(self, column: str, task: Task) -> None:
