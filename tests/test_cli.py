@@ -8,6 +8,7 @@ import pytest
 from harness.cli import DEFAULT_WORKFLOW, _github_sources, main, serve
 from harness.drivers.github_client import FakeGithubClient
 from harness.drivers.memory import MemoryArtifactStore, MemoryRepositoryRegistry
+from harness.drivers.stage_output import StageOutputProjection
 from harness.models import END, Task, Transition, Workflow
 from harness.projection import BoardProjection
 from tests.fakes import FakeTaskControl
@@ -249,6 +250,7 @@ async def test_serve_returns_when_uvicorn_stops_before_the_loop(monkeypatch):
         def __init__(self):
             self.projection = BoardProjection(SERVE_TEST_WORKFLOW)
             self.artifacts = MemoryArtifactStore()
+            self.stage_output = StageOutputProjection()
             self.control = FakeTaskControl()
             self.stop_seen: asyncio.Event | None = None
 

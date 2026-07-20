@@ -4,7 +4,7 @@ import pytest
 
 from harness.behaviors.agent import ClaudeCliBehavior, compose_prompt
 from harness.drivers.claude_cli import AgentError
-from harness.drivers.memory import FakeAgentRunner, FakeClock
+from harness.drivers.memory import FakeAgentRunner, FakeClock, MemoryEventSink
 from harness.models import BehaviorResult, Outcome, Task
 from harness.ports.agent import AgentRun, AgentRunner, AgentSpec
 from harness.ports.workspace import Workspace, WorkspaceHandle
@@ -70,11 +70,21 @@ def make_task(status: str = "development") -> Task:
 ARTIFACT_01 = ".artifacts/tsk_1/development-01.md"
 
 
-def build(tmp_path: Path, *, runner: AgentRunner, spec: AgentSpec | None = None):
+def build(
+    tmp_path: Path,
+    *,
+    runner: AgentRunner,
+    spec: AgentSpec | None = None,
+    events: MemoryEventSink | None = None,
+):
     spec = spec or AgentSpec(name="development", prompt="you are a developer")
     workspace = RealFsWorkspace(tmp_path)
     behavior = ClaudeCliBehavior(
-        clock=FakeClock(), workspace=workspace, runner=runner, spec=spec
+        clock=FakeClock(),
+        workspace=workspace,
+        runner=runner,
+        spec=spec,
+        events=events or MemoryEventSink(),
     )
     return behavior, workspace, spec
 
@@ -127,6 +137,29 @@ async def test_returns_behavior_result_from_agent_run(tmp_path):
     assert result == BehaviorResult(Outcome.DONE, "dev: done")
 
 
+async def test_emits_stage_output_events_tagged_with_identity(tmp_path):
+    runner = FakeAgentRunner(
+        runs={"development": AgentRun(Outcome.DONE, "dev: done")},
+        outputs={"development": ["⏵ Bash: pytest -q", "all green"]},
+    )
+    events = MemoryEventSink()
+    behavior, _, _ = build(tmp_path, runner=runner, events=events)
+
+    await behavior.run(make_task())
+
+    stage_output = [fields for name, fields in events.events if name == "stage_output"]
+    assert [fields["line"] for fields in stage_output] == [
+        "⏵ Bash: pytest -q",
+        "all green",
+    ]
+    assert all(fields["task_id"] == "tsk_1" for fields in stage_output)
+    assert all(fields["step"] == "development" for fields in stage_output)
+    assert all(fields["attempt"] == 1 for fields in stage_output)
+    # The stage_output events must NOT carry `task`/`queue` — else the board
+    # projection would treat them as a column move (invariant 7).
+    assert all("task" not in fields and "queue" not in fields for fields in stage_output)
+
+
 async def test_second_run_of_same_step_increments_attempt(tmp_path):
     runner = dev_runner()
     behavior, _, _ = build(tmp_path, runner=runner)
@@ -139,7 +172,7 @@ async def test_second_run_of_same_step_increments_attempt(tmp_path):
 
 
 class RaisingRunner(AgentRunner):
-    async def run(self, *, prompt, spec, cwd, timeout):
+    async def run(self, *, prompt, spec, cwd, timeout, on_output=None):
         raise AgentError("claude crashed")
 
 

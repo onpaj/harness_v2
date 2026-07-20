@@ -74,7 +74,7 @@ class EchoRunner(AgentRunner):
         self._review_seen: set[str] = set()
 
     async def run(
-        self, *, prompt: str, spec: AgentSpec, cwd: Path, timeout: float
+        self, *, prompt: str, spec: AgentSpec, cwd: Path, timeout: float, on_output=None
     ) -> AgentRun:
         self.calls.append(
             {"prompt": prompt, "spec": spec, "cwd": cwd, "timeout": timeout}

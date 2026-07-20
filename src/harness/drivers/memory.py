@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -307,7 +308,9 @@ class FakeAgentRunner(AgentRunner):
     `runs` maps an agent name to its verdict; `default` is the fallback when
     the name is not in `runs`. `writes` maps an agent name to files (relpath →
     content) that are written into `cwd` during the run — simulating an agent
-    writing artifacts and code. Every call is recorded in `self.calls`.
+    writing artifacts and code. `outputs` maps an agent name to lines it "streams"
+    through `on_output` during the run — simulating live stage output. Every call
+    is recorded in `self.calls`.
     """
 
     def __init__(
@@ -315,18 +318,29 @@ class FakeAgentRunner(AgentRunner):
         runs: dict[str, AgentRun] | None = None,
         default: AgentRun | None = None,
         writes: dict[str, dict[str, str]] | None = None,
+        outputs: dict[str, list[str]] | None = None,
     ) -> None:
         self._runs = runs or {}
         self._default = default
         self._writes = writes or {}
+        self._outputs = outputs or {}
         self.calls: list[dict[str, Any]] = []
 
     async def run(
-        self, *, prompt: str, spec: AgentSpec, cwd: Path, timeout: float
+        self,
+        *,
+        prompt: str,
+        spec: AgentSpec,
+        cwd: Path,
+        timeout: float,
+        on_output: Callable[[str], None] | None = None,
     ) -> AgentRun:
         self.calls.append(
             {"prompt": prompt, "spec": spec, "cwd": cwd, "timeout": timeout}
         )
+        if on_output is not None:
+            for line in self._outputs.get(spec.name, ()):
+                on_output(line)
         for relpath, content in self._writes.get(spec.name, {}).items():
             target = Path(cwd) / relpath
             target.parent.mkdir(parents=True, exist_ok=True)
