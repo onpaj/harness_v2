@@ -51,6 +51,15 @@ def test_build_creates_inbox_done_and_failed(tmp_path):
     assert (tmp_path / "failed").is_dir()
 
 
+def test_build_without_sources_has_no_pollers(tmp_path):
+    """Zpětná kompatibilita: default sources=[] → žádný poller, chování jako dřív."""
+    seed(tmp_path)
+
+    harness = build(tmp_path, "default", events=MemoryEventSink())
+
+    assert harness.pollers == []
+
+
 async def test_run_drives_a_task_all_the_way_to_done(tmp_path):
     seed(tmp_path)
     events = MemoryEventSink()
