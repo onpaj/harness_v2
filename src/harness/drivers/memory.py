@@ -6,6 +6,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
+from harness.ids import new_task_id
 from harness.models import BehaviorResult, Outcome, Task, Workflow
 from harness.ports.agent import (
     AgentCatalog,
@@ -25,6 +26,7 @@ from harness.ports.events import EventSink
 from harness.ports.forge import Forge, PullRequest
 from harness.ports.queue import TaskQueue
 from harness.ports.repos import RepositoryNotFound, RepositoryRegistry
+from harness.ports.source import FinishResult, Progress, TaskSource
 from harness.ports.workflows import WorkflowNotFound, WorkflowRepository
 from harness.ports.workspace import Workspace, WorkspaceHandle
 
@@ -187,6 +189,78 @@ class MemoryWorkspace(Workspace):
             handle = MemoryWorkspaceHandle(task.id)
             self.handles[task.id] = handle
         return handle
+
+
+class MemoryTaskSource(TaskSource):
+    """In-memory zdroj tasků. „Issue" je řádek v interní frontě, „claim" ho
+    přesune z nezkonzumovaných pryč — dvojče `poll()` GitHub adapteru bez sítě.
+    Projekce ven (`report_progress`/`finish`) se zapisují do `states` pro aserce.
+    """
+
+    kind = "memory"
+
+    def __init__(
+        self,
+        *,
+        clock: Clock,
+        workflow: str = "default",
+        repository: str | None = None,
+        worktree_root: str = "/memory/worktrees",
+    ) -> None:
+        self._clock = clock
+        self._workflow = workflow
+        self._repository = repository
+        self._worktree_root = worktree_root
+        self._pending: list[tuple[str, str, str]] = []  # (issue_id, title, body)
+        self._next_issue = 0
+        self.states: dict[str, list] = {}
+
+    def submit(self, title: str, body: str = "") -> str:
+        """Testovací helper: přidej „issue" do fronty a vrať jeho id."""
+        issue_id = f"issue-{self._next_issue}"
+        self._next_issue += 1
+        self._pending.append((issue_id, title, body))
+        return issue_id
+
+    def poll(self) -> list[Task]:
+        claimed = self._pending
+        self._pending = []
+        tasks: list[Task] = []
+        for issue_id, title, body in claimed:
+            task_id = new_task_id()
+            tasks.append(
+                Task(
+                    id=task_id,
+                    workflow_template=self._workflow,
+                    created=self._clock.now(),
+                    repository=self._repository,
+                    worktree=f"{self._worktree_root}/{task_id}",
+                    data={
+                        "title": title,
+                        "body": body,
+                        "source": {"kind": self.kind, "issue": issue_id},
+                    },
+                )
+            )
+        return tasks
+
+    def report_progress(self, task: Task, progress: Progress) -> None:
+        if not self._mine(task):
+            return
+        self.states.setdefault(self._issue(task), []).append(
+            ("progress", progress.step)
+        )
+
+    def finish(self, task: Task, result: FinishResult) -> None:
+        if not self._mine(task):
+            return
+        self.states.setdefault(self._issue(task), []).append(("finish", result.ok))
+
+    def _mine(self, task: Task) -> bool:
+        return task.data.get("source", {}).get("kind") == self.kind
+
+    def _issue(self, task: Task) -> str:
+        return task.data["source"]["issue"]
 
 
 class MemoryForge(Forge):
