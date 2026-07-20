@@ -19,13 +19,24 @@ from harness.drivers.fs_agents import FilesystemAgentCatalog
 from harness.drivers.fs_repos import FilesystemRepositoryRegistry
 from harness.drivers.fs_workflows import invalid_workflow_name
 from harness.drivers.git_workspace import GitWorkspace
+from harness.drivers.github_client import HttpGithubClient
+from harness.drivers.github_source import GithubTaskSource
 from harness.drivers.system_clock import SystemClock
 from harness.drivers.worktree_artifacts import WorktreeArtifactView
 from harness.ids import new_task_id
 from harness.models import Task
+from harness.ports.source import TaskSource
 from harness.ports.workflows import WorkflowNotFound
 
 DEFAULT_WORKFLOW = "default"
+
+# Rozumná coarse mapa kroků výchozího workflow na labely. Ostatní kroky bez
+# labelu → míň šumu. Je to jen default, ne zákon.
+DEFAULT_STEP_LABELS = {
+    "development": "harness:in-progress",
+    "review": "harness:in-review",
+    "land": "harness:landing",
+}
 
 DEFAULT_DEFINITION = {
     "name": "default",
@@ -153,6 +164,31 @@ def _submit(args: argparse.Namespace) -> int:
     return 0
 
 
+def _github_source(args: argparse.Namespace, root: Path) -> TaskSource | None:
+    """Zdroj z GitHub Issues, když je `--github-repo` a `GITHUB_TOKEN`. Jinak
+    None — harness běží jako dřív (jen `harness submit`)."""
+    if not args.github_repo:
+        return None
+    token = os.environ.get("GITHUB_TOKEN")
+    if not token:
+        print(
+            "varování: --github-repo bez GITHUB_TOKEN, zdroj vypnut",
+            file=sys.stderr,
+        )
+        return None
+    worktree_root = args.worktree_root or str(root / "worktrees")
+    return GithubTaskSource(
+        client=HttpGithubClient(token),
+        clock=SystemClock(),
+        repo=args.github_repo,
+        workflow=args.github_workflow,
+        repository=str(root / "repo"),
+        worktree_root=worktree_root,
+        select_label=args.github_label,
+        step_labels=DEFAULT_STEP_LABELS,
+    )
+
+
 def _run(args: argparse.Namespace) -> int:
     root = _root(args.root)
     layout = HarnessLayout(root)
@@ -166,6 +202,7 @@ def _run(args: argparse.Namespace) -> int:
     workspace = GitWorkspace(registry, layout.worktrees)
     artifact_view = WorktreeArtifactView(layout.worktrees)
     forge = FakeForge(root / "forge")
+    source = _github_source(args, root)
     try:
         harness = build(
             root,
@@ -176,6 +213,7 @@ def _run(args: argparse.Namespace) -> int:
             catalog=catalog,
             artifact_view=artifact_view,
             agent_timeout=args.agent_timeout,
+            sources=[source] if source else None,
             delay=args.delay,
             request_changes_once_at=args.request_changes_at,
         )
@@ -243,6 +281,18 @@ def main(argv: list[str] | None = None) -> int:
     run.add_argument("--poll", type=float, default=0.2)
     run.add_argument("--agent-timeout", type=float, default=600.0, dest="agent_timeout")
     run.add_argument("--request-changes-at", default=None, dest="request_changes_at")
+    run.add_argument(
+        "--github-repo",
+        default=None,
+        help="repo (owner/name) pro GitHub zdroj tasků; s GITHUB_TOKEN",
+    )
+    run.add_argument(
+        "--github-label",
+        default="harness:todo",
+        help="label, kterým se vybírají issue k ingesci",
+    )
+    run.add_argument("--github-workflow", default=DEFAULT_WORKFLOW)
+    run.add_argument("--worktree-root", default=None, help="kořen worktree tasků")
     run.add_argument(
         "--api-port",
         type=int,

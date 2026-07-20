@@ -47,6 +47,10 @@ GitHub je pořád jen driver (forge), který se vymění dál.
 15. **`task.repository` je jméno, ne cesta.** Cesty řeší `RepositoryRegistry` — machine-specific config (`repos.json`), mimo task. Worktree cestu odvodí harness (`<worktrees_root>/<task_id>`).
 16. **Artefakty žijí ve worktree pod `.artifacts/<id>/`, verzované.** Píše je agent, commituje worker. Číslování pokusů (`<step>-NN`) je gapless přes reset-on-reattach.
 17. **`AgentRunner`/`AgentCatalog`/`RepositoryRegistry` nezná dispatcher ani consumer.** Sahá na ně jen behavior / wiring. Hlídá `test_architecture.py`.
+18. **Vnější svět tasků je jeden port `TaskSource` (`poll`/`report_progress`/`finish`).** GitHub je driver; jak se stav renderuje (label), zná jen driver.
+19. **Původ tasku žije v `task.data.source`** (`{kind, repo, issue, url}`). Projekce ven ho čte odtud, ne z vedlejšího stavu. Router ani dispatcher `data.source` nečtou.
+20. **`TaskSource` sahá jen `SourcePoller` (jádro) a `SourceReflectorSink` (driver)**, drátované v `app.py`. `dispatcher.py`/`consumer.py` port neimportují — hlídá `test_architecture.py`.
+21. **Projekce ven je idempotentní a neblokuje rozhodování.** `report_progress` dvakrát je no-op; selhání zdroje izoluje `CompositeEventSink` (a `SourcePoller.tick` chytí výjimku z `poll()`).
 
 ## Práce tady
 
@@ -85,10 +89,10 @@ Závislosti tečou striktně dolů, cykly nejsou.
 | Základ | `models` (neimportuje nic z balíku), `ids` |
 | Logika | `router` (zná jen `models`) |
 | Základ (bez balíku) | `models`, `ids`, `artifacts_layout` (konvence `.artifacts/<id>/<step>-NN`) |
-| Porty | `ports/{queue,workflows,strategy,behavior,events,clock,workspace,artifacts,forge,board,agent,repos}` |
-| Orchestrace | `dispatcher`, `consumer` — znají jen porty (a ne `workspace`/`forge`/`artifacts`/`agent`/`repos`) |
+| Porty | `ports/{queue,workflows,strategy,behavior,events,clock,workspace,artifacts,forge,board,agent,repos,source}` |
+| Orchestrace | `dispatcher`, `consumer`, `source_poller` — znají jen porty (a ne `workspace`/`forge`/`artifacts`/`agent`/`repos`/`drivers`) |
 | Behaviory | `behaviors/{landing,agent}` — sahají na porty, ne na drivery |
-| Drivery | `drivers/{fs_queue,fs_workflows,fifo_strategy,dummy_behavior,stdout_events,system_clock,memory,fs_artifacts,git_workspace,fake_forge,claude_cli,fs_agents,fs_repos,worktree_artifacts}` |
+| Drivery | `drivers/{fs_queue,fs_workflows,fifo_strategy,dummy_behavior,stdout_events,system_clock,memory,fs_artifacts,git_workspace,fake_forge,claude_cli,fs_agents,fs_repos,worktree_artifacts,source_reflector,github_client,github_source}` |
 | Okraje | `app` (wiring), `cli` |
 
 - `projection.py` — in-memory read model boardu; hydratace z front + proud eventů
@@ -100,6 +104,11 @@ Závislosti tečou striktně dolů, cykly nejsou.
 - `ports/agent.py` — `AgentRunner.run(...)`, `AgentCatalog.get(name)`, `AgentSpec` (persona jako data)
 - `ports/repos.py` — `RepositoryRegistry.resolve(name) -> Path` (jméno repa → cesta)
 - `behaviors/agent.py` — `ClaudeCliBehavior`: attach worktree → alokuj attempt → spusť agenta → worker commitne
+- `ports/source.py` — port `TaskSource` (`poll`/`report_progress`/`finish`) + `Progress`/`FinishResult`
+- `source_poller.py` — `SourcePoller`: jádro plnící inbox ze zdroje (zná jen porty)
+- `drivers/source_reflector.py` — `SourceReflectorSink(EventSink)`: proud eventů → projekce do zdroje
+- `drivers/github_client.py` — `GithubClient` (ABC), `Issue`, `FakeGithubClient`, `HttpGithubClient` (stdlib `urllib`)
+- `drivers/github_source.py` — `GithubTaskSource`: issue → task, stav → label
 - `api/` — FastAPI board; vidí jen `BoardView` a `ArtifactView`, nikdy driver ani `ArtifactStore`
 
 ## Co je za co zodpovědné
@@ -137,6 +146,15 @@ Závislosti tečou striktně dolů, cykly nejsou.
   instruuje verdikt blok + psaní artefaktu) a prázdný `repos.json`. `harness run`
   injektuje `ClaudeCliRunner`, `Filesystem{AgentCatalog,RepositoryRegistry}`,
   `GitWorkspace` a `WorktreeArtifactView`.
+- **`TaskSource`** (fáze 4) je vnější svět řízení práce za jedním portem se třemi
+  slovesy: `poll()` přinese nové tasky (druhý producent inboxu vedle `submit`),
+  `report_progress`/`finish` promítnou stav ven. GitHub adapter to dělá labely,
+  filesystem přesunem JSON — záměna driveru, ne okolí. Původ tasku cestuje s ním
+  v `task.data.source`; projekci ven routuje `SourceReflectorSink` podle `kind`,
+  cizí task (jiný `kind` / bez `source`) adapter tiše ignoruje, takže tasky z
+  `harness submit` projdou bez jediného volání ven. `poll()` claimuje přehozením
+  labelu (GitHubí dvojče atomického `rename` ve `fs_queue.claim()`) — ingesce
+  „nanejvýš jednou" bez vedlejšího ledgeru.
 
 ## Gotchas
 
