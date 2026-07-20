@@ -1,7 +1,5 @@
-from harness.drivers.worktree_artifacts import (
-    WorktreeArtifactView,
-    next_attempt,
-)
+from harness.artifacts_layout import next_attempt
+from harness.drivers.worktree_artifacts import WorktreeArtifactView
 from harness.ports.artifacts import ArtifactRef
 
 
