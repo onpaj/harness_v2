@@ -1,6 +1,89 @@
 # CHANGELOG
 
 
+## v0.2.0 (2026-07-20)
+
+### Bug Fixes
+
+- Httpgithubclient reports the confirmed PR head, not the requested one
+  ([`9f818cc`](https://github.com/onpaj/harness_v2/commit/9f818cc66f2e4aa6295d0bc06aee53b1e0acf2e8))
+
+find_pull_request and create_pull_request built PullRequestRef.head from the caller's argument
+  instead of the server's response, contradicting the docstring's claim that it reflects what the
+  API returned. Read item["head"]["label"] instead, falling back to the argument when the field is
+  absent or malformed.
+
+Also make add_label set Content-Type: application/json like the sibling create_pull_request, since
+  both POST a JSON body.
+
+- Push the task branch without force
+  ([`411e2c2`](https://github.com/onpaj/harness_v2/commit/411e2c247471d98e3c2f62eb5736c1928472f37c))
+
+reset-on-reattach only discards uncommitted working-tree state (reset --hard + clean -fd); it never
+  rewinds the task branch, so the branch only ever moves forward. A plain push is therefore correct
+  — --force-with-lease was masking the real invariant. A rejected push now means something else
+  touched the branch and must fail loudly, per the design intent of this series.
+
+### Documentation
+
+- Correct the plan's push justification (no force needed)
+  ([`8eb80f7`](https://github.com/onpaj/harness_v2/commit/8eb80f75c4441c743b50798bd81f7e5020017897))
+
+- Implementation plan for the GitHub forge
+  ([`383254f`](https://github.com/onpaj/harness_v2/commit/383254fff008773941043ca1d9dea745e9881cec))
+
+Five TDD tasks: WorkspaceHandle.push(), PR verbs on GithubClient, the GithubForge driver, landing
+  pushing before it proposes, and the --forge flag. Also corrects the spec's claim that `harness
+  doctor` exists on main — it ships with the unmerged issue #14 work.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+
+- Spec for the GitHub forge — landing opens a real pull request
+  ([`00247e1`](https://github.com/onpaj/harness_v2/commit/00247e1ab7000d8ff48027d3c4ddeb28d2e6af5f))
+
+land reported success while FakeForge only appended to prs.json and the task branch was never
+  pushed. Specs the GithubForge driver, the missing WorkspaceHandle.push(), and making a failed PR
+  loud instead of silent.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+
+### Features
+
+- --agent dummy runs the pipeline without claude
+  ([`2a013f1`](https://github.com/onpaj/harness_v2/commit/2a013f1120f727974192465ca66d3ad647c7e669))
+
+Every step shells out to `claude`, so an expired login fails every task and there is no way to test
+  the rest of the pipeline. `--agent dummy` leaves the catalog and runner unset, which makes build()
+  fall back to DummyBehavior for the step queues while worktree, commits, push and forge all stay
+  real.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+
+- Githubforge opens real pull requests, failing loudly
+  ([`d5c4cfc`](https://github.com/onpaj/harness_v2/commit/d5c4cfcce2af9af2f9d005da6156eaee7deebf01))
+
+- Land pushes the branch and opens a real GitHub pull request
+  ([`456a285`](https://github.com/onpaj/harness_v2/commit/456a2856e9e65903bd0a7fe23243629ca78acb2a))
+
+Completes the forge: `land` now calls WorkspaceHandle.push() before proposing, and `harness run`
+  defaults to --forge github, wiring GithubForge instead of the prs.json stub. `--forge fake` keeps
+  the old behaviour for offline runs.
+
+The git e2e and smoke fixtures gain a bare sibling remote: landing genuinely requires a pushable
+  origin now, and a repo without one must fail rather than quietly report a PR that does not exist.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+
+- Pull-request verbs on GithubClient (default branch, find, create)
+  ([`ce5282b`](https://github.com/onpaj/harness_v2/commit/ce5282b41052c418bbcb9aaf5e3d8f22f06d5b5e))
+
+- Workspacehandle.push() publishes the task branch to origin
+  ([`04bec01`](https://github.com/onpaj/harness_v2/commit/04bec01f5b6acdd9350a487f0b9d29d052fbfb8e))
+
+Also adds push() to the RealFsHandle test double in tests/test_agent_behavior.py so it keeps
+  satisfying the now-larger WorkspaceHandle ABC.
+
+
 ## v0.1.0 (2026-07-20)
 
 ### Bug Fixes
