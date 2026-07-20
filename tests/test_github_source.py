@@ -1,10 +1,33 @@
 """GithubTaskSource — issue → task, stav → label."""
 
+import pytest
+
 from harness.drivers.github_client import FakeGithubClient, Issue
-from harness.drivers.github_source import GithubTaskSource
+from harness.drivers.github_source import GithubTaskSource, slug_from_source
 from harness.drivers.memory import FakeClock
 from harness.models import Task
 from harness.ports.source import FinishResult, Progress
+
+
+@pytest.mark.parametrize(
+    "source, expected",
+    [
+        ("onpaj/harness_v2", "onpaj/harness_v2"),
+        ("https://github.com/onpaj/harness_v2", "onpaj/harness_v2"),
+        ("https://github.com/onpaj/harness_v2.git", "onpaj/harness_v2"),
+        ("https://github.com/onpaj/harness_v2/", "onpaj/harness_v2"),
+        ("git@github.com:onpaj/harness_v2.git", "onpaj/harness_v2"),
+        ("  onpaj/harness_v2  ", "onpaj/harness_v2"),
+    ],
+)
+def test_slug_from_source_normalizes_common_forms(source, expected):
+    assert slug_from_source(source) == expected
+
+
+@pytest.mark.parametrize("source", ["", "   ", "harness_v2", "https://github.com/"])
+def test_slug_from_source_rejects_non_slug(source):
+    with pytest.raises(ValueError):
+        slug_from_source(source)
 
 
 def build_source(client, **kwargs):

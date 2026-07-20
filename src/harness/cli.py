@@ -20,11 +20,12 @@ from harness.drivers.fs_repos import FilesystemRepositoryRegistry
 from harness.drivers.fs_workflows import invalid_workflow_name
 from harness.drivers.git_workspace import GitWorkspace
 from harness.drivers.github_client import HttpGithubClient
-from harness.drivers.github_source import GithubTaskSource
+from harness.drivers.github_source import GithubTaskSource, slug_from_source
 from harness.drivers.system_clock import SystemClock
 from harness.drivers.worktree_artifacts import WorktreeArtifactView
 from harness.ids import new_task_id
 from harness.models import Task
+from harness.ports.repos import RepositoryNotFound, RepositoryRegistry
 from harness.ports.source import TaskSource
 from harness.ports.workflows import WorkflowNotFound
 
@@ -164,15 +165,60 @@ def _submit(args: argparse.Namespace) -> int:
     return 0
 
 
-def _github_source(args: argparse.Namespace, root: Path) -> TaskSource | None:
-    """Zdroj z GitHub Issues, když je `--github-repo` a `GITHUB_TOKEN`. Jinak
-    None — harness běží jako dřív (jen `harness submit`)."""
-    if not args.github_repo:
+def _github_slug_and_repository(
+    args: argparse.Namespace, root: Path, registry: RepositoryRegistry
+) -> tuple[str, str] | None:
+    """Odvoď (GitHub slug `owner/name`, jméno repa pro task) z argumentů.
+
+    Preferuje `--repo <jméno>`: repo se dohledá v `repos.json` a jeho `source`
+    (GitHub URL nastavené uživatelem) se přeloží na slug; `task.repository` je
+    pak logické jméno, takže `GitWorkspace` z registru vytáhne lokální složku —
+    složka i zdroj jednoho repa drží pohromadě v definici. `--github-repo`
+    zůstává explicitním override slugu i cestou pro repo mimo registr."""
+    if args.repo:
+        try:
+            definition = registry.get(args.repo)
+        except RepositoryNotFound as error:
+            print(f"varování: {error}, GitHub zdroj vypnut", file=sys.stderr)
+            return None
+        slug = args.github_repo
+        if not slug:
+            if not definition.source:
+                print(
+                    f"varování: repo {args.repo!r} nemá 'source' (GitHub URL), "
+                    "zdroj vypnut",
+                    file=sys.stderr,
+                )
+                return None
+            try:
+                slug = slug_from_source(definition.source)
+            except ValueError as error:
+                print(f"varování: {error}, GitHub zdroj vypnut", file=sys.stderr)
+                return None
+        return slug, args.repo
+
+    if args.github_repo:
+        # Legacy: repo mimo registr — slug je přímo argument, task.repository
+        # ukazuje na klasickou složku `<root>/repo`.
+        return args.github_repo, str(root / "repo")
+
+    return None
+
+
+def _github_source(
+    args: argparse.Namespace, root: Path, registry: RepositoryRegistry
+) -> TaskSource | None:
+    """Zdroj z GitHub Issues, když je zadané repo (`--repo`/`--github-repo`) a
+    `GITHUB_TOKEN`. Jinak None — harness běží jako dřív (jen `harness submit`)."""
+    resolved = _github_slug_and_repository(args, root, registry)
+    if resolved is None:
         return None
+    slug, repository = resolved
+
     token = os.environ.get("GITHUB_TOKEN")
     if not token:
         print(
-            "varování: --github-repo bez GITHUB_TOKEN, zdroj vypnut",
+            "varování: GitHub zdroj bez GITHUB_TOKEN, zdroj vypnut",
             file=sys.stderr,
         )
         return None
@@ -180,9 +226,9 @@ def _github_source(args: argparse.Namespace, root: Path) -> TaskSource | None:
     return GithubTaskSource(
         client=HttpGithubClient(token),
         clock=SystemClock(),
-        repo=args.github_repo,
+        repo=slug,
         workflow=args.github_workflow,
-        repository=str(root / "repo"),
+        repository=repository,
         worktree_root=worktree_root,
         select_label=args.github_label,
         step_labels=DEFAULT_STEP_LABELS,
@@ -202,7 +248,7 @@ def _run(args: argparse.Namespace) -> int:
     workspace = GitWorkspace(registry, layout.worktrees)
     artifact_view = WorktreeArtifactView(layout.worktrees)
     forge = FakeForge(root / "forge")
-    source = _github_source(args, root)
+    source = _github_source(args, root, registry)
     try:
         harness = build(
             root,
@@ -282,9 +328,14 @@ def main(argv: list[str] | None = None) -> int:
     run.add_argument("--agent-timeout", type=float, default=600.0, dest="agent_timeout")
     run.add_argument("--request-changes-at", default=None, dest="request_changes_at")
     run.add_argument(
+        "--repo",
+        default=None,
+        help="jméno repa z repos.json; jeho 'source' (GitHub URL) zapne zdroj tasků",
+    )
+    run.add_argument(
         "--github-repo",
         default=None,
-        help="repo (owner/name) pro GitHub zdroj tasků; s GITHUB_TOKEN",
+        help="explicitní slug owner/name (override 'source' z repos.json)",
     )
     run.add_argument(
         "--github-label",

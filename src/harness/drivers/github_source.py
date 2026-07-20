@@ -14,6 +14,36 @@ from harness.ports.clock import Clock
 from harness.ports.source import FinishResult, Progress, TaskSource
 
 
+def slug_from_source(source: str) -> str:
+    """Vytáhni GitHub slug `owner/name` z hodnoty `RepositoryDefinition.source`.
+
+    Zdroj je neprůhledný řetězec — teprve tady, v GitHub driveru, ho čteme jako
+    GitHub. Přijme běžné tvary a všechny srovná na `owner/name`:
+
+    - `owner/name` (už slug) → beze změny,
+    - `https://github.com/owner/name` (i s `.git`, i s koncovým `/`),
+    - `git@github.com:owner/name.git` (SSH remote).
+
+    Jiný tvar (prázdno, jediný segment) → `ValueError` — ať se chyba configu
+    ozve nahlas při wiringu, ne němým 404 z API."""
+    value = source.strip()
+    if value.endswith(".git"):
+        value = value[: -len(".git")]
+    value = value.rstrip("/")
+
+    if value.startswith("git@"):  # git@github.com:owner/name
+        value = value.partition(":")[2]
+    elif "://" in value:  # https://github.com/owner/name → shoď schéma i host
+        value = value.split("://", 1)[1]
+
+    # `owner/name` z ocasu: u URL to odřízne host (`github.com`), u holého slugu
+    # vezme obě části.
+    parts = [segment for segment in value.split("/") if segment]
+    if len(parts) < 2:
+        raise ValueError(f"z {source!r} nejde odvodit GitHub slug 'owner/name'")
+    return "/".join(parts[-2:])
+
+
 class GithubTaskSource(TaskSource):
     kind = "github"
 

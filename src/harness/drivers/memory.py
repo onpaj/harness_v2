@@ -25,7 +25,11 @@ from harness.ports.clock import Clock
 from harness.ports.events import EventSink
 from harness.ports.forge import Forge, PullRequest
 from harness.ports.queue import TaskQueue
-from harness.ports.repos import RepositoryNotFound, RepositoryRegistry
+from harness.ports.repos import (
+    RepositoryDefinition,
+    RepositoryNotFound,
+    RepositoryRegistry,
+)
 from harness.ports.source import FinishResult, Progress, TaskSource
 from harness.ports.workflows import WorkflowNotFound, WorkflowRepository
 from harness.ports.workspace import Workspace, WorkspaceHandle
@@ -338,13 +342,29 @@ class FakeAgentRunner(AgentRunner):
 
 
 class MemoryRepositoryRegistry(RepositoryRegistry):
-    """Registr rep nad dictem jméno → cesta."""
+    """Registr rep nad dictem jméno → definice.
 
-    def __init__(self, repos: dict[str, Path]) -> None:
-        self._repos = repos
+    Hodnota smí být buď `RepositoryDefinition`, nebo zkráceně jen cesta
+    (`Path`/`str`) — ta se zabalí do definice bez zdroje, ať testy, kterým jde
+    jen o lokální složku, zůstanou stručné."""
 
-    def resolve(self, name: str) -> Path:
+    def __init__(
+        self, repos: dict[str, RepositoryDefinition | Path | str]
+    ) -> None:
+        self._repos = {
+            name: _as_definition(name, value) for name, value in repos.items()
+        }
+
+    def get(self, name: str) -> RepositoryDefinition:
         try:
             return self._repos[name]
         except KeyError:
             raise RepositoryNotFound(f"repo {name!r} není v registru") from None
+
+
+def _as_definition(
+    name: str, value: RepositoryDefinition | Path | str
+) -> RepositoryDefinition:
+    if isinstance(value, RepositoryDefinition):
+        return value
+    return RepositoryDefinition(name=name, path=Path(value))
