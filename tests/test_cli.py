@@ -422,10 +422,15 @@ def test_update_runs_uv_tool_upgrade(monkeypatch, capsys):
     monkeypatch.setattr(cli, "uv_executable", lambda: Path("/uv"))
     monkeypatch.setattr(cli.subprocess, "run", fake_run)
 
+    monkeypatch.setattr(cli, "installed_version_report", lambda: "harness 0.2.0 (git abc1234)")
+
     assert main(["update"]) == 0
     assert calls == [["/uv", "tool", "upgrade", "harness"]]
+    out = capsys.readouterr().out
     # A running service keeps the old code until it is bounced — say so.
-    assert "kickstart" in capsys.readouterr().out
+    assert "kickstart" in out
+    # ...and report the version we just installed, not the one being replaced.
+    assert "harness 0.2.0 (git abc1234)" in out
 
 
 def test_update_reports_a_failed_upgrade(monkeypatch, capsys):
@@ -491,3 +496,47 @@ def test_version_string_survives_a_missing_direct_url(monkeypatch):
     monkeypatch.setattr(cli.metadata, "distribution", lambda name: Dist())
 
     assert cli.version_string() == "0.1.0"
+
+
+def test_installed_version_report_asks_the_new_script(tmp_path, monkeypatch):
+    """After an upgrade this process is the OLD code, so reading our own
+    metadata would report the version we just replaced."""
+    from harness import cli
+
+    script = tmp_path / "harness"
+    script.write_text("#!/bin/sh\n", encoding="utf-8")
+    monkeypatch.setattr(cli, "service_entry_point", lambda: script)
+
+    class Result:
+        returncode = 0
+        stdout = "harness 0.3.0 (git deadbee)\n"
+        stderr = ""
+
+    seen = {}
+
+    def fake_run(cmd, **kwargs):
+        seen["cmd"] = cmd
+        return Result()
+
+    monkeypatch.setattr(cli.subprocess, "run", fake_run)
+
+    assert cli.installed_version_report() == "harness 0.3.0 (git deadbee)"
+    assert seen["cmd"] == [str(script), "--version"]
+
+
+def test_installed_version_report_degrades_when_the_script_fails(tmp_path, monkeypatch):
+    from harness import cli
+
+    script = tmp_path / "harness"
+    script.write_text("#!/bin/sh\n", encoding="utf-8")
+    monkeypatch.setattr(cli, "service_entry_point", lambda: script)
+
+    class Result:
+        returncode = 1
+        stdout = ""
+        stderr = "boom"
+
+    monkeypatch.setattr(cli.subprocess, "run", lambda cmd, **kw: Result())
+
+    # The upgrade itself succeeded; only the report failed. Don't imply otherwise.
+    assert "installed" in cli.installed_version_report()

@@ -467,6 +467,24 @@ def uv_executable() -> Path | None:
     return candidate if candidate.exists() else None
 
 
+def installed_version_report() -> str:
+    """Ask the installed `harness` script what it is now.
+
+    Called right after an upgrade, from the process the upgrade replaced — so
+    it must shell out rather than read its own already-stale metadata.
+    """
+    entry = service_entry_point()
+    if not entry.is_file():
+        return "harness (installed; run `harness --version` to confirm)"
+    result = subprocess.run(
+        [str(entry), "--version"], capture_output=True, text=True, check=False
+    )
+    reported = result.stdout.strip()
+    if result.returncode != 0 or not reported:
+        return "harness (installed; run `harness --version` to confirm)"
+    return reported
+
+
 def _update(args: argparse.Namespace) -> int:
     """Upgrade the installed harness in place via `uv tool upgrade`."""
     uv = uv_executable()
@@ -490,9 +508,9 @@ def _update(args: argparse.Namespace) -> int:
         print(f"error: uv tool upgrade failed (exit {result.returncode})", file=sys.stderr)
         return 1
 
-    # uv replaces the tool environment; a running service still holds the old
-    # code until it is restarted.
-    print(f"\nnow: harness {version_string()}")
+    # This process is still the *old* code, so version_string() here would
+    # report the version we just replaced. Ask the freshly installed script.
+    print(f"\nnow: {installed_version_report()}")
     print(
         "the running service still has the previous version — restart it with\n"
         "  launchctl kickstart -k gui/$(id -u)/com.harness"

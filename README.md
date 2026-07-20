@@ -66,9 +66,30 @@ on your default branch.
 harness update
 ```
 
-Runs `uv tool upgrade harness` and reports the new version. A running service
-keeps the old code until you restart it — `harness update` prints the exact
-command.
+Runs `uv tool upgrade harness` and reports the version it installed. A running
+service keeps the old code until you restart it — `harness update` prints the
+exact command.
+
+Versions are cut automatically: every push to `main` runs the test suite, and
+[python-semantic-release](https://python-semantic-release.readthedocs.io/)
+derives the next version from the [conventional
+commits](https://www.conventionalcommits.org/) since the last tag (`feat:` →
+minor, `fix:`/`perf:` → patch, `BREAKING CHANGE:` → major), tags it and cuts a
+GitHub release. `harness --version` reports both the version and the exact
+commit it was built from.
+
+To pin instead of tracking `main`:
+
+```sh
+uv tool install git+https://github.com/onpaj/harness_v2.git@v0.2.0
+```
+
+### Contributing
+
+Commit messages must follow conventional commits — the release workflow reads
+them to decide the next version. `feat:` and `fix:` are what move it; `docs:`,
+`chore:`, `test:`, `refactor:` and `ci:` appear in the notes without cutting a
+release on their own.
 
 ## Running it as a service
 

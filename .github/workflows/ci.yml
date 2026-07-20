@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_call: # so release.yml can gate on exactly this job
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.11
+
+      - name: Install the package with dev extras
+        run: uv venv && uv pip install -e ".[dev]"
+
+      # The suite is in-memory apart from the git/FS smokes, which need a real
+      # git identity — CI runners have none configured.
+      - name: Configure git for the smoke tests
+        run: |
+          git config --global user.name "ci"
+          git config --global user.email "ci@local"
+          git config --global init.defaultBranch main
+
+      - name: Run tests
+        run: uv run pytest -q
+
+      - name: Check the package builds and ships its data files
+        run: |
+          uv build
+          uv run python - <<'PY'
+          import pathlib, zipfile
+          wheel = sorted(pathlib.Path("dist").glob("*.whl"))[-1]
+          names = zipfile.ZipFile(wheel).namelist()
+          # The board is served from these; a wheel without them installs fine
+          # and then 500s at runtime. This has bitten us before.
+          need = ["harness/api/templates/board.html", "harness/api/static/htmx.min.js"]
+          missing = [n for n in need if n not in names]
+          raise SystemExit(f"wheel is missing {missing}" if missing else 0)
+          PY

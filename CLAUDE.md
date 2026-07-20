@@ -92,6 +92,14 @@ It covers the thin subprocess shell of `ClaudeCliRunner` that the fake runners b
 **Commit straight into `main`.** In this phase that's the intended approach — don't
 create a branch, don't open a PR, and don't ask. This applies to the harness's own repo.
 
+**Commit messages are conventional commits — this is now load-bearing.**
+`.github/workflows/release.yml` runs python-semantic-release on every push to
+`main`: `feat:` bumps the minor, `fix:`/`perf:` the patch, `BREAKING CHANGE:` the
+major, and everything else (`docs:`, `chore:`, `test:`, `refactor:`, `ci:`) only
+shows up in the notes. A sloppy subject line silently means no release. The
+release job pushes back a `chore(release): X.Y.Z` commit carrying `[skip ci]`;
+that commit has no feat/fix, so it cannot trigger a release of its own.
+
 ## Module map
 
 Dependencies flow strictly downward, no cycles.
