@@ -67,8 +67,11 @@ swapped out later.
 .venv/bin/pytest -q
 ```
 
-Python is **3.11** (`/Users/rem/.local/bin/python3.11`), the machine **has no `uv`** —
-plain `venv` + `pip install -e ".[dev]"`. The runtime has no production dependencies.
+Python is **3.11** (`/Users/rem/.local/bin/python3.11`, a uv-managed CPython).
+Development is a clone + `venv` + `pip install -e ".[dev]"`; **shipping** is
+`uv tool install git+https://github.com/onpaj/harness_v2.git`, updated with
+`harness update` (a thin wrapper over `uv tool upgrade harness`). `install.sh`
+was retired in favour of that — don't reintroduce a second install path.
 
 Unit and integration tests run on in-memory drivers and `FakeClock` — no disk
 and no real waiting. Never write a test into them that sleeps in real time.
@@ -198,6 +201,15 @@ Dependencies flow strictly downward, no cycles.
   start-up — an explicit variable first, else `gh auth token` from the keyring. The
   plist itself never contains a token; a test asserts that. No token is not fatal:
   GitHub ingestion goes quiet and `harness submit` still works.
+- **The LaunchAgent points at uv's shim** (`~/.local/bin/harness`), not at a
+  virtualenv. `uv tool upgrade` rebuilds the tool environment but keeps the shim
+  path, so an update never invalidates an installed service — it just needs a
+  restart to be picked up. `service_entry_point()` falls back to
+  `sys.prefix/bin/harness` for a from-source venv.
+- **`sys.executable` is useless for locating the entry point.** Resolving it
+  follows the venv's python symlink out to the base interpreter — with a
+  uv-managed CPython that is `~/.local/share/uv/python/...`, where no `harness`
+  script exists. Use `sys.prefix`.
 - **The service `PATH` is explicit.** launchd's default `PATH` has no `git`, `gh` or
   `claude`, so the wrapper exports one built by `cli.service_path_entries` (venv bin
   first, then `~/.npm-global/bin`, `~/.local/bin`, `/usr/local/bin`, …). A "claude not

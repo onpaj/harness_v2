@@ -320,15 +320,124 @@ def test_service_path_entries_lead_with_the_venv_bin():
     assert "/usr/bin" in entries
 
 
-def test_service_entry_point_lives_in_this_environment():
+def test_service_entry_point_is_a_real_script():
     """Regression: resolving sys.executable follows the venv symlink out to the
-    base interpreter (uv-managed CPython), where no `harness` script exists."""
-    import sys
-
+    base interpreter (uv-managed CPython), where no `harness` script exists —
+    the service then failed to install. Whichever candidate wins (uv shim or
+    this environment's own script), it must be a file that exists."""
     from harness.cli import service_entry_point
 
     entry = service_entry_point()
 
-    assert entry == Path(sys.prefix) / "bin" / "harness"
-    assert str(entry).startswith(sys.prefix)
-    assert entry.is_file(), "the running environment must have the harness script"
+    assert entry.is_file(), f"{entry} is not an executable script"
+    assert "share/uv/python" not in str(entry), (
+        "pointed at the managed interpreter, not at a harness script"
+    )
+
+
+# --- uv install / update ---------------------------------------------------
+
+
+def test_version_flag_reports_the_package_version(capsys):
+    import pytest
+
+    from harness.cli import version_string
+
+    with pytest.raises(SystemExit) as exit_info:
+        main(["--version"])
+
+    assert exit_info.value.code == 0
+    assert version_string() in capsys.readouterr().out
+
+
+def test_service_entry_point_prefers_the_uv_shim(tmp_path, monkeypatch):
+    """`uv tool upgrade` rebuilds the tool env, but keeps the shim path stable,
+    so an installed LaunchAgent must point at the shim, not the tool venv."""
+    from harness import cli
+
+    home = tmp_path / "home"
+    (home / ".local" / "bin").mkdir(parents=True)
+    shim = home / ".local" / "bin" / "harness"
+    shim.write_text("#!/bin/sh\n", encoding="utf-8")
+    monkeypatch.setattr(cli.Path, "home", staticmethod(lambda: home))
+
+    assert cli.service_entry_point() == shim
+
+
+def test_service_entry_point_falls_back_to_this_environment(tmp_path, monkeypatch):
+    import sys
+
+    from harness import cli
+
+    monkeypatch.setattr(cli.Path, "home", staticmethod(lambda: tmp_path / "empty"))
+
+    assert cli.service_entry_point() == Path(sys.prefix) / "bin" / "harness"
+
+
+def test_uv_executable_falls_back_to_the_standard_location(tmp_path, monkeypatch):
+    from harness import cli
+
+    home = tmp_path / "home"
+    (home / ".local" / "bin").mkdir(parents=True)
+    uv = home / ".local" / "bin" / "uv"
+    uv.write_text("#!/bin/sh\n", encoding="utf-8")
+    monkeypatch.setattr(cli.shutil, "which", lambda name: None)
+    monkeypatch.setattr(cli.Path, "home", staticmethod(lambda: home))
+
+    assert cli.uv_executable() == uv
+
+
+def test_uv_executable_is_none_when_uv_is_absent(tmp_path, monkeypatch):
+    from harness import cli
+
+    monkeypatch.setattr(cli.shutil, "which", lambda name: None)
+    monkeypatch.setattr(cli.Path, "home", staticmethod(lambda: tmp_path / "empty"))
+
+    assert cli.uv_executable() is None
+
+
+def test_update_without_uv_explains_how_to_get_it(tmp_path, monkeypatch, capsys):
+    from harness import cli
+
+    monkeypatch.setattr(cli, "uv_executable", lambda: None)
+
+    assert main(["update"]) == 2
+    assert "astral.sh/uv/install.sh" in capsys.readouterr().err
+
+
+def test_update_runs_uv_tool_upgrade(monkeypatch, capsys):
+    from harness import cli
+
+    calls = []
+
+    class Result:
+        returncode = 0
+        stdout = "Updated harness\n"
+        stderr = ""
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        return Result()
+
+    monkeypatch.setattr(cli, "uv_executable", lambda: Path("/uv"))
+    monkeypatch.setattr(cli.subprocess, "run", fake_run)
+
+    assert main(["update"]) == 0
+    assert calls == [["/uv", "tool", "upgrade", "harness"]]
+    # A running service keeps the old code until it is bounced — say so.
+    assert "kickstart" in capsys.readouterr().out
+
+
+def test_update_reports_a_failed_upgrade(monkeypatch, capsys):
+    from harness import cli
+
+    class Result:
+        returncode = 2
+        stdout = ""
+        stderr = "no such tool\n"
+
+    monkeypatch.setattr(cli, "uv_executable", lambda: Path("/uv"))
+    monkeypatch.setattr(cli.subprocess, "run", lambda cmd, **kw: Result())
+
+    assert main(["update"]) == 1
+    assert "uv tool upgrade failed" in capsys.readouterr().err

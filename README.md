@@ -10,29 +10,73 @@ persistent storage, and git arrive in later phases.
 
 ## Installation
 
-The quickest way from a fresh clone to a runnable harness is the installer. It
-checks prerequisites (Python 3.11+, git; it warns if the `claude` CLI is
-missing, which real runs need), creates a virtualenv, installs the package with
-its dev extras, runs `harness init`, and walks you through populating
-`repos.json`:
+The harness installs as a [uv](https://docs.astral.sh/uv/) tool — no clone, no
+virtualenv to manage:
 
 ```sh
-./install.sh
+uv tool install git+https://github.com/onpaj/harness_v2.git
 ```
 
-It is safe to re-run: an existing venv is reused, `harness init` never
-overwrites existing files, and the `repos.json` step only adds entries. Useful
-flags: `--root DIR` (harness home, mirrors `harness --root`; default
-`$HARNESS_HOME` or `~/.harness`), `--workflow NAME`, and `--yes` for a
-non-interactive run that skips the `repos.json` wizard. See `./install.sh --help`.
-
-### Running it as a service
-
-`harness run` in a terminal dies with the terminal. To keep the loop supervised
-and bring it back at login, add `--service` (macOS launchd):
+That puts a `harness` command on your `PATH` (uv's shim in `~/.local/bin`).
+Verify it:
 
 ```sh
-./install.sh --service --root ~/harness-root
+harness --version
+```
+
+If you don't have uv yet:
+
+```sh
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
+### Prerequisites
+
+- Python 3.11+ (uv will fetch one if you have none)
+- `git` >= 2.38, for worktree support
+- the [`claude` CLI](https://claude.ai/code), installed and **authenticated** —
+  every agent step shells out to it, so an expired login fails every task
+- a GitHub token with `repo` scope, if you want issues ingested; `gh auth login`
+  is enough (see [Running it as a service](#running-it-as-a-service))
+
+### First run
+
+```sh
+harness init --root ~/harness-root
+```
+
+That writes the workflow, the default agent personas, and an empty `repos.json`.
+Map each repo name to its path on this machine before running anything real:
+
+```jsonc
+// ~/harness-root/repos.json
+{
+  "my-app": "/Users/you/code/my-app"
+}
+```
+
+The name is what `harness submit --repo <name>` takes; the harness derives the
+per-task worktree path itself. Note that a task branches from whatever the
+registered clone currently has checked out, so point it at a clone that stays
+on your default branch.
+
+### Updating
+
+```sh
+harness update
+```
+
+Runs `uv tool upgrade harness` and reports the new version. A running service
+keeps the old code until you restart it — `harness update` prints the exact
+command.
+
+## Running it as a service
+
+`harness run` in a terminal dies with the terminal. To keep the loop supervised
+and bring it back at login (macOS launchd):
+
+```sh
+harness service install --root ~/harness-root
 ```
 
 That generates a wrapper and a LaunchAgent, then starts it. Afterwards:
@@ -48,14 +92,22 @@ asks `gh auth token` for the one in your keyring — so `gh auth login` is the
 only setup. Without a token the harness still runs; it just stops pulling
 issues, and `harness submit` keeps working.
 
+The LaunchAgent points at uv's shim rather than at a virtualenv, so
+`harness update` does not invalidate it; restart the service to pick the new
+version up.
+
 Logs land in `<root>/logs/harness.log` and `<root>/logs/harness.error.log`.
 
-Prefer to do it by hand? The installer is a thin wrapper over:
+## Developing
+
+Working on the harness itself needs a clone and an editable install:
 
 ```sh
+git clone https://github.com/onpaj/harness_v2.git
+cd harness_v2
 python3.11 -m venv .venv
 .venv/bin/pip install -e ".[dev]"
-.venv/bin/harness init
+.venv/bin/pytest -q
 ```
 
 ## Quick start

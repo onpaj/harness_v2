@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import importlib.metadata as metadata
 import json
 import os
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -39,6 +42,8 @@ from harness.models import Task
 from harness.ports.repos import RepositoryRegistry
 from harness.ports.source import TaskSource
 from harness.ports.workflows import WorkflowNotFound
+
+PACKAGE_NAME = "harness"
 
 DEFAULT_WORKFLOW = "default"
 
@@ -393,16 +398,83 @@ def service_path_entries(harness: Path) -> list[str]:
     ]
 
 
-def service_entry_point() -> Path:
-    """Absolute path to the `harness` script of the environment we are running in.
+def version_string() -> str:
+    """The installed package version, or a marker when running from a checkout."""
+    try:
+        return metadata.version(PACKAGE_NAME)
+    except metadata.PackageNotFoundError:  # running from source without an install
+        return "unknown (not installed)"
 
-    `sys.prefix` is the venv root; `sys.executable` is not usable here because
+
+def uv_shim() -> Path:
+    """Where `uv tool install` puts the stable `harness` shim."""
+    return Path.home() / ".local" / "bin" / "harness"
+
+
+def service_entry_point() -> Path:
+    """Absolute path to the `harness` the service should exec.
+
+    Prefers uv's shim: `uv tool upgrade` rebuilds the tool environment, but the
+    shim path is the contract uv keeps stable, so an upgrade never invalidates
+    an installed LaunchAgent. Falls back to this environment's own script for a
+    from-source venv.
+
+    `sys.prefix` is the venv root. `sys.executable` is not usable here because
     resolving it follows the venv's python symlink out to the base interpreter
-    (with uv-managed CPython that lands in `~/.local/share/uv/...`, where no
-    `harness` script exists). `sys.argv[0]` is no good either — it is whatever
-    the caller typed, or `pytest`.
+    (with uv-managed CPython that lands in `~/.local/share/uv/python/...`, where
+    no `harness` script exists). `sys.argv[0]` is no good either — it is
+    whatever the caller typed, or `pytest`.
     """
+    shim = uv_shim()
+    if shim.exists():
+        return shim
     return Path(sys.prefix) / "bin" / "harness"
+
+
+def uv_executable() -> Path | None:
+    """The `uv` binary, or None when it is not installed.
+
+    Checked explicitly rather than relying on `PATH`: `harness update` may be
+    invoked from the service context, whose `PATH` we build ourselves.
+    """
+    found = shutil.which("uv")
+    if found:
+        return Path(found)
+    candidate = Path.home() / ".local" / "bin" / "uv"
+    return candidate if candidate.exists() else None
+
+
+def _update(args: argparse.Namespace) -> int:
+    """Upgrade the installed harness in place via `uv tool upgrade`."""
+    uv = uv_executable()
+    if uv is None:
+        print(
+            "error: uv is not installed — install it with\n"
+            "  curl -LsSf https://astral.sh/uv/install.sh | sh",
+            file=sys.stderr,
+        )
+        return 2
+
+    result = subprocess.run(
+        [str(uv), "tool", "upgrade", PACKAGE_NAME],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    sys.stdout.write(result.stdout)
+    sys.stderr.write(result.stderr)
+    if result.returncode != 0:
+        print(f"error: uv tool upgrade failed (exit {result.returncode})", file=sys.stderr)
+        return 1
+
+    # uv replaces the tool environment; a running service still holds the old
+    # code until it is restarted.
+    print(f"\nnow: harness {version_string()}")
+    print(
+        "the running service still has the previous version — restart it with\n"
+        "  launchctl kickstart -k gui/$(id -u)/com.harness"
+    )
+    return 0
 
 
 def _require_macos() -> str | None:
@@ -592,6 +664,11 @@ async def serve(
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="harness")
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"harness {version_string()}",
+    )
     # --root and --workflow are declared only on the subcommands (see below). A
     # declaration on the top-level parser would be dead: argparse's
     # _SubParsersAction overwrites the parent's namespace with the subcommand's
@@ -670,6 +747,11 @@ def main(argv: list[str] | None = None) -> int:
     service_status.add_argument("--root", default=None)
     service_status.add_argument("--label", default=DEFAULT_LABEL)
     service_status.set_defaults(handler=_service_status)
+
+    update = subparsers.add_parser(
+        "update", help="upgrade the installed harness via uv"
+    )
+    update.set_defaults(handler=_update)
 
     args = parser.parse_args(argv)
     return args.handler(args)
