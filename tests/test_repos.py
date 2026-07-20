@@ -60,3 +60,33 @@ def test_fs_malformed_json_raises(tmp_path):
 
     with pytest.raises(RepositoryNotFound):
         registry.resolve("harness_v2")
+
+
+def test_memory_names_lists_keys():
+    registry = MemoryRepositoryRegistry(
+        {"harness_v2": Path("/repos/harness_v2"), "heblo": Path("/repos/heblo")}
+    )
+
+    assert sorted(registry.names()) == ["harness_v2", "heblo"]
+
+
+def test_fs_names_lists_keys(tmp_path):
+    config = tmp_path / "repos.json"
+    config.write_text(json.dumps({"harness_v2": "/a", "heblo": "/b"}))
+    registry = FilesystemRepositoryRegistry(config)
+
+    assert sorted(registry.names()) == ["harness_v2", "heblo"]
+
+
+def test_fs_names_missing_config_is_empty(tmp_path):
+    registry = FilesystemRepositoryRegistry(tmp_path / "missing.json")
+
+    assert registry.names() == []
+
+
+def test_fs_names_broken_json_is_empty(tmp_path):
+    config = tmp_path / "repos.json"
+    config.write_text("{not json")
+    registry = FilesystemRepositoryRegistry(config)
+
+    assert registry.names() == []

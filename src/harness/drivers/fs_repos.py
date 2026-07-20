@@ -38,3 +38,12 @@ class FilesystemRepositoryRegistry(RepositoryRegistry):
             ) from None
 
         return Path(path).expanduser()
+
+    def names(self) -> list[str]:
+        try:
+            raw = json.loads(self._config.read_text(encoding="utf-8"))
+        except (FileNotFoundError, json.JSONDecodeError):
+            return []
+        if not isinstance(raw, dict):
+            return []
+        return list(raw)
