@@ -35,7 +35,9 @@ from harness.ports.queue import TaskQueue
 from harness.ports.source import TaskSource
 from harness.ports.workspace import Workspace
 from harness.projection import BoardProjection
+from harness.ports.control import TaskControl
 from harness.source_poller import SourcePoller
+from harness.task_control import TaskControlService
 
 LANDING_STEP = "land"
 """The step to which the wiring assigns LandingBehavior instead of DummyBehavior."""
@@ -92,6 +94,7 @@ class Harness:
         failed: TaskQueue,
         projection: BoardProjection,
         artifacts: ArtifactView,
+        control: TaskControl,
         events: EventSink,
         clock: Clock,
         pollers: list[SourcePoller] | None = None,
@@ -103,6 +106,7 @@ class Harness:
         self.pollers = pollers or []
         self.projection = projection
         self.artifacts = artifacts
+        self.control = control
         self._inbox = inbox
         self._step_queues = step_queues
         self._done = done
@@ -282,6 +286,10 @@ def build(
         SourcePoller(source=source, inbox=inbox, events=events) for source in sources
     ]
 
+    control = TaskControlService(
+        inbox=inbox, failed=failed, events=events, clock=clock
+    )
+
     return Harness(
         layout=layout,
         workflow=workflow,
@@ -293,6 +301,7 @@ def build(
         failed=failed,
         projection=projection,
         artifacts=view,
+        control=control,
         events=events,
         clock=clock,
         pollers=pollers,

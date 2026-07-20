@@ -7,6 +7,7 @@ GitHub-blind — the poller knows only ports (`TaskSource`, `TaskQueue`,
 
 from __future__ import annotations
 
+from harness.ports.board import TODO_COLUMN
 from harness.ports.events import EventSink
 from harness.ports.queue import TaskQueue
 from harness.ports.source import TaskSource
@@ -37,7 +38,10 @@ class SourcePoller:
 
         for task in tasks:
             self._inbox.put(task)
+            # A freshly ingested task is unstarted (status=None): on the board it
+            # belongs in `todo`, not the physical inbox queue name (`tasks`),
+            # which is not a column.
             self._events.emit(
-                "ingested", task_id=task.id, queue="tasks", task=task.to_dict()
+                "ingested", task_id=task.id, queue=TODO_COLUMN, task=task.to_dict()
             )
         return bool(tasks)

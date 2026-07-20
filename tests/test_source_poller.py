@@ -35,7 +35,7 @@ def test_tick_moves_submitted_task_into_inbox_and_emits_ingested():
     ingested = [(name, fields) for name, fields in events.events if name == "ingested"]
     assert len(ingested) == 1
     _, fields = ingested[0]
-    assert fields["queue"] == "tasks"
+    assert fields["queue"] == "todo"
     assert fields["task"]["id"] == tasks[0].id
 
 
