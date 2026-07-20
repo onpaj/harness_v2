@@ -14,9 +14,9 @@ PY="$(command -v python3.11 || echo "$HOME/.local/bin/python3.11")"
 .venv/bin/python -m pip install --quiet --upgrade pip
 .venv/bin/python -m pip install --quiet -e ".[dev]"
 .venv/bin/harness init --root "$CONDUCTOR_WORKSPACE_PATH/.harness"
-# repos.json je machine-specific (jméno repa → cesta ke klonu). `harness init`
-# ho založí prázdný jen když chybí; tady ho vždy naplníme oběma repy, se
-# kterými harness na tomhle stroji pracuje. Klony leží pod ~/Work/GitHub.
+# repos.json is machine-specific (repo name → path to the clone). `harness init`
+# creates it empty only when missing; here we always fill it with both repos the
+# harness works with on this machine. The clones live under ~/Work/GitHub.
 GH="$HOME/Work/GitHub"
 cat > "$CONDUCTOR_WORKSPACE_PATH/.harness/repos.json" <<EOF
 {
@@ -29,17 +29,14 @@ EOF
 # Each workspace has its own root → the loops don't interfere with each other.
 run_mode = "concurrent"
 
-# Runs the orchestration loop. It runs forward and polls the queue until
-# Conductor stops it (SIGHUP → the loop exits cleanly). The root must have been
-# initialized by the setup script above.
-#
-# GitHub source: `--github-repo onpaj/Anela.Heblo` turns on ingestion of issues
-# labeled `harness:todo`. The token is taken at runtime from `gh` (no secret in
-# the file); the source disables itself when `GITHUB_TOKEN` is missing. `--poll 5`
-# keeps the poll interval low — GitHub's `list_issues` reads with lag, so there's
-# no point hammering it every 0.2 s (in-process dedup in the source also guards
-# against a double claim).
+# GitHub source: with GITHUB_TOKEN present, the harness scans EVERY repo in
+# repos.json (currently harness_v2 and heblo) for issues labeled `harness:todo`.
+# Each repo's owner/name slug is derived from its clone's git origin. The token
+# is taken at runtime from `gh` (no secret in the file); without it the harness
+# runs on `harness submit` alone. GitHub is polled on its own interval
+# (`--source-poll`, default 30 s) so it doesn't hit API rate limits, while the
+# internal loop stays fast for a responsive board.
 [scripts.run.loop]
-command = 'GITHUB_TOKEN="$(gh auth token)" .venv/bin/harness run --root "$CONDUCTOR_WORKSPACE_PATH/.harness" --github-repo onpaj/Anela.Heblo --poll 5'
+command = 'GITHUB_TOKEN="$(gh auth token)" .venv/bin/harness run --root "$CONDUCTOR_WORKSPACE_PATH/.harness"'
 default = true
 icon = "play"

@@ -19,3 +19,8 @@ class RepositoryRegistry(ABC):
     @abstractmethod
     def resolve(self, name: str) -> Path:
         """Return the repo root for the name. Unknown name → RepositoryNotFound."""
+
+    @abstractmethod
+    def names(self) -> list[str]:
+        """All repo names in the registry. A missing/unreadable registry yields
+        an empty list — enumeration is lenient where `resolve` is strict."""

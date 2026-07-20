@@ -363,3 +363,6 @@ class MemoryRepositoryRegistry(RepositoryRegistry):
             return self._repos[name]
         except KeyError:
             raise RepositoryNotFound(f"repo {name!r} is not in the registry") from None
+
+    def names(self) -> list[str]:
+        return list(self._repos)

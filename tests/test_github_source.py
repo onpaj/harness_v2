@@ -147,3 +147,28 @@ def test_task_without_source_is_noop():
     source.finish(foreign, FinishResult(ok=True))
 
     assert _labels(client, 1) == {"harness:todo"}
+
+
+def test_task_from_another_repo_is_not_mine():
+    client = FakeGithubClient([Issue(1, "Fix", "", "u1", ("harness:todo",))])
+    source = build_source(client)  # repo="o/r"
+    foreign = Task(
+        id="tsk_x",
+        workflow_template="default",
+        created="2026-07-19T10:00:00Z",
+        repository="/repos/other",
+        worktree="/wt/tsk_x",
+        data={
+            "source": {
+                "kind": "github",
+                "repo": "o/other",  # a DIFFERENT github repo
+                "issue": 1,
+                "url": "u",
+            }
+        },
+    )
+
+    source.report_progress(foreign, Progress(step="development"))
+    source.finish(foreign, FinishResult(ok=True))
+
+    assert _labels(client, 1) == {"harness:todo"}  # untouched — not this source's repo
