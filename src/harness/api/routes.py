@@ -17,6 +17,20 @@ from harness.ports.clock import Clock
 TEMPLATES = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 
 
+def _basename(value: str | None) -> str:
+    """Poslední segment cesty. Jméno bez lomítka projde beze změny.
+
+    `repository` má být jméno (invariant 15), `worktree` je cesta
+    `<root>/<task_id>` — obojí se v UI ukazuje jako holé jméno, ne cesta.
+    """
+    if not value:
+        return ""
+    return value.rstrip("/").rsplit("/", 1)[-1]
+
+
+TEMPLATES.env.filters["basename"] = _basename
+
+
 async def board_event_stream(
     view: BoardView, clock: Clock, coalesce_seconds: float
 ) -> AsyncIterator[str]:
