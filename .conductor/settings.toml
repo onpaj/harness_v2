@@ -13,6 +13,16 @@ PY="$(command -v python3.11 || echo "$HOME/.local/bin/python3.11")"
 .venv/bin/python -m pip install --quiet --upgrade pip
 .venv/bin/python -m pip install --quiet -e ".[dev]"
 .venv/bin/harness init --root "$CONDUCTOR_WORKSPACE_PATH/.harness"
+# repos.json je machine-specific (jméno repa → cesta ke klonu). `harness init`
+# ho založí prázdný jen když chybí; tady ho vždy naplníme oběma repy, se
+# kterými harness na tomhle stroji pracuje. Klony leží pod ~/Work/GitHub.
+GH="$HOME/Work/GitHub"
+cat > "$CONDUCTOR_WORKSPACE_PATH/.harness/repos.json" <<EOF
+{
+  "harness_v2": "$GH/harness_v2",
+  "heblo": "$GH/Anela.Heblo"
+}
+EOF
 """
 
 # Každý workspace má vlastní root → smyčky se navzájem neruší.
