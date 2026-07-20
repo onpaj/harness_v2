@@ -1,6 +1,27 @@
 # CHANGELOG
 
 
+## v0.2.2 (2026-07-20)
+
+### Bug Fixes
+
+- Dummy writes where the agent does, and forge reports GitHub's reason
+  ([`0c8027b`](https://github.com/onpaj/harness_v2/commit/0c8027b58155dd01d68e502e4e838d424e8036ea))
+
+A live end-to-end run failed at land with a bare "HTTP Error 422: Unprocessable Entity". Two
+  separate faults behind it:
+
+- DummyBehavior wrote its work into `.harness/`, which repos routinely gitignore (this one does).
+  Ignored writes stage nothing, so commit() returned None, the task branch carried no diff, and
+  GitHub correctly refused a PR with no commits. It now writes into `.artifacts/<task>/`, the
+  versioned location the real agent uses (invariant 16) — so --agent dummy can actually exercise
+  landing. - urllib's HTTPError stringifies to just the status line. GitHub puts the real reason in
+  the response body ("No commits between main and ..."); the forge now surfaces it, along with the
+  head -> base it attempted.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+
+
 ## v0.2.1 (2026-07-20)
 
 ### Bug Fixes
