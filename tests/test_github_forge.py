@@ -1,5 +1,6 @@
 """GithubForge — the real forge driven by FakeGithubClient (no network)."""
 
+import json
 from pathlib import Path
 
 import pytest
@@ -199,3 +200,50 @@ def test_slug_is_resolved_from_the_task_worktree():
     forge.open_pull_request(make_task(), branch="harness/tsk_1", title="T", body="B")
 
     assert seen == [Path("/work/tsk_1")]
+
+
+def test_api_error_surfaces_githubs_own_explanation():
+    """urllib's HTTPError str() is just "HTTP Error 422: Unprocessable Entity".
+    GitHub puts the actual reason in the body — a live run hit exactly this and
+    the message told us nothing."""
+    import io
+    import urllib.error
+
+    class RefusingClient(FakeGithubClient):
+        def create_pull_request(self, repo, *, head, base, title, body):
+            raise urllib.error.HTTPError(
+                "https://api.github.com/repos/o/r/pulls",
+                422,
+                "Unprocessable Entity",
+                {},
+                io.BytesIO(
+                    json.dumps(
+                        {
+                            "message": "Validation Failed",
+                            "errors": [
+                                {"message": "No commits between main and harness/tsk_1"}
+                            ],
+                        }
+                    ).encode("utf-8")
+                ),
+            )
+
+    forge, _ = build(RefusingClient())
+
+    with pytest.raises(ForgeError) as error:
+        forge.open_pull_request(make_task(), branch="harness/tsk_1", title="T", body="B")
+
+    message = str(error.value)
+    assert "No commits between main and harness/tsk_1" in message
+    assert "Validation Failed" in message
+
+
+def test_api_error_without_a_body_still_reports_the_status():
+    class RefusingClient(FakeGithubClient):
+        def create_pull_request(self, repo, *, head, base, title, body):
+            raise RuntimeError("connection reset")
+
+    forge, _ = build(RefusingClient())
+
+    with pytest.raises(ForgeError, match="connection reset"):
+        forge.open_pull_request(make_task(), branch="harness/tsk_1", title="T", body="B")

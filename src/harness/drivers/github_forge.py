@@ -10,6 +10,7 @@ task that reports "opened PR" always means a pull request that exists.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Callable
 
@@ -22,6 +23,30 @@ from harness.ports.repos import RepositoryRegistry
 
 class ForgeError(RuntimeError):
     """The forge could not open a pull request."""
+
+
+def _explain(error: Exception) -> str:
+    """The API's own words, not just the status line.
+
+    `urllib` raises `HTTPError` whose str() is only "HTTP Error 422:
+    Unprocessable Entity" — useless. GitHub puts the reason in the response body
+    ("No commits between main and ...", "A pull request already exists"), which
+    is almost always the actual answer.
+    """
+    detail = ""
+    read = getattr(error, "read", None)
+    if callable(read):
+        try:
+            payload = json.loads(read().decode("utf-8"))
+        except Exception:  # noqa: BLE001 - a non-JSON body is not worth failing over
+            payload = None
+        if isinstance(payload, dict):
+            parts = [payload["message"]] if payload.get("message") else []
+            for item in payload.get("errors") or []:
+                if isinstance(item, dict) and item.get("message"):
+                    parts.append(item["message"])
+            detail = " — ".join(parts)
+    return f"{error}: {detail}" if detail else str(error)
 
 
 class GithubForge(Forge):
@@ -96,7 +121,8 @@ class GithubForge(Forge):
             raise
         except Exception as error:  # noqa: BLE001 - any API failure is a forge failure
             raise ForgeError(
-                f"GitHub refused to open a pull request for {slug}: {error}"
+                f"GitHub refused to open a pull request for {slug} "
+                f"({head} -> {self._base.get(slug, '?')}): {_explain(error)}"
             ) from error
 
         return PullRequest(

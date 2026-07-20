@@ -59,7 +59,14 @@ class DummyBehavior(ConsumerBehavior):
         slot.put(f"{step}.md", f"# {step}\n\n{summary}\n")
 
         handle = self._workspace.attach(task)
-        handle.write(f".harness/progress/{step}.{slot.attempt}.txt", f"{summary}\n")
+        # Into `.artifacts/<task>/`, the versioned location the real agent uses
+        # (invariant 16) — NOT `.harness/`, which repos routinely gitignore. A
+        # dummy whose writes are ignored commits nothing, so the task branch has
+        # no diff and landing cannot open a PR at all.
+        handle.write(
+            f".artifacts/{task.id}/{step}-{slot.attempt:02d}.md",
+            f"# {step}\n\n{summary}\n",
+        )
         handle.commit(f"[{step}] {summary}")
 
         return BehaviorResult(outcome, summary)
