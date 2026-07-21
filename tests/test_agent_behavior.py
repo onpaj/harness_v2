@@ -208,3 +208,23 @@ def test_compose_prompt_mentions_task_artifacts_and_allowed_outcomes():
     assert ".artifacts/tsk_1/review-01.md" in prompt
     assert ".artifacts/tsk_1/" in prompt
     assert "done" in prompt and "request_changes" in prompt
+
+
+def test_compose_prompt_demands_the_verdict_block_as_the_last_thing():
+    # Fix B: the closing verdict must be stated as mandatory (a forgotten block
+    # is what fails a finished run), and it must be the final thing in the prompt.
+    spec = AgentSpec(
+        name="development",
+        prompt="you are dev",
+        allowed_outcomes=(Outcome.DONE,),
+    )
+    prompt = compose_prompt(
+        make_task(status="development"),
+        step="development",
+        artifact_relpath=".artifacts/tsk_1/development-01.md",
+        spec=spec,
+    )
+
+    assert "```json" in prompt
+    assert "must" in prompt.lower()
+    assert prompt.rstrip().endswith("```")
