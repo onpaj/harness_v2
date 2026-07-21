@@ -21,6 +21,7 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+exclude = ["harness_docs_site*"]
 
 [tool.setuptools.package-data]
 "harness.api" = ["templates/*.html", "static/*"]
