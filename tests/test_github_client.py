@@ -11,6 +11,7 @@ from harness.drivers.github_client import (
     FakeGithubClient,
     HttpGithubClient,
     Issue,
+    PullRequestInfo,
     PullRequestRef,
 )
 
@@ -356,6 +357,149 @@ def test_http_create_pull_request_falls_back_to_argument_when_head_missing():
     )
 
     assert created.head == "o:harness/tsk_1"
+
+
+# --- mergeability watcher support: PullRequestInfo, list_pull_requests, update_branch ---
+
+
+def test_fake_list_pull_requests_filters_by_head_prefix():
+    client = FakeGithubClient()
+    client.add_pull_request(
+        PullRequestInfo(1, "u1", "harness/tsk_1", "sha1", "main", "behind")
+    )
+    client.add_pull_request(
+        PullRequestInfo(2, "u2", "someone/manual", "sha2", "main", "dirty")
+    )
+
+    watched = client.list_pull_requests("o/r", head_prefix="harness/")
+
+    assert [pr.number for pr in watched] == [1]
+
+
+def test_fake_list_pull_requests_without_prefix_returns_all():
+    client = FakeGithubClient()
+    client.add_pull_request(
+        PullRequestInfo(1, "u1", "harness/tsk_1", "sha1", "main", "clean")
+    )
+
+    assert len(client.list_pull_requests("o/r")) == 1
+
+
+def test_fake_update_branch_records_call_and_flips_to_clean():
+    client = FakeGithubClient()
+    client.add_pull_request(
+        PullRequestInfo(1, "u1", "harness/tsk_1", "sha1", "main", "behind")
+    )
+
+    client.update_branch("o/r", 1)
+
+    assert client.updated_branches == [("o/r", 1)]
+    [pr] = client.list_pull_requests("o/r")
+    assert pr.mergeable_state == "clean"
+
+
+def test_http_list_pull_requests_two_tier_fetch():
+    list_payload = [
+        {
+            "number": 1,
+            "html_url": "https://github.com/o/r/pull/1",
+            "head": {"ref": "harness/tsk_1"},
+            "base": {"ref": "main"},
+        },
+        {
+            "number": 2,
+            "html_url": "https://github.com/o/r/pull/2",
+            "head": {"ref": "someone/manual"},
+            "base": {"ref": "main"},
+        },
+    ]
+    detail_payload = {
+        "head": {"sha": "abc123"},
+        "base": {"ref": "main"},
+        "mergeable_state": "behind",
+    }
+
+    class TieredOpener:
+        def __init__(self):
+            self.requests = []
+
+        def open(self, request):
+            self.requests.append(request)
+            if request.full_url.endswith("/pulls/1"):
+                return FakeResponse(detail_payload)
+            return FakeResponse(list_payload)
+
+    opener = TieredOpener()
+    client = HttpGithubClient("tok", opener=opener)
+
+    infos = client.list_pull_requests("o/r", head_prefix="harness/")
+
+    assert len(infos) == 1
+    info = infos[0]
+    assert info.number == 1
+    assert info.head_branch == "harness/tsk_1"
+    assert info.head_sha == "abc123"
+    assert info.base_branch == "main"
+    assert info.mergeable_state == "behind"
+    # exactly one list call + one detail call (for the matching PR only)
+    assert len(opener.requests) == 2
+
+
+def test_http_list_pull_requests_missing_mergeable_state_is_unknown():
+    class TieredOpener:
+        def open(self, request):
+            if "/pulls/1" in request.full_url and request.full_url.endswith("/pulls/1"):
+                return FakeResponse({"head": {"sha": "x"}, "base": {"ref": "main"}})
+            return FakeResponse(
+                [
+                    {
+                        "number": 1,
+                        "html_url": "u",
+                        "head": {"ref": "harness/tsk_1"},
+                        "base": {"ref": "main"},
+                    }
+                ]
+            )
+
+    client = HttpGithubClient("tok", opener=TieredOpener())
+
+    [info] = client.list_pull_requests("o/r", head_prefix="harness/")
+
+    assert info.mergeable_state == "unknown"
+
+
+def test_http_update_branch_puts_update_branch_endpoint():
+    opener = FakeOpener({})
+    client = HttpGithubClient("tok", opener=opener)
+
+    client.update_branch("o/r", 5)
+
+    req = opener.requests[0]
+    assert req.get_method() == "PUT"
+    assert req.full_url == "https://api.github.com/repos/o/r/pulls/5/update-branch"
+
+
+def test_http_update_branch_422_is_swallowed():
+    class NotBehindOpener:
+        def open(self, request):
+            raise urllib.error.HTTPError(
+                request.full_url, 422, "Unprocessable", {}, io.BytesIO(b"")
+            )
+
+    client = HttpGithubClient("tok", opener=NotBehindOpener())
+    client.update_branch("o/r", 5)  # must not raise
+
+
+def test_http_update_branch_other_error_propagates():
+    class ServerErrorOpener:
+        def open(self, request):
+            raise urllib.error.HTTPError(
+                request.full_url, 500, "Server Error", {}, io.BytesIO(b"")
+            )
+
+    client = HttpGithubClient("tok", opener=ServerErrorOpener())
+    with pytest.raises(urllib.error.HTTPError):
+        client.update_branch("o/r", 5)
 
 
 # --- issues, http ----------------------------------------------------------

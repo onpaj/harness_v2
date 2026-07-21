@@ -9,6 +9,7 @@ from pathlib import Path
 
 from harness.behaviors.agent import ClaudeCliBehavior
 from harness.behaviors.landing import LandingBehavior
+from harness.behaviors.resolve_conflict import ResolveConflictBehavior
 from harness.consumer import Consumer
 from harness.dispatcher import Dispatcher
 from harness.drivers.composite_events import CompositeEventSink
@@ -50,6 +51,10 @@ from harness.task_control import TaskControlService
 
 LANDING_STEP = "land"
 """The step to which the wiring assigns LandingBehavior instead of DummyBehavior."""
+
+RESOLVE_STEP = "resolve"
+"""The step to which the wiring assigns ResolveConflictBehavior, when a catalog
+is configured — the resolver workflow's first step."""
 
 
 @dataclass(frozen=True)
@@ -324,6 +329,11 @@ def build(
     inbox = FilesystemTaskQueue(
         name="tasks", root=layout.tasks, events=events, quarantine=failed
     )
+    # Step queues, consumers and board columns are unioned across every served
+    # workflow (e.g. the primary and the resolver workflow) so a task carrying a
+    # different `workflow_template` still gets a working queue — the dispatcher
+    # already resolves the workflow per task, this is the only piece that
+    # otherwise assumed a single workflow.
     step_queues = {
         step: FilesystemTaskQueue(
             name=step, root=layout.queues / step, events=events, quarantine=failed
@@ -357,6 +367,15 @@ def build(
     def behavior_for(step: str) -> ConsumerBehavior:
         if step == landing_step:
             return landing
+        if step == RESOLVE_STEP and catalog is not None:
+            return ResolveConflictBehavior(
+                clock=clock,
+                workspace=workspace,
+                runner=runner,
+                spec=catalog.get(step),
+                events=events,
+                timeout=agent_timeout,
+            )
         if catalog is not None:
             # Missing spec → AgentNotFound surfaces already at build time (fail fast).
             spec = catalog.get(step)

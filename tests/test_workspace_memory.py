@@ -55,3 +55,29 @@ def test_memory_handle_records_pushes():
     handle.push()
 
     assert handle.pushes == ["harness/tsk_1", "harness/tsk_1"]
+
+
+def test_attach_honors_branch_override():
+    handle = MemoryWorkspace().attach(
+        Task(
+            id="tsk_1",
+            workflow_template="resolver",
+            created="2026-07-20T10:00:00Z",
+            repository="app",
+            data={"branch": "harness/tsk_original"},
+        )
+    )
+
+    assert handle.branch == "harness/tsk_original"
+
+
+def test_merge_records_base_and_returns_preset_conflict_flag():
+    handle = MemoryWorkspace().attach(make_task())
+
+    clean = handle.merge("main")
+
+    assert clean is False
+    assert handle.merges == ["main"]
+
+    handle.conflicted = True
+    assert handle.merge("main") is True

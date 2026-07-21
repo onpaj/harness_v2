@@ -64,6 +64,10 @@ swapped out later.
 25. **The healer produces an issue, never a task, and never writes back to `failed/`.** A heal claims a task out of `failed/` exactly once and settles it to `healed/` — success *or* failure (agent error / `IssueError` become a `heal-failed` note, not a re-queue). So no failure is healed twice and nothing can loop; there is no recursion to guard.
 26. **The healer's deliverable is opened by the worker loop, not the LLM.** The `healer` agent (persona as data) only drafts `issue.md` and returns a verdict; the `Healer` loop reads the draft and calls `IssueTracker.open_issue` (invariant 9). `IssueTracker` is a third port distinct from `Forge` (opens PRs) and `TaskSource.finish` (relabels), idempotent by a per-task marker.
 27. **`IssueTracker` and the `Healer` loop are unknown to the dispatcher and consumer.** The healer is a core loop that imports only ports/models/ids (like `SourcePoller`); wiring lives in `app.py`. Guarded by `test_architecture.py`.
+28. **A task's workspace branch is `harness/<task.id>` unless `task.data["branch"]` overrides it.** The override exists for exactly one case (the resolver workflow fixing an existing PR): `GitWorkspace.attach` checks out that *existing* branch instead of creating a fresh one from HEAD. Absent the key, every path is unchanged.
+29. **Conflict resolution is always a merge, never a rebase.** `WorkspaceHandle.merge()` produces a two-parent merge commit, deliberately — a rebase would rewrite history on a branch that may already be pushed, breaking the no-force-push invariant `GitWorkspaceHandle.push()` relies on (a plain `push -u`, no `--force`).
+30. **No task's worktree directory is ever removed.** Nothing under `src/harness` calls `git worktree remove`/`prune`. Consequence: a harness-authored branch is always still checked out in its original task's own worktree, so `GitWorkspace.attach`'s branch-override path force-checks it out into a *second* worktree (`git worktree add --force <path> <branch>`, reusing the existing local branch — not `-B`, which git refuses to force-reset on a branch checked out elsewhere no matter how many times `--force` is passed). Safe because the original worktree is permanently inert once its task reaches a terminal state. Deliberate — don't "fix" the `--force` away, and don't add worktree cleanup without re-checking this invariant.
+31. **The branch-override's reused local ref is untrusted until reconciled with `origin`.** The shared `refs/heads/<branch>` only tracks `origin/<branch>` while every advance of the branch goes through a local commit+push in *some* worktree — `GithubMergeabilityWatcher.update_branch` breaks that by advancing the branch server-side with no local git touch at all. So immediately after the `--force`d `worktree add` in the reuse path, `GitWorkspace.attach` hard-resets the *new* worktree to `origin/<branch>`'s fetched tip before returning the handle. That reset targets the branch as checked out in the new worktree, not "elsewhere," so it isn't blocked by the guard invariant 30 relies on. Don't drop this reset — without it, a `behind`→`update_branch`→`dirty`→resolver sequence on the same PR leaves the resolver's worktree stale and its final `push` fails as non-fast-forward.
 
 ## Working here
 
@@ -115,8 +119,8 @@ Dependencies flow strictly downward, no cycles.
 | Base (package-free) | `models`, `ids`, `artifacts_layout` (the `.artifacts/<id>/<step>-NN` convention) |
 | Ports | `ports/{queue,workflows,strategy,behavior,events,clock,workspace,artifacts,forge,board,agent,repos,source,control,logs,issues}` |
 | Orchestration | `dispatcher`, `consumer`, `source_poller`, `task_control`, `healer` — know only ports (and not `workspace`/`forge`/`artifacts`/`agent`/`repos`/`drivers`) |
-| Behaviors | `behaviors/{landing,agent}` — touch ports, not drivers |
-| Drivers | `drivers/{fs_queue,fs_workflows,fifo_strategy,dummy_behavior,stdout_events,system_clock,memory,fs_artifacts,git_workspace,fake_forge,claude_cli,fs_agents,fs_repos,worktree_artifacts,source_reflector,github_client,github_source,github_forge,github_issues,launchd,composite_events,git_remote,projection_events,stage_output}` |
+| Behaviors | `behaviors/{landing,agent,resolve_conflict}` — touch ports, not drivers |
+| Drivers | `drivers/{fs_queue,fs_workflows,fifo_strategy,dummy_behavior,stdout_events,system_clock,memory,fs_artifacts,git_workspace,fake_forge,claude_cli,fs_agents,fs_repos,worktree_artifacts,source_reflector,github_client,github_source,github_forge,github_issues,mergeability_watcher,launchd,composite_events,git_remote,projection_events,stage_output}` |
 | UI | `api/{app,routes}` — reads through `BoardView`/`ArtifactView`/`StageOutputView`, writes through `TaskControl`; never a driver |
 | Edges | `app` (wiring), `cli` |
 
@@ -143,6 +147,13 @@ Dependencies flow strictly downward, no cycles.
 - `drivers/launchd.py` — the background service on macOS: pure `wrapper_script`/
   `plist_bytes` builders (unit-tested) plus a thin `launchctl` shell; driven by
   `harness service install|uninstall|status`
+- `drivers/mergeability_watcher.py` — `GithubMergeabilityWatcher(TaskSource)`,
+  `kind="mergeability"`: `poll()` auto-updates a "behind" harness-owned PR
+  (side effect, no task) and queues a "dirty" one as a resolver task on the
+  same branch, deduped by `repo:pr:head_sha`
+- `behaviors/resolve_conflict.py` — `ResolveConflictBehavior`: merges the base
+  into the attached branch; a clean merge commits without spending an agent
+  call, a real conflict runs the `resolve` persona then the worker commits
 - `api/` — FastAPI board; sees only `BoardView` and `ArtifactView`, never a driver or `ArtifactStore`
 
 ## What is responsible for what
