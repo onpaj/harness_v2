@@ -1,6 +1,25 @@
 # CHANGELOG
 
 
+## v0.3.0 (2026-07-21)
+
+### Features
+
+- Service sources a secrets file for CLAUDE_CODE_OAUTH_TOKEN
+  ([`e98a543`](https://github.com/onpaj/harness_v2/commit/e98a5439f877c7e977b17d842cc3c329f62148fb))
+
+Under launchd, claude cannot read the macOS login keychain where an interactive login stores its
+  credential, so every agent step failed with "Not logged in" even though the same binary works from
+  a shell. Proven by running claude inside a launchd agent.
+
+The service wrapper now sources <root>/secrets.env (created 0600, never overwritten) and exports
+  CLAUDE_CODE_OAUTH_TOKEN from it, which makes claude bypass the keychain — the supported headless
+  path via `claude setup-token`. A missing token warns loudly rather than failing silently, and the
+  install prints the exact setup-token steps.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+
+
 ## v0.2.2 (2026-07-20)
 
 ### Bug Fixes
