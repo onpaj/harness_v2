@@ -4,9 +4,13 @@ Orchestration harness for multiple agents. The unit of work is a **task**; it mo
 between queues according to a **workflow**, which is a small state machine with
 explicit edges for each outcome.
 
-Phase 1 is a POC of the whole loop: a task flows through the workflow from `start`
-to `end`, but the work is stood in for by a dummy behavior for now. Real agents,
-persistent storage, and git arrive in later phases.
+Each step's work is done by a real agent (`claude -p`, or `--agent dummy` for
+testing the pipeline itself), running inside a git worktree the harness manages
+per task. The last step, landing, pushes the task's branch and opens a pull
+request — the harness proposes, a human decides the merge. Tasks arrive either
+by hand (`harness submit`) or ingested from GitHub issues; an operator board
+shows every task's state, its artifacts, its live stage output while a step is
+running, and a restart control for anything that failed.
 
 ## Installation
 
@@ -204,15 +208,41 @@ around them stays real, including the PR that `land` opens. Pair it with
 
 ## Board
 
-Alongside the orchestration loop, `harness run` serves a read-only board at
+Alongside the orchestration loop, `harness run` serves a board at
 `http://127.0.0.1:8420/`. The columns are the workflow steps plus `done` and
-`failed`, the cards are tasks, and a click shows metadata and history. The board
-updates itself over SSE.
+`failed`, the cards are tasks, and a click shows metadata, history, the
+artifacts each step wrote, and — while a step is actively running — a live tail
+of the agent's output, streamed over SSE. A task in `failed/` gets a **Restart**
+control, which resets it and re-inboxes it for the dispatcher to route again.
+The board itself updates over SSE too.
 
 `--api-port 0` turns the board off.
 
-The board reads exclusively through the `BoardView` port. That the tasks are JSON
-files and the queues directories, it does not know — and must not.
+The board reads exclusively through the `BoardView`/`ArtifactView`/
+`StageOutputView` ports and writes only through `TaskControl`. That the tasks
+are JSON files and the queues directories, it does not know — and must not.
+
+## GitHub issue ingestion
+
+`harness run` watches every repository registered in `repos.json` whose git
+`origin` resolves to a GitHub slug, and pulls in issues labeled for pickup
+(default `harness:todo`, override with `--github-label`) as new tasks. A repo
+with no GitHub origin is skipped with a warning — there is no per-repo opt-out
+flag, ingestion is automatic for anything registered with a GitHub remote.
+
+Each ingested issue moves through a managed label lifecycle as its task
+progresses: `harness:todo` (selected) → `harness:queued` (claimed) → a
+per-step label from the workflow (e.g. `harness:in-progress` while in
+`development`, `harness:in-review` while in `review`) → `harness:pr-open` on
+success or `harness:failed` on failure. Foreign labels on the same issue (`bug`,
+`priority`, ...) are left untouched — only labels in this managed set are ever
+added or removed.
+
+`--github-workflow` picks which workflow a newly ingested issue starts on
+(default `default`); `--source-poll` sets how often GitHub is polled (default
+30s, deliberately coarser than `--poll` to respect rate limits). Without a
+`GITHUB_TOKEN` (see [Running it as a service](#running-it-as-a-service)), GitHub
+ingestion is simply inactive — `harness submit` keeps working regardless.
 
 ## How work flows
 
@@ -265,3 +295,6 @@ Every moving part sits behind a port and is swapped by swapping the driver:
 Decision-making is split into three non-overlapping roles: `ConsumerBehavior` says
 *what happened*, the dispatcher *where it goes next*, and the consumer just
 delivers.
+
+See `docs/adr/` for the *why* behind each of these — one Architecture Decision
+Record per load-bearing rule.

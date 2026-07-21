@@ -5,7 +5,7 @@ from harness.app import HarnessLayout, build
 from harness.drivers.fake_forge import FakeForge
 from harness.drivers.memory import MemoryAgentCatalog, MemoryEventSink
 from harness.models import ARCHIVED, BehaviorResult, Outcome, Task
-from harness.ports.agent import AgentSpec
+from harness.ports.agent import AgentRun, AgentSpec
 from harness.ports.behavior import ConsumerBehavior
 from harness.ports.source import TaskSource
 
@@ -55,6 +55,16 @@ DEFINITION = {
 }
 
 
+RESOLVER_DEFINITION = {
+    "name": "resolver",
+    "start": "resolve",
+    "transitions": [
+        {"from": "resolve", "on": "done", "to": "land"},
+        {"from": "land", "on": "done", "to": "end"},
+    ],
+}
+
+
 def seed(tmp_path):
     layout = HarnessLayout(tmp_path)
     layout.workflows.mkdir(parents=True, exist_ok=True)
@@ -91,6 +101,85 @@ def test_build_always_constructs_a_pr_watcher(tmp_path):
     harness = build(tmp_path, "default", events=MemoryEventSink())
 
     assert harness.pr_watcher is not None
+
+
+def test_build_with_extra_workflow_unions_step_queues(tmp_path):
+    layout = seed(tmp_path)
+    (layout.workflows / "resolver.json").write_text(json.dumps(RESOLVER_DEFINITION))
+
+    harness = build(
+        tmp_path, ["default", "resolver"], events=MemoryEventSink()
+    )
+
+    assert (tmp_path / "queues" / "resolve").is_dir()
+    assert (tmp_path / "queues" / "land").is_dir()
+    # default: plan, review, land (3); resolver adds only resolve (land is shared).
+    assert len(harness.consumers) == 4
+
+
+async def test_resolver_task_flows_through_resolve_and_land_to_done(tmp_path):
+    from harness.drivers.memory import (
+        FakeAgentRunner,
+        FakeClock,
+        MemoryAgentCatalog,
+        MemoryArtifactStore,
+        MemoryForge,
+        MemoryWorkspace,
+    )
+
+    layout = seed(tmp_path)
+    (layout.workflows / "resolver.json").write_text(json.dumps(RESOLVER_DEFINITION))
+
+    catalog = MemoryAgentCatalog(
+        {
+            "plan": AgentSpec(name="plan", prompt="p"),
+            "review": AgentSpec(name="review", prompt="p"),
+            "resolve": AgentSpec(name="resolve", prompt="p"),
+        }
+    )
+    runner = FakeAgentRunner(default=AgentRun(Outcome.DONE, "done"))
+    workspace = MemoryWorkspace()
+    events = MemoryEventSink()
+
+    harness = build(
+        tmp_path,
+        ["default", "resolver"],
+        events=events,
+        clock=FakeClock(),
+        workspace=workspace,
+        artifacts=MemoryArtifactStore(),
+        forge=MemoryForge(),
+        catalog=catalog,
+        runner=runner,
+        delay=0.0,
+    )
+
+    task = Task(
+        id="tsk_resolver_1",
+        workflow_template="resolver",
+        created="2026-07-21T10:00:00Z",
+        repository="app",
+        data={
+            "branch": "harness/tsk_original",
+            "source": {"kind": "mergeability", "repo": "o/r", "pr": 1, "url": "u", "base": "main"},
+        },
+    )
+    (tmp_path / "tasks" / "tsk_resolver_1.json").write_text(json.dumps(task.to_dict()))
+
+    stop = asyncio.Event()
+    runner_task = asyncio.create_task(harness.run(poll_interval=0.01, stop=stop))
+    for _ in range(400):
+        await asyncio.sleep(0.01)
+        if (tmp_path / "done" / "tsk_resolver_1.json").exists():
+            break
+    stop.set()
+    await asyncio.wait_for(runner_task, timeout=RUNNER_TIMEOUT)
+
+    assert (tmp_path / "done" / "tsk_resolver_1.json").exists()
+    finished = Task.from_dict(
+        json.loads((tmp_path / "done" / "tsk_resolver_1.json").read_text())
+    )
+    assert finished.status == "end"
 
 
 def test_build_without_sources_has_no_pollers(tmp_path):
