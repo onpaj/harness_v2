@@ -213,7 +213,7 @@ def build(
     forge: Forge | None = None,
     runner: AgentRunner | None = None,
     catalog: AgentCatalog | None = None,
-    agent_timeout: float = 600.0,
+    agent_timeout: float = 1800.0,
     artifact_view: ArtifactView | None = None,
     sources: list[TaskSource] | None = None,
     landing_step: str = LANDING_STEP,
@@ -289,13 +289,17 @@ def build(
             return landing
         if catalog is not None:
             # Missing spec → AgentNotFound surfaces already at build time (fail fast).
+            spec = catalog.get(step)
+            effective_timeout = (
+                spec.timeout if spec.timeout is not None else agent_timeout
+            )
             return ClaudeCliBehavior(
                 clock=clock,
                 workspace=workspace,
                 runner=runner,
-                spec=catalog.get(step),
+                spec=spec,
                 events=events,
-                timeout=agent_timeout,
+                timeout=effective_timeout,
             )
         return work
 

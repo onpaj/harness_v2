@@ -313,6 +313,7 @@ def _write_default_agents(layout: HarnessLayout, workflow) -> None:
             "fallback_model": None,
             "allowed_tools": _agent_tools(step),
             "allowed_outcomes": _allowed_outcomes_for(workflow, step),
+            "timeout": None,
         }
         path.write_text(
             json.dumps(definition, indent=2, ensure_ascii=False), encoding="utf-8"
@@ -921,7 +922,7 @@ def main(argv: list[str] | None = None) -> int:
         help="interval (s) for polling the task source (e.g. GitHub); kept "
         "well above --poll to respect remote API rate limits",
     )
-    run.add_argument("--agent-timeout", type=float, default=600.0, dest="agent_timeout")
+    run.add_argument("--agent-timeout", type=float, default=1800.0, dest="agent_timeout")
     run.add_argument("--request-changes-at", default=None, dest="request_changes_at")
     run.add_argument(
         "--github-label",
