@@ -1,6 +1,21 @@
 # CHANGELOG
 
 
+## v0.6.0 (2026-07-21)
+
+### Features
+
+- Make the dashboard mobile friendly ([#21](https://github.com/onpaj/harness_v2/pull/21),
+  [`a530359`](https://github.com/onpaj/harness_v2/commit/a5303594ced4c487068d83aa77e9ea54552d2ce2))
+
+CSS-only responsive layout for the board: a @media(max-width:767px) block for
+  .column/.card/dialog/.tabs and a .table-scroll wrapper on the task-detail tables, layered onto the
+  tabbed task-detail design. Reconciled with the tab redesign that landed on main after this branch
+  was cut.
+
+Closes #16
+
+
 ## v0.5.0 (2026-07-21)
 
 ### Features
