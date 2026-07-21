@@ -680,13 +680,20 @@ def _run(args: argparse.Namespace) -> int:
     served_names = _resolve_served_workflows(args, layout)
     if served_names is None:
         return 2
-    if args.github_workflow not in served_names:
+
+    # `--github-workflow` defaults to `None` (not `DEFAULT_WORKFLOW`) so this
+    # check only fires when the operator actually named a workflow for GitHub
+    # ingestion. Validating the *default* against the served set would reject
+    # e.g. `run --workflow hotfix` with no GitHub flags at all -- a regression
+    # against FR-6, since no GithubTaskSource is ever built in that case.
+    if args.github_workflow is not None and args.github_workflow not in served_names:
         print(
             f"error: --github-workflow {args.github_workflow!r} is not served "
             f"by this harness (served: {', '.join(served_names)})",
             file=sys.stderr,
         )
         return 2
+    args.github_workflow = args.github_workflow or DEFAULT_WORKFLOW
 
     # The real run: agent behind `claude -p`, git worktree under a shared root,
     # repo name→path from `repos.json`, personas from `agents/`, artifacts
@@ -823,7 +830,12 @@ def main(argv: list[str] | None = None) -> int:
         default="harness:todo",
         help="label that selects issues to ingest",
     )
-    run.add_argument("--github-workflow", default=DEFAULT_WORKFLOW)
+    run.add_argument(
+        "--github-workflow",
+        default=None,
+        help="workflow assigned to GitHub-sourced tasks (default: 'default'); "
+        "an explicit value must be in the served set",
+    )
     run.add_argument("--worktree-root", default=None, help="root of the task worktrees")
     run.add_argument(
         "--api-port",

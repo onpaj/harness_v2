@@ -210,6 +210,32 @@ def test_run_rejects_github_workflow_not_in_served_set(tmp_path, capsys):
     assert "not served" in err
 
 
+def test_run_single_custom_workflow_ignores_github_workflow_default(
+    monkeypatch, tmp_path, capsys
+):
+    """Regression: `--github-workflow` used to default to `DEFAULT_WORKFLOW`
+    ("default") and get checked against the served set unconditionally, so
+    `run --workflow hotfix` with no GitHub flags at all (and no GITHUB_TOKEN)
+    used to fail startup even though no GithubTaskSource is ever built in that
+    case. FR-6 requires single-workflow runs to behave exactly as before."""
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    main(["init", "--root", str(tmp_path)])
+    (tmp_path / "workflows" / "hotfix.json").write_text(json.dumps(HOTFIX_DEFINITION))
+    captured = {}
+
+    async def fake_serve(harness, port, poll_interval, source_interval=30.0):
+        captured["harness"] = harness
+
+    monkeypatch.setattr("harness.cli.serve", fake_serve)
+    capsys.readouterr()
+
+    assert main(["run", "--root", str(tmp_path), "--workflow", "hotfix"]) == 0
+
+    out, err = capsys.readouterr()
+    assert err == ""
+    assert set(captured["harness"].workflows) == {"hotfix"}
+
+
 def test_init_rejects_workflow_name_with_path_separator(tmp_path, capsys):
     assert main(["init", "--root", str(tmp_path), "--workflow", "foo/bar"]) == 2
 
