@@ -604,3 +604,36 @@ def test_run_agent_defaults_to_claude_and_accepts_dummy(tmp_path, monkeypatch):
     with pytest.raises(SystemExit):
         main(["run", "--root", str(tmp_path), "--api-port", "0"])
     assert seen["catalog"] is not None and seen["runner"] is not None
+
+
+def test_service_install_prints_setup_token_steps_when_no_active_token(tmp_path, monkeypatch, capsys):
+    """The commented example in the template must not be mistaken for a real
+    token — otherwise the operator never sees the setup instructions."""
+    monkeypatch.setattr("harness.cli.sys.platform", "darwin")
+    monkeypatch.setattr("harness.cli.load", lambda *a, **k: None)
+    monkeypatch.setattr("harness.cli.Path.home", staticmethod(lambda: tmp_path))
+    main(["init", "--root", str(tmp_path / "root")])
+    capsys.readouterr()
+
+    main(["service", "install", "--root", str(tmp_path / "root")])
+
+    out = capsys.readouterr().out
+    assert "claude setup-token" in out
+    assert (tmp_path / "root" / "secrets.env").stat().st_mode & 0o777 == 0o600
+
+
+def test_service_install_stays_quiet_once_a_token_is_set(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr("harness.cli.sys.platform", "darwin")
+    monkeypatch.setattr("harness.cli.load", lambda *a, **k: None)
+    monkeypatch.setattr("harness.cli.Path.home", staticmethod(lambda: tmp_path))
+    root = tmp_path / "root"
+    main(["init", "--root", str(root)])
+    (root / "secrets.env").write_text("CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-real\n")
+    capsys.readouterr()
+
+    main(["service", "install", "--root", str(root)])
+
+    out = capsys.readouterr().out
+    assert "claude setup-token" not in out
+    # An existing secrets file is never clobbered.
+    assert "sk-ant-oat01-real" in (root / "secrets.env").read_text()

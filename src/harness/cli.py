@@ -618,7 +618,11 @@ def _service_install(args: argparse.Namespace) -> int:
     print(f"  logs:    {log_dir}/harness.log, {log_dir}/harness.error.log")
     print(f"  board:   http://127.0.0.1:{args.api_port}/")
 
-    token_set = "CLAUDE_CODE_OAUTH_TOKEN=" in env_file.read_text(encoding="utf-8")
+    # An *active* assignment, not the commented example in the template.
+    token_set = any(
+        line.lstrip().startswith("CLAUDE_CODE_OAUTH_TOKEN=")
+        for line in env_file.read_text(encoding="utf-8").splitlines()
+    )
     if not token_set:
         print()
         print("NEXT: claude cannot use the macOS keychain under launchd. Give the")
