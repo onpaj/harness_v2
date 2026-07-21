@@ -100,6 +100,30 @@ def test_source_poller_imports_only_ports_and_models():
     ), f"source_poller.py imports outside ports/models: {imports}"
 
 
+def test_reconciler_imports_only_ports_and_models():
+    """MergeReconciler is core: it knows only ports, models and the base `ids`
+    module (the same base layer dispatcher/consumer draw lock ids from), no
+    driver."""
+    imports = {
+        module
+        for module in imported_modules(SOURCE / "merge_reconciler.py")
+        if module.startswith("harness")
+    }
+    assert all(
+        module in ("harness.models", "harness.ids") or module.startswith("harness.ports")
+        for module in imports
+    ), f"merge_reconciler.py imports outside ports/models/ids: {imports}"
+
+
+def test_orchestration_does_not_import_merge_port():
+    """MergeChecker is unknown to dispatcher/consumer. Only MergeReconciler
+    (core) and app.py/cli.py (wiring) reach for it."""
+    for name in ("dispatcher.py", "consumer.py"):
+        assert "harness.ports.merge" not in imported_modules(SOURCE / name), (
+            f"{name} imports ports.merge"
+        )
+
+
 def test_orchestration_does_not_import_work_ports():
     """Worktree, forge, artifacts, agent and the repo registry are unknown to
     dispatcher/consumer — only behavior reaches for them. Otherwise orchestration

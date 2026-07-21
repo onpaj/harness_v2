@@ -18,6 +18,7 @@ class PullRequest:
     url: str
     branch: str
     title: str
+    repo: str
 
 
 class Forge(ABC):

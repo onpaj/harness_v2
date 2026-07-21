@@ -62,6 +62,22 @@ async def test_opens_pull_request_for_task_branch():
     assert "PR" in result.summary
 
 
+async def test_result_carries_structured_pr_identity():
+    behavior, _, _, forge = build()
+
+    result = await behavior.run(make_task())
+
+    pull = forge.opened[0]
+    assert result.data == {
+        "pr": {
+            "repo": pull.repo,
+            "number": pull.number,
+            "url": pull.url,
+            "branch": pull.branch,
+        }
+    }
+
+
 async def test_pr_body_aggregates_history_summaries():
     behavior, _, _, forge = build()
 

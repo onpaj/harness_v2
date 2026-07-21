@@ -60,6 +60,7 @@ swapped out later.
 21. **The outward projection is idempotent and doesn't block decision-making.** `report_progress` twice is a no-op; a source failure is isolated by `CompositeEventSink` (and `SourcePoller.tick` catches the exception from `poll()`).
 22. **`todo` is the board's name for the inbox's fresh tasks** (`status is None`) — the first column. It is a view concern only: the router and dispatcher never see a `todo` queue, and auto-flow is unchanged (a fresh task passes through `todo` into `start`).
 23. **Operator control is a write-side port `TaskControl`, mirroring the read-side `BoardView`.** `restart` is a reset, not a routing decision: it clears `status`/`lastOutcome` and re-inboxes a `failed` task, then the dispatcher decides where next (invariant #3 holds). `TaskControl` is touched only by `TaskControlService` (core), `api/` and wiring — `dispatcher.py`/`consumer.py` don't import it; guarded by `test_architecture.py`.
+24. **`MergeChecker` is touched only by `MergeReconciler` (core) and wiring.** `dispatcher.py`/`consumer.py` don't import `ports.merge` — guarded by `test_architecture.py`, mirroring invariant 20's shape for `TaskSource`.
 
 ## Working here
 
@@ -109,10 +110,10 @@ Dependencies flow strictly downward, no cycles.
 | Base | `models` (imports nothing from the package), `ids` |
 | Logic | `router` (knows only `models`) |
 | Base (package-free) | `models`, `ids`, `artifacts_layout` (the `.artifacts/<id>/<step>-NN` convention) |
-| Ports | `ports/{queue,workflows,strategy,behavior,events,clock,workspace,artifacts,forge,board,agent,repos,source}` |
-| Orchestration | `dispatcher`, `consumer`, `source_poller` — know only ports (and not `workspace`/`forge`/`artifacts`/`agent`/`repos`/`drivers`) |
+| Ports | `ports/{queue,workflows,strategy,behavior,events,clock,workspace,artifacts,forge,board,agent,repos,source,merge}` |
+| Orchestration | `dispatcher`, `consumer`, `source_poller`, `merge_reconciler` — know only ports (and, for `merge_reconciler`, the base `ids` module — not `workspace`/`forge`/`artifacts`/`agent`/`repos`/`drivers`) |
 | Behaviors | `behaviors/{landing,agent}` — touch ports, not drivers |
-| Drivers | `drivers/{fs_queue,fs_workflows,fifo_strategy,dummy_behavior,stdout_events,system_clock,memory,fs_artifacts,git_workspace,fake_forge,claude_cli,fs_agents,fs_repos,worktree_artifacts,source_reflector,github_client,github_source,github_forge,launchd}` |
+| Drivers | `drivers/{fs_queue,fs_workflows,fifo_strategy,dummy_behavior,stdout_events,system_clock,memory,fs_artifacts,git_workspace,fake_forge,claude_cli,fs_agents,fs_repos,worktree_artifacts,source_reflector,github_client,github_source,github_forge,github_merge_checker,launchd}` |
 | Edges | `app` (wiring), `cli` |
 
 - `projection.py` — in-memory read model of the board; hydration from queues + event stream
@@ -136,6 +137,9 @@ Dependencies flow strictly downward, no cycles.
   `plist_bytes` builders (unit-tested) plus a thin `launchctl` shell; driven by
   `harness service install|uninstall|status`
 - `api/` — FastAPI board; sees only `BoardView` and `ArtifactView`, never a driver or `ArtifactStore`
+- `ports/merge.py` — the `MergeChecker` port: `is_merged(task) -> bool | None` (`None`: no `data.pr`; raises on a transient failure — the caller must retry, never treat that as "not merged")
+- `merge_reconciler.py` — `MergeReconciler`: the core that checks a `done` task's PR and archives it once merged (knows only ports/models, mirrors `source_poller.py`)
+- `drivers/github_merge_checker.py` — `GithubMergeChecker`: reads `repo`/`number` straight off `task.data["pr"]` at check time, no per-repo construction
 
 ## What is responsible for what
 
@@ -186,6 +190,19 @@ Dependencies flow strictly downward, no cycles.
   `list_issues` reads with read-after-write lag (unlike `rename`), so
   `GithubTaskSource` keeps an in-process ledger of claimed numbers (`_claimed`)
   so a fast poll won't claim the same issue twice.
+- **`MergeReconciler`** is `SourcePoller`'s structural twin, pulling the outcome of
+  already-landed work back *in* instead of pulling new work in: on its own
+  `reconcile_interval` (default 300s — much longer than `source_interval`, since this
+  is a housekeeping sweep, not latency-sensitive), it checks one `done` task's PR per
+  tick (least-recently-checked first, via a `checkedAt` stamp on `task.data.pr`, to
+  avoid starving on a single stubborn open PR) and, once merged, moves it into a new
+  terminal queue `archived/` — a plain `TaskQueue`, so it gets `claim`/`transfer`/
+  `recover` crash-safety for free, same as `done`/`failed`. `BoardProjection.archive()`
+  drops the task out of every rendered column while keeping it in `_tasks`, so
+  `GET /api/tasks/{id}` still resolves it with full history — declutter the live view,
+  don't destroy the record. Only wired when a `merge_checker` is supplied to `build()`
+  (real runs: gated on `GITHUB_TOKEN`, same as `GithubForge` — a fake/memory forge's
+  synthesized `repo` placeholder is never checked against a live `MergeChecker`).
 
 ## Gotchas
 
@@ -234,6 +251,12 @@ Dependencies flow strictly downward, no cycles.
   `claude`, so the wrapper exports one built by `cli.service_path_entries` (venv bin
   first, then `~/.npm-global/bin`, `~/.local/bin`, `/usr/local/bin`, …). A "claude not
   found" failure deep in a run is usually this.
+- **`Harness.recover()` always includes `done`, whether or not a reconciler is wired
+  this run.** A `.processing/` file in `done/` can only have been left by a
+  `MergeReconciler` claim, but it may outlive the run that created it (the operator
+  could disable reconciliation between restarts). Gating it on `self.reconciler is not
+  None` would leave such a task stuck forever; recovering an idle queue is a no-op, so
+  it's unconditional and free.
 
 ## Operator
 

@@ -2,7 +2,7 @@ import asyncio
 import json
 
 from harness.app import HarnessLayout, build
-from harness.drivers.memory import MemoryEventSink
+from harness.drivers.memory import FakeMergeChecker, MemoryEventSink
 from harness.models import Task
 from harness.ports.source import TaskSource
 
@@ -178,6 +178,91 @@ def test_seed_pollers_collects_from_every_queue(tmp_path):
     # The source would hand back issue #1, but it is already on disk → skipped.
     assert harness.pollers[0].tick() is False
     assert list((tmp_path / "tasks").glob("tsk_*.json")) == []
+
+
+def test_build_without_merge_checker_has_no_archived_queue_or_reconciler(tmp_path):
+    """Backward compatibility: default merge_checker=None → current behavior unchanged."""
+    seed(tmp_path)
+
+    harness = build(tmp_path, "default", events=MemoryEventSink())
+
+    assert harness.archived is None
+    assert harness.reconciler is None
+    assert not (tmp_path / "archived").exists()
+
+
+def test_build_with_merge_checker_wires_archived_queue_and_reconciler(tmp_path):
+    seed(tmp_path)
+
+    harness = build(
+        tmp_path, "default", events=MemoryEventSink(), merge_checker=FakeMergeChecker()
+    )
+
+    assert harness.archived is not None
+    assert harness.reconciler is not None
+    assert (tmp_path / "archived").is_dir()
+
+
+async def test_run_archives_a_done_task_once_its_pr_is_merged(tmp_path):
+    seed(tmp_path)
+    checker = FakeMergeChecker()
+    checker.merged.add(("o/r", 1))
+    events = MemoryEventSink()
+    harness = build(
+        tmp_path, "default", events=events, delay=0.0, merge_checker=checker
+    )
+    done_task = Task(
+        id="tsk_1",
+        workflow_template="default",
+        created="2026-07-19T10:00:00Z",
+        status="end",
+        data={"pr": {"repo": "o/r", "number": 1, "url": "u", "branch": "b"}},
+    )
+    (tmp_path / "done" / "tsk_1.json").write_text(json.dumps(done_task.to_dict()))
+
+    stop = asyncio.Event()
+    runner = asyncio.create_task(
+        harness.run(poll_interval=0.01, reconcile_interval=0.01, stop=stop)
+    )
+    for _ in range(400):
+        await asyncio.sleep(0.01)
+        if (tmp_path / "archived" / "tsk_1.json").exists():
+            break
+    stop.set()
+    await asyncio.wait_for(runner, timeout=RUNNER_TIMEOUT)
+
+    assert (tmp_path / "archived" / "tsk_1.json").exists()
+    assert not (tmp_path / "done" / "tsk_1.json").exists()
+    assert harness.projection.get("tsk_1") is not None
+    assert all(
+        task.id != "tsk_1"
+        for column in harness.projection.snapshot().columns
+        for task in column.tasks
+    )
+
+
+def test_recover_returns_stranded_done_tasks(tmp_path):
+    """A crash between MergeReconciler's claim and transfer must not lose the
+    task — recover() includes `done` unconditionally, even without a
+    reconciler wired this run."""
+    seed(tmp_path)
+    harness = build(tmp_path, "default", events=MemoryEventSink())
+    stranded = Task(
+        id="tsk_1",
+        workflow_template="default",
+        created="2026-07-19T10:00:00Z",
+        status="end",
+        lock_id="lck_1",
+        data={"pr": {"repo": "o/r", "number": 1, "url": "u", "branch": "b"}},
+    )
+    (tmp_path / "done" / ".processing" / "tsk_1.json").write_text(
+        json.dumps(stranded.to_dict())
+    )
+
+    assert harness.recover() == 1
+    assert (tmp_path / "done" / "tsk_1.json").exists()
+    revived = Task.from_dict(json.loads((tmp_path / "done" / "tsk_1.json").read_text()))
+    assert revived.lock_id is None
 
 
 async def test_stranded_task_survives_into_the_projection(tmp_path):

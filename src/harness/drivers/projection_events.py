@@ -24,4 +24,8 @@ class ProjectionSink(EventSink):
         except (KeyError, TypeError):
             return
 
+        if name == "archived":
+            self._projection.archive(task)
+            return
+
         self._projection.apply(column, task)

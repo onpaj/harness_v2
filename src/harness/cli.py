@@ -25,6 +25,7 @@ from harness.drivers.git_remote import github_slug
 from harness.drivers.git_workspace import GitWorkspace
 from harness.drivers.github_client import GithubClient, HttpGithubClient
 from harness.drivers.github_forge import GithubForge
+from harness.drivers.github_merge_checker import GithubMergeChecker
 from harness.drivers.github_source import GithubTaskSource
 from harness.drivers.launchd import (
     DEFAULT_LABEL,
@@ -40,6 +41,7 @@ from harness.drivers.system_clock import SystemClock
 from harness.drivers.worktree_artifacts import WorktreeArtifactView
 from harness.ids import new_task_id
 from harness.models import Task
+from harness.ports.merge import MergeChecker
 from harness.ports.repos import RepositoryRegistry
 from harness.ports.source import TaskSource
 from harness.ports.workflows import WorkflowNotFound
@@ -646,6 +648,17 @@ def _build_forge(kind: str, root: Path, registry: RepositoryRegistry | None = No
     )
 
 
+def _build_merge_checker(args: argparse.Namespace) -> MergeChecker | None:
+    """A live `MergeChecker`, gated on `GITHUB_TOKEN` — same condition as
+    `GithubForge`, independent of `--forge`. Reconciliation only ever exists
+    for tasks a real forge landed: `--forge fake` synthesizes non-GitHub
+    `repo` placeholders (`local/<branch>`) that a real merge check can't
+    resolve, so a fake-forge run must never get a live checker.
+    """
+    token = os.environ.get("GITHUB_TOKEN")
+    return GithubMergeChecker(HttpGithubClient(token)) if token else None
+
+
 def _run(args: argparse.Namespace) -> int:
     root = _root(args.root)
     layout = HarnessLayout(root)
@@ -665,6 +678,7 @@ def _run(args: argparse.Namespace) -> int:
     artifact_view = WorktreeArtifactView(layout.worktrees)
     forge = _build_forge(args.forge, root, registry)
     sources = _github_sources(args, root, registry)
+    merge_checker = _build_merge_checker(args)
     try:
         harness = build(
             root,
@@ -676,6 +690,7 @@ def _run(args: argparse.Namespace) -> int:
             artifact_view=artifact_view,
             agent_timeout=args.agent_timeout,
             sources=sources or None,
+            merge_checker=merge_checker,
             delay=args.delay,
             request_changes_once_at=args.request_changes_at,
         )
@@ -684,20 +699,35 @@ def _run(args: argparse.Namespace) -> int:
         return 2
 
     try:
-        asyncio.run(serve(harness, args.api_port, args.poll, args.source_poll))
+        asyncio.run(
+            serve(
+                harness,
+                args.api_port,
+                args.poll,
+                args.source_poll,
+                args.reconcile_poll,
+            )
+        )
     except KeyboardInterrupt:
         return 0
     return 0
 
 
 async def serve(
-    harness, port: int, poll_interval: float, source_interval: float = 30.0
+    harness,
+    port: int,
+    poll_interval: float,
+    source_interval: float = 30.0,
+    reconcile_interval: float = 300.0,
 ) -> None:
     """The loop and the board in a single event loop."""
     stop = asyncio.Event()
     loop = asyncio.create_task(
         harness.run(
-            poll_interval=poll_interval, source_interval=source_interval, stop=stop
+            poll_interval=poll_interval,
+            source_interval=source_interval,
+            reconcile_interval=reconcile_interval,
+            stop=stop,
         )
     )
 
@@ -764,6 +794,15 @@ def main(argv: list[str] | None = None) -> int:
         dest="source_poll",
         help="interval (s) for polling the task source (e.g. GitHub); kept "
         "well above --poll to respect remote API rate limits",
+    )
+    run.add_argument(
+        "--reconcile-poll",
+        type=float,
+        default=300.0,
+        dest="reconcile_poll",
+        help="interval (s) for checking done tasks' PR merge status and "
+        "archiving them once merged; deliberately long to respect GitHub "
+        "rate limits",
     )
     run.add_argument("--agent-timeout", type=float, default=600.0, dest="agent_timeout")
     run.add_argument("--request-changes-at", default=None, dest="request_changes_at")

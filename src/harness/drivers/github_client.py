@@ -33,6 +33,15 @@ class PullRequestRef:
     head: str
 
 
+@dataclass(frozen=True)
+class PullRequestDetail:
+    """A pull request's merge state, as read back by `get_pull_request`."""
+
+    number: int
+    url: str
+    merged: bool
+
+
 class GithubClient(ABC):
     """The minimal GitHub API the connector needs."""
 
@@ -62,6 +71,10 @@ class GithubClient(ABC):
     ) -> PullRequestRef:
         """Open a PR from `head` into `base`."""
 
+    @abstractmethod
+    def get_pull_request(self, repo: str, number: int) -> PullRequestDetail:
+        """The PR's current state, including whether it has been merged."""
+
 
 class FakeGithubClient(GithubClient):
     """Issues in a dict. For unit/e2e and smoke — no network."""
@@ -73,6 +86,7 @@ class FakeGithubClient(GithubClient):
         self._default_branch = default_branch
         self.pulls: list[PullRequestRef] = []
         self.created: list[dict] = []
+        self.merged: set[int] = set()
 
     def add_issue(self, issue: Issue) -> None:
         self._issues[issue.number] = issue
@@ -116,6 +130,18 @@ class FakeGithubClient(GithubClient):
             {"repo": repo, "head": head, "base": base, "title": title, "body": body}
         )
         return pull
+
+    def merge_pull_request(self, number: int) -> None:
+        """Test helper: mark a PR as merged."""
+        self.merged.add(number)
+
+    def get_pull_request(self, repo: str, number: int) -> PullRequestDetail:
+        for pull in self.pulls:
+            if pull.number == number:
+                return PullRequestDetail(
+                    number=pull.number, url=pull.url, merged=number in self.merged
+                )
+        raise KeyError(f"no such pull request: {repo}#{number}")
 
 
 class HttpGithubClient(GithubClient):
@@ -238,4 +264,15 @@ class HttpGithubClient(GithubClient):
             number=item["number"],
             url=item.get("html_url", ""),
             head=self._pr_head(item, head),
+        )
+
+    def get_pull_request(self, repo: str, number: int) -> PullRequestDetail:
+        url = f"{self._api}/repos/{repo}/pulls/{number}"
+        request = urllib.request.Request(url, headers=self._headers(), method="GET")
+        with self._opener.open(request) as response:
+            item = json.loads(response.read())
+        return PullRequestDetail(
+            number=item["number"],
+            url=item.get("html_url", ""),
+            merged=bool(item.get("merged")),
         )

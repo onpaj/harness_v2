@@ -209,7 +209,9 @@ def test_run_accepts_api_port(monkeypatch, tmp_path):
     main(["init", "--root", str(tmp_path)])
     captured = {}
 
-    async def fake_serve(harness, port, poll_interval, source_interval=30.0):
+    async def fake_serve(
+        harness, port, poll_interval, source_interval=30.0, reconcile_interval=300.0
+    ):
         captured["port"] = port
         captured["source_interval"] = source_interval
 
@@ -224,13 +226,30 @@ def test_run_forwards_source_poll(monkeypatch, tmp_path):
     main(["init", "--root", str(tmp_path)])
     captured = {}
 
-    async def fake_serve(harness, port, poll_interval, source_interval=30.0):
+    async def fake_serve(
+        harness, port, poll_interval, source_interval=30.0, reconcile_interval=300.0
+    ):
         captured["source_interval"] = source_interval
 
     monkeypatch.setattr("harness.cli.serve", fake_serve)
 
     assert main(["run", "--root", str(tmp_path), "--source-poll", "5"]) == 0
     assert captured["source_interval"] == 5.0
+
+
+def test_run_forwards_reconcile_poll(monkeypatch, tmp_path):
+    main(["init", "--root", str(tmp_path)])
+    captured = {}
+
+    async def fake_serve(
+        harness, port, poll_interval, source_interval=30.0, reconcile_interval=300.0
+    ):
+        captured["reconcile_interval"] = reconcile_interval
+
+    monkeypatch.setattr("harness.cli.serve", fake_serve)
+
+    assert main(["run", "--root", str(tmp_path), "--reconcile-poll", "42"]) == 0
+    assert captured["reconcile_interval"] == 42.0
 
 
 async def test_serve_returns_when_uvicorn_stops_before_the_loop(monkeypatch):
@@ -254,7 +273,9 @@ async def test_serve_returns_when_uvicorn_stops_before_the_loop(monkeypatch):
             self.control = FakeTaskControl()
             self.stop_seen: asyncio.Event | None = None
 
-        async def run(self, poll_interval, source_interval=30.0, stop=None):
+        async def run(
+            self, poll_interval, source_interval=30.0, reconcile_interval=300.0, stop=None
+        ):
             self.stop_seen = stop
             while not stop.is_set():
                 await asyncio.sleep(0.01)
@@ -582,6 +603,30 @@ def test_build_forge_with_a_token_wires_the_http_client(tmp_path, monkeypatch):
     monkeypatch.setenv("GITHUB_TOKEN", "tok")
 
     assert isinstance(_build_forge("github", tmp_path)._client, HttpGithubClient)
+
+
+# --- merge checker selection -------------------------------------------------
+
+
+def test_build_merge_checker_returns_none_without_a_token(monkeypatch):
+    from harness.cli import _build_merge_checker
+
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+
+    assert _build_merge_checker(_github_args()) is None
+
+
+def test_build_merge_checker_with_a_token_wires_the_http_client(monkeypatch):
+    from harness.cli import _build_merge_checker
+    from harness.drivers.github_client import HttpGithubClient
+    from harness.drivers.github_merge_checker import GithubMergeChecker
+
+    monkeypatch.setenv("GITHUB_TOKEN", "tok")
+
+    checker = _build_merge_checker(_github_args())
+
+    assert isinstance(checker, GithubMergeChecker)
+    assert isinstance(checker._client, HttpGithubClient)
 
 
 def test_run_agent_defaults_to_claude_and_accepts_dummy(tmp_path, monkeypatch):

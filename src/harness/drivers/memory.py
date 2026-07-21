@@ -25,6 +25,7 @@ from harness.ports.behavior import ConsumerBehavior
 from harness.ports.clock import Clock
 from harness.ports.events import EventSink
 from harness.ports.forge import Forge, PullRequest
+from harness.ports.merge import MergeChecker
 from harness.ports.queue import TaskQueue
 from harness.ports.repos import RepositoryNotFound, RepositoryRegistry
 from harness.ports.source import FinishResult, Progress, TaskSource, dedup_key
@@ -288,10 +289,28 @@ class MemoryForge(Forge):
             url=f"https://forge.local/pr/{len(self.opened) + 1}",
             branch=branch,
             title=title,
+            repo=f"memory/{branch}",
         )
         self.opened.append(pull)
         self.bodies[branch] = body
         return pull
+
+
+class FakeMergeChecker(MergeChecker):
+    """Test double: direct control over merge state, no `GithubClient` needed."""
+
+    def __init__(self) -> None:
+        self.merged: set[tuple[str, int]] = set()
+        self.raises: set[tuple[str, int]] = set()
+
+    def is_merged(self, task: Task) -> bool | None:
+        pr = task.data.get("pr")
+        if not isinstance(pr, dict):
+            return None
+        key = (pr.get("repo"), pr.get("number"))
+        if key in self.raises:
+            raise RuntimeError(f"merge check failed for {key}")
+        return key in self.merged
 
 
 class MemoryAgentCatalog(AgentCatalog):

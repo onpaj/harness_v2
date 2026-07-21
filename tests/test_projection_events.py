@@ -68,3 +68,21 @@ def test_malformed_task_snapshot_does_not_raise():
     sink.emit("dispatched", queue="plan", task={"something": "else"})
 
     assert projection.snapshot().revision == 0
+
+
+def test_archived_event_routes_to_archive_not_apply():
+    projection, sink = build()
+    sink.emit("finished", task_id="tsk_1", queue="done", task=snapshot("end"))
+
+    sink.emit("archived", task_id="tsk_1", queue="archived", task=snapshot("end"))
+
+    assert projection.snapshot().column(DONE_COLUMN).tasks == ()
+    assert projection.get("tsk_1") is not None
+
+
+def test_rechecked_event_flows_through_the_existing_apply_path():
+    projection, sink = build()
+
+    sink.emit("rechecked", task_id="tsk_1", queue="done", task=snapshot("end"))
+
+    assert projection.snapshot().column(DONE_COLUMN).tasks[0].id == "tsk_1"
