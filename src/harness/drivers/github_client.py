@@ -62,6 +62,25 @@ class GithubClient(ABC):
     ) -> PullRequestRef:
         """Open a PR from `head` into `base`."""
 
+    @abstractmethod
+    def create_issue(
+        self, repo: str, *, title: str, body: str, labels: tuple[str, ...]
+    ) -> Issue:
+        """Open a fresh issue on `repo`."""
+
+    @abstractmethod
+    def search_issue_by_marker(self, repo: str, marker: str) -> Issue | None:
+        """The open self-heal issue whose body carries `marker`, or None.
+
+        Used to keep issue creation idempotent without the Search API — it scans
+        the `harness:self-heal`-labelled open issues and matches the marker in
+        the body.
+        """
+
+
+SELF_HEAL_LABEL = "harness:self-heal"
+"""Label every healer-opened issue carries — also the scope of the marker search."""
+
 
 class FakeGithubClient(GithubClient):
     """Issues in a dict. For unit/e2e and smoke — no network."""
@@ -116,6 +135,26 @@ class FakeGithubClient(GithubClient):
             {"repo": repo, "head": head, "base": base, "title": title, "body": body}
         )
         return pull
+
+    def create_issue(
+        self, repo: str, *, title: str, body: str, labels: tuple[str, ...]
+    ) -> Issue:
+        number = (max(self._issues) if self._issues else 0) + 1
+        issue = Issue(
+            number=number,
+            title=title,
+            body=body,
+            url=f"https://github.com/{repo}/issues/{number}",
+            labels=tuple(labels),
+        )
+        self._issues[number] = issue
+        return issue
+
+    def search_issue_by_marker(self, repo: str, marker: str) -> Issue | None:
+        for issue in self.list_issues(repo, label=SELF_HEAL_LABEL):
+            if marker in issue.body:
+                return issue
+        return None
 
 
 class HttpGithubClient(GithubClient):
@@ -239,3 +278,29 @@ class HttpGithubClient(GithubClient):
             url=item.get("html_url", ""),
             head=self._pr_head(item, head),
         )
+
+    def create_issue(
+        self, repo: str, *, title: str, body: str, labels: tuple[str, ...]
+    ) -> Issue:
+        url = f"{self._api}/repos/{repo}/issues"
+        payload = json.dumps(
+            {"title": title, "body": body, "labels": list(labels)}
+        ).encode("utf-8")
+        request = urllib.request.Request(
+            url, data=payload, headers=self._json_headers(), method="POST"
+        )
+        with self._opener.open(request) as response:
+            item = json.loads(response.read())
+        return Issue(
+            number=item["number"],
+            title=item.get("title", title),
+            body=item.get("body") or body,
+            url=item.get("html_url", ""),
+            labels=tuple(l["name"] for l in item.get("labels", [])),
+        )
+
+    def search_issue_by_marker(self, repo: str, marker: str) -> Issue | None:
+        for issue in self.list_issues(repo, label=SELF_HEAL_LABEL):
+            if marker in issue.body:
+                return issue
+        return None
