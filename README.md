@@ -117,6 +117,35 @@ The LaunchAgent points at uv's shim rather than at a virtualenv, so
 `harness update` does not invalidate it; restart the service to pick the new
 version up.
 
+### The claude token (required for the service)
+
+Every agent step shells out to `claude`, and **`claude` cannot read the macOS
+login keychain when it runs under launchd** — an interactive `claude` login is
+invisible to the background service, so every task fails with "Not logged in".
+The service therefore needs a token in its environment instead:
+
+```sh
+claude setup-token                 # interactive, once — creates a long-lived token
+```
+
+Put the value in `<root>/secrets.env` (created 0600 by `harness service
+install`):
+
+```sh
+# ~/harness-root/secrets.env
+CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-...
+```
+
+then restart the service:
+
+```sh
+launchctl kickstart -k gui/$(id -u)/com.harness
+```
+
+`CLAUDE_CODE_OAUTH_TOKEN` makes `claude` skip the keychain entirely, which is
+what a background agent needs. Running `harness run` yourself in a terminal does
+*not* need this — there the keychain is reachable and your normal login works.
+
 Logs land in `<root>/logs/harness.log` and `<root>/logs/harness.error.log`.
 
 ## Developing

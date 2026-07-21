@@ -46,6 +46,22 @@ from harness.ports.workflows import WorkflowNotFound
 
 PACKAGE_NAME = "harness"
 
+# Written to `<root>/secrets.env` (0600) when the service is installed, unless
+# the file already exists. Sourced by the wrapper; the operator fills in the
+# token that `claude` needs under launchd, where the keychain is unreachable.
+_SECRETS_TEMPLATE = """\
+# harness service secrets — sourced by harness-run.sh. Keep this file 0600.
+# `claude` cannot read the macOS login keychain when run under launchd, so the
+# background service needs a token in the environment. Create one with
+# `claude setup-token` and uncomment the line below with its value:
+#
+# CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-...
+#
+# GITHUB_TOKEN is taken from `gh auth token` automatically; set it here only to
+# override that.
+# GITHUB_TOKEN=ghp_...
+"""
+
 DEFAULT_WORKFLOW = "default"
 
 # A sensible coarse mapping of default-workflow steps to labels. Other steps
@@ -554,6 +570,16 @@ def _service_install(args: argparse.Namespace) -> int:
     log_dir = root / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
 
+    # The secrets file the wrapper sources. Create it 0600 with a template if it
+    # is absent — never overwrite it, since that is where the operator's tokens
+    # live. `claude` under launchd cannot read the login keychain, so the claude
+    # token has to travel through the environment from here.
+    env_file = root / "secrets.env"
+    env_file_created = not env_file.exists()
+    if env_file_created:
+        env_file.write_text(_SECRETS_TEMPLATE, encoding="utf-8")
+    env_file.chmod(0o600)
+
     wrapper = root / "harness-run.sh"
     wrapper.write_text(
         wrapper_script(
@@ -561,6 +587,7 @@ def _service_install(args: argparse.Namespace) -> int:
             root=root,
             api_port=args.api_port,
             path_entries=service_path_entries(harness),
+            env_file=env_file,
         ),
         encoding="utf-8",
     )
@@ -587,8 +614,18 @@ def _service_install(args: argparse.Namespace) -> int:
     print(f"service {args.label} installed and started")
     print(f"  wrapper: {wrapper}")
     print(f"  plist:   {target}")
+    print(f"  secrets: {env_file}")
     print(f"  logs:    {log_dir}/harness.log, {log_dir}/harness.error.log")
     print(f"  board:   http://127.0.0.1:{args.api_port}/")
+
+    token_set = "CLAUDE_CODE_OAUTH_TOKEN=" in env_file.read_text(encoding="utf-8")
+    if not token_set:
+        print()
+        print("NEXT: claude cannot use the macOS keychain under launchd. Give the")
+        print("service a token so agent steps work:")
+        print("  1. claude setup-token")
+        print(f"  2. add CLAUDE_CODE_OAUTH_TOKEN=<token> to {env_file}")
+        print(f"  3. launchctl kickstart -k gui/{os.getuid()}/{args.label}")
     return 0
 
 
