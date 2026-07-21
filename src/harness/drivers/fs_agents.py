@@ -9,7 +9,8 @@ source of truth:
         "model": null,
         "fallback_model": null,
         "allowed_tools": [],
-        "allowed_outcomes": ["done", "request_changes"]
+        "allowed_outcomes": ["done", "request_changes"],
+        "timeout": null
     }
 
 Missing file / broken JSON / invalid name → `AgentNotFound`.
@@ -52,6 +53,20 @@ def _parse_agent_spec(name: str, raw: dict) -> AgentSpec:
     except (ValueError, TypeError) as error:
         raise ValueError(f"agent {name!r} has invalid allowed_outcomes: {error}") from None
 
+    timeout = raw.get("timeout")
+    if timeout is not None:
+        if isinstance(timeout, bool) or not isinstance(timeout, (int, float)):
+            raise ValueError(
+                f"agent {name!r} has invalid timeout: expected a positive "
+                f"number, got {timeout!r}"
+            )
+        if timeout <= 0:
+            raise ValueError(
+                f"agent {name!r} has invalid timeout: expected a positive "
+                f"number, got {timeout!r}"
+            )
+        timeout = float(timeout)
+
     return AgentSpec(
         name=name,
         prompt=raw["prompt"],
@@ -59,6 +74,7 @@ def _parse_agent_spec(name: str, raw: dict) -> AgentSpec:
         fallback_model=raw.get("fallback_model"),
         allowed_tools=tuple(raw.get("allowed_tools", ())),
         allowed_outcomes=allowed_outcomes,
+        timeout=timeout,
     )
 
 

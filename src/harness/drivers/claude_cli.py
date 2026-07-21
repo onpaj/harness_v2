@@ -51,7 +51,11 @@ class VerdictError(Exception):
 
 
 def build_argv(
-    *, prompt: str, spec: AgentSpec, output_format: str = "json"
+    *,
+    prompt: str,
+    spec: AgentSpec,
+    output_format: str = "json",
+    resume: str | None = None,
 ) -> list[str]:
     """Assemble the argv for `claude -p`. A pure function, no I/O.
 
@@ -59,6 +63,10 @@ def build_argv(
     `--allowedTools` are added only when the spec carries them. The persona goes
     through `--append-system-prompt`. `stream-json` additionally requires
     `--verbose` (claude refuses `-p --output-format stream-json` without it).
+
+    With `resume` set the call re-enters an existing session (`--resume`) — used
+    by the verdict re-prompt (fix C). The persona already lives in that session,
+    so `--append-system-prompt` is dropped in favour of `--resume`.
     """
     argv = [
         "claude",
@@ -70,9 +78,11 @@ def build_argv(
         "bypassPermissions",
         "--setting-sources",
         "project",
-        "--append-system-prompt",
-        spec.prompt,
     ]
+    if resume is None:
+        argv += ["--append-system-prompt", spec.prompt]
+    else:
+        argv += ["--resume", resume]
     if output_format == "stream-json":
         argv.append("--verbose")
     if spec.model is not None:
@@ -84,33 +94,29 @@ def build_argv(
     return argv
 
 
-def _extract_verdict(result: str) -> dict:
-    """Pull `{outcome, summary}` out of the agent's final text.
+def _extract_verdict(result: str) -> dict | None:
+    """The `{outcome, summary}` dict from the agent's final text, or `None`.
 
-    Takes the last fenced ```json``` block; if there is none, tries to parse the
-    whole text as JSON. Unreadable → `VerdictError`.
+    Takes the last fenced ```json``` block; if there is none, tries the whole
+    text as JSON. Unreadable JSON, or JSON that isn't an object, → `None` — the
+    caller decides whether a missing verdict is a hard failure (`parse_verdict`,
+    `verdict_from_final`) or a recoverable miss (`try_verdict`).
     """
     blocks = _FENCED_JSON.findall(result)
     candidate = blocks[-1] if blocks else result
     try:
         verdict = json.loads(candidate)
-    except (json.JSONDecodeError, ValueError) as error:
-        raise VerdictError(
-            f"verdict is not readable JSON: {candidate!r}"
-        ) from error
-    if not isinstance(verdict, dict):
-        raise VerdictError(f"verdict is not an object: {verdict!r}")
-    return verdict
+    except (json.JSONDecodeError, ValueError):
+        return None
+    return verdict if isinstance(verdict, dict) else None
 
 
-def _verdict_from_envelope(
-    envelope: dict, *, allowed: tuple[Outcome, ...], raw: str
-) -> AgentRun:
-    """Map an envelope carrying `result` (+`is_error`) onto an `AgentRun`.
+def _require_result(envelope: object, *, raw: str) -> str:
+    """The agent's final text from a `result`/`is_error` envelope.
 
-    Shared by the legacy one-shot JSON envelope (`parse_verdict`) and the terminal
-    `result` message of the stream-json stream (`verdict_from_final`) — both carry
-    the same two keys, so the verdict is read through one code path.
+    Envelope-level failures — not an object, `is_error` set, no `result` field —
+    are process defects and always raise. This is deliberately distinct from a
+    merely missing verdict *block*, which the tolerant path treats as recoverable.
     """
     if not isinstance(envelope, dict):
         raise VerdictError(f"claude envelope is not an object: {envelope!r}")
@@ -118,8 +124,23 @@ def _verdict_from_envelope(
         raise VerdictError(f"claude reported an error: {raw!r}")
     if "result" not in envelope:
         raise VerdictError(f"claude envelope has no 'result' field: {raw!r}")
+    return envelope["result"]
 
-    verdict = _extract_verdict(envelope["result"])
+
+def _verdict_from_envelope(
+    envelope: dict, *, allowed: tuple[Outcome, ...], raw: str
+) -> AgentRun:
+    """Map an envelope carrying `result` (+`is_error`) onto an `AgentRun`.
+
+    The strict reading: a missing/unreadable/disallowed verdict raises. Shared by
+    the legacy one-shot JSON envelope (`parse_verdict`) and the terminal `result`
+    message of the stream-json stream (`verdict_from_final`) — both carry the same
+    two keys, so the verdict is read through one code path.
+    """
+    result = _require_result(envelope, raw=raw)
+    verdict = _extract_verdict(result)
+    if verdict is None:
+        raise VerdictError(f"verdict is not readable JSON: {result!r}")
     if "outcome" not in verdict:
         raise VerdictError(f"verdict has no 'outcome' field: {verdict!r}")
     try:
@@ -131,6 +152,58 @@ def _verdict_from_envelope(
             f"outcome {outcome.value!r} is not in allowed {allowed!r}"
         )
     return AgentRun(outcome, summary=verdict.get("summary", ""), raw=raw)
+
+
+def try_verdict(
+    envelope: object, *, allowed: tuple[Outcome, ...], raw: str
+) -> AgentRun | None:
+    """A readable, allowed verdict as an `AgentRun`, else `None`.
+
+    The tolerant sibling of `_verdict_from_envelope`, used by the runner's
+    recovery path. Envelope-level failures still raise (see `_require_result`) —
+    only a verdict the model forgot, garbled, or set outside `allowed` yields the
+    recoverable `None` the caller re-prompts or falls back on.
+    """
+    result = _require_result(envelope, raw=raw)
+    verdict = _extract_verdict(result)
+    if verdict is None:
+        return None
+    try:
+        outcome = Outcome(verdict.get("outcome"))
+    except ValueError:
+        return None
+    if outcome not in allowed:
+        return None
+    return AgentRun(outcome, summary=verdict.get("summary", ""), raw=raw)
+
+
+def fallback_verdict(
+    result_text: str, *, allowed: tuple[Outcome, ...], raw: str
+) -> AgentRun | None:
+    """Rescue a finished step whose single allowed outcome makes it unambiguous.
+
+    When the agent ran to completion but skipped the verdict block, a one-outcome
+    step (development, plan, design, architecture) has exactly one thing it could
+    have meant — take it, and keep the agent's final text as the summary. A
+    multi-outcome step (review: done / request_changes) is genuinely ambiguous,
+    so this returns `None` and the miss stays a failure.
+    """
+    if len(allowed) == 1:
+        return AgentRun(allowed[0], summary=result_text.strip(), raw=raw)
+    return None
+
+
+def _verdict_reprompt(allowed: tuple[Outcome, ...]) -> str:
+    """The follow-up prompt for a resumed session that skipped its verdict."""
+    names = ", ".join(outcome.value for outcome in allowed)
+    return (
+        "Your previous message did not end with the required machine-readable "
+        "verdict, so the harness could not read a result. Reply with ONLY the "
+        "verdict now — a single fenced json block and nothing else:\n"
+        "```json\n"
+        '{"outcome": "<one of: ' + names + '>", "summary": "<short summary>"}\n'
+        "```"
+    )
 
 
 def parse_verdict(stdout: str, *, allowed: tuple[Outcome, ...]) -> AgentRun:
@@ -335,7 +408,85 @@ class ClaudeCliRunner(AgentRunner):
             raise AgentError(f"claude exited with {returncode}: {stderr.strip()}")
         if final is None:
             raise VerdictError(f"claude produced no result message: {raw!r}")
-        return verdict_from_final(final, allowed=spec.allowed_outcomes, raw=raw)
+
+        allowed = spec.allowed_outcomes
+        run = try_verdict(final, allowed=allowed, raw=raw)
+        if run is not None:
+            return run
+
+        # The agent finished but skipped its verdict block — recover rather than
+        # throw away a completed run. A multi-outcome step (review) is ambiguous,
+        # so re-prompt the same session for just the verdict (fix C); a
+        # single-outcome step is not, so synthesize it directly, no second call
+        # (fix A). Both keep a forgotten closing format from failing the task.
+        session_id = final.get("session_id")
+        if len(allowed) > 1 and isinstance(session_id, str):
+            run = await self._reprompt_verdict(
+                session_id=session_id,
+                spec=spec,
+                cwd=cwd,
+                timeout=timeout,
+                allowed=allowed,
+            )
+            if run is not None:
+                return run
+
+        run = fallback_verdict(final.get("result", ""), allowed=allowed, raw=raw)
+        if run is not None:
+            return run
+
+        # Nothing recovered it — raise the precise strict error for the log.
+        return verdict_from_final(final, allowed=allowed, raw=raw)
+
+    async def _reprompt_verdict(
+        self,
+        *,
+        session_id: str,
+        spec: AgentSpec,
+        cwd: Path,
+        timeout: float,
+        allowed: tuple[Outcome, ...],
+    ) -> AgentRun | None:
+        """One cheap `claude -p --resume` that asks only for the verdict block.
+
+        Best-effort: any failure — bad exit, timeout, still no readable verdict —
+        returns `None` so the caller can fall back. The re-prompt must never turn
+        an already-finished run into a hard error of its own.
+        """
+        argv = build_argv(
+            prompt=_verdict_reprompt(allowed),
+            spec=spec,
+            output_format="json",
+            resume=session_id,
+        )
+        env = {**os.environ, "IS_SANDBOX": "1"}
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *argv,
+                cwd=str(cwd),
+                env=env,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+        except OSError:
+            return None
+        try:
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout)
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+            return None
+        if proc.returncode != 0:
+            return None
+        text = stdout.decode(errors="replace")
+        try:
+            envelope = json.loads(text)
+        except (json.JSONDecodeError, ValueError):
+            return None
+        try:
+            return try_verdict(envelope, allowed=allowed, raw=text)
+        except VerdictError:
+            return None
 
 
 async def _drain(
