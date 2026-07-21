@@ -1,6 +1,25 @@
 # CHANGELOG
 
 
+## v0.4.0 (2026-07-21)
+
+### Features
+
+- One-step update+restart, idle-gated, and a schedule for it
+  ([`998c8b8`](https://github.com/onpaj/harness_v2/commit/998c8b8fb525445c0632a1f9ff2a6abe45dcac55))
+
+Updating meant two commands and remembering the second, and nothing kept the box current on its own.
+  Three additions:
+
+- `harness update --restart` upgrades and restarts the service in one step. - `--only-if-idle` skips
+  the restart when a stage is mid-run (a task claimed in a queue's .processing/), so an update never
+  kills a live agent — it applies at the next idle restart instead. - `harness service autoupdate`
+  installs a launchd timer that runs `update --restart --only-if-idle` a few times a day (default
+  02/08/14/20).
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+
+
 ## v0.3.1 (2026-07-21)
 
 ### Bug Fixes
