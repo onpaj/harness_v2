@@ -23,6 +23,7 @@
     dialog { border: none; border-radius: 6px; padding: 16px; max-width: 640px; width: 90%; }
     table { border-collapse: collapse; width: 100%; font-size: 13px; }
     td, th { text-align: left; padding: 4px 8px; border-bottom: 1px solid #ebecf0; vertical-align: top; }
+    .status-bar { margin-top: 16px; padding-top: 8px; border-top: 1px solid #dfe1e6; color: #97a0af; font-size: 11px; font-family: ui-monospace, monospace; }
   </style>
 </head>
 <body hx-ext="sse" sse-connect="/api/events">
@@ -31,6 +32,7 @@
     {% include "_columns.html" %}
   </div>
   <dialog id="detail"></dialog>
+  <footer class="status-bar">harness {{ version }} · built {{ build_time or "unknown" }}</footer>
   <script>
     document.body.addEventListener('htmx:afterSwap', function (event) {
       if (event.detail.target.id === 'detail') { document.getElementById('detail').showModal(); }
