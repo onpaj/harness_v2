@@ -131,6 +131,41 @@ def plist_bytes(
     return plistlib.dumps(definition)
 
 
+def autoupdate_plist_bytes(
+    *,
+    label: str,
+    harness: Path,
+    service_label: str,
+    hours: list[int],
+    path_entries: list[str],
+    log_dir: Path,
+    home: Path,
+) -> bytes:
+    """A LaunchAgent that runs `harness update --restart --only-if-idle` on a
+    schedule, so the box stays current without interrupting a running stage.
+
+    `StartCalendarInterval` fires at each of `hours` (minute 0). No `KeepAlive`:
+    this is a periodic one-shot, not a daemon. `--only-if-idle` is what makes a
+    firing that lands mid-stage skip the restart and leave it for the next slot.
+    """
+    definition = {
+        "Label": label,
+        "ProgramArguments": [
+            str(harness),
+            "update",
+            "--restart",
+            "--only-if-idle",
+            "--label",
+            service_label,
+        ],
+        "StartCalendarInterval": [{"Hour": h, "Minute": 0} for h in hours],
+        "StandardOutPath": str(log_dir / "autoupdate.log"),
+        "StandardErrorPath": str(log_dir / "autoupdate.log"),
+        "EnvironmentVariables": {"HOME": str(home), "PATH": ":".join(path_entries)},
+    }
+    return plistlib.dumps(definition)
+
+
 def _launchctl(args: list[str], *, check: bool = True) -> subprocess.CompletedProcess:
     try:
         result = subprocess.run(
@@ -173,6 +208,12 @@ def load(uid: int, path: Path, label: str) -> None:
         )
     _launchctl(["bootstrap", domain, str(path)])
     _launchctl(["kickstart", "-k", f"{domain}/{label}"])
+
+
+def kickstart(uid: int, label: str) -> None:
+    """Restart the agent (`-k` kills the running copy first). The service must be
+    loaded; `harness service install` is what loads it."""
+    _launchctl(["kickstart", "-k", f"gui/{uid}/{label}"])
 
 
 def unload(uid: int, label: str) -> bool:

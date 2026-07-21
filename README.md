@@ -67,8 +67,27 @@ harness update
 ```
 
 Runs `uv tool upgrade harness` and reports the version it installed. A running
-service keeps the old code until you restart it — `harness update` prints the
-exact command.
+service keeps the old code until you restart it. To upgrade **and** restart in
+one step:
+
+```sh
+harness update --restart                 # restart now (may interrupt a stage)
+harness update --restart --only-if-idle  # restart only when no stage is running
+```
+
+To keep the box current on its own, schedule the idle-gated form a few times a
+day (macOS launchd):
+
+```sh
+harness service autoupdate               # runs at 02:00, 08:00, 14:00, 20:00
+harness service autoupdate --hours 3,15  # custom times
+harness service autoupdate --remove      # stop auto-updating
+```
+
+Each firing upgrades, then restarts the service **only if no stage is mid-run** —
+a firing that lands while a task is being worked skips the restart and leaves it
+for the next slot, so an update never kills a running agent. Output goes to
+`<root>/logs/autoupdate.log`.
 
 Versions are cut automatically: every push to `main` runs the test suite, and
 [python-semantic-release](https://python-semantic-release.readthedocs.io/)
