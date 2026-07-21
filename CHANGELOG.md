@@ -1,6 +1,33 @@
 # CHANGELOG
 
 
+## v0.8.1 (2026-07-21)
+
+### Bug Fixes
+
+- Recover a finished agent run whose verdict block is missing
+  ([`6333c6e`](https://github.com/onpaj/harness_v2/commit/6333c6e729e074310eec896c75865a2a604f6920))
+
+An agent that ran to completion but ended with a prose summary instead of the required ```json
+  {outcome, summary}``` block was failing the whole task ("verdict is not readable JSON"),
+  discarding a green run (tests passing, artifact written, uncommitted). This hit the development
+  step repeatedly.
+
+Three composed defenses: - A (fallback_verdict): a single-outcome step (development/plan/design/
+  architecture) is unambiguous, so a missing block is synthesized to that outcome with the final
+  text as the summary — no second claude call. - C (_reprompt_verdict): a multi-outcome step
+  (review) is genuinely ambiguous, so re-enter the same session via `claude -p --resume` and ask for
+  just the verdict; best-effort, any failure falls through. - B (compose_prompt): state the verdict
+  block as mandatory and last, so the model omits it less often to begin with.
+
+Envelope-level failures (is_error, no result, non-zero exit, timeout) still fail hard — only a
+  forgotten/garbled/disallowed verdict is now recoverable. verdict parsing is split into a strict
+  path (parse_verdict/verdict_from_final, unchanged contract) and a tolerant try_verdict the runner
+  drives.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+
+
 ## v0.8.0 (2026-07-21)
 
 ### Features
