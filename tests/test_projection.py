@@ -40,6 +40,48 @@ def test_column_order_follows_reachability_and_ignores_back_edges():
     )
 
 
+RESOLVER_WORKFLOW = Workflow(
+    name="resolver",
+    start="resolve",
+    transitions=(
+        Transition(from_step="resolve", on="done", to_step="land"),
+        Transition(from_step="land", on="done", to_step=END),
+    ),
+)
+
+
+def test_column_order_folds_in_extra_workflow_steps():
+    assert column_order(WORKFLOW, RESOLVER_WORKFLOW) == (
+        TODO_COLUMN,
+        "plan",
+        "design",
+        "development",
+        "review",
+        "resolve",
+        "land",
+        DONE_COLUMN,
+        FAILED_COLUMN,
+    )
+
+
+def test_snapshot_with_extra_workflow_includes_its_columns():
+    projection = BoardProjection(WORKFLOW, extra_workflows=(RESOLVER_WORKFLOW,))
+
+    board = projection.snapshot()
+
+    assert [column.name for column in board.columns] == list(
+        column_order(WORKFLOW, RESOLVER_WORKFLOW)
+    )
+
+
+def test_apply_places_resolver_task_in_resolve_column():
+    projection = BoardProjection(WORKFLOW, extra_workflows=(RESOLVER_WORKFLOW,))
+
+    projection.apply("resolve", make_task(status="resolve"))
+
+    assert projection.snapshot().column("resolve").tasks[0].id == "tsk_1"
+
+
 def test_snapshot_has_every_column_even_when_empty():
     projection = BoardProjection(WORKFLOW)
 

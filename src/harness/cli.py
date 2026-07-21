@@ -20,12 +20,13 @@ from harness.drivers.claude_cli import ClaudeCliRunner
 from harness.drivers.fake_forge import FakeForge
 from harness.drivers.fs_agents import FilesystemAgentCatalog
 from harness.drivers.fs_repos import FilesystemRepositoryRegistry
-from harness.drivers.fs_workflows import invalid_workflow_name
+from harness.drivers.fs_workflows import FilesystemWorkflowRepository, invalid_workflow_name
 from harness.drivers.git_remote import github_slug
 from harness.drivers.git_workspace import GitWorkspace
 from harness.drivers.github_client import GithubClient, HttpGithubClient
 from harness.drivers.github_forge import GithubForge
 from harness.drivers.github_source import GithubTaskSource
+from harness.drivers.mergeability_watcher import GithubMergeabilityWatcher
 from harness.drivers.launchd import (
     DEFAULT_LABEL,
     ServiceError,
@@ -70,6 +71,17 @@ DEFAULT_DEFINITION = {
     ],
 }
 
+DEFAULT_RESOLVER_WORKFLOW = "resolver"
+
+RESOLVER_DEFINITION = {
+    "name": "resolver",
+    "start": "resolve",
+    "transitions": [
+        {"from": "resolve", "on": "done", "to": "land"},
+        {"from": "land", "on": "done", "to": "end"},
+    ],
+}
+
 
 def _root(value: str | None) -> Path:
     if value:
@@ -94,13 +106,24 @@ def _init(args: argparse.Namespace) -> int:
             encoding="utf-8",
         )
 
+    resolver_definition_path = layout.workflows / f"{DEFAULT_RESOLVER_WORKFLOW}.json"
+    if not resolver_definition_path.exists():
+        resolver_definition_path.write_text(
+            json.dumps(RESOLVER_DEFINITION, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+
     try:
         harness = build(root, args.workflow)
+        resolver_workflow = FilesystemWorkflowRepository(layout.workflows).get(
+            DEFAULT_RESOLVER_WORKFLOW
+        )
     except WorkflowNotFound as error:
         print(f"error: {error}", file=sys.stderr)
         return 2
 
     _write_default_agents(layout, harness.workflow)
+    _write_default_agents(layout, resolver_workflow)
     _write_default_repos(layout)
 
     print(f"harness ready at {root}")
@@ -238,6 +261,19 @@ _REVIEW_PERSONA = (
     "cleanup suggestions)."
 )
 
+_RESOLVE_PERSONA = (
+    "You are a senior developer whose only job right now is to resolve a git "
+    "merge conflict. The working directory already contains a real conflict "
+    "from merging the base branch into this PR's branch — files with "
+    "<<<<<<<, =======, >>>>>>> markers. Read each conflicted file, understand "
+    "both sides using the surrounding code and tests, and produce a correct "
+    "resolution: remove every marker, preserve the combined intent of both "
+    "changes, and leave a tree that would pass the project's existing "
+    "tests.\n\n"
+    "Do not commit, create a branch, or open a worktree — the harness handles "
+    "all of that."
+)
+
 # Step → (persona, default tools). The tools are names of Claude Code tools,
 # which `claude_cli` passes through via `--allowedTools`.
 AGENT_PERSONAS: dict[str, tuple[str, list[str]]] = {
@@ -249,6 +285,7 @@ AGENT_PERSONAS: dict[str, tuple[str, list[str]]] = {
         ["Read", "Write", "Edit", "Bash", "Grep", "Glob", "Task"],
     ),
     "review": (_REVIEW_PERSONA, ["Read", "Grep", "Glob", "Bash"]),
+    "resolve": (_RESOLVE_PERSONA, ["Read", "Edit", "Bash", "Grep", "Glob"]),
 }
 
 
@@ -373,6 +410,42 @@ def _github_sources(
                 worktree_root=worktree_root,
                 select_label=args.github_label,
                 step_labels=DEFAULT_STEP_LABELS,
+            )
+        )
+    return sources
+
+
+def _mergeability_sources(
+    args: argparse.Namespace,
+    root: Path,
+    registry: RepositoryRegistry,
+    *,
+    slug_of=github_slug,
+    client: GithubClient | None = None,
+) -> list[TaskSource]:
+    """One `GithubMergeabilityWatcher` per repo in `repos.json` with a GitHub
+    origin — mirrors `_github_sources` exactly: no token (and no injected
+    client) → no sources, a repo with no GitHub origin is skipped."""
+    if client is None:
+        token = os.environ.get("GITHUB_TOKEN")
+        if not token:
+            return []
+        client = HttpGithubClient(token)
+
+    worktree_root = args.worktree_root or str(root / "worktrees")
+    sources: list[TaskSource] = []
+    for name in registry.names():
+        slug = slug_of(registry.resolve(name))
+        if slug is None:
+            continue  # already warned about by _github_sources for the same repo
+        sources.append(
+            GithubMergeabilityWatcher(
+                client=client,
+                clock=SystemClock(),
+                repo=slug,
+                repository=name,
+                worktree_root=worktree_root,
+                resolver_workflow=args.resolver_workflow,
             )
         )
     return sources
@@ -664,7 +737,9 @@ def _run(args: argparse.Namespace) -> int:
     workspace = GitWorkspace(registry, layout.worktrees)
     artifact_view = WorktreeArtifactView(layout.worktrees)
     forge = _build_forge(args.forge, root, registry)
-    sources = _github_sources(args, root, registry)
+    mergeability = _mergeability_sources(args, root, registry) if args.watch_mergeability else []
+    sources = _github_sources(args, root, registry) + mergeability
+    extra_workflow_names = (args.resolver_workflow,) if mergeability else ()
     try:
         harness = build(
             root,
@@ -678,6 +753,7 @@ def _run(args: argparse.Namespace) -> int:
             sources=sources or None,
             delay=args.delay,
             request_changes_once_at=args.request_changes_at,
+            extra_workflow_names=extra_workflow_names,
         )
     except WorkflowNotFound as error:
         print(f"error: {error}", file=sys.stderr)
@@ -791,6 +867,20 @@ def main(argv: list[str] | None = None) -> int:
         choices=("github", "fake"),
         default="github",
         help="where landing proposes the change (default: real GitHub)",
+    )
+    run.add_argument(
+        "--watch-mergeability",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        dest="watch_mergeability",
+        help="auto-update 'behind' PRs and queue 'dirty' ones to the resolver "
+        "workflow (no GITHUB_TOKEN → no-op, same as GitHub issue ingestion)",
+    )
+    run.add_argument(
+        "--resolver-workflow",
+        default=DEFAULT_RESOLVER_WORKFLOW,
+        dest="resolver_workflow",
+        help="workflow template used for tasks the mergeability watcher queues",
     )
     run.set_defaults(handler=_run)
 

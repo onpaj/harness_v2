@@ -22,34 +22,41 @@ from harness.ports.board import (
 from harness.ports.queue import TaskQueue
 
 
-def column_order(workflow: Workflow) -> tuple[str, ...]:
+def column_order(workflow: Workflow, *extra: Workflow) -> tuple[str, ...]:
     """Steps in order of reachability from the start, then done and failed.
 
     Backward edges are ignored — a step already placed is never moved.
     Otherwise the column order would depend on which way the search went.
+
+    `extra` workflows (e.g. the resolver workflow, running alongside the
+    primary one) get their steps folded in the same way, after the primary
+    workflow's — a step already placed (shared by name, e.g. `land`) is not
+    moved or duplicated.
     """
     order: list[str] = []
-    pending: list[str] = [workflow.start]
 
-    while pending:
-        step = pending.pop(0)
-        if step == END or step in order:
-            continue
-        order.append(step)
-        for transition in workflow.transitions:
-            if transition.from_step == step and transition.to_step not in order:
-                pending.append(transition.to_step)
-
-    for step in workflow.steps():
-        if step not in order:
+    for wf in (workflow, *extra):
+        pending: list[str] = [wf.start]
+        while pending:
+            step = pending.pop(0)
+            if step == END or step in order:
+                continue
             order.append(step)
+            for transition in wf.transitions:
+                if transition.from_step == step and transition.to_step not in order:
+                    pending.append(transition.to_step)
+
+    for wf in (workflow, *extra):
+        for step in wf.steps():
+            if step not in order:
+                order.append(step)
 
     return (TODO_COLUMN,) + tuple(order) + (DONE_COLUMN, FAILED_COLUMN)
 
 
 class BoardProjection(BoardView):
-    def __init__(self, workflow: Workflow) -> None:
-        self._order = column_order(workflow)
+    def __init__(self, workflow: Workflow, *, extra_workflows: tuple[Workflow, ...] = ()) -> None:
+        self._order = column_order(workflow, *extra_workflows)
         self._tasks: dict[str, Task] = {}
         self._columns: dict[str, str] = {}
         self._revision = 0

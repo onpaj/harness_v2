@@ -160,3 +160,125 @@ def test_push_without_a_remote_raises(tmp_path):
 
     with pytest.raises(GitError):
         handle.push()
+
+
+def _workspace_with_remote(tmp_path):
+    repo = tmp_path / "repo"
+    _make_repo(repo)
+    remote = tmp_path / "remote.git"
+    _make_bare_remote(remote)
+    _git(["remote", "add", "origin", str(remote)], repo)
+    registry = MemoryRepositoryRegistry({"app": repo})
+    return GitWorkspace(registry, worktrees_root=tmp_path / "wt")
+
+
+def test_attach_with_branch_override_force_checks_out_already_checked_out_branch(tmp_path):
+    """A resolver task's branch override targets an existing PR branch — one
+    that, by construction, is already checked out in the *original* task's own
+    worktree (nothing ever removes a worktree). Without `--force` git refuses
+    a second checkout of the same branch."""
+    workspace = _workspace_with_remote(tmp_path)
+    original = workspace.attach(_make_task("tsk_original"))
+    original.write("feature.txt", "hi\n")
+    original.commit("[development] work")
+    original.push()
+
+    resolver_task = Task(
+        id="tsk_resolver",
+        workflow_template="resolver",
+        created="2026-07-20T10:00:00Z",
+        repository="app",
+        data={"branch": "harness/tsk_original"},
+    )
+
+    handle = workspace.attach(resolver_task)
+
+    assert handle.path == tmp_path / "wt" / "tsk_resolver"
+    assert handle.branch == "harness/tsk_original"
+    assert (handle.path / "feature.txt").read_text(encoding="utf-8") == "hi\n"
+    branch = _git(["rev-parse", "--abbrev-ref", "HEAD"], handle.path).strip()
+    assert branch == "harness/tsk_original"
+
+
+def test_attach_with_branch_override_creates_from_origin_when_no_local_copy(tmp_path):
+    """When the base repo never locally saw the branch (fresh registry entry),
+    it is created from `origin/<branch>` instead of reused."""
+    repo = tmp_path / "repo"
+    _make_repo(repo)
+    remote = tmp_path / "remote.git"
+    _make_bare_remote(remote)
+    _git(["remote", "add", "origin", str(remote)], repo)
+    _git(["push", "origin", "main"], repo)
+
+    # A branch that exists only on the remote (as if pushed from elsewhere,
+    # e.g. a different registry checkout), never checked out locally here.
+    other_clone = tmp_path / "other_clone"
+    _git(["clone", str(remote), str(other_clone)], tmp_path)
+    _git(["checkout", "-b", "harness/tsk_elsewhere"], other_clone)
+    (other_clone / "feature.txt").write_text("from elsewhere\n", encoding="utf-8")
+    _git(["add", "-A"], other_clone)
+    _git(["commit", "-m", "work"], other_clone)
+    _git(["push", "origin", "harness/tsk_elsewhere"], other_clone)
+
+    registry = MemoryRepositoryRegistry({"app": repo})
+    workspace = GitWorkspace(registry, worktrees_root=tmp_path / "wt")
+    resolver_task = Task(
+        id="tsk_resolver",
+        workflow_template="resolver",
+        created="2026-07-20T10:00:00Z",
+        repository="app",
+        data={"branch": "harness/tsk_elsewhere"},
+    )
+
+    handle = workspace.attach(resolver_task)
+
+    assert handle.branch == "harness/tsk_elsewhere"
+    assert (handle.path / "feature.txt").read_text(encoding="utf-8") == "from elsewhere\n"
+
+
+def test_attach_without_override_is_unchanged(tmp_path):
+    """The absent-key path (every non-resolver task) is byte-for-byte unchanged."""
+    workspace = _workspace(tmp_path)
+
+    handle = workspace.attach(_make_task())
+
+    assert handle.branch == "harness/tsk_1"
+
+
+def test_merge_clean_stages_result_and_returns_false(tmp_path):
+    workspace = _workspace_with_remote(tmp_path)
+    repo = tmp_path / "repo"
+    _git(["push", "origin", "main"], repo)
+
+    handle = workspace.attach(_make_task())
+    handle.write("feature.txt", "hi\n")
+    handle.commit("[development] work")
+
+    conflicted = handle.merge("main")
+
+    assert conflicted is False
+    log = _git(["log", "--oneline"], handle.path)
+    assert "[development] work" in log
+
+
+def test_merge_conflict_leaves_markers_and_returns_true(tmp_path):
+    workspace = _workspace_with_remote(tmp_path)
+    repo = tmp_path / "repo"
+
+    # A PR branch that diverges from main on the same file.
+    branch_handle = workspace.attach(_make_task("tsk_branch"))
+    branch_handle.write("README.md", "branch change\n")
+    branch_handle.commit("[development] branch change")
+
+    # main moves forward with a conflicting edit to the same file, pushed to origin.
+    (repo / "README.md").write_text("main change\n", encoding="utf-8")
+    _git(["add", "-A"], repo)
+    _git(["commit", "-m", "main change"], repo)
+    _git(["push", "origin", "main"], repo)
+
+    conflicted = branch_handle.merge("main")
+
+    assert conflicted is True
+    content = (branch_handle.path / "README.md").read_text(encoding="utf-8")
+    assert "<<<<<<<" in content
+    assert ">>>>>>>" in content

@@ -8,6 +8,7 @@ from pathlib import Path
 
 from harness.behaviors.agent import ClaudeCliBehavior
 from harness.behaviors.landing import LandingBehavior
+from harness.behaviors.resolve_conflict import ResolveConflictBehavior
 from harness.consumer import Consumer
 from harness.dispatcher import Dispatcher
 from harness.drivers.composite_events import CompositeEventSink
@@ -43,6 +44,10 @@ from harness.task_control import TaskControlService
 
 LANDING_STEP = "land"
 """The step to which the wiring assigns LandingBehavior instead of DummyBehavior."""
+
+RESOLVE_STEP = "resolve"
+"""The step to which the wiring assigns ResolveConflictBehavior, when a catalog
+is configured — the resolver workflow's first step."""
 
 
 @dataclass(frozen=True)
@@ -215,6 +220,7 @@ def build(
     landing_step: str = LANDING_STEP,
     delay: float = 5.0,
     request_changes_once_at: str | None = None,
+    extra_workflow_names: tuple[str, ...] = (),
 ) -> Harness:
     layout = HarnessLayout(Path(root))
     events = events or StdoutEventSink()
@@ -232,8 +238,9 @@ def build(
 
     workflows = FilesystemWorkflowRepository(layout.workflows)
     workflow = workflows.get(workflow_name)
+    extra_workflows = tuple(workflows.get(name) for name in extra_workflow_names)
 
-    projection = BoardProjection(workflow)
+    projection = BoardProjection(workflow, extra_workflows=extra_workflows)
     stage_output = StageOutputProjection()
     # The reflector comes after ProjectionSink: the outward projection must not
     # get ahead of the board. The stage-output projection sits alongside the
@@ -251,11 +258,19 @@ def build(
     inbox = FilesystemTaskQueue(
         name="tasks", root=layout.tasks, events=events, quarantine=failed
     )
+    # Step queues, consumers and board columns are unioned across the primary
+    # workflow and every extra one (e.g. the resolver workflow) so a task
+    # carrying a different `workflow_template` still gets a working queue —
+    # the dispatcher already resolves the workflow per task, this is the only
+    # piece that otherwise assumed a single workflow.
+    all_steps: list[str] = list(workflow.steps())
+    for wf in extra_workflows:
+        all_steps += [step for step in wf.steps() if step not in all_steps]
     step_queues = {
         step: FilesystemTaskQueue(
             name=step, root=layout.queues / step, events=events, quarantine=failed
         )
-        for step in workflow.steps()
+        for step in all_steps
     }
 
     # Read side of artifacts: when passed in (phase 3: `WorktreeArtifactView`),
@@ -283,6 +298,15 @@ def build(
     def behavior_for(step: str) -> ConsumerBehavior:
         if step == landing_step:
             return landing
+        if step == RESOLVE_STEP and catalog is not None:
+            return ResolveConflictBehavior(
+                clock=clock,
+                workspace=workspace,
+                runner=runner,
+                spec=catalog.get(step),
+                events=events,
+                timeout=agent_timeout,
+            )
         if catalog is not None:
             # Missing spec → AgentNotFound surfaces already at build time (fail fast).
             return ClaudeCliBehavior(
