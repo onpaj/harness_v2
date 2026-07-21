@@ -5,9 +5,19 @@ from harness.drivers.memory import (
     MemoryTaskQueue,
     ScriptedBehavior,
 )
-from harness.models import FAILED, Outcome, Task
+from harness.models import FAILED, BehaviorResult, Outcome, Task
 from harness.ports.behavior import ConsumerBehavior
 from harness.ports.strategy import EnqueueStrategy
+
+
+class DataBehavior(ConsumerBehavior):
+    """Returns a fixed BehaviorResult.data payload — for testing the consumer's merge."""
+
+    def __init__(self, data: dict) -> None:
+        self._data = data
+
+    async def run(self, task: Task) -> BehaviorResult:
+        return BehaviorResult(Outcome.DONE, "done", data=self._data)
 
 
 class FirstStrategy(EnqueueStrategy):
@@ -157,6 +167,48 @@ async def test_invalid_outcome_task_carries_terminal_failed_status():
 # tests/test_architecture.py::test_consumer_has_no_branch_on_outcome_value —
 # see the comment there for the reason (string-matching via inspect.getsource
 # missed `if outcome == "done":`, an aliased import, and a branch in a module function).
+
+
+async def test_result_data_is_merged_into_task_data():
+    consumer, _, inbox, _, _ = build(
+        DataBehavior({"pr": {"number": 1, "branch": "harness/tsk_1"}}), make_task()
+    )
+
+    await consumer.tick()
+
+    assert inbox.list()[0].data == {"pr": {"number": 1, "branch": "harness/tsk_1"}}
+
+
+async def test_result_data_merge_preserves_existing_keys():
+    task = Task(
+        id="tsk_1",
+        workflow_template="default",
+        created="2026-07-19T10:00:00Z",
+        status="design",
+        data={"title": "add rate limiting"},
+    )
+    consumer, _, inbox, _, _ = build(DataBehavior({"pr": {"number": 1}}), task)
+
+    await consumer.tick()
+
+    updated = inbox.list()[0].data
+    assert updated["title"] == "add rate limiting"
+    assert updated["pr"] == {"number": 1}
+
+
+async def test_no_result_data_leaves_task_data_untouched():
+    task = Task(
+        id="tsk_1",
+        workflow_template="default",
+        created="2026-07-19T10:00:00Z",
+        status="design",
+        data={"title": "add rate limiting"},
+    )
+    consumer, _, inbox, _, _ = build(ScriptedBehavior(), task)
+
+    await consumer.tick()
+
+    assert inbox.list()[0].data == {"title": "add rate limiting"}
 
 
 async def test_claimed_event_is_emitted_before_behavior_runs():

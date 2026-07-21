@@ -38,6 +38,7 @@ from harness.ports.source import TaskSource
 from harness.ports.workspace import Workspace
 from harness.projection import BoardProjection
 from harness.ports.control import TaskControl
+from harness.pr_watcher import PrWatcher
 from harness.source_poller import SourcePoller
 from harness.task_control import TaskControlService
 
@@ -70,6 +71,10 @@ class HarnessLayout:
         return self.root / "failed"
 
     @property
+    def archived(self) -> Path:
+        return self.root / "archived"
+
+    @property
     def worktrees(self) -> Path:
         return self.root / "worktrees"
 
@@ -94,6 +99,7 @@ class Harness:
         step_queues: dict[str, TaskQueue],
         done: TaskQueue,
         failed: TaskQueue,
+        archived: TaskQueue,
         projection: BoardProjection,
         artifacts: ArtifactView,
         stage_output: StageOutputView,
@@ -101,12 +107,14 @@ class Harness:
         events: EventSink,
         clock: Clock,
         pollers: list[SourcePoller] | None = None,
+        pr_watcher: PrWatcher | None = None,
     ) -> None:
         self.layout = layout
         self.workflow = workflow
         self.dispatcher = dispatcher
         self.consumers = consumers
         self.pollers = pollers or []
+        self.pr_watcher = pr_watcher
         self.projection = projection
         self.artifacts = artifacts
         self.stage_output = stage_output
@@ -115,11 +123,16 @@ class Harness:
         self._step_queues = step_queues
         self._done = done
         self._failed = failed
+        self._archived = archived
         self._events = events
         self._clock = clock
 
     def recover(self) -> int:
-        queues = [self._inbox, *self._step_queues.values()]
+        # `done` is included because PrWatcher claims out of it (unlike every
+        # other consumer of this queue, which only ever writes into it) — a
+        # crash between its claim and transfer would otherwise strand a task
+        # in done/.processing/, invisible to both done.list() and hydrate().
+        queues = [self._inbox, *self._step_queues.values(), self._done]
         total = sum(queue.recover() for queue in queues)
         if total:
             self._events.emit("recovered", count=total)
@@ -148,12 +161,14 @@ class Harness:
         self,
         poll_interval: float = 0.2,
         source_interval: float = 30.0,
+        pr_poll_interval: float = 0.0,
         stop: asyncio.Event | None = None,
     ) -> None:
         # The internal loops (dispatcher, consumers) poll local queues off disk,
         # so a tight `poll_interval` keeps the board responsive. A `TaskSource`,
         # by contrast, is a remote API with rate limits (GitHub), so its loop
-        # gets its own, much slower `source_interval`.
+        # gets its own, much slower `source_interval` — same reasoning for the
+        # PR watcher's `pr_poll_interval` (0 disables the loop entirely).
         stop = stop or asyncio.Event()
         self.recover()
         self.projection.hydrate(
@@ -161,14 +176,18 @@ class Harness:
             step_queues=self._step_queues,
             done=self._done,
             failed=self._failed,
+            archived=self._archived,
         )
         self._seed_pollers()
         self._events.emit("started", workflow=self.workflow.name)
-        await asyncio.gather(
+        loops = [
             self._dispatcher_loop(poll_interval, stop),
             *(self._consumer_loop(consumer, poll_interval, stop) for consumer in self.consumers),
             *(self._source_loop(poller, source_interval, stop) for poller in self.pollers),
-        )
+        ]
+        if pr_poll_interval > 0 and self.pr_watcher is not None:
+            loops.append(self._pr_watcher_loop(pr_poll_interval, stop))
+        await asyncio.gather(*loops)
         self._events.emit("stopped")
 
     async def _dispatcher_loop(self, poll_interval: float, stop: asyncio.Event) -> None:
@@ -193,6 +212,13 @@ class Harness:
         while not stop.is_set():
             if not poller.tick():
                 await asyncio.sleep(source_interval)
+            else:
+                await asyncio.sleep(0)
+
+    async def _pr_watcher_loop(self, interval: float, stop: asyncio.Event) -> None:
+        while not stop.is_set():
+            if not self.pr_watcher.tick():
+                await asyncio.sleep(interval)
             else:
                 await asyncio.sleep(0)
 
@@ -248,6 +274,7 @@ def build(
 
     failed = FilesystemTaskQueue(name="failed", root=layout.failed, events=events)
     done = FilesystemTaskQueue(name="done", root=layout.done, events=events)
+    archived = FilesystemTaskQueue(name="archived", root=layout.archived, events=events)
     inbox = FilesystemTaskQueue(
         name="tasks", root=layout.tasks, events=events, quarantine=failed
     )
@@ -324,6 +351,13 @@ def build(
         SourcePoller(source=source, inbox=inbox, events=events) for source in sources
     ]
 
+    # Cheap and side-effect-free until ticked (nothing starts its loop unless
+    # `--pr-poll`/`pr_poll_interval` is non-zero) — always built, same posture
+    # as `landing` always being built even when the workflow's last step isn't `land`.
+    pr_watcher = PrWatcher(
+        done=done, archived=archived, forge=forge, events=events, clock=clock
+    )
+
     control = TaskControlService(
         inbox=inbox, failed=failed, events=events, clock=clock
     )
@@ -337,6 +371,7 @@ def build(
         step_queues=step_queues,
         done=done,
         failed=failed,
+        archived=archived,
         projection=projection,
         artifacts=view,
         stage_output=stage_output,
@@ -344,4 +379,5 @@ def build(
         events=events,
         clock=clock,
         pollers=pollers,
+        pr_watcher=pr_watcher,
     )

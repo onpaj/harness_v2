@@ -209,28 +209,49 @@ def test_run_accepts_api_port(monkeypatch, tmp_path):
     main(["init", "--root", str(tmp_path)])
     captured = {}
 
-    async def fake_serve(harness, port, poll_interval, source_interval=30.0):
+    async def fake_serve(
+        harness, port, poll_interval, source_interval=30.0, pr_poll_interval=0.0
+    ):
         captured["port"] = port
         captured["source_interval"] = source_interval
+        captured["pr_poll_interval"] = pr_poll_interval
 
     monkeypatch.setattr("harness.cli.serve", fake_serve)
 
     assert main(["run", "--root", str(tmp_path), "--api-port", "9123"]) == 0
     assert captured["port"] == 9123
     assert captured["source_interval"] == 30.0
+    assert captured["pr_poll_interval"] == 0.0
 
 
 def test_run_forwards_source_poll(monkeypatch, tmp_path):
     main(["init", "--root", str(tmp_path)])
     captured = {}
 
-    async def fake_serve(harness, port, poll_interval, source_interval=30.0):
+    async def fake_serve(
+        harness, port, poll_interval, source_interval=30.0, pr_poll_interval=0.0
+    ):
         captured["source_interval"] = source_interval
 
     monkeypatch.setattr("harness.cli.serve", fake_serve)
 
     assert main(["run", "--root", str(tmp_path), "--source-poll", "5"]) == 0
     assert captured["source_interval"] == 5.0
+
+
+def test_run_forwards_pr_poll(monkeypatch, tmp_path):
+    main(["init", "--root", str(tmp_path)])
+    captured = {}
+
+    async def fake_serve(
+        harness, port, poll_interval, source_interval=30.0, pr_poll_interval=0.0
+    ):
+        captured["pr_poll_interval"] = pr_poll_interval
+
+    monkeypatch.setattr("harness.cli.serve", fake_serve)
+
+    assert main(["run", "--root", str(tmp_path), "--pr-poll", "60"]) == 0
+    assert captured["pr_poll_interval"] == 60.0
 
 
 async def test_serve_returns_when_uvicorn_stops_before_the_loop(monkeypatch):
@@ -254,7 +275,9 @@ async def test_serve_returns_when_uvicorn_stops_before_the_loop(monkeypatch):
             self.control = FakeTaskControl()
             self.stop_seen: asyncio.Event | None = None
 
-        async def run(self, poll_interval, source_interval=30.0, stop=None):
+        async def run(
+            self, poll_interval, source_interval=30.0, pr_poll_interval=0.0, stop=None
+        ):
             self.stop_seen = stop
             while not stop.is_set():
                 await asyncio.sleep(0.01)

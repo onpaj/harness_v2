@@ -1,5 +1,8 @@
+from dataclasses import replace
+
 from harness.drivers.memory import MemoryForge
 from harness.models import Task
+from harness.ports.forge import PullRequestState
 
 
 def make_task() -> Task:
@@ -32,3 +35,38 @@ def test_open_pull_request_is_idempotent_per_branch():
 
     assert second is first
     assert len(forge.opened) == 1
+
+
+def _landed(forge: MemoryForge) -> Task:
+    pull = forge.open_pull_request(
+        make_task(), branch="harness/tsk_1", title="t", body="b"
+    )
+    return replace(
+        make_task(),
+        data={"pr": {"number": pull.number, "url": pull.url, "branch": pull.branch}},
+    )
+
+
+def test_pull_request_state_defaults_to_open():
+    forge = MemoryForge()
+    landed = _landed(forge)
+
+    assert forge.pull_request_state(landed) is PullRequestState.OPEN
+
+
+def test_close_marks_merged():
+    forge = MemoryForge()
+    landed = _landed(forge)
+
+    forge.close("harness/tsk_1", merged=True)
+
+    assert forge.pull_request_state(landed) is PullRequestState.MERGED
+
+
+def test_close_marks_closed_unmerged():
+    forge = MemoryForge()
+    landed = _landed(forge)
+
+    forge.close("harness/tsk_1", merged=False)
+
+    assert forge.pull_request_state(landed) is PullRequestState.CLOSED

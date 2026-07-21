@@ -68,3 +68,28 @@ def test_malformed_task_snapshot_does_not_raise():
     sink.emit("dispatched", queue="plan", task={"something": "else"})
 
     assert projection.snapshot().revision == 0
+
+
+def test_archived_event_removes_task_from_the_board():
+    projection, sink = build()
+    sink.emit("finished", task_id="tsk_1", queue="done", task=snapshot("end"))
+
+    sink.emit(
+        "archived",
+        task_id="tsk_1",
+        resolution="merged",
+        queue="archived",
+        task=snapshot("archived"),
+    )
+
+    assert projection.snapshot().column(DONE_COLUMN).tasks == ()
+    assert projection.get("tsk_1") is not None
+    assert projection.get("tsk_1").status == "archived"
+
+
+def test_archived_event_with_malformed_task_does_not_raise():
+    projection, sink = build()
+
+    sink.emit("archived", resolution="merged", queue="archived", task={"bad": "shape"})
+
+    assert projection.snapshot().revision == 0

@@ -152,6 +152,70 @@ def test_hydrate_reads_every_source():
     assert board.column("design").tasks[0].id == "tsk_5"
 
 
+def test_archive_drops_task_from_its_column_but_keeps_it_gettable():
+    projection = BoardProjection(WORKFLOW)
+    projection.apply(DONE_COLUMN, make_task(status="end"))
+
+    projection.archive(make_task(status="archived"))
+
+    board = projection.snapshot()
+    assert board.column(DONE_COLUMN).tasks == ()
+    assert projection.get("tsk_1") is not None
+    assert projection.get("tsk_1").status == "archived"
+
+
+def test_archive_then_snapshot_does_not_raise_for_other_tasks():
+    """The KeyError regression: an archived task must not take down snapshot()
+    for the columns that still have live tasks in them."""
+    projection = BoardProjection(WORKFLOW)
+    projection.apply(DONE_COLUMN, make_task("tsk_1", status="end"))
+    projection.apply("plan", make_task("tsk_2", status="plan"))
+
+    projection.archive(make_task("tsk_1", status="archived"))
+
+    board = projection.snapshot()
+    assert board.column(DONE_COLUMN).tasks == ()
+    assert board.column("plan").tasks[0].id == "tsk_2"
+
+
+def test_archive_bumps_revision():
+    projection = BoardProjection(WORKFLOW)
+    projection.apply(DONE_COLUMN, make_task(status="end"))
+    before = projection.snapshot().revision
+
+    projection.archive(make_task(status="archived"))
+
+    assert projection.snapshot().revision > before
+
+
+def test_hydrate_with_archived_queue_keeps_tasks_gettable_across_restart():
+    projection = BoardProjection(WORKFLOW)
+    inbox = MemoryTaskQueue("tasks")
+    done = MemoryTaskQueue("done")
+    failed = MemoryTaskQueue("failed")
+    archived = MemoryTaskQueue("archived")
+    archived.put(make_task("tsk_1", status="archived"))
+
+    projection.hydrate(
+        inbox=inbox, step_queues={}, done=done, failed=failed, archived=archived
+    )
+
+    board = projection.snapshot()
+    assert all(task.id != "tsk_1" for column in board.columns for task in column.tasks)
+    assert projection.get("tsk_1") is not None
+
+
+def test_hydrate_without_archived_queue_is_backward_compatible():
+    projection = BoardProjection(WORKFLOW)
+    inbox = MemoryTaskQueue("tasks")
+    done = MemoryTaskQueue("done")
+    failed = MemoryTaskQueue("failed")
+
+    projection.hydrate(inbox=inbox, step_queues={}, done=done, failed=failed)
+
+    assert projection.snapshot().revision >= 0
+
+
 def test_hydrate_places_statusless_inbox_task_in_todo():
     projection = BoardProjection(WORKFLOW)
     inbox = MemoryTaskQueue("tasks")

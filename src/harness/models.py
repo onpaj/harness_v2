@@ -14,6 +14,11 @@ FAILED = "failed"
 Like END it has no outgoing edges — it just additionally isn't known to any
 workflow as one of its steps."""
 
+ARCHIVED = "archived"
+"""Reserved terminal status of a task whose PR resolved and was moved out of
+`done/` into `archived/`. Purely informational — nothing routes on it, since an
+archived task is never reintroduced to the inbox."""
+
 
 class Outcome(str, Enum):
     """The only values a ConsumerBehavior may return."""
@@ -32,6 +37,9 @@ class BehaviorResult:
 
     outcome: Outcome
     summary: str = ""
+    data: dict[str, Any] | None = None
+    """Extra fields the consumer merges into task.data on delivery. None (the
+    default) merges nothing — every existing behavior is unaffected."""
 
 
 @dataclass(frozen=True)

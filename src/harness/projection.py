@@ -62,6 +62,7 @@ class BoardProjection(BoardView):
         step_queues: dict[str, TaskQueue],
         done: TaskQueue,
         failed: TaskQueue,
+        archived: TaskQueue | None = None,
     ) -> None:
         """Build the initial state from the queues.
 
@@ -79,11 +80,21 @@ class BoardProjection(BoardView):
             # A fresh task (never dispatched) shows in `todo`; one transiting the
             # inbox between steps keeps the column of the step it just left.
             self._store(task.status if task.status is not None else TODO_COLUMN, task)
+        if archived is not None:
+            for task in archived.list():
+                # Archived in a previous run: queryable by id, in no column —
+                # a restart must not lose get()-ability for it.
+                self._register(task)
         self._bump()
 
     def apply(self, column: str, task: Task) -> None:
         """Record that the task is now in the given column."""
         self._store(column, task)
+        self._bump()
+
+    def archive(self, task: Task) -> None:
+        """Task resolved (PR merged/closed): drop from every column, keep gettable by id."""
+        self._register(task)
         self._bump()
 
     def snapshot(self) -> Board:
@@ -94,7 +105,7 @@ class BoardProjection(BoardView):
                     (
                         task
                         for task_id, task in self._tasks.items()
-                        if self._columns[task_id] == name
+                        if self._columns.get(task_id) == name
                     ),
                     key=lambda task: (task.created, task.id),
                 )
@@ -121,6 +132,11 @@ class BoardProjection(BoardView):
             return
         self._tasks[task.id] = task
         self._columns[task.id] = column
+
+    def _register(self, task: Task) -> None:
+        """Keep the task queryable by id, with no column — never listed."""
+        self._tasks[task.id] = task
+        self._columns.pop(task.id, None)
 
     def _bump(self) -> None:
         self._revision += 1

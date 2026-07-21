@@ -33,6 +33,17 @@ class PullRequestRef:
     head: str
 
 
+@dataclass(frozen=True)
+class PullRequestDetail:
+    """A pull request fetched by number, regardless of open/closed state."""
+
+    number: int
+    url: str
+    head: str
+    state: str  # "open" | "closed", exactly as GitHub's API reports it
+    merged: bool  # true only when state == "closed" and GitHub merged it
+
+
 class GithubClient(ABC):
     """The minimal GitHub API the connector needs."""
 
@@ -62,6 +73,10 @@ class GithubClient(ABC):
     ) -> PullRequestRef:
         """Open a PR from `head` into `base`."""
 
+    @abstractmethod
+    def get_pull_request(self, repo: str, *, number: int) -> PullRequestDetail:
+        """Fetch a PR by number, regardless of its open/closed state."""
+
 
 class FakeGithubClient(GithubClient):
     """Issues in a dict. For unit/e2e and smoke — no network."""
@@ -73,6 +88,10 @@ class FakeGithubClient(GithubClient):
         self._default_branch = default_branch
         self.pulls: list[PullRequestRef] = []
         self.created: list[dict] = []
+        # (state, merged) per PR number. A freshly created pull defaults to
+        # ("open", False); close_pull_request flips it for tests that simulate
+        # GitHub resolving the PR.
+        self._pr_state: dict[int, tuple[str, bool]] = {}
 
     def add_issue(self, issue: Issue) -> None:
         self._issues[issue.number] = issue
@@ -115,7 +134,19 @@ class FakeGithubClient(GithubClient):
         self.created.append(
             {"repo": repo, "head": head, "base": base, "title": title, "body": body}
         )
+        self._pr_state[number] = ("open", False)
         return pull
+
+    def get_pull_request(self, repo: str, *, number: int) -> PullRequestDetail:
+        pull = next(p for p in self.pulls if p.number == number)
+        state, merged = self._pr_state.get(number, ("open", False))
+        return PullRequestDetail(
+            number=pull.number, url=pull.url, head=pull.head, state=state, merged=merged
+        )
+
+    def close_pull_request(self, number: int, *, merged: bool) -> None:
+        """Test helper: simulate GitHub resolving the PR (merged or closed unmerged)."""
+        self._pr_state[number] = ("closed", merged)
 
 
 class HttpGithubClient(GithubClient):
@@ -238,4 +269,17 @@ class HttpGithubClient(GithubClient):
             number=item["number"],
             url=item.get("html_url", ""),
             head=self._pr_head(item, head),
+        )
+
+    def get_pull_request(self, repo: str, *, number: int) -> PullRequestDetail:
+        url = f"{self._api}/repos/{repo}/pulls/{number}"
+        request = urllib.request.Request(url, headers=self._headers(), method="GET")
+        with self._opener.open(request) as response:
+            item = json.loads(response.read())
+        return PullRequestDetail(
+            number=item["number"],
+            url=item.get("html_url", ""),
+            head=self._pr_head(item, f"?:{number}"),
+            state=item.get("state", "open"),
+            merged=bool(item.get("merged", False)),
         )

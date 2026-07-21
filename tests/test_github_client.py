@@ -318,3 +318,107 @@ def test_http_create_pull_request_falls_back_to_argument_when_head_missing():
     )
 
     assert created.head == "o:harness/tsk_1"
+
+
+# --- get_pull_request, fake --------------------------------------------------
+
+
+def test_fake_get_pull_request_defaults_to_open():
+    client = FakeGithubClient()
+    created = client.create_pull_request(
+        "o/r", head="o:harness/tsk_1", base="main", title="T", body="B"
+    )
+
+    detail = client.get_pull_request("o/r", number=created.number)
+
+    assert detail.number == created.number
+    assert detail.url == created.url
+    assert detail.state == "open"
+    assert detail.merged is False
+
+
+def test_fake_close_pull_request_marks_merged():
+    client = FakeGithubClient()
+    created = client.create_pull_request(
+        "o/r", head="o:harness/tsk_1", base="main", title="T", body="B"
+    )
+
+    client.close_pull_request(created.number, merged=True)
+
+    detail = client.get_pull_request("o/r", number=created.number)
+    assert detail.state == "closed"
+    assert detail.merged is True
+
+
+def test_fake_close_pull_request_marks_closed_unmerged():
+    client = FakeGithubClient()
+    created = client.create_pull_request(
+        "o/r", head="o:harness/tsk_1", base="main", title="T", body="B"
+    )
+
+    client.close_pull_request(created.number, merged=False)
+
+    detail = client.get_pull_request("o/r", number=created.number)
+    assert detail.state == "closed"
+    assert detail.merged is False
+
+
+# --- get_pull_request, http ---------------------------------------------------
+
+
+def test_http_get_pull_request_maps_open_state():
+    payload = {
+        "number": 7,
+        "html_url": "https://github.com/o/r/pull/7",
+        "state": "open",
+        "merged": False,
+        "head": {"label": "o:harness/tsk_1"},
+    }
+    client = HttpGithubClient("tok", opener=FakeOpener(payload))
+
+    detail = client.get_pull_request("o/r", number=7)
+
+    assert detail.number == 7
+    assert detail.state == "open"
+    assert detail.merged is False
+
+
+def test_http_get_pull_request_maps_merged():
+    payload = {
+        "number": 7,
+        "html_url": "https://github.com/o/r/pull/7",
+        "state": "closed",
+        "merged": True,
+    }
+    client = HttpGithubClient("tok", opener=FakeOpener(payload))
+
+    detail = client.get_pull_request("o/r", number=7)
+
+    assert detail.state == "closed"
+    assert detail.merged is True
+
+
+def test_http_get_pull_request_maps_closed_unmerged():
+    payload = {
+        "number": 7,
+        "html_url": "https://github.com/o/r/pull/7",
+        "state": "closed",
+        "merged": False,
+    }
+    client = HttpGithubClient("tok", opener=FakeOpener(payload))
+
+    detail = client.get_pull_request("o/r", number=7)
+
+    assert detail.state == "closed"
+    assert detail.merged is False
+
+
+def test_http_get_pull_request_uses_the_right_url():
+    opener = FakeOpener({"number": 7, "state": "open", "merged": False})
+    client = HttpGithubClient("tok", opener=opener)
+
+    client.get_pull_request("o/r", number=7)
+
+    req = opener.requests[0]
+    assert req.get_method() == "GET"
+    assert req.full_url == "https://api.github.com/repos/o/r/pulls/7"

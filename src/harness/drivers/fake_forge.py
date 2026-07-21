@@ -12,7 +12,7 @@ import json
 from pathlib import Path
 
 from harness.models import Task
-from harness.ports.forge import Forge, PullRequest
+from harness.ports.forge import Forge, PullRequest, PullRequestState
 
 
 class FakeForge(Forge):
@@ -36,10 +36,38 @@ class FakeForge(Forge):
             "branch": branch,
             "title": title,
             "body": body,
+            "state": "open",
+            "merged": False,
         }
         records.append(record)
         self._store(records)
         return self._to_pr(record)
+
+    def pull_request_state(self, task: Task) -> PullRequestState:
+        pr = task.data.get("pr")
+        if not isinstance(pr, dict):
+            raise RuntimeError(f"task {task.id}: carries no PR reference to check")
+        branch = pr.get("branch")
+        for record in self._load():
+            if record["branch"] == branch:
+                # Missing state/merged means a prs.json written before this
+                # feature shipped — treat that as "still open", not an error.
+                state = record.get("state", "open")
+                merged = record.get("merged", False)
+                if state == "open":
+                    return PullRequestState.OPEN
+                return PullRequestState.MERGED if merged else PullRequestState.CLOSED
+        raise RuntimeError(f"task {task.id}: no PR found for branch {branch!r}")
+
+    def close_pull_request(self, branch: str, *, merged: bool) -> None:
+        """Test/smoke helper: simulate GitHub resolving the PR for `branch`."""
+        records = self._load()
+        for record in records:
+            if record["branch"] == branch:
+                record["state"] = "closed"
+                record["merged"] = merged
+                break
+        self._store(records)
 
     def _load(self) -> list[dict]:
         try:

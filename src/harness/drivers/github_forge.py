@@ -17,7 +17,7 @@ from typing import Callable
 from harness.drivers.git_remote import github_slug
 from harness.drivers.github_client import GithubClient
 from harness.models import Task
-from harness.ports.forge import Forge, PullRequest
+from harness.ports.forge import Forge, PullRequest, PullRequestState
 from harness.ports.repos import RepositoryRegistry
 
 
@@ -128,6 +128,40 @@ class GithubForge(Forge):
         return PullRequest(
             number=created.number, url=created.url, branch=branch, title=title
         )
+
+    def pull_request_state(self, task: Task) -> PullRequestState:
+        client = self._client
+        if client is None:
+            raise ForgeError(
+                "GITHUB_TOKEN is not set — cannot check a pull request. "
+                "Export it, or run with --forge fake."
+            )
+        repo_path = self._repo_path(task)
+        if repo_path is None:
+            raise ForgeError(
+                f"task {task.id}: cannot locate repository {task.repository!r} — "
+                "not in repos.json and the task carries no worktree"
+            )
+        slug = self._slug_of(repo_path)
+        if slug is None:
+            raise ForgeError(
+                f"{task.repository} has no GitHub origin — cannot check a pull request"
+            )
+        pr = task.data.get("pr")
+        if not isinstance(pr, dict) or not isinstance(pr.get("number"), int):
+            raise ForgeError(f"task {task.id}: carries no PR reference to check")
+
+        try:
+            detail = client.get_pull_request(slug, number=pr["number"])
+        except Exception as error:  # noqa: BLE001 - any API failure is a forge failure
+            raise ForgeError(
+                f"GitHub refused to fetch pull request {pr['number']} for {slug}: "
+                f"{_explain(error)}"
+            ) from error
+
+        if detail.state == "open":
+            return PullRequestState.OPEN
+        return PullRequestState.MERGED if detail.merged else PullRequestState.CLOSED
 
     def _default_branch(self, client: GithubClient, slug: str) -> str:
         """The repo's default branch, fetched once per slug per process."""
