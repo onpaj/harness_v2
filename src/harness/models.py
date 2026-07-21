@@ -12,7 +12,14 @@ END = "end"
 FAILED = "failed"
 """Reserved terminal status of a task that ended up in the `failed/` queue.
 Like END it has no outgoing edges — it just additionally isn't known to any
-workflow as one of its steps."""
+workflow as one of its steps. Unlike a true terminal, `failed/` has exactly one
+reader: the `Healer` loop, which drains it into `healed/` (invariant 24)."""
+
+HEALED = "healed"
+"""Reserved terminal status of a task the healer has settled onto the `healed/`
+queue. This is the never-consumed terminal that `failed/` used to be — the
+healer reads `failed/` and moves a task here once, success or failure, so a
+failure can never be healed twice (invariant 25)."""
 
 
 class Outcome(str, Enum):
@@ -149,6 +156,7 @@ class Workflow:
     name: str
     start: str
     transitions: tuple[Transition, ...]
+    max_parallel: dict[str, int] = field(default_factory=dict)
 
     def target(self, status: str, outcome: str) -> str | None:
         """Target of the matching edge, or None when none matches."""
@@ -167,6 +175,10 @@ class Workflow:
         if self.start != END and self.start not in found:
             found.append(self.start)
         return tuple(found)
+
+    def max_parallel_for(self, step: str) -> int:
+        """The configured concurrency limit for a step. Absent entries default to 1."""
+        return self.max_parallel.get(step, 1)
 
 
 @dataclass(frozen=True)

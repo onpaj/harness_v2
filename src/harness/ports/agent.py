@@ -27,6 +27,7 @@ class AgentSpec:
     fallback_model: str | None = None
     allowed_tools: tuple[str, ...] = ()
     allowed_outcomes: tuple[Outcome, ...] = (Outcome.DONE,)
+    timeout: float | None = None
 
 
 @dataclass(frozen=True)

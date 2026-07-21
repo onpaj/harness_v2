@@ -98,6 +98,8 @@ def test_index_renders_board_shell(client):
     assert "/static/sse.js" in body
     assert "/api/events" in body
     assert "https://" not in body
+    assert 'name="viewport"' in body
+    assert "width=device-width" in body
 
 
 def test_index_contains_columns(client):

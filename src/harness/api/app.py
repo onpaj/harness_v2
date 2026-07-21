@@ -58,6 +58,8 @@ def create_app(
     control: TaskControl | None = None,
     clock: Clock,
     coalesce_seconds: float = 0.25,
+    version: str = "unknown",
+    build_time: str | None = None,
 ) -> FastAPI:
     artifacts = artifacts or _EmptyArtifactView()
     output = output or _EmptyStageOutputView()
@@ -74,8 +76,11 @@ def create_app(
         StaticFiles(directory=str(Path(__file__).parent / "static")),
         name="static",
     )
-    app.include_router(build_json_router(view, artifacts))
+    app.include_router(build_json_router(view, artifacts, version, build_time))
     app.include_router(
-        build_html_router(view, artifacts, output, control, clock, coalesce_seconds)
+        build_html_router(
+            view, artifacts, output, control, clock, coalesce_seconds,
+            version, build_time,
+        )
     )
     return app

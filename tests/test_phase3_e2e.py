@@ -301,7 +301,7 @@ async def test_workflow_less_task_reaches_done_after_one_step(tmp_path):
         artifact_view=artifact_view,
         delay=0.0,
     )
-    assert harness.workflow is None
+    assert harness.workflows == {}
 
     task = Task(
         id=WORKFLOW_LESS_TASK_ID,

@@ -40,6 +40,29 @@ def test_column_order_follows_reachability_and_ignores_back_edges():
     )
 
 
+def test_column_order_unions_multiple_workflows_no_duplicates():
+    """A second workflow contributes only the steps not already seen, in its
+    own order, and a step shared by both (here "plan") shows up once."""
+    other = Workflow(
+        name="hotfix",
+        start="plan",
+        transitions=(
+            Transition(from_step="plan", on="done", to_step="review"),
+            Transition(from_step="review", on="done", to_step=END),
+        ),
+    )
+
+    assert column_order((*WORKFLOW.steps(), *other.steps()), (WORKFLOW, other)) == (
+        TODO_COLUMN,
+        "plan",
+        "design",
+        "development",
+        "review",
+        DONE_COLUMN,
+        FAILED_COLUMN,
+    )
+
+
 def test_column_order_falls_back_to_declaration_order_for_workflow_less_steps():
     assert column_order((*WORKFLOW.steps(), "triage"), (WORKFLOW,)) == (
         TODO_COLUMN,
