@@ -10,6 +10,7 @@ from harness.drivers.github_client import (
     FakeGithubClient,
     HttpGithubClient,
     Issue,
+    PullRequestRef,
 )
 
 
@@ -130,6 +131,7 @@ def test_http_add_label_posts_labels_body():
     assert req.get_method() == "POST"
     assert req.full_url == "https://api.github.com/repos/o/r/issues/5/labels"
     assert json.loads(req.data.decode("utf-8")) == {"labels": ["harness:queued"]}
+    assert req.get_header("Content-type") == "application/json"
 
 
 def test_http_remove_label_deletes_and_swallows_404():
@@ -164,3 +166,155 @@ def test_http_remove_label_other_error_propagates():
     client = HttpGithubClient("tok", opener=ServerErrorOpener())
     with pytest.raises(urllib.error.HTTPError):
         client.remove_label("o/r", 5, "x")
+
+
+# --- pull requests, fake ---------------------------------------------------
+
+
+def test_fake_find_pull_request_misses_then_hits():
+    client = FakeGithubClient()
+
+    assert client.find_pull_request("o/r", head="o:harness/tsk_1") is None
+
+    created = client.create_pull_request(
+        "o/r", head="o:harness/tsk_1", base="main", title="T", body="B"
+    )
+
+    assert client.find_pull_request("o/r", head="o:harness/tsk_1") == created
+
+
+def test_fake_create_pull_request_records_the_call():
+    client = FakeGithubClient()
+
+    client.create_pull_request(
+        "o/r", head="o:harness/tsk_1", base="trunk", title="T", body="B"
+    )
+
+    assert client.created == [
+        {
+            "repo": "o/r",
+            "head": "o:harness/tsk_1",
+            "base": "trunk",
+            "title": "T",
+            "body": "B",
+        }
+    ]
+
+
+def test_fake_default_branch_is_configurable():
+    assert FakeGithubClient().default_branch("o/r") == "main"
+    assert FakeGithubClient(default_branch="trunk").default_branch("o/r") == "trunk"
+
+
+# --- pull requests, http ---------------------------------------------------
+
+
+def test_http_default_branch_reads_the_repo():
+    opener = FakeOpener({"default_branch": "trunk"})
+    client = HttpGithubClient("tok", opener=opener)
+
+    assert client.default_branch("o/r") == "trunk"
+
+    req = opener.requests[0]
+    assert req.get_method() == "GET"
+    assert req.full_url == "https://api.github.com/repos/o/r"
+
+
+def test_http_find_pull_request_queries_by_head():
+    payload = [{"number": 7, "html_url": "https://github.com/o/r/pull/7"}]
+    opener = FakeOpener(payload)
+    client = HttpGithubClient("tok", opener=opener)
+
+    found = client.find_pull_request("o/r", head="o:harness/tsk_1")
+
+    assert found.number == 7
+    assert found.url == "https://github.com/o/r/pull/7"
+
+    req = opener.requests[0]
+    assert req.full_url.startswith("https://api.github.com/repos/o/r/pulls")
+    assert "head=o%3Aharness%2Ftsk_1" in req.full_url
+    assert "state=open" in req.full_url
+
+
+def test_http_find_pull_request_returns_none_when_empty():
+    client = HttpGithubClient("tok", opener=FakeOpener([]))
+
+    assert client.find_pull_request("o/r", head="o:harness/tsk_1") is None
+
+
+def test_http_find_pull_request_uses_head_label_from_response():
+    # The response's head label differs from the argument on purpose: under the
+    # old echo-the-argument behavior this would still (wrongly) pass with "head"
+    # equal to the argument, so the assertion must pin the response's value.
+    payload = [
+        {
+            "number": 7,
+            "html_url": "https://github.com/o/r/pull/7",
+            "head": {"label": "o:harness/actual-branch"},
+        }
+    ]
+    client = HttpGithubClient("tok", opener=FakeOpener(payload))
+
+    found = client.find_pull_request("o/r", head="o:harness/tsk_1")
+
+    assert found.head == "o:harness/actual-branch"
+
+
+def test_http_find_pull_request_falls_back_to_argument_when_head_missing():
+    payload = [{"number": 7, "html_url": "https://github.com/o/r/pull/7"}]
+    client = HttpGithubClient("tok", opener=FakeOpener(payload))
+
+    found = client.find_pull_request("o/r", head="o:harness/tsk_1")
+
+    assert found.head == "o:harness/tsk_1"
+
+
+def test_http_create_pull_request_posts_the_payload():
+    opener = FakeOpener({"number": 12, "html_url": "https://github.com/o/r/pull/12"})
+    client = HttpGithubClient("tok", opener=opener)
+
+    created = client.create_pull_request(
+        "o/r", head="o:harness/tsk_1", base="main", title="T", body="B"
+    )
+
+    assert created.number == 12
+    assert created.url == "https://github.com/o/r/pull/12"
+
+    req = opener.requests[0]
+    assert req.get_method() == "POST"
+    assert req.full_url == "https://api.github.com/repos/o/r/pulls"
+    assert json.loads(req.data.decode("utf-8")) == {
+        "head": "o:harness/tsk_1",
+        "base": "main",
+        "title": "T",
+        "body": "B",
+    }
+    assert req.get_header("Content-type") == "application/json"
+
+
+def test_http_create_pull_request_uses_head_label_from_response():
+    # Same deliberate mismatch as the find_pull_request case above: the response
+    # label differs from the argument so the test fails under the old echo.
+    payload = {
+        "number": 12,
+        "html_url": "https://github.com/o/r/pull/12",
+        "head": {"label": "o:harness/actual-branch"},
+    }
+    client = HttpGithubClient("tok", opener=FakeOpener(payload))
+
+    created = client.create_pull_request(
+        "o/r", head="o:harness/tsk_1", base="main", title="T", body="B"
+    )
+
+    assert created.head == "o:harness/actual-branch"
+
+
+def test_http_create_pull_request_falls_back_to_argument_when_head_missing():
+    payload = {"number": 12, "html_url": "https://github.com/o/r/pull/12"}
+    client = HttpGithubClient("tok", opener=FakeOpener(payload))
+
+    created = client.create_pull_request(
+        "o/r", head="o:harness/tsk_1", base="main", title="T", body="B"
+    )
+
+    assert created.head == "o:harness/tsk_1"

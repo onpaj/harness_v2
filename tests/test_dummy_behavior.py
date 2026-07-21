@@ -93,3 +93,31 @@ async def test_request_changes_is_per_task():
     assert (await behavior.run(first)).outcome is Outcome.REQUEST_CHANGES
     assert (await behavior.run(second)).outcome is Outcome.REQUEST_CHANGES
     assert (await behavior.run(first)).outcome is Outcome.DONE
+
+
+async def test_dummy_writes_into_the_versioned_artifacts_dir():
+    """`.harness/` is gitignored in real repos, so a dummy writing there commits
+    nothing and the task branch reaches landing with no diff — GitHub then
+    refuses the PR with a 422. Write where the real agent writes (invariant 16)."""
+    from harness.drivers.memory import MemoryArtifactStore, MemoryWorkspace
+
+    workspace = MemoryWorkspace()
+    behavior = DummyBehavior(
+        clock=FakeClock(), workspace=workspace, artifacts=MemoryArtifactStore(), delay=0
+    )
+    task = Task(
+        id="tsk_1",
+        workflow_template="default",
+        created="2026-07-20T10:00:00Z",
+        repository="app",
+        status="plan",
+    )
+
+    await behavior.run(task)
+
+    written = [path for path, _ in workspace.handles["tsk_1"].writes]
+    # The attempt index is the store's business; the *location* is the point.
+    assert len(written) == 1
+    assert written[0].startswith(".artifacts/tsk_1/plan-")
+    assert written[0].endswith(".md")
+    assert not any(p.startswith(".harness/") for p in written)

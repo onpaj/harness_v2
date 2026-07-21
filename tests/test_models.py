@@ -55,6 +55,7 @@ def test_task_roundtrips_through_camelcase_json():
         status="design",
         last_outcome="done",
         lock_id="lck_1",
+        dedup_key="github:o/r:42",
         data={"request": "add rate limiting"},
     )
 
@@ -63,6 +64,7 @@ def test_task_roundtrips_through_camelcase_json():
     assert raw["workflowTemplate"] == "default"
     assert raw["lastOutcome"] == "done"
     assert raw["lockId"] == "lck_1"
+    assert raw["dedupKey"] == "github:o/r:42"
     assert Task.from_dict(raw) == task
 
 
@@ -72,6 +74,7 @@ def test_new_task_has_null_status_and_empty_history():
     assert task.status is None
     assert task.last_outcome is None
     assert task.lock_id is None
+    assert task.dedup_key is None
     assert task.history == ()
     assert task.data == {}
 
@@ -134,6 +137,32 @@ def test_workflow_steps_excludes_end():
     )
 
     assert workflow.steps() == ("plan", "review")
+
+
+def test_workflow_max_parallel_for_defaults_to_one():
+    workflow = Workflow(
+        name="default",
+        start="plan",
+        transitions=(Transition(from_step="plan", on="done", to_step=END),),
+    )
+
+    assert workflow.max_parallel_for("plan") == 1
+    assert workflow.max_parallel_for("unknown") == 1
+
+
+def test_workflow_max_parallel_for_reads_configured_limit():
+    workflow = Workflow(
+        name="default",
+        start="plan",
+        transitions=(
+            Transition(from_step="plan", on="done", to_step="review"),
+            Transition(from_step="review", on="done", to_step=END),
+        ),
+        max_parallel={"review": 3},
+    )
+
+    assert workflow.max_parallel_for("review") == 3
+    assert workflow.max_parallel_for("plan") == 1
 
 
 def test_outcome_values():

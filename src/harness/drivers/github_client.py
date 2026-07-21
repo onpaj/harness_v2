@@ -24,6 +24,15 @@ class Issue:
     labels: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class PullRequestRef:
+    """A pull request as the API returns it. `head` is the `owner:branch` form."""
+
+    number: int
+    url: str
+    head: str
+
+
 class GithubClient(ABC):
     """The minimal GitHub API the connector needs."""
 
@@ -39,12 +48,31 @@ class GithubClient(ABC):
     def remove_label(self, repo: str, number: int, label: str) -> None:
         """Remove a label. A missing one is a no-op (idempotent)."""
 
+    @abstractmethod
+    def default_branch(self, repo: str) -> str:
+        """The repo's default branch — what a PR is opened against."""
+
+    @abstractmethod
+    def find_pull_request(self, repo: str, *, head: str) -> PullRequestRef | None:
+        """The open PR for `head` (`owner:branch`), or None."""
+
+    @abstractmethod
+    def create_pull_request(
+        self, repo: str, *, head: str, base: str, title: str, body: str
+    ) -> PullRequestRef:
+        """Open a PR from `head` into `base`."""
+
 
 class FakeGithubClient(GithubClient):
     """Issues in a dict. For unit/e2e and smoke — no network."""
 
-    def __init__(self, issues: list[Issue] | None = None) -> None:
+    def __init__(
+        self, issues: list[Issue] | None = None, *, default_branch: str = "main"
+    ) -> None:
         self._issues: dict[int, Issue] = {i.number: i for i in (issues or [])}
+        self._default_branch = default_branch
+        self.pulls: list[PullRequestRef] = []
+        self.created: list[dict] = []
 
     def add_issue(self, issue: Issue) -> None:
         self._issues[issue.number] = issue
@@ -64,6 +92,30 @@ class FakeGithubClient(GithubClient):
         self._issues[number] = replace(
             issue, labels=tuple(l for l in issue.labels if l != label)
         )
+
+    def default_branch(self, repo: str) -> str:
+        return self._default_branch
+
+    def find_pull_request(self, repo: str, *, head: str) -> PullRequestRef | None:
+        for pull in self.pulls:
+            if pull.head == head:
+                return pull
+        return None
+
+    def create_pull_request(
+        self, repo: str, *, head: str, base: str, title: str, body: str
+    ) -> PullRequestRef:
+        number = len(self.pulls) + 1
+        pull = PullRequestRef(
+            number=number,
+            url=f"https://github.com/{repo}/pull/{number}",
+            head=head,
+        )
+        self.pulls.append(pull)
+        self.created.append(
+            {"repo": repo, "head": head, "base": base, "title": title, "body": body}
+        )
+        return pull
 
 
 class HttpGithubClient(GithubClient):
@@ -86,6 +138,25 @@ class HttpGithubClient(GithubClient):
             "Authorization": f"Bearer {self._token}",
             "Accept": "application/vnd.github+json",
         }
+
+    def _json_headers(self) -> dict[str, str]:
+        """Headers for a request that carries a JSON body (POST/PATCH)."""
+        return {**self._headers(), "Content-Type": "application/json"}
+
+    @staticmethod
+    def _pr_head(item: dict, fallback: str) -> str:
+        """The `owner:branch` label as the server reported it.
+
+        Falls back to the caller's `head` argument when the response is missing
+        the field or it isn't shaped as expected, so a partial response degrades
+        instead of raising.
+        """
+        head = item.get("head")
+        if isinstance(head, dict):
+            label = head.get("label")
+            if isinstance(label, str):
+                return label
+        return fallback
 
     def list_issues(self, repo: str, *, label: str) -> list[Issue]:
         query = urllib.parse.urlencode({"state": "open", "labels": label})
@@ -113,7 +184,7 @@ class HttpGithubClient(GithubClient):
         url = f"{self._api}/repos/{repo}/issues/{number}/labels"
         body = json.dumps({"labels": [label]}).encode("utf-8")
         request = urllib.request.Request(
-            url, data=body, headers=self._headers(), method="POST"
+            url, data=body, headers=self._json_headers(), method="POST"
         )
         self._opener.open(request)
 
@@ -127,3 +198,44 @@ class HttpGithubClient(GithubClient):
             if error.code == 404:  # label is already gone → nothing to do
                 return
             raise
+
+    def default_branch(self, repo: str) -> str:
+        url = f"{self._api}/repos/{repo}"
+        request = urllib.request.Request(url, headers=self._headers(), method="GET")
+        with self._opener.open(request) as response:
+            return json.loads(response.read())["default_branch"]
+
+    def find_pull_request(self, repo: str, *, head: str) -> PullRequestRef | None:
+        query = urllib.parse.urlencode({"state": "open", "head": head})
+        url = f"{self._api}/repos/{repo}/pulls?{query}"
+        request = urllib.request.Request(url, headers=self._headers(), method="GET")
+        with self._opener.open(request) as response:
+            raw = json.loads(response.read())
+        for item in raw:
+            return PullRequestRef(
+                number=item["number"],
+                url=item.get("html_url", ""),
+                head=self._pr_head(item, head),
+            )
+        return None
+
+    def create_pull_request(
+        self, repo: str, *, head: str, base: str, title: str, body: str
+    ) -> PullRequestRef:
+        url = f"{self._api}/repos/{repo}/pulls"
+        payload = json.dumps(
+            {"head": head, "base": base, "title": title, "body": body}
+        ).encode("utf-8")
+        request = urllib.request.Request(
+            url,
+            data=payload,
+            headers=self._json_headers(),
+            method="POST",
+        )
+        with self._opener.open(request) as response:
+            item = json.loads(response.read())
+        return PullRequestRef(
+            number=item["number"],
+            url=item.get("html_url", ""),
+            head=self._pr_head(item, head),
+        )

@@ -86,6 +86,23 @@ class GitWorkspaceHandle(WorkspaceHandle):
         )
         return _git(["-C", str(self._path), "rev-parse", "HEAD"]).strip()
 
+    def push(self) -> None:
+        # Plain push, no force: the task branch only ever moves forward.
+        # Reset-on-reattach (`reset --hard` + `clean -fd`) discards uncommitted
+        # working-tree state on a re-run, it never rewinds the branch pointer.
+        # A rejected push therefore means something else touched the branch —
+        # that must surface as a failure, not be forced over.
+        _git(
+            [
+                "-C",
+                str(self._path),
+                "push",
+                "-u",
+                "origin",
+                self._branch,
+            ]
+        )
+
 
 class GitWorkspace(Workspace):
     """Creates and reuses git worktrees under a shared root.

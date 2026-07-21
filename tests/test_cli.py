@@ -273,3 +273,501 @@ async def test_serve_returns_when_uvicorn_stops_before_the_loop(monkeypatch):
 
     assert harness.stop_seen is not None
     assert harness.stop_seen.is_set()
+
+
+# --- harness service -------------------------------------------------------
+
+
+def test_service_install_refuses_an_uninitialized_root(tmp_path, monkeypatch, capsys):
+    # Pin the platform: on Linux the launchd guard fires first and this would
+    # assert the wrong message (as CI found).
+    monkeypatch.setattr("harness.cli.sys.platform", "darwin")
+
+    code = main(["service", "install", "--root", str(tmp_path / "nope")])
+
+    assert code == 2
+    assert "not initialized" in capsys.readouterr().err
+
+
+def test_service_install_refuses_a_non_macos_host(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr("harness.cli.sys.platform", "linux")
+
+    code = main(["service", "install", "--root", str(tmp_path)])
+
+    assert code == 2
+    err = capsys.readouterr().err
+    assert "launchd" in err and "linux" in err
+
+
+def test_service_status_refuses_a_non_macos_host(monkeypatch, capsys):
+    monkeypatch.setattr("harness.cli.sys.platform", "linux")
+
+    assert main(["service", "status"]) == 2
+    assert "launchd" in capsys.readouterr().err
+
+
+def test_service_requires_an_action():
+    import pytest
+
+    with pytest.raises(SystemExit):
+        main(["service"])
+
+
+def test_service_path_entries_lead_with_the_venv_bin():
+    from harness.cli import service_path_entries
+
+    entries = service_path_entries(Path("/opt/app/.venv/bin/harness"))
+
+    assert entries[0] == "/opt/app/.venv/bin"
+    # git and gh live in these; without them the service cannot work at all.
+    assert "/usr/local/bin" in entries
+    assert "/usr/bin" in entries
+
+
+def test_service_entry_point_is_a_real_script():
+    """Regression: resolving sys.executable follows the venv symlink out to the
+    base interpreter (uv-managed CPython), where no `harness` script exists —
+    the service then failed to install. Whichever candidate wins (uv shim or
+    this environment's own script), it must be a file that exists."""
+    from harness.cli import service_entry_point
+
+    entry = service_entry_point()
+
+    assert entry.is_file(), f"{entry} is not an executable script"
+    assert "share/uv/python" not in str(entry), (
+        "pointed at the managed interpreter, not at a harness script"
+    )
+
+
+# --- uv install / update ---------------------------------------------------
+
+
+def test_version_flag_reports_the_package_version(capsys):
+    import pytest
+
+    from harness.cli import version_string
+
+    with pytest.raises(SystemExit) as exit_info:
+        main(["--version"])
+
+    assert exit_info.value.code == 0
+    assert version_string() in capsys.readouterr().out
+
+
+def test_service_entry_point_prefers_the_uv_shim(tmp_path, monkeypatch):
+    """`uv tool upgrade` rebuilds the tool env, but keeps the shim path stable,
+    so an installed LaunchAgent must point at the shim, not the tool venv."""
+    from harness import cli
+
+    home = tmp_path / "home"
+    (home / ".local" / "bin").mkdir(parents=True)
+    shim = home / ".local" / "bin" / "harness"
+    shim.write_text("#!/bin/sh\n", encoding="utf-8")
+    monkeypatch.setattr(cli.Path, "home", staticmethod(lambda: home))
+
+    assert cli.service_entry_point() == shim
+
+
+def test_service_entry_point_falls_back_to_this_environment(tmp_path, monkeypatch):
+    import sys
+
+    from harness import cli
+
+    monkeypatch.setattr(cli.Path, "home", staticmethod(lambda: tmp_path / "empty"))
+
+    assert cli.service_entry_point() == Path(sys.prefix) / "bin" / "harness"
+
+
+def test_uv_executable_falls_back_to_the_standard_location(tmp_path, monkeypatch):
+    from harness import cli
+
+    home = tmp_path / "home"
+    (home / ".local" / "bin").mkdir(parents=True)
+    uv = home / ".local" / "bin" / "uv"
+    uv.write_text("#!/bin/sh\n", encoding="utf-8")
+    monkeypatch.setattr(cli.shutil, "which", lambda name: None)
+    monkeypatch.setattr(cli.Path, "home", staticmethod(lambda: home))
+
+    assert cli.uv_executable() == uv
+
+
+def test_uv_executable_is_none_when_uv_is_absent(tmp_path, monkeypatch):
+    from harness import cli
+
+    monkeypatch.setattr(cli.shutil, "which", lambda name: None)
+    monkeypatch.setattr(cli.Path, "home", staticmethod(lambda: tmp_path / "empty"))
+
+    assert cli.uv_executable() is None
+
+
+def test_update_without_uv_explains_how_to_get_it(tmp_path, monkeypatch, capsys):
+    from harness import cli
+
+    monkeypatch.setattr(cli, "uv_executable", lambda: None)
+
+    assert main(["update"]) == 2
+    assert "astral.sh/uv/install.sh" in capsys.readouterr().err
+
+
+def test_update_runs_uv_tool_upgrade(monkeypatch, capsys):
+    from harness import cli
+
+    calls = []
+
+    class Result:
+        returncode = 0
+        stdout = "Updated harness\n"
+        stderr = ""
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        return Result()
+
+    monkeypatch.setattr(cli, "uv_executable", lambda: Path("/uv"))
+    monkeypatch.setattr(cli.subprocess, "run", fake_run)
+
+    monkeypatch.setattr(cli, "installed_version_report", lambda: "harness 0.2.0 (git abc1234)")
+
+    assert main(["update"]) == 0
+    assert calls == [["/uv", "tool", "upgrade", "harness"]]
+    out = capsys.readouterr().out
+    # A running service keeps the old code until it is bounced — say so.
+    assert "kickstart" in out
+    # ...and report the version we just installed, not the one being replaced.
+    assert "harness 0.2.0 (git abc1234)" in out
+
+
+def test_update_reports_a_failed_upgrade(monkeypatch, capsys):
+    from harness import cli
+
+    class Result:
+        returncode = 2
+        stdout = ""
+        stderr = "no such tool\n"
+
+    monkeypatch.setattr(cli, "uv_executable", lambda: Path("/uv"))
+    monkeypatch.setattr(cli.subprocess, "run", lambda cmd, **kw: Result())
+
+    assert main(["update"]) == 1
+    assert "uv tool upgrade failed" in capsys.readouterr().err
+
+
+def test_version_string_includes_the_source_commit(monkeypatch):
+    """pyproject carries one static version, so two installs both say 0.1.0 —
+    the commit from PEP 610 direct_url.json is what tells them apart."""
+    from harness import cli
+
+    class Dist:
+        @staticmethod
+        def read_text(name):
+            assert name == "direct_url.json"
+            return json.dumps(
+                {
+                    "url": "https://github.com/onpaj/harness_v2.git",
+                    "vcs_info": {"vcs": "git", "commit_id": "e427b9fafaa15f26c5ec"},
+                }
+            )
+
+    monkeypatch.setattr(cli.metadata, "version", lambda name: "0.1.0")
+    monkeypatch.setattr(cli.metadata, "distribution", lambda name: Dist())
+
+    assert cli.version_string() == "0.1.0 (git e427b9f)"
+
+
+def test_version_string_without_vcs_info_is_just_the_version(monkeypatch):
+    from harness import cli
+
+    class Dist:
+        @staticmethod
+        def read_text(name):
+            return json.dumps({"url": "file:///tmp/harness", "dir_info": {}})
+
+    monkeypatch.setattr(cli.metadata, "version", lambda name: "0.1.0")
+    monkeypatch.setattr(cli.metadata, "distribution", lambda name: Dist())
+
+    assert cli.version_string() == "0.1.0"
+
+
+def test_version_string_survives_a_missing_direct_url(monkeypatch):
+    from harness import cli
+
+    class Dist:
+        @staticmethod
+        def read_text(name):
+            return None  # editable/source installs have no direct_url.json
+
+    monkeypatch.setattr(cli.metadata, "version", lambda name: "0.1.0")
+    monkeypatch.setattr(cli.metadata, "distribution", lambda name: Dist())
+
+    assert cli.version_string() == "0.1.0"
+
+
+def test_installed_version_report_asks_the_new_script(tmp_path, monkeypatch):
+    """After an upgrade this process is the OLD code, so reading our own
+    metadata would report the version we just replaced."""
+    from harness import cli
+
+    script = tmp_path / "harness"
+    script.write_text("#!/bin/sh\n", encoding="utf-8")
+    monkeypatch.setattr(cli, "service_entry_point", lambda: script)
+
+    class Result:
+        returncode = 0
+        stdout = "harness 0.3.0 (git deadbee)\n"
+        stderr = ""
+
+    seen = {}
+
+    def fake_run(cmd, **kwargs):
+        seen["cmd"] = cmd
+        return Result()
+
+    monkeypatch.setattr(cli.subprocess, "run", fake_run)
+
+    assert cli.installed_version_report() == "harness 0.3.0 (git deadbee)"
+    assert seen["cmd"] == [str(script), "--version"]
+
+
+def test_installed_version_report_degrades_when_the_script_fails(tmp_path, monkeypatch):
+    from harness import cli
+
+    script = tmp_path / "harness"
+    script.write_text("#!/bin/sh\n", encoding="utf-8")
+    monkeypatch.setattr(cli, "service_entry_point", lambda: script)
+
+    class Result:
+        returncode = 1
+        stdout = ""
+        stderr = "boom"
+
+    monkeypatch.setattr(cli.subprocess, "run", lambda cmd, **kw: Result())
+
+    # The upgrade itself succeeded; only the report failed. Don't imply otherwise.
+    assert "installed" in cli.installed_version_report()
+
+
+# --- forge selection -------------------------------------------------------
+
+
+def test_run_rejects_an_unknown_forge():
+    with pytest.raises(SystemExit):
+        main(["run", "--forge", "bogus"])
+
+
+def test_build_forge_returns_fake_when_asked(tmp_path):
+    from harness.cli import _build_forge
+    from harness.drivers.fake_forge import FakeForge
+
+    assert isinstance(_build_forge("fake", tmp_path), FakeForge)
+
+
+def test_build_forge_without_a_token_still_returns_a_github_forge(tmp_path, monkeypatch):
+    """No token must fail at `land`, on the task — not refuse to start, which
+    would make the harness unusable for `harness submit`."""
+    from harness.cli import _build_forge
+    from harness.drivers.github_forge import GithubForge
+
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+
+    forge = _build_forge("github", tmp_path)
+
+    assert isinstance(forge, GithubForge)
+    assert forge._client is None
+
+
+def test_build_forge_with_a_token_wires_the_http_client(tmp_path, monkeypatch):
+    from harness.cli import _build_forge
+    from harness.drivers.github_client import HttpGithubClient
+
+    monkeypatch.setenv("GITHUB_TOKEN", "tok")
+
+    assert isinstance(_build_forge("github", tmp_path)._client, HttpGithubClient)
+
+
+def test_run_agent_defaults_to_claude_and_accepts_dummy(tmp_path, monkeypatch):
+    """`--agent dummy` runs the real pipeline (worktree, push, forge) with a stub
+    step behavior — the only way to exercise landing where claude is unusable."""
+    main(["init", "--root", str(tmp_path)])
+    seen = {}
+
+    def fake_build(*args, **kwargs):
+        seen.update(kwargs)
+        raise SystemExit(0)  # stop before the event loop
+
+    monkeypatch.setattr("harness.cli.build", fake_build)
+
+    with pytest.raises(SystemExit):
+        main(["run", "--root", str(tmp_path), "--agent", "dummy", "--api-port", "0"])
+    assert seen["catalog"] is None and seen["runner"] is None
+
+    seen.clear()
+    with pytest.raises(SystemExit):
+        main(["run", "--root", str(tmp_path), "--api-port", "0"])
+    assert seen["catalog"] is not None and seen["runner"] is not None
+
+
+def test_service_install_prints_setup_token_steps_when_no_active_token(tmp_path, monkeypatch, capsys):
+    """The commented example in the template must not be mistaken for a real
+    token — otherwise the operator never sees the setup instructions."""
+    monkeypatch.setattr("harness.cli.sys.platform", "darwin")
+    monkeypatch.setattr("harness.cli.load", lambda *a, **k: None)
+    monkeypatch.setattr("harness.cli.Path.home", staticmethod(lambda: tmp_path))
+    main(["init", "--root", str(tmp_path / "root")])
+    capsys.readouterr()
+
+    main(["service", "install", "--root", str(tmp_path / "root")])
+
+    out = capsys.readouterr().out
+    assert "claude setup-token" in out
+    assert (tmp_path / "root" / "secrets.env").stat().st_mode & 0o777 == 0o600
+
+
+def test_service_install_stays_quiet_once_a_token_is_set(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr("harness.cli.sys.platform", "darwin")
+    monkeypatch.setattr("harness.cli.load", lambda *a, **k: None)
+    monkeypatch.setattr("harness.cli.Path.home", staticmethod(lambda: tmp_path))
+    root = tmp_path / "root"
+    main(["init", "--root", str(root)])
+    (root / "secrets.env").write_text("CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-real\n")
+    capsys.readouterr()
+
+    main(["service", "install", "--root", str(root)])
+
+    out = capsys.readouterr().out
+    assert "claude setup-token" not in out
+    # An existing secrets file is never clobbered.
+    assert "sk-ant-oat01-real" in (root / "secrets.env").read_text()
+
+
+# --- idle detection & idle-gated restart -----------------------------------
+
+
+def _claim(root: Path, step: str, task_id: str) -> None:
+    """Simulate a stage actively working: a task in <queue>/.processing/."""
+    proc = root / "queues" / step / ".processing"
+    proc.mkdir(parents=True, exist_ok=True)
+    (proc / f"{task_id}.json").write_text("{}", encoding="utf-8")
+
+
+def test_active_stages_empty_when_nothing_is_processing(tmp_path):
+    from harness.cli import active_stages
+
+    main(["init", "--root", str(tmp_path)])
+    assert active_stages(tmp_path) == []
+
+
+def test_active_stages_lists_claimed_tasks(tmp_path):
+    from harness.cli import active_stages
+
+    main(["init", "--root", str(tmp_path)])
+    _claim(tmp_path, "development", "tsk_a")
+    _claim(tmp_path, "review", "tsk_b")
+
+    assert active_stages(tmp_path) == ["tsk_a", "tsk_b"]
+
+
+def test_update_restart_only_if_idle_skips_when_busy(tmp_path, monkeypatch, capsys):
+    from harness import cli
+
+    main(["init", "--root", str(tmp_path)])
+    _claim(tmp_path, "plan", "tsk_live")
+    capsys.readouterr()
+
+    class Ok:
+        returncode = 0
+        stdout = "upgraded\n"
+        stderr = ""
+
+    monkeypatch.setattr(cli, "uv_executable", lambda: Path("/uv"))
+    monkeypatch.setattr(cli.subprocess, "run", lambda cmd, **k: Ok())
+    monkeypatch.setattr(cli, "installed_version_report", lambda: "harness 0.9.0")
+    restarted = []
+    monkeypatch.setattr(cli, "kickstart", lambda uid, label: restarted.append(label))
+
+    assert main(["update", "--root", str(tmp_path), "--restart", "--only-if-idle"]) == 0
+    out = capsys.readouterr().out
+    assert "tsk_live" in out and "skipping the restart" in out
+    assert restarted == []  # a live stage must never be killed
+
+
+def test_update_restart_only_if_idle_restarts_when_quiet(tmp_path, monkeypatch, capsys):
+    from harness import cli
+
+    main(["init", "--root", str(tmp_path)])  # no .processing => idle
+    capsys.readouterr()
+
+    class Ok:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    monkeypatch.setattr(cli, "uv_executable", lambda: Path("/uv"))
+    monkeypatch.setattr(cli.subprocess, "run", lambda cmd, **k: Ok())
+    monkeypatch.setattr(cli, "installed_version_report", lambda: "harness 0.9.0")
+    monkeypatch.setattr("harness.cli.sys.platform", "darwin")
+    restarted = []
+    monkeypatch.setattr(cli, "kickstart", lambda uid, label: restarted.append(label))
+
+    assert main(["update", "--root", str(tmp_path), "--restart", "--only-if-idle"]) == 0
+    assert restarted == ["com.harness"]
+    assert "restarted service com.harness" in capsys.readouterr().out
+
+
+def test_update_without_restart_still_only_prints_the_hint(monkeypatch, capsys):
+    from harness import cli
+
+    class Ok:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    monkeypatch.setattr(cli, "uv_executable", lambda: Path("/uv"))
+    monkeypatch.setattr(cli.subprocess, "run", lambda cmd, **k: Ok())
+    monkeypatch.setattr(cli, "installed_version_report", lambda: "harness 0.9.0")
+    restarted = []
+    monkeypatch.setattr(cli, "kickstart", lambda uid, label: restarted.append(label))
+
+    assert main(["update"]) == 0
+    assert restarted == []
+    assert "kickstart" in capsys.readouterr().out
+
+
+# --- autoupdate schedule ---------------------------------------------------
+
+
+def test_autoupdate_hours_parse_and_reject():
+    from harness.cli import _parse_hours
+    import pytest as _pytest
+
+    assert _parse_hours("2,8,14,20") == [2, 8, 14, 20]
+    assert _parse_hours("20,2,2") == [2, 20]  # sorted + deduped
+    for bad in ("24", "-1", "x", ""):
+        with _pytest.raises(ValueError):
+            _parse_hours(bad)
+
+
+def test_autoupdate_plist_runs_the_idle_gated_update():
+    from harness.drivers.launchd import autoupdate_plist_bytes
+    import plistlib
+
+    raw = autoupdate_plist_bytes(
+        label="com.harness.autoupdate",
+        harness=Path("/Users/rem/.local/bin/harness"),
+        service_label="com.harness",
+        hours=[2, 14],
+        path_entries=["/Users/rem/.local/bin", "/usr/bin"],
+        log_dir=Path("/r/logs"),
+        home=Path("/Users/rem"),
+    )
+    d = plistlib.loads(raw)
+
+    assert d["ProgramArguments"] == [
+        "/Users/rem/.local/bin/harness",
+        "update",
+        "--restart",
+        "--only-if-idle",
+        "--label",
+        "com.harness",
+    ]
+    assert d["StartCalendarInterval"] == [{"Hour": 2, "Minute": 0}, {"Hour": 14, "Minute": 0}]
+    assert "KeepAlive" not in d  # a periodic one-shot, not a daemon

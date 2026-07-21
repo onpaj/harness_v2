@@ -67,8 +67,11 @@ swapped out later.
 .venv/bin/pytest -q
 ```
 
-Python is **3.11** (`/Users/rem/.local/bin/python3.11`), the machine **has no `uv`** —
-plain `venv` + `pip install -e ".[dev]"`. The runtime has no production dependencies.
+Python is **3.11** (`/Users/rem/.local/bin/python3.11`, a uv-managed CPython).
+Development is a clone + `venv` + `pip install -e ".[dev]"`; **shipping** is
+`uv tool install git+https://github.com/onpaj/harness_v2.git`, updated with
+`harness update` (a thin wrapper over `uv tool upgrade harness`). `install.sh`
+was retired in favour of that — don't reintroduce a second install path.
 
 Unit and integration tests run on in-memory drivers and `FakeClock` — no disk
 and no real waiting. Never write a test into them that sleeps in real time.
@@ -89,6 +92,14 @@ It covers the thin subprocess shell of `ClaudeCliRunner` that the fake runners b
 **Commit straight into `main`.** In this phase that's the intended approach — don't
 create a branch, don't open a PR, and don't ask. This applies to the harness's own repo.
 
+**Commit messages are conventional commits — this is now load-bearing.**
+`.github/workflows/release.yml` runs python-semantic-release on every push to
+`main`: `feat:` bumps the minor, `fix:`/`perf:` the patch, `BREAKING CHANGE:` the
+major, and everything else (`docs:`, `chore:`, `test:`, `refactor:`, `ci:`) only
+shows up in the notes. A sloppy subject line silently means no release. The
+release job pushes back a `chore(release): X.Y.Z` commit carrying `[skip ci]`;
+that commit has no feat/fix, so it cannot trigger a release of its own.
+
 ## Module map
 
 Dependencies flow strictly downward, no cycles.
@@ -101,7 +112,7 @@ Dependencies flow strictly downward, no cycles.
 | Ports | `ports/{queue,workflows,strategy,behavior,events,clock,workspace,artifacts,forge,board,agent,repos,source}` |
 | Orchestration | `dispatcher`, `consumer`, `source_poller` — know only ports (and not `workspace`/`forge`/`artifacts`/`agent`/`repos`/`drivers`) |
 | Behaviors | `behaviors/{landing,agent}` — touch ports, not drivers |
-| Drivers | `drivers/{fs_queue,fs_workflows,fifo_strategy,dummy_behavior,stdout_events,system_clock,memory,fs_artifacts,git_workspace,fake_forge,claude_cli,fs_agents,fs_repos,worktree_artifacts,source_reflector,github_client,github_source}` |
+| Drivers | `drivers/{fs_queue,fs_workflows,fifo_strategy,dummy_behavior,stdout_events,system_clock,memory,fs_artifacts,git_workspace,fake_forge,claude_cli,fs_agents,fs_repos,worktree_artifacts,source_reflector,github_client,github_source,github_forge,launchd}` |
 | Edges | `app` (wiring), `cli` |
 
 - `projection.py` — in-memory read model of the board; hydration from queues + event stream
@@ -118,6 +129,12 @@ Dependencies flow strictly downward, no cycles.
 - `drivers/source_reflector.py` — `SourceReflectorSink(EventSink)`: event stream → projection into the source
 - `drivers/github_client.py` — `GithubClient` (ABC), `Issue`, `FakeGithubClient`, `HttpGithubClient` (stdlib `urllib`)
 - `drivers/github_source.py` — `GithubTaskSource`: issue → task, state → label
+- `drivers/github_forge.py` — `GithubForge`: opens the real PR. Slug per task from
+  the worktree's origin, base = the repo's default branch, `Closes #n` for an
+  issue-born task, `ForgeError` on every failure path
+- `drivers/launchd.py` — the background service on macOS: pure `wrapper_script`/
+  `plist_bytes` builders (unit-tested) plus a thin `launchctl` shell; driven by
+  `harness service install|uninstall|status`
 - `api/` — FastAPI board; sees only `BoardView` and `ArtifactView`, never a driver or `ArtifactStore`
 
 ## What is responsible for what
@@ -126,6 +143,16 @@ Dependencies flow strictly downward, no cycles.
   instances of the same port. Terminal states are simply queues that nobody consumes.
 - **`claim()`** is an atomic `rename` into `<queue>/.processing/`. A single operation
   handles the lease, idempotency and provenance after a crash.
+- **A step's concurrency is workflow config, not wiring.** `Workflow.max_parallel`
+  (parsed from the optional `maxParallel: {step: N}` key in the workflow JSON,
+  validated at load time by `FilesystemWorkflowRepository`) says how many tasks a
+  step may work on at once; `Workflow.max_parallel_for(step)` defaults an absent
+  entry to **1** — every workflow file written before this feature keeps behaving
+  exactly as before. `Harness.run()` reads it to decide how many `_consumer_loop`
+  coroutines to gather over the *same* `Consumer` for that step; `Consumer` and
+  `claim()`'s atomicity are what keep two of those loops from ever claiming the
+  same task, so `Consumer` itself needed no change beyond a read-only `step`
+  property.
 - **`END = "end"`** is a reserved node. It is not a "state with no outgoing edges" —
   a typo would then quietly pass for success.
 - **A task has two workspaces** (phase 2). The **worktree** (`repository`/`worktree`)
@@ -185,11 +212,38 @@ Dependencies flow strictly downward, no cycles.
   behavior, like the dummy itself, is fake. `build` with a `catalog` switches the agent
   steps to `ClaudeCliBehavior`; the real run (`cli._run`) injects `GitWorkspace`,
   `ClaudeCliRunner`, `WorktreeArtifactView`, `Filesystem{AgentCatalog,Repository‑
-  Registry}` and `FakeForge` — a swap of driver, not surroundings.
+  Registry}` and `GithubForge` — a swap of driver, not surroundings.
 - **Landing is idempotent.** For an existing PR on a branch the forge returns the
-  existing one. So a re-run after a crash won't open a second PR.
+  existing one (`GithubForge` matches on `head=owner:branch`). So a re-run after a
+  crash won't open a second PR. The push is a plain `git push -u origin` — the task
+  branch only ever moves forward, so a rejection is a real anomaly and must fail.
+- **Landing needs a pushable remote.** `land` pushes the task branch before it
+  proposes, so a registered repo with no `origin` cannot land — that is why the
+  git e2e/smoke fixtures create a bare sibling repo and add it as `origin`.
+- **A failed PR fails the task.** `GithubForge` raises `ForgeError` on a missing
+  `GITHUB_TOKEN`, a non-GitHub origin or an API error, and the task lands in
+  `failed/`. Deliberate: before this, `land` reported success while only writing
+  to `prs.json`. Offline or in tests, use `--forge fake`.
 - **`ArtifactStore.begin(task, step)` allocates the next attempt.** Writing into one
   slot belongs to one run; the second pass (the loop) gets a new subdirectory.
+- **The service holds no secret.** launchd hands a process almost no environment, so
+  `harness service install` generates a wrapper that resolves `GITHUB_TOKEN` at
+  start-up — an explicit variable first, else `gh auth token` from the keyring. The
+  plist itself never contains a token; a test asserts that. No token is not fatal:
+  GitHub ingestion goes quiet and `harness submit` still works.
+- **The LaunchAgent points at uv's shim** (`~/.local/bin/harness`), not at a
+  virtualenv. `uv tool upgrade` rebuilds the tool environment but keeps the shim
+  path, so an update never invalidates an installed service — it just needs a
+  restart to be picked up. `service_entry_point()` falls back to
+  `sys.prefix/bin/harness` for a from-source venv.
+- **`sys.executable` is useless for locating the entry point.** Resolving it
+  follows the venv's python symlink out to the base interpreter — with a
+  uv-managed CPython that is `~/.local/share/uv/python/...`, where no `harness`
+  script exists. Use `sys.prefix`.
+- **The service `PATH` is explicit.** launchd's default `PATH` has no `git`, `gh` or
+  `claude`, so the wrapper exports one built by `cli.service_path_entries` (venv bin
+  first, then `~/.npm-global/bin`, `~/.local/bin`, `/usr/local/bin`, …). A "claude not
+  found" failure deep in a run is usually this.
 
 ## Operator
 

@@ -21,6 +21,7 @@ class RealFsHandle(WorkspaceHandle):
         self._path = root
         self.writes: list[tuple[str, str]] = []
         self.commits: list[str] = []
+        self.pushes: list[str] = []
 
     @property
     def path(self) -> Path:
@@ -39,6 +40,9 @@ class RealFsHandle(WorkspaceHandle):
     def commit(self, message: str) -> str | None:
         self.commits.append(message)
         return f"sha{len(self.commits)}"
+
+    def push(self) -> None:
+        self.pushes.append(self._branch)
 
 
 class RealFsWorkspace(Workspace):

@@ -38,3 +38,20 @@ def test_commit_records_message_and_returns_sha():
 
     assert sha is not None
     assert handle.commits == ["[development] done"]
+
+
+def test_memory_handle_records_pushes():
+    workspace = MemoryWorkspace()
+    handle = workspace.attach(
+        Task(
+            id="tsk_1",
+            workflow_template="default",
+            created="2026-07-20T10:00:00Z",
+            repository="app",
+        )
+    )
+
+    handle.push()
+    handle.push()
+
+    assert handle.pushes == ["harness/tsk_1", "harness/tsk_1"]
