@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from harness.cli import DEFAULT_WORKFLOW, _github_sources, main, serve
+from harness.cli import DEFAULT_DEFINITION, DEFAULT_WORKFLOW, _REVIEW_PERSONA, _allowed_outcomes_for, _github_sources, main, serve
 from harness.drivers.github_client import FakeGithubClient
 from harness.drivers.memory import MemoryArtifactStore, MemoryRepositoryRegistry
 from harness.drivers.stage_output import StageOutputProjection
@@ -45,6 +45,29 @@ def test_init_is_idempotent_and_keeps_edits(tmp_path):
 
     definition = json.loads((tmp_path / "workflows" / "default.json").read_text())
     assert definition["transitions"] == []
+
+
+def test_review_persona_syncs_with_base_branch_before_checking_conformance():
+    sync_index = _REVIEW_PERSONA.index("git fetch origin")
+    check_index = _REVIEW_PERSONA.index("Check:")
+    assert sync_index < check_index
+
+    assert "git merge origin" in _REVIEW_PERSONA
+    assert "git merge --abort" in _REVIEW_PERSONA
+    conflict_index = _REVIEW_PERSONA.index("git merge --abort")
+    assert "request_changes" in _REVIEW_PERSONA[conflict_index:check_index]
+    assert "do not switch branches" in _REVIEW_PERSONA.lower() or "do not create or switch branches" in _REVIEW_PERSONA.lower()
+
+
+def test_review_allowed_outcomes_unaffected_by_sync_instructions():
+    workflow = Workflow(
+        name=DEFAULT_DEFINITION["name"],
+        start=DEFAULT_DEFINITION["start"],
+        transitions=tuple(
+            Transition(from_step=t["from"], on=t["on"], to_step=t["to"]) for t in DEFAULT_DEFINITION["transitions"]
+        ),
+    )
+    assert _allowed_outcomes_for(workflow, "review") == ["done", "request_changes"]
 
 
 def test_submit_writes_a_task(tmp_path, capsys):
