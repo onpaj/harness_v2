@@ -10,17 +10,23 @@ import os
 import shutil
 import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 import uvicorn
 
 from harness.api.app import create_app
-from harness.app import LANDING_STEP, HarnessLayout, build
+from harness.app import LANDING_STEP, HarnessLayout, HealConfig, build
 from harness.drivers.claude_cli import ClaudeCliRunner
 from harness.drivers.fake_forge import FakeForge
 from harness.drivers.fs_agents import FilesystemAgentCatalog
+from harness.drivers.github_issues import GithubIssueTracker
+from harness.drivers.memory import MemoryIssueTracker
 from harness.drivers.fs_repos import FilesystemRepositoryRegistry
-from harness.drivers.fs_workflows import invalid_workflow_name
+from harness.drivers.fs_workflows import (
+    FilesystemWorkflowRepository,
+    invalid_workflow_name,
+)
 from harness.drivers.git_remote import github_slug
 from harness.drivers.git_workspace import GitWorkspace
 from harness.drivers.github_client import GithubClient, HttpGithubClient
@@ -29,6 +35,8 @@ from harness.drivers.github_source import GithubTaskSource
 from harness.drivers.launchd import (
     DEFAULT_LABEL,
     ServiceError,
+    autoupdate_plist_bytes,
+    kickstart,
     load,
     plist_bytes,
     plist_path,
@@ -45,6 +53,22 @@ from harness.ports.source import TaskSource
 from harness.ports.workflows import WorkflowNotFound
 
 PACKAGE_NAME = "harness"
+
+# Written to `<root>/secrets.env` (0600) when the service is installed, unless
+# the file already exists. Sourced by the wrapper; the operator fills in the
+# token that `claude` needs under launchd, where the keychain is unreachable.
+_SECRETS_TEMPLATE = """\
+# harness service secrets — sourced by harness-run.sh. Keep this file 0600.
+# `claude` cannot read the macOS login keychain when run under launchd, so the
+# background service needs a token in the environment. Create one with
+# `claude setup-token` and uncomment the line below with its value:
+#
+# CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-...
+#
+# GITHUB_TOKEN is taken from `gh auth token` automatically; set it here only to
+# override that.
+# GITHUB_TOKEN=ghp_...
+"""
 
 DEFAULT_WORKFLOW = "default"
 
@@ -100,11 +124,13 @@ def _init(args: argparse.Namespace) -> int:
         print(f"error: {error}", file=sys.stderr)
         return 2
 
-    _write_default_agents(layout, harness.workflow)
+    workflow = harness.workflows[args.workflow]
+    _write_default_agents(layout, workflow)
+    _write_healer_agent(layout)
     _write_default_repos(layout)
 
     print(f"harness ready at {root}")
-    print(f"steps: {', '.join(harness.workflow.steps())}")
+    print(f"steps: {', '.join(workflow.steps())}")
     return 0
 
 
@@ -238,6 +264,29 @@ _REVIEW_PERSONA = (
     "cleanup suggestions)."
 )
 
+_HEALER_PERSONA = (
+    "You are the harness healer. A task in the orchestration harness has failed "
+    "and landed in the `failed/` queue; your job is to read the failure report "
+    "you are given and diagnose it.\n\n"
+    "Decide whether the failure points at a fixable bug in the HARNESS ITSELF — "
+    "a driver contract that was violated, a wiring gap, a missing workflow edge, "
+    "an unhandled error path — as opposed to an external or expected failure (a "
+    "flaky network, an unauthenticated tool, a task whose own request was simply "
+    "wrong or impossible). Be conservative: only propose a change when there is a "
+    "concrete, plausible harness fix.\n\n"
+    "When it IS a fixable harness bug: write a proposed GitHub issue to the file "
+    "`issue.md` in your working directory. Its first line must be a title "
+    "`# <concise title>`; then a short diagnosis (what failed and why), and a "
+    "concrete proposed change (which module/contract, and what to do). Finish "
+    "with the verdict `done`.\n\n"
+    "When there is nothing actionable for the harness: do not write a file, and "
+    "finish with the verdict `request_changes` — its summary saying briefly why "
+    "the failure is not a harness bug.\n\n"
+    "You are working from the failure report alone; you do not have the task's "
+    "worktree. Do not attempt to run or fix code — your deliverable is the issue."
+)
+
+
 # Step → (persona, default tools). The tools are names of Claude Code tools,
 # which `claude_cli` passes through via `--allowedTools`.
 AGENT_PERSONAS: dict[str, tuple[str, list[str]]] = {
@@ -295,10 +344,32 @@ def _write_default_agents(layout: HarnessLayout, workflow) -> None:
             "fallback_model": None,
             "allowed_tools": _agent_tools(step),
             "allowed_outcomes": _allowed_outcomes_for(workflow, step),
+            "timeout": None,
         }
         path.write_text(
             json.dumps(definition, indent=2, ensure_ascii=False), encoding="utf-8"
         )
+
+
+def _write_healer_agent(layout: HarnessLayout) -> None:
+    """Write the `healer` persona used by the self-healing loop (invariant 14:
+    persona as data). It is not a workflow step — the healer is a loop assigned to
+    the `failed/` queue — so it lives beside the step agents but is written here."""
+    layout.agents.mkdir(parents=True, exist_ok=True)
+    path = layout.agents / "healer.json"
+    if path.exists():
+        return
+    definition = {
+        "prompt": _HEALER_PERSONA,
+        "model": None,
+        "fallback_model": None,
+        "allowed_tools": ["Read", "Write"],
+        "allowed_outcomes": ["done", "request_changes"],
+        "timeout": None,
+    }
+    path.write_text(
+        json.dumps(definition, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
 
 
 def _write_default_repos(layout: HarnessLayout) -> None:
@@ -430,6 +501,28 @@ def version_string() -> str:
     return f"{version} (git {commit})" if commit else version
 
 
+def build_timestamp() -> str | None:
+    """An approximation of "when this install was placed", not a true build
+    time — the project has no build-stamp pipeline (ships via
+    `uv tool install git+...`, see CLAUDE.md). Derived from the installed
+    distribution's on-disk mtime; `None` when that can't be determined (no
+    install, or a `Distribution` backend this heuristic didn't anticipate).
+    Never raises — degrades to `None` on any failure, the caller shows
+    "unknown" instead.
+    """
+    try:
+        location = metadata.distribution(PACKAGE_NAME).locate_file("")
+        mtime = Path(location).stat().st_mtime
+    except (metadata.PackageNotFoundError, OSError, AttributeError, TypeError):
+        return None
+    return (
+        datetime.fromtimestamp(mtime, tz=timezone.utc)
+        .replace(microsecond=0)
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
+
+
 def uv_shim() -> Path:
     """Where `uv tool install` puts the stable `harness` shim."""
     return Path.home() / ".local" / "bin" / "harness"
@@ -512,11 +605,52 @@ def _update(args: argparse.Namespace) -> int:
     # This process is still the *old* code, so version_string() here would
     # report the version we just replaced. Ask the freshly installed script.
     print(f"\nnow: {installed_version_report()}")
-    print(
-        "the running service still has the previous version — restart it with\n"
-        "  launchctl kickstart -k gui/$(id -u)/com.harness"
-    )
+
+    if not getattr(args, "restart", False):
+        print(
+            "the running service still has the previous version — restart it with\n"
+            f"  launchctl kickstart -k gui/$(id -u)/{getattr(args, 'label', DEFAULT_LABEL)}"
+        )
+        return 0
+
+    label = getattr(args, "label", DEFAULT_LABEL)
+    if getattr(args, "only_if_idle", False):
+        active = active_stages(_root(getattr(args, "root", None)))
+        if active:
+            print(
+                f"a stage is running ({', '.join(active)}); skipping the restart. "
+                "The update is on disk and will apply at the next idle restart."
+            )
+            return 0
+
+    problem = _require_macos()
+    if problem:
+        print(f"error: {problem}", file=sys.stderr)
+        return 2
+    try:
+        kickstart(os.getuid(), label)
+    except ServiceError as error:
+        print(f"error: restart failed: {error}", file=sys.stderr)
+        return 1
+    print(f"restarted service {label}")
     return 0
+
+
+def active_stages(root: Path) -> list[str]:
+    """Task ids currently claimed in a step queue — i.e. a stage is executing.
+
+    `claim()` is an atomic rename into `<queue>/.processing/`, so a `.json` there
+    means an agent is mid-run. This is the "no active work" signal the idle-gated
+    restart checks: restarting with one of these live would kill the agent
+    subprocess and waste the attempt.
+    """
+    queues = HarnessLayout(root).queues
+    if not queues.is_dir():
+        return []
+    return sorted(
+        path.stem
+        for path in queues.glob("*/.processing/*.json")
+    )
 
 
 def _require_macos() -> str | None:
@@ -554,6 +688,16 @@ def _service_install(args: argparse.Namespace) -> int:
     log_dir = root / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
 
+    # The secrets file the wrapper sources. Create it 0600 with a template if it
+    # is absent — never overwrite it, since that is where the operator's tokens
+    # live. `claude` under launchd cannot read the login keychain, so the claude
+    # token has to travel through the environment from here.
+    env_file = root / "secrets.env"
+    env_file_created = not env_file.exists()
+    if env_file_created:
+        env_file.write_text(_SECRETS_TEMPLATE, encoding="utf-8")
+    env_file.chmod(0o600)
+
     wrapper = root / "harness-run.sh"
     wrapper.write_text(
         wrapper_script(
@@ -561,6 +705,7 @@ def _service_install(args: argparse.Namespace) -> int:
             root=root,
             api_port=args.api_port,
             path_entries=service_path_entries(harness),
+            env_file=env_file,
         ),
         encoding="utf-8",
     )
@@ -587,8 +732,22 @@ def _service_install(args: argparse.Namespace) -> int:
     print(f"service {args.label} installed and started")
     print(f"  wrapper: {wrapper}")
     print(f"  plist:   {target}")
+    print(f"  secrets: {env_file}")
     print(f"  logs:    {log_dir}/harness.log, {log_dir}/harness.error.log")
     print(f"  board:   http://127.0.0.1:{args.api_port}/")
+
+    # An *active* assignment, not the commented example in the template.
+    token_set = any(
+        line.lstrip().startswith("CLAUDE_CODE_OAUTH_TOKEN=")
+        for line in env_file.read_text(encoding="utf-8").splitlines()
+    )
+    if not token_set:
+        print()
+        print("NEXT: claude cannot use the macOS keychain under launchd. Give the")
+        print("service a token so agent steps work:")
+        print("  1. claude setup-token")
+        print(f"  2. add CLAUDE_CODE_OAUTH_TOKEN=<token> to {env_file}")
+        print(f"  3. launchctl kickstart -k gui/{os.getuid()}/{args.label}")
     return 0
 
 
@@ -631,6 +790,101 @@ def _service_status(args: argparse.Namespace) -> int:
     return 0
 
 
+def _resolve_served_workflows(
+    args: argparse.Namespace, layout: HarnessLayout
+) -> tuple[str, ...] | None:
+    """The set of workflow names `harness run` should serve, or None on error
+    (an error message has already been printed to stderr)."""
+    if args.workflows and args.all_workflows:
+        print(
+            "error: --workflow and --all-workflows are mutually exclusive",
+            file=sys.stderr,
+        )
+        return None
+    if args.all_workflows:
+        names = FilesystemWorkflowRepository(layout.workflows).names()
+        if not names:
+            print(
+                f"error: no workflow definitions found under {layout.workflows}",
+                file=sys.stderr,
+            )
+            return None
+        return names
+    return tuple(args.workflows) if args.workflows else (DEFAULT_WORKFLOW,)
+
+
+def _parse_hours(raw: str) -> list[int]:
+    """Parse "2,8,14,20" into sorted unique hours, rejecting anything out of 0-23."""
+    hours = []
+    for piece in raw.split(","):
+        piece = piece.strip()
+        if not piece:
+            continue
+        if not piece.isdigit() or not (0 <= int(piece) <= 23):
+            raise ValueError(f"invalid hour {piece!r} (expected 0-23)")
+        hours.append(int(piece))
+    if not hours:
+        raise ValueError("no hours given")
+    return sorted(set(hours))
+
+
+def _service_autoupdate(args: argparse.Namespace) -> int:
+    problem = _require_macos()
+    if problem:
+        print(f"error: {problem}", file=sys.stderr)
+        return 2
+
+    home = Path.home()
+    autoupdate_label = f"{args.label}.autoupdate"
+    target = plist_path(home, autoupdate_label)
+
+    if args.remove:
+        was_loaded = unload(os.getuid(), autoupdate_label)
+        existed = target.exists()
+        target.unlink(missing_ok=True)
+        print(
+            f"autoupdate {autoupdate_label} removed"
+            if (was_loaded or existed)
+            else f"autoupdate {autoupdate_label} was not installed"
+        )
+        return 0
+
+    try:
+        hours = _parse_hours(args.hours)
+    except ValueError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
+
+    harness = service_entry_point()
+    root = _root(args.root)
+    log_dir = root / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(
+        autoupdate_plist_bytes(
+            label=autoupdate_label,
+            harness=harness,
+            service_label=args.label,
+            hours=hours,
+            path_entries=service_path_entries(harness),
+            log_dir=log_dir,
+            home=home,
+        )
+    )
+    try:
+        load(os.getuid(), target, autoupdate_label)
+    except ServiceError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+
+    pretty = ", ".join(f"{h:02d}:00" for h in hours)
+    print(f"autoupdate {autoupdate_label} installed — runs at {pretty}")
+    print(f"  it runs: harness update --restart --only-if-idle --label {args.label}")
+    print(f"  log:     {log_dir}/autoupdate.log")
+    return 0
+
+
 def _build_forge(kind: str, root: Path, registry: RepositoryRegistry | None = None):
     """The forge for a real run. `fake` writes into `<root>/forge/prs.json`.
 
@@ -649,6 +903,25 @@ def _build_forge(kind: str, root: Path, registry: RepositoryRegistry | None = No
 def _run(args: argparse.Namespace) -> int:
     root = _root(args.root)
     layout = HarnessLayout(root)
+
+    served_names = _resolve_served_workflows(args, layout)
+    if served_names is None:
+        return 2
+
+    # `--github-workflow` defaults to `None` (not `DEFAULT_WORKFLOW`) so this
+    # check only fires when the operator actually named a workflow for GitHub
+    # ingestion. Validating the *default* against the served set would reject
+    # e.g. `run --workflow hotfix` with no GitHub flags at all -- a regression
+    # against FR-6, since no GithubTaskSource is ever built in that case.
+    if args.github_workflow is not None and args.github_workflow not in served_names:
+        print(
+            f"error: --github-workflow {args.github_workflow!r} is not served "
+            f"by this harness (served: {', '.join(served_names)})",
+            file=sys.stderr,
+        )
+        return 2
+    args.github_workflow = args.github_workflow or DEFAULT_WORKFLOW
+
     # The real run: agent behind `claude -p`, git worktree under a shared root,
     # repo name→path from `repos.json`, personas from `agents/`, artifacts
     # versioned in the worktree, and a real GitHub forge (`--forge fake` swaps
@@ -665,10 +938,32 @@ def _run(args: argparse.Namespace) -> int:
     artifact_view = WorktreeArtifactView(layout.worktrees)
     forge = _build_forge(args.forge, root, registry)
     sources = _github_sources(args, root, registry)
+
+    # Self-healing: an agent assigned to the `failed/` queue. Enabled by
+    # `--heal-repo <owner/repo>` (where the healer opens issues). It reuses the
+    # claude agent, so it needs `--agent claude`; offline (no GITHUB_TOKEN) it
+    # falls back to the in-memory tracker so the loop still runs harmlessly.
+    heal = None
+    issue_tracker = None
+    if args.heal_repo:
+        if not use_agent:
+            print(
+                "error: --heal-repo needs --agent claude (the healer is a claude agent)",
+                file=sys.stderr,
+            )
+            return 2
+        token = os.environ.get("GITHUB_TOKEN")
+        issue_tracker = (
+            GithubIssueTracker(HttpGithubClient(token))
+            if token
+            else MemoryIssueTracker()
+        )
+        heal = HealConfig(repository=args.heal_repo)
+
     try:
         harness = build(
             root,
-            args.workflow,
+            served_names,
             workspace=workspace,
             forge=forge,
             runner=runner,
@@ -678,6 +973,8 @@ def _run(args: argparse.Namespace) -> int:
             sources=sources or None,
             delay=args.delay,
             request_changes_once_at=args.request_changes_at,
+            issue_tracker=issue_tracker,
+            heal=heal,
         )
     except WorkflowNotFound as error:
         print(f"error: {error}", file=sys.stderr)
@@ -711,6 +1008,8 @@ async def serve(
         output=harness.stage_output,
         control=harness.control,
         clock=SystemClock(),
+        version=version_string(),
+        build_time=build_timestamp(),
     )
     config = uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning")
     server = asyncio.create_task(uvicorn.Server(config).serve())
@@ -754,7 +1053,19 @@ def main(argv: list[str] | None = None) -> int:
 
     run = subparsers.add_parser("run", help="start the orchestration loop")
     run.add_argument("--root", default=None)
-    run.add_argument("--workflow", default=DEFAULT_WORKFLOW)
+    run.add_argument(
+        "--workflow",
+        action="append",
+        dest="workflows",
+        default=None,
+        help="workflow to serve (repeatable); unset serves just 'default'",
+    )
+    run.add_argument(
+        "--all-workflows",
+        action="store_true",
+        help="serve every workflow definition found under <root>/workflows "
+        "(mutually exclusive with --workflow)",
+    )
     run.add_argument("--delay", type=float, default=5.0)
     run.add_argument("--poll", type=float, default=0.2)
     run.add_argument(
@@ -765,15 +1076,27 @@ def main(argv: list[str] | None = None) -> int:
         help="interval (s) for polling the task source (e.g. GitHub); kept "
         "well above --poll to respect remote API rate limits",
     )
-    run.add_argument("--agent-timeout", type=float, default=600.0, dest="agent_timeout")
+    run.add_argument("--agent-timeout", type=float, default=1800.0, dest="agent_timeout")
     run.add_argument("--request-changes-at", default=None, dest="request_changes_at")
     run.add_argument(
         "--github-label",
         default="harness:todo",
         help="label that selects issues to ingest",
     )
-    run.add_argument("--github-workflow", default=DEFAULT_WORKFLOW)
+    run.add_argument(
+        "--github-workflow",
+        default=None,
+        help="workflow assigned to GitHub-sourced tasks (default: 'default'); "
+        "an explicit value must be in the served set",
+    )
     run.add_argument("--worktree-root", default=None, help="root of the task worktrees")
+    run.add_argument(
+        "--heal-repo",
+        default=None,
+        dest="heal_repo",
+        help="enable self-healing: assign a healer agent to the failed queue that "
+        "opens diagnostic issues on this repo (owner/repo); needs --agent claude",
+    )
     run.add_argument(
         "--api-port",
         type=int,
@@ -822,8 +1145,37 @@ def main(argv: list[str] | None = None) -> int:
     service_status.add_argument("--label", default=DEFAULT_LABEL)
     service_status.set_defaults(handler=_service_status)
 
+    service_autoupdate = service_actions.add_parser(
+        "autoupdate",
+        help="schedule `harness update --restart --only-if-idle` a few times a day",
+    )
+    service_autoupdate.add_argument("--label", default=DEFAULT_LABEL)
+    service_autoupdate.add_argument("--root", default=None)
+    service_autoupdate.add_argument(
+        "--hours",
+        default="2,8,14,20",
+        help="comma-separated hours (0-23) to run the update (default: 2,8,14,20)",
+    )
+    service_autoupdate.add_argument(
+        "--remove", action="store_true", help="remove the autoupdate schedule"
+    )
+    service_autoupdate.set_defaults(handler=_service_autoupdate)
+
     update = subparsers.add_parser(
         "update", help="upgrade the installed harness via uv"
+    )
+    update.add_argument("--root", default=None)
+    update.add_argument("--label", default=DEFAULT_LABEL)
+    update.add_argument(
+        "--restart",
+        action="store_true",
+        help="restart the service after upgrading, so it runs the new version",
+    )
+    update.add_argument(
+        "--only-if-idle",
+        action="store_true",
+        dest="only_if_idle",
+        help="with --restart: skip the restart while a stage is running",
     )
     update.set_defaults(handler=_update)
 

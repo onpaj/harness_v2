@@ -15,9 +15,10 @@ class WorkflowRepository(ABC):
         """Load a workflow. If it does not exist, raise WorkflowNotFound."""
 
     @abstractmethod
-    def names(self) -> list[str]:
-        """All discoverable workflow names, sorted alphabetically.
+    def names(self) -> tuple[str, ...]:
+        """All workflow names discoverable here, sorted alphabetically.
 
-        Lenient where get() is strict: a definition that fails to parse is
-        omitted, never raised. A missing/unreadable root yields an empty list.
+        Lenient on enumeration: an unreadable or invalid definition is simply
+        skipped here, not raised — it still fails loud from get() if actually
+        requested.
         """

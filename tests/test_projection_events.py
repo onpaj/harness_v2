@@ -47,7 +47,7 @@ def test_terminal_event_lands_in_done():
 def test_event_without_task_is_ignored():
     projection, sink = build()
 
-    sink.emit("started", workflow="default")
+    sink.emit("started", workflows=["default"])
     sink.emit("recovered", count=3)
     sink.emit("corrupt", path="/tmp/x.json")
 

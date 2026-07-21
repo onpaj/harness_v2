@@ -25,6 +25,7 @@ from harness.ports.behavior import ConsumerBehavior
 from harness.ports.clock import Clock
 from harness.ports.events import EventSink
 from harness.ports.forge import Forge, PullRequest
+from harness.ports.issues import IssueRef, IssueTracker
 from harness.ports.queue import TaskQueue
 from harness.ports.repos import RepositoryNotFound, RepositoryRegistry
 from harness.ports.source import FinishResult, Progress, TaskSource, dedup_key
@@ -74,8 +75,8 @@ class MemoryWorkflowRepository(WorkflowRepository):
         except KeyError:
             raise WorkflowNotFound(f"workflow {name!r} does not exist") from None
 
-    def names(self) -> list[str]:
-        return sorted(self._workflows)
+    def names(self) -> tuple[str, ...]:
+        return tuple(sorted(self._workflows))
 
 
 class MemoryEventSink(EventSink):
@@ -295,6 +296,40 @@ class MemoryForge(Forge):
         self.opened.append(pull)
         self.bodies[branch] = body
         return pull
+
+
+class MemoryIssueTracker(IssueTracker):
+    """Records opened issues in a list. Idempotent by marker — the twin of
+    `MemoryForge`'s idempotency by branch. For unit/e2e/smoke, no network."""
+
+    def __init__(self) -> None:
+        self.opened: list[dict[str, Any]] = []
+
+    def open_issue(
+        self,
+        repo: str,
+        *,
+        title: str,
+        body: str,
+        labels: tuple[str, ...],
+        marker: str,
+    ) -> IssueRef:
+        for existing in self.opened:
+            if existing["repo"] == repo and existing["marker"] == marker:
+                return existing["ref"]
+        number = len(self.opened) + 1
+        ref = IssueRef(number=number, url=f"https://forge.local/{repo}/issues/{number}")
+        self.opened.append(
+            {
+                "repo": repo,
+                "title": title,
+                "body": body,
+                "labels": labels,
+                "marker": marker,
+                "ref": ref,
+            }
+        )
+        return ref
 
 
 class MemoryAgentCatalog(AgentCatalog):

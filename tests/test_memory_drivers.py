@@ -83,7 +83,7 @@ def test_workflow_repository_names_lists_keys_sorted():
     workflow = Workflow(name="default", start="plan", transitions=())
     repository = MemoryWorkflowRepository({"hotfix": workflow, "default": workflow})
 
-    assert repository.names() == ["default", "hotfix"]
+    assert repository.names() == ("default", "hotfix")
 
 
 def test_event_sink_records():

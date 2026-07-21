@@ -2,8 +2,10 @@ import asyncio
 import json
 
 from harness.app import HarnessLayout, build
-from harness.drivers.memory import MemoryEventSink
-from harness.models import Task
+from harness.drivers.memory import MemoryAgentCatalog, MemoryEventSink
+from harness.models import BehaviorResult, Outcome, Task
+from harness.ports.agent import AgentSpec
+from harness.ports.behavior import ConsumerBehavior
 from harness.ports.source import TaskSource
 
 
@@ -64,7 +66,7 @@ def test_build_creates_one_queue_per_step(tmp_path):
 
     harness = build(tmp_path, "default", events=MemoryEventSink())
 
-    assert sorted(step for step in harness.workflow.steps()) == ["plan", "review"]
+    assert sorted(step for step in harness.workflows["default"].steps()) == ["plan", "review"]
     assert (tmp_path / "queues" / "plan").is_dir()
     assert (tmp_path / "queues" / "review").is_dir()
     assert not (tmp_path / "queues" / "end").exists()
@@ -130,6 +132,104 @@ async def test_run_drives_a_task_all_the_way_to_done(tmp_path):
     finished = Task.from_dict(json.loads((tmp_path / "done" / "tsk_1.json").read_text()))
     visited = [entry.to_step for entry in finished.history if entry.actor == "dispatcher"]
     assert visited == ["plan", "review", "plan", "review", "end"]
+
+
+def test_behavior_for_uses_spec_timeout_override_else_agent_timeout(tmp_path):
+    seed(tmp_path)
+    catalog = MemoryAgentCatalog(
+        {
+            "plan": AgentSpec(name="plan", prompt="p", timeout=45.0),
+            "review": AgentSpec(name="review", prompt="r"),
+        }
+    )
+
+    harness = build(
+        tmp_path,
+        "default",
+        events=MemoryEventSink(),
+        catalog=catalog,
+        agent_timeout=900.0,
+    )
+
+    by_actor = {consumer.actor: consumer for consumer in harness.consumers}
+    assert by_actor["consumer:plan"]._behavior._timeout == 45.0
+    assert by_actor["consumer:review"]._behavior._timeout == 900.0
+
+
+class ConcurrencyProbeBehavior(ConsumerBehavior):
+    """Records, per step, how many `run()` calls were in flight at once.
+
+    `task.status` is the step the task is currently queued under (the
+    dispatcher stamps it before handing the task to that step's queue), so a
+    single shared instance can distinguish concurrency per step even though
+    `build()` wires one behavior instance across every non-landing consumer.
+    """
+
+    def __init__(self, hold: float) -> None:
+        self._hold = hold
+        self.current: dict[str, int] = {}
+        self.max_seen: dict[str, int] = {}
+
+    async def run(self, task: Task) -> BehaviorResult:
+        step = task.status
+        self.current[step] = self.current.get(step, 0) + 1
+        self.max_seen[step] = max(self.max_seen.get(step, 0), self.current[step])
+        await asyncio.sleep(self._hold)
+        self.current[step] -= 1
+        return BehaviorResult(Outcome.DONE, summary="probed")
+
+
+async def test_max_parallel_bounds_concurrent_runs_per_step(tmp_path):
+    """FR-3: a step's configured maxParallel is the ceiling on concurrent
+    `ConsumerBehavior.run()` calls for that step, while a step with no
+    override never exceeds the default of 1 — in the same harness run."""
+    layout = HarnessLayout(tmp_path)
+    layout.workflows.mkdir(parents=True, exist_ok=True)
+    definition = {
+        "name": "default",
+        "start": "plan",
+        "transitions": [
+            {"from": "plan", "on": "done", "to": "review"},
+            {"from": "review", "on": "done", "to": "end"},
+        ],
+        "maxParallel": {"review": 2},
+    }
+    (layout.workflows / "default.json").write_text(json.dumps(definition))
+
+    probe = ConcurrencyProbeBehavior(hold=0.05)
+    harness = build(tmp_path, "default", events=MemoryEventSink(), behavior=probe)
+
+    for i in range(3):
+        plan_task = Task(
+            id=f"tsk_plan_{i}",
+            workflow_template="default",
+            created="2026-07-21T10:00:00Z",
+            status="plan",
+        )
+        (tmp_path / "queues" / "plan" / f"tsk_plan_{i}.json").write_text(
+            json.dumps(plan_task.to_dict())
+        )
+        review_task = Task(
+            id=f"tsk_review_{i}",
+            workflow_template="default",
+            created="2026-07-21T10:00:00Z",
+            status="review",
+        )
+        (tmp_path / "queues" / "review" / f"tsk_review_{i}.json").write_text(
+            json.dumps(review_task.to_dict())
+        )
+
+    stop = asyncio.Event()
+    runner = asyncio.create_task(harness.run(poll_interval=0.01, stop=stop))
+    for _ in range(400):
+        await asyncio.sleep(0.01)
+        if len(list((tmp_path / "done").glob("tsk_*.json"))) >= 6:
+            break
+    stop.set()
+    await asyncio.wait_for(runner, timeout=RUNNER_TIMEOUT)
+
+    assert probe.max_seen["review"] == 2
+    assert probe.max_seen["plan"] == 1
 
 
 def test_recover_returns_stranded_tasks(tmp_path):
@@ -213,3 +313,97 @@ async def test_stranded_task_survives_into_the_projection(tmp_path):
     await harness.run(poll_interval=0.01, stop=stop)
 
     assert harness.projection.get("tsk_8") is not None
+
+
+HOTFIX_DEFINITION = {
+    "name": "hotfix",
+    "start": "plan",
+    "transitions": [
+        {"from": "plan", "on": "done", "to": "review"},
+        {"from": "review", "on": "done", "to": "end"},
+    ],
+}
+
+
+def seed_two_workflows(tmp_path):
+    """`default` (plan -> review) and `hotfix` (plan -> review), sharing the
+    `plan` and `review` step names."""
+    layout = seed(tmp_path)
+    (layout.workflows / "hotfix.json").write_text(json.dumps(HOTFIX_DEFINITION))
+    return layout
+
+
+def test_build_with_two_workflows_unions_step_queues(tmp_path):
+    seed_two_workflows(tmp_path)
+
+    harness = build(tmp_path, ["default", "hotfix"], events=MemoryEventSink())
+
+    assert set(harness.workflows) == {"default", "hotfix"}
+    assert sorted(harness._step_queues) == ["plan", "review"]
+    assert len(harness.consumers) == 2
+
+
+async def test_two_served_workflows_route_tasks_to_their_own_steps_via_shared_queue(
+    tmp_path,
+):
+    seed_two_workflows(tmp_path)
+    harness = build(tmp_path, ["default", "hotfix"], events=MemoryEventSink(), delay=0.0)
+    default_task = Task(
+        id="tsk_default", workflow_template="default", created="2026-07-19T10:00:00Z"
+    )
+    hotfix_task = Task(
+        id="tsk_hotfix", workflow_template="hotfix", created="2026-07-19T10:00:00Z"
+    )
+    (tmp_path / "tasks" / "tsk_default.json").write_text(json.dumps(default_task.to_dict()))
+    (tmp_path / "tasks" / "tsk_hotfix.json").write_text(json.dumps(hotfix_task.to_dict()))
+
+    stop = asyncio.Event()
+    runner = asyncio.create_task(harness.run(poll_interval=0.01, stop=stop))
+    for _ in range(400):
+        await asyncio.sleep(0.01)
+        if (tmp_path / "done" / "tsk_default.json").exists() and (
+            tmp_path / "done" / "tsk_hotfix.json"
+        ).exists():
+            break
+    stop.set()
+    await asyncio.wait_for(runner, timeout=RUNNER_TIMEOUT)
+
+    assert (tmp_path / "done" / "tsk_default.json").exists()
+    assert (tmp_path / "done" / "tsk_hotfix.json").exists()
+
+
+def test_task_for_unserved_but_existing_workflow_fails_with_clear_message(tmp_path):
+    """`hotfix` is a valid definition on disk, but this harness only serves
+    `default` — the task must fail fast with a message naming the unserved
+    workflow, not the generic "no queue" message."""
+    seed_two_workflows(tmp_path)
+    harness = build(tmp_path, "default", events=MemoryEventSink(), delay=0.0)
+    task = Task(
+        id="tsk_1", workflow_template="hotfix", created="2026-07-19T10:00:00Z"
+    )
+    (tmp_path / "tasks" / "tsk_1.json").write_text(json.dumps(task.to_dict()))
+
+    assert harness.dispatcher.tick() is True
+
+    failed = Task.from_dict(
+        json.loads((tmp_path / "failed" / "tsk_1.json").read_text())
+    )
+    assert "hotfix" in failed.history[-1].reason
+    assert "not served" in failed.history[-1].reason
+    assert "no queue" not in failed.history[-1].reason
+
+
+def test_task_for_nonexistent_workflow_still_fails_as_before(tmp_path):
+    seed_two_workflows(tmp_path)
+    harness = build(tmp_path, "default", events=MemoryEventSink(), delay=0.0)
+    task = Task(
+        id="tsk_1", workflow_template="does-not-exist", created="2026-07-19T10:00:00Z"
+    )
+    (tmp_path / "tasks" / "tsk_1.json").write_text(json.dumps(task.to_dict()))
+
+    assert harness.dispatcher.tick() is True
+
+    failed = Task.from_dict(
+        json.loads((tmp_path / "failed" / "tsk_1.json").read_text())
+    )
+    assert "does-not-exist" in failed.history[-1].reason
