@@ -2,6 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>harness board</title>
   <script src="/static/htmx.min.js"></script>
   <script src="/static/sse.js"></script>
@@ -24,7 +25,6 @@
     dialog[open] { display: flex; flex-direction: column; }
     table { border-collapse: collapse; width: 100%; font-size: 13px; }
     td, th { text-align: left; padding: 4px 8px; border-bottom: 1px solid #ebecf0; vertical-align: top; }
-
     .task-detail { flex: 1; min-height: 0; display: flex; flex-direction: column; }
     .task-detail__header {
       display: flex; align-items: center; gap: 8px; padding: 12px 16px;
@@ -41,6 +41,14 @@
     .tab-panels { flex: 1; min-height: 0; overflow: auto; padding: 16px; display: flex; flex-direction: column; }
     .tab-panel { display: none; }
     .tab-panel.active { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+    .table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+    @media (max-width: 767px) {
+      .column { min-width: 85vw; flex: 0 0 auto; }
+      .card { padding: 12px 10px; }
+      dialog { width: 94vw; max-width: 94vw; height: 90vh; }
+      .tabs { overflow-x: auto; }
+      .tab-panels { padding: 12px; }
+    }
   </style>
 </head>
 <body hx-ext="sse" sse-connect="/api/events">

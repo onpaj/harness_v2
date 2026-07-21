@@ -17,6 +17,7 @@
 
   <div class="tab-panels">
     <section class="tab-panel active" data-panel="info">
+      <div class="table-scroll">
       <table>
         <tr><th>repository</th><td>{{ task.repository or "—" }}</td></tr>
         <tr><th>worktree</th><td>{{ task.worktree or "—" }}</td></tr>
@@ -27,8 +28,10 @@
         <tr><th>created</th><td>{{ task.created }}</td></tr>
         <tr><th>data</th><td><pre>{{ task.data }}</pre></td></tr>
       </table>
+      </div>
 
       <h3>artifacts</h3>
+      <div class="table-scroll">
       <table>
         <tr><th>step</th><th>attempt</th><th>name</th></tr>
         {% for ref in artifacts %}
@@ -39,9 +42,11 @@
         </tr>
         {% endfor %}
       </table>
+      </div>
     </section>
 
     <section class="tab-panel" data-panel="history">
+      <div class="table-scroll">
       <table>
         <tr><th>time</th><th>actor</th><th>from</th><th>to</th><th>outcome</th><th>reason</th></tr>
         {% for entry in task.history %}
@@ -55,6 +60,7 @@
         </tr>
         {% endfor %}
       </table>
+      </div>
     </section>
 
     <section class="tab-panel" data-panel="output">
