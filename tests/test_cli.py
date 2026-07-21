@@ -1,6 +1,7 @@
 import argparse
 import asyncio
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -771,6 +772,51 @@ def test_version_string_survives_a_missing_direct_url(monkeypatch):
     monkeypatch.setattr(cli.metadata, "distribution", lambda name: Dist())
 
     assert cli.version_string() == "0.1.0"
+
+
+def test_build_timestamp_is_the_install_locations_mtime(tmp_path, monkeypatch):
+    from harness import cli
+
+    install_dir = tmp_path / "harness-0.1.0.dist-info"
+    install_dir.mkdir()
+    # A known mtime, expressed in whole seconds (the function truncates to
+    # second precision), so the assertion is exact rather than approximate.
+    stamp = 1_784_629_920  # 2026-07-21T10:32:00Z
+    os.utime(install_dir, (stamp, stamp))
+
+    class Dist:
+        @staticmethod
+        def locate_file(name):
+            assert name == ""
+            return install_dir
+
+    monkeypatch.setattr(cli.metadata, "distribution", lambda name: Dist())
+
+    assert cli.build_timestamp() == "2026-07-21T10:32:00Z"
+
+
+def test_build_timestamp_is_none_when_not_installed(monkeypatch):
+    from harness import cli
+
+    def raise_not_found(name):
+        raise cli.metadata.PackageNotFoundError(name)
+
+    monkeypatch.setattr(cli.metadata, "distribution", raise_not_found)
+
+    assert cli.build_timestamp() is None
+
+
+def test_build_timestamp_is_none_on_an_unreadable_location(monkeypatch):
+    from harness import cli
+
+    class Dist:
+        @staticmethod
+        def locate_file(name):
+            return "/no/such/path/at/all"
+
+    monkeypatch.setattr(cli.metadata, "distribution", lambda name: Dist())
+
+    assert cli.build_timestamp() is None
 
 
 def test_installed_version_report_asks_the_new_script(tmp_path, monkeypatch):

@@ -187,12 +187,18 @@ def build_json_router(
     artifacts: ArtifactView,
     agent_admin: AgentAdmin,
     workflow_admin: WorkflowAdmin,
+    version: str,
+    build_time: str | None,
 ) -> APIRouter:
     router = APIRouter(prefix="/api")
 
     @router.get("/board")
     def board() -> dict:
         return view.snapshot().to_dict()
+
+    @router.get("/version")
+    def version_info() -> dict:
+        return {"version": version, "build_time": build_time}
 
     @router.get("/tasks/{task_id}")
     def task(task_id: str) -> dict:
@@ -286,6 +292,8 @@ def build_html_router(
     coalesce_seconds: float,
     agent_admin: AgentAdmin,
     workflow_admin: WorkflowAdmin,
+    version: str,
+    build_time: str | None,
 ) -> APIRouter:
     router = APIRouter()
 
@@ -302,7 +310,13 @@ def build_html_router(
     @router.get("/", response_class=HTMLResponse)
     def index(request: Request) -> HTMLResponse:
         return TEMPLATES.TemplateResponse(
-            request=request, name="board.html", context={"board": view.snapshot()}
+            request=request,
+            name="board.html",
+            context={
+                "board": view.snapshot(),
+                "version": version,
+                "build_time": build_time,
+            },
         )
 
     @router.get("/fragment/board", response_class=HTMLResponse)

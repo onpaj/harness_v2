@@ -99,6 +99,8 @@ def create_app(
     coalesce_seconds: float = 0.25,
     agent_admin: AgentAdmin | None = None,
     workflow_admin: WorkflowAdmin | None = None,
+    version: str = "unknown",
+    build_time: str | None = None,
 ) -> FastAPI:
     artifacts = artifacts or _EmptyArtifactView()
     output = output or _EmptyStageOutputView()
@@ -117,7 +119,9 @@ def create_app(
         StaticFiles(directory=str(Path(__file__).parent / "static")),
         name="static",
     )
-    app.include_router(build_json_router(view, artifacts, agent_admin, workflow_admin))
+    app.include_router(
+        build_json_router(view, artifacts, agent_admin, workflow_admin, version, build_time)
+    )
     app.include_router(
         build_html_router(
             view,
@@ -128,6 +132,8 @@ def create_app(
             coalesce_seconds,
             agent_admin,
             workflow_admin,
+            version,
+            build_time,
         )
     )
     return app

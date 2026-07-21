@@ -244,6 +244,17 @@ def _imported_names_from(path: Path, module: str) -> set[str]:
     return names
 
 
+def test_api_does_not_import_cli():
+    """`create_app` receives version/build_time as already-computed strings —
+    it must not reach back into `cli.py` (or `importlib.metadata` directly) to
+    compute them itself, which would both cycle (`cli.py` imports
+    `create_app`) and leak how the harness is packaged/run into the UI layer."""
+    for path in (SOURCE / "api").rglob("*.py"):
+        imports = imported_modules(path)
+        assert "harness.cli" not in imports, f"{path.name} imports harness.cli"
+        assert "importlib.metadata" not in imports, f"{path.name} imports importlib.metadata"
+
+
 def test_api_reads_artifacts_only_through_view():
     """`api/` reads artifacts only through `ArtifactView` (read-side). The
     write-side `ArtifactStore` and its drivers do not belong in the UI — the
