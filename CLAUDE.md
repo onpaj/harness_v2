@@ -143,6 +143,16 @@ Dependencies flow strictly downward, no cycles.
   instances of the same port. Terminal states are simply queues that nobody consumes.
 - **`claim()`** is an atomic `rename` into `<queue>/.processing/`. A single operation
   handles the lease, idempotency and provenance after a crash.
+- **A step's concurrency is workflow config, not wiring.** `Workflow.max_parallel`
+  (parsed from the optional `maxParallel: {step: N}` key in the workflow JSON,
+  validated at load time by `FilesystemWorkflowRepository`) says how many tasks a
+  step may work on at once; `Workflow.max_parallel_for(step)` defaults an absent
+  entry to **1** — every workflow file written before this feature keeps behaving
+  exactly as before. `Harness.run()` reads it to decide how many `_consumer_loop`
+  coroutines to gather over the *same* `Consumer` for that step; `Consumer` and
+  `claim()`'s atomicity are what keep two of those loops from ever claiming the
+  same task, so `Consumer` itself needed no change beyond a read-only `step`
+  property.
 - **`END = "end"`** is a reserved node. It is not a "state with no outgoing edges" —
   a typo would then quietly pass for success.
 - **A task has two workspaces** (phase 2). The **worktree** (`repository`/`worktree`)
