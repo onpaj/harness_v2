@@ -48,6 +48,16 @@ class WorkspaceHandle(ABC):
         branch is a no-op.
         """
 
+    @abstractmethod
+    def merge(self, base: str) -> bool:
+        """Merge `origin/<base>` into the current branch, without committing.
+
+        Returns True when the merge left conflict markers in the working tree
+        (dirty — nothing was staged for a clean commit); False when the merge
+        applied cleanly (already up to date, fast-forward, or an automatic
+        merge) — the result is staged and ready for `commit()`.
+        """
+
 
 class Workspace(ABC):
     @abstractmethod

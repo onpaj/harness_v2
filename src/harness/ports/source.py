@@ -64,7 +64,14 @@ class TaskSource(ABC):
 
     @abstractmethod
     def poll(self) -> list[Task]:
-        """Bring in new, not-yet-consumed tasks."""
+        """Bring in new, not-yet-consumed tasks.
+
+        An implementation may also perform an idempotent, side-effecting
+        action per polled item that produces no task (precedent:
+        `GithubTaskSource.poll()` swaps a label as part of claiming an issue;
+        `GithubMergeabilityWatcher.poll()` calls GitHub's update-branch API on
+        a "behind" PR). Any such action must be safe to repeat every tick.
+        """
 
     @abstractmethod
     def report_progress(self, task: Task, progress: Progress) -> None:
