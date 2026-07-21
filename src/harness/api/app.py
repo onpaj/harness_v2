@@ -9,11 +9,15 @@ from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
 from harness.api.routes import build_html_router, build_json_router
+from harness.ports.agent import AgentNotFound, AgentSpec
+from harness.ports.agent_admin import AgentAdmin, AgentFields, AgentValidationError
 from harness.ports.artifacts import ArtifactRef, ArtifactView
 from harness.ports.board import BoardView
 from harness.ports.clock import Clock
 from harness.ports.control import TaskControl
 from harness.ports.logs import StageOutputView
+from harness.ports.workflow_admin import WorkflowAdmin, WorkflowValidationError
+from harness.ports.workflows import WorkflowNotFound
 
 
 class _EmptyArtifactView(ArtifactView):
@@ -50,6 +54,41 @@ class _NullTaskControl(TaskControl):
         return False
 
 
+class _EmptyAgentAdmin(AgentAdmin):
+    """No-op agent admin for a board wired without one. Keeps `create_app`
+    backward compatible — the admin routes exist but list nothing and refuse
+    every write. Behind the port, so api/ still knows no driver."""
+
+    def list(self) -> tuple[str, ...]:
+        return ()
+
+    def read(self, name: str) -> AgentSpec:
+        raise AgentNotFound(f"agent {name!r} does not exist")
+
+    def write(self, name: str, fields: AgentFields) -> AgentSpec:
+        raise AgentValidationError({"name": "no agent admin configured"})
+
+    def delete(self, name: str) -> bool:
+        return False
+
+
+class _EmptyWorkflowAdmin(WorkflowAdmin):
+    """No-op workflow admin for a board wired without one. Same rationale as
+    `_EmptyAgentAdmin`."""
+
+    def list(self) -> tuple[str, ...]:
+        return ()
+
+    def read_raw(self, name: str) -> str:
+        raise WorkflowNotFound(f"workflow {name!r} does not exist")
+
+    def write_raw(self, name: str, raw_json: str) -> None:
+        raise WorkflowValidationError("no workflow admin configured")
+
+    def delete(self, name: str) -> bool:
+        return False
+
+
 def create_app(
     *,
     view: BoardView,
@@ -58,10 +97,14 @@ def create_app(
     control: TaskControl | None = None,
     clock: Clock,
     coalesce_seconds: float = 0.25,
+    agent_admin: AgentAdmin | None = None,
+    workflow_admin: WorkflowAdmin | None = None,
 ) -> FastAPI:
     artifacts = artifacts or _EmptyArtifactView()
     output = output or _EmptyStageOutputView()
     control = control or _NullTaskControl()
+    agent_admin = agent_admin or _EmptyAgentAdmin()
+    workflow_admin = workflow_admin or _EmptyWorkflowAdmin()
     app = FastAPI(title="harness board", docs_url=None, redoc_url=None)
     app.state.view = view
     app.state.artifacts = artifacts
@@ -74,8 +117,17 @@ def create_app(
         StaticFiles(directory=str(Path(__file__).parent / "static")),
         name="static",
     )
-    app.include_router(build_json_router(view, artifacts))
+    app.include_router(build_json_router(view, artifacts, agent_admin, workflow_admin))
     app.include_router(
-        build_html_router(view, artifacts, output, control, clock, coalesce_seconds)
+        build_html_router(
+            view,
+            artifacts,
+            output,
+            control,
+            clock,
+            coalesce_seconds,
+            agent_admin,
+            workflow_admin,
+        )
     )
     return app

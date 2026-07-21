@@ -60,6 +60,7 @@ swapped out later.
 21. **The outward projection is idempotent and doesn't block decision-making.** `report_progress` twice is a no-op; a source failure is isolated by `CompositeEventSink` (and `SourcePoller.tick` catches the exception from `poll()`).
 22. **`todo` is the board's name for the inbox's fresh tasks** (`status is None`) — the first column. It is a view concern only: the router and dispatcher never see a `todo` queue, and auto-flow is unchanged (a fresh task passes through `todo` into `start`).
 23. **Operator control is a write-side port `TaskControl`, mirroring the read-side `BoardView`.** `restart` is a reset, not a routing decision: it clears `status`/`lastOutcome` and re-inboxes a `failed` task, then the dispatcher decides where next (invariant #3 holds). `TaskControl` is touched only by `TaskControlService` (core), `api/` and wiring — `dispatcher.py`/`consumer.py` don't import it; guarded by `test_architecture.py`.
+24. **`AgentAdmin`/`WorkflowAdmin` are unknown to the dispatcher and consumer.** They are UI-facing admin ports, not orchestration ports — like `BoardView`/`TaskControl`, not like `AgentCatalog`/`WorkflowRepository`. `api/` touches only the two admin ports; the filesystem drivers (`FilesystemAgentAdmin`, `FilesystemWorkflowAdmin`) are wired exclusively in `cli.py`'s `serve()`. Guarded by `test_architecture.py`'s existing glob-based checks (no dedicated test needed).
 
 ## Working here
 
@@ -135,7 +136,14 @@ Dependencies flow strictly downward, no cycles.
 - `drivers/launchd.py` — the background service on macOS: pure `wrapper_script`/
   `plist_bytes` builders (unit-tested) plus a thin `launchctl` shell; driven by
   `harness service install|uninstall|status`
-- `api/` — FastAPI board; sees only `BoardView` and `ArtifactView`, never a driver or `ArtifactStore`
+- `ports/agent_admin.py` — `AgentAdmin` (write-side counterpart of `AgentCatalog`,
+  for the admin UI): `list`/`read`/`write`/`delete`, plus `AgentFields`
+  (raw strings in) and `AgentValidationError`
+- `ports/workflow_admin.py` — `WorkflowAdmin` (write-side counterpart of
+  `WorkflowRepository`, for the admin UI): `list`/`read_raw`/`write_raw`/`delete`
+  over the file's exact text, plus `WorkflowValidationError`
+- `api/` — FastAPI board and admin UI; sees only `BoardView`, `ArtifactView`,
+  `TaskControl`, `AgentAdmin` and `WorkflowAdmin` — never a driver or `ArtifactStore`
 
 ## What is responsible for what
 

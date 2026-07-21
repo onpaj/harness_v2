@@ -18,9 +18,9 @@ from harness.api.app import create_app
 from harness.app import LANDING_STEP, HarnessLayout, build
 from harness.drivers.claude_cli import ClaudeCliRunner
 from harness.drivers.fake_forge import FakeForge
-from harness.drivers.fs_agents import FilesystemAgentCatalog
+from harness.drivers.fs_agents import FilesystemAgentAdmin, FilesystemAgentCatalog
 from harness.drivers.fs_repos import FilesystemRepositoryRegistry
-from harness.drivers.fs_workflows import invalid_workflow_name
+from harness.drivers.fs_workflows import FilesystemWorkflowAdmin, invalid_workflow_name
 from harness.drivers.git_remote import github_slug
 from harness.drivers.git_workspace import GitWorkspace
 from harness.drivers.github_client import GithubClient, HttpGithubClient
@@ -711,6 +711,8 @@ async def serve(
         output=harness.stage_output,
         control=harness.control,
         clock=SystemClock(),
+        agent_admin=FilesystemAgentAdmin(harness.layout.agents),
+        workflow_admin=FilesystemWorkflowAdmin(harness.layout.workflows),
     )
     config = uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning")
     server = asyncio.create_task(uvicorn.Server(config).serve())
