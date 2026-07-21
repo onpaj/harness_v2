@@ -10,6 +10,7 @@ import os
 import shutil
 import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 import uvicorn
@@ -573,6 +574,28 @@ def version_string() -> str:
     return f"{version} (git {commit})" if commit else version
 
 
+def build_timestamp() -> str | None:
+    """An approximation of "when this install was placed", not a true build
+    time — the project has no build-stamp pipeline (ships via
+    `uv tool install git+...`, see CLAUDE.md). Derived from the installed
+    distribution's on-disk mtime; `None` when that can't be determined (no
+    install, or a `Distribution` backend this heuristic didn't anticipate).
+    Never raises — degrades to `None` on any failure, the caller shows
+    "unknown" instead.
+    """
+    try:
+        location = metadata.distribution(PACKAGE_NAME).locate_file("")
+        mtime = Path(location).stat().st_mtime
+    except (metadata.PackageNotFoundError, OSError, AttributeError, TypeError):
+        return None
+    return (
+        datetime.fromtimestamp(mtime, tz=timezone.utc)
+        .replace(microsecond=0)
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
+
+
 def uv_shim() -> Path:
     """Where `uv tool install` puts the stable `harness` shim."""
     return Path.home() / ".local" / "bin" / "harness"
@@ -1063,6 +1086,8 @@ async def serve(
         output=harness.stage_output,
         control=harness.control,
         clock=SystemClock(),
+        version=version_string(),
+        build_time=build_timestamp(),
     )
     config = uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning")
     server = asyncio.create_task(uvicorn.Server(config).serve())
