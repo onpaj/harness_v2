@@ -1,6 +1,33 @@
 # CHANGELOG
 
 
+## v0.5.0 (2026-07-21)
+
+### Features
+
+- Add per-step max-parallel-task limits to workflows
+  ([#27](https://github.com/onpaj/harness_v2/pull/27),
+  [`6e16c73`](https://github.com/onpaj/harness_v2/commit/6e16c73a15b51c858952586579a194675416582f))
+
+Adds a validated maxParallel map on the workflow JSON (default 1 per step),
+  Workflow.max_parallel_for() accessor, Consumer.step property, and Harness.run() spawning N
+  concurrent consumer loops per step. Relies on the existing atomic queue claim; no changes to
+  Dispatcher or router.
+
+Closes #25
+
+- Create-harness-issue skill creates directly when inputs are complete
+  ([#26](https://github.com/onpaj/harness_v2/pull/26),
+  [`b0554f0`](https://github.com/onpaj/harness_v2/commit/b0554f0e6634c3d4f78e86d27285a057d01e9b0f))
+
+Rewrites SKILL.md step 4 into a completeness-check router
+  (repo_resolved/title_concrete/body_substantive) that creates the issue directly when all three
+  pass and asks a targeted question otherwise. Extends step 6 into a five-field post-creation
+  report.
+
+Closes #24
+
+
 ## v0.4.0 (2026-07-21)
 
 ### Features
