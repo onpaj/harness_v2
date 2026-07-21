@@ -44,6 +44,15 @@ TITLED = Task(
 )
 
 
+WORKFLOW_LESS = Task(
+    id="tsk_4",
+    workflow_template=None,
+    step="development",
+    created="2026-07-19T10:00:04Z",
+    status="development",
+)
+
+
 BROKEN = Task(
     id="tsk_9",
     workflow_template="default",
@@ -74,7 +83,9 @@ def client() -> TestClient:
     )
     # BROKEN is retrievable via get() (for the detail fragment) without cluttering
     # the rendered columns, so the board-rendering tests stay undisturbed.
-    view = FakeBoardView(board, {"tsk_1": WORKING, "tsk_9": BROKEN})
+    view = FakeBoardView(
+        board, {"tsk_1": WORKING, "tsk_4": WORKFLOW_LESS, "tsk_9": BROKEN}
+    )
     return TestClient(create_app(view=view, clock=FakeClock()))
 
 
@@ -157,6 +168,24 @@ def test_fragment_task_shows_metadata_and_history(client):
     assert "development" in body
     assert "2026-07-19T10:00:05Z" in body
     assert "dispatcher" in body
+
+
+def test_fragment_task_shows_pipeline_workflow_and_dash_step(client):
+    """FR-9: a pipeline task (workflow set, step unset) shows its workflow
+    name and a dash — never a literal 'None' — in the step cell."""
+    body = client.get("/fragment/task/tsk_1").text
+
+    assert "default" in body
+    assert ">None<" not in body
+
+
+def test_fragment_task_shows_dash_workflow_and_real_step_when_workflow_less(client):
+    """FR-9: a workflow-less task (workflow unset, step set) shows a dash —
+    never a literal 'None' — in the workflow cell, and its real step."""
+    body = client.get("/fragment/task/tsk_4").text
+
+    assert ">None<" not in body
+    assert "development" in body
 
 
 def test_fragment_task_unknown_returns_404(client):

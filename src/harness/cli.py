@@ -20,7 +20,7 @@ from harness.drivers.claude_cli import ClaudeCliRunner
 from harness.drivers.fake_forge import FakeForge
 from harness.drivers.fs_agents import FilesystemAgentCatalog
 from harness.drivers.fs_repos import FilesystemRepositoryRegistry
-from harness.drivers.fs_workflows import invalid_workflow_name
+from harness.drivers.fs_workflows import invalid_step_name, invalid_workflow_name
 from harness.drivers.git_remote import github_slug
 from harness.drivers.git_workspace import GitWorkspace
 from harness.drivers.github_client import GithubClient, HttpGithubClient
@@ -81,6 +81,14 @@ def _init(args: argparse.Namespace) -> int:
     root = _root(args.root)
     layout = HarnessLayout(root)
 
+    layout.agents.mkdir(parents=True, exist_ok=True)
+    _write_default_repos(layout)
+
+    if args.no_workflow:
+        layout.tasks.mkdir(parents=True, exist_ok=True)
+        print(f"harness ready at {root} (no workflow — add steps under {layout.agents})")
+        return 0
+
     if invalid_workflow_name(args.workflow):
         print(f"error: invalid workflow name: {args.workflow!r}", file=sys.stderr)
         return 2
@@ -101,7 +109,6 @@ def _init(args: argparse.Namespace) -> int:
         return 2
 
     _write_default_agents(layout, harness.workflow)
-    _write_default_repos(layout)
 
     print(f"harness ready at {root}")
     print(f"steps: {', '.join(harness.workflow.steps())}")
@@ -321,9 +328,18 @@ def _submit(args: argparse.Namespace) -> int:
         print(f"error: --data is not valid JSON: {error}", file=sys.stderr)
         return 2
 
+    workflow_name = args.workflow
+    step = args.step
+    if workflow_name is None and step is None:
+        workflow_name = DEFAULT_WORKFLOW
+    if step is not None and invalid_step_name(step):
+        print(f"error: invalid step name: {step!r}", file=sys.stderr)
+        return 2
+
     task = Task(
         id=new_task_id(),
-        workflow_template=args.workflow,
+        workflow_template=workflow_name,
+        step=step,
         created=SystemClock().now(),
         repository=args.repo,
         worktree=args.worktree,
@@ -357,6 +373,10 @@ def _github_sources(
         client = HttpGithubClient(token)
 
     worktree_root = args.worktree_root or str(root / "worktrees")
+    workflow = args.github_workflow
+    step = args.github_step
+    if workflow is None and step is None:
+        workflow = DEFAULT_WORKFLOW
     sources: list[TaskSource] = []
     for name in registry.names():
         slug = slug_of(registry.resolve(name))
@@ -368,7 +388,8 @@ def _github_sources(
                 client=client,
                 clock=SystemClock(),
                 repo=slug,
-                workflow=args.github_workflow,
+                workflow=workflow,
+                step=step,
                 repository=name,
                 worktree_root=worktree_root,
                 select_label=args.github_label,
@@ -649,6 +670,9 @@ def _build_forge(kind: str, root: Path, registry: RepositoryRegistry | None = No
 def _run(args: argparse.Namespace) -> int:
     root = _root(args.root)
     layout = HarnessLayout(root)
+    workflow_name = args.workflow
+    if workflow_name is None and (layout.workflows / f"{DEFAULT_WORKFLOW}.json").is_file():
+        workflow_name = DEFAULT_WORKFLOW  # unchanged default when one exists
     # The real run: agent behind `claude -p`, git worktree under a shared root,
     # repo name→path from `repos.json`, personas from `agents/`, artifacts
     # versioned in the worktree, and a real GitHub forge (`--forge fake` swaps
@@ -668,7 +692,7 @@ def _run(args: argparse.Namespace) -> int:
     try:
         harness = build(
             root,
-            args.workflow,
+            workflow_name,
             workspace=workspace,
             forge=forge,
             runner=runner,
@@ -742,11 +766,26 @@ def main(argv: list[str] | None = None) -> int:
     init = subparsers.add_parser("init", help="create the directory tree")
     init.add_argument("--root", default=None)
     init.add_argument("--workflow", default=DEFAULT_WORKFLOW)
+    init.add_argument(
+        "--no-workflow",
+        action="store_true",
+        help="skip writing a default workflow; add steps under agents/ directly",
+    )
     init.set_defaults(handler=_init)
 
     submit = subparsers.add_parser("submit", help="submit a new task")
     submit.add_argument("--root", default=None)
-    submit.add_argument("--workflow", default=DEFAULT_WORKFLOW)
+    submit_target = submit.add_mutually_exclusive_group()
+    submit_target.add_argument(
+        "--workflow",
+        default=None,
+        help="run the named workflow (mutually exclusive with --step)",
+    )
+    submit_target.add_argument(
+        "--step",
+        default=None,
+        help="run this one step and finish (mutually exclusive with --workflow)",
+    )
     submit.add_argument("--repo", default=None)
     submit.add_argument("--worktree", default=None, help="path to the task's worktree")
     submit.add_argument("--data", default=None, help="JSON payload")
@@ -754,7 +793,7 @@ def main(argv: list[str] | None = None) -> int:
 
     run = subparsers.add_parser("run", help="start the orchestration loop")
     run.add_argument("--root", default=None)
-    run.add_argument("--workflow", default=DEFAULT_WORKFLOW)
+    run.add_argument("--workflow", default=None)
     run.add_argument("--delay", type=float, default=5.0)
     run.add_argument("--poll", type=float, default=0.2)
     run.add_argument(
@@ -772,7 +811,9 @@ def main(argv: list[str] | None = None) -> int:
         default="harness:todo",
         help="label that selects issues to ingest",
     )
-    run.add_argument("--github-workflow", default=DEFAULT_WORKFLOW)
+    github_target = run.add_mutually_exclusive_group()
+    github_target.add_argument("--github-workflow", default=None)
+    github_target.add_argument("--github-step", default=None, dest="github_step")
     run.add_argument("--worktree-root", default=None, help="root of the task worktrees")
     run.add_argument(
         "--api-port",

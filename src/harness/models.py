@@ -87,8 +87,9 @@ class Task:
     """
 
     id: str
-    workflow_template: str
     created: str
+    workflow_template: str | None = None
+    step: str | None = None
     repository: str | None = None
     worktree: str | None = None
     status: str | None = None
@@ -104,6 +105,7 @@ class Task:
             "repository": self.repository,
             "worktree": self.worktree,
             "workflowTemplate": self.workflow_template,
+            "step": self.step,
             "status": self.status,
             "lastOutcome": self.last_outcome,
             "lockId": self.lock_id,
@@ -117,7 +119,8 @@ class Task:
     def from_dict(cls, raw: dict[str, Any]) -> Task:
         return cls(
             id=raw["id"],
-            workflow_template=raw["workflowTemplate"],
+            workflow_template=raw.get("workflowTemplate"),
+            step=raw.get("step"),
             created=raw["created"],
             repository=raw.get("repository"),
             worktree=raw.get("worktree"),

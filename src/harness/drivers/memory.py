@@ -74,6 +74,9 @@ class MemoryWorkflowRepository(WorkflowRepository):
         except KeyError:
             raise WorkflowNotFound(f"workflow {name!r} does not exist") from None
 
+    def names(self) -> list[str]:
+        return list(self._workflows)
+
 
 class MemoryEventSink(EventSink):
     def __init__(self) -> None:
@@ -305,6 +308,9 @@ class MemoryAgentCatalog(AgentCatalog):
             return self._specs[name]
         except KeyError:
             raise AgentNotFound(f"agent {name!r} does not exist") from None
+
+    def names(self) -> list[str]:
+        return list(self._specs)
 
 
 class FakeAgentRunner(AgentRunner):

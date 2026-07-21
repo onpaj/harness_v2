@@ -68,6 +68,47 @@ def test_task_roundtrips_through_camelcase_json():
     assert Task.from_dict(raw) == task
 
 
+def test_workflow_less_task_roundtrips_through_json():
+    task = Task(
+        id="tsk_1",
+        workflow_template=None,
+        step="development",
+        created="2026-07-19T10:00:00Z",
+    )
+
+    raw = task.to_dict()
+
+    assert raw["workflowTemplate"] is None
+    assert raw["step"] == "development"
+    assert Task.from_dict(raw) == task
+
+
+def test_task_from_dict_defaults_step_when_absent():
+    """Backward compatibility: an existing task file on disk never carries a
+    `step` key. `from_dict` must default it to None, not raise KeyError."""
+    raw = {
+        "id": "tsk_1",
+        "workflowTemplate": "default",
+        "created": "2026-07-19T10:00:00Z",
+    }
+
+    task = Task.from_dict(raw)
+
+    assert task.step is None
+    assert task.workflow_template == "default"
+
+
+def test_task_from_dict_defaults_workflow_template_when_absent():
+    """A workflow-less task written before this change never had a
+    `workflowTemplate` key either — must default to None, not KeyError."""
+    raw = {"id": "tsk_1", "created": "2026-07-19T10:00:00Z"}
+
+    task = Task.from_dict(raw)
+
+    assert task.workflow_template is None
+    assert task.step is None
+
+
 def test_new_task_has_null_status_and_empty_history():
     task = Task(id="tsk_1", workflow_template="default", created="2026-07-19T10:00:00Z")
 

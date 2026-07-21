@@ -33,6 +33,15 @@ class FilesystemAgentCatalog(AgentCatalog):
     def __init__(self, root: Path) -> None:
         self._root = Path(root)
 
+    def names(self) -> tuple[str, ...]:
+        return tuple(
+            sorted(
+                path.stem
+                for path in self._root.glob("*.json")
+                if not _invalid_agent_name(path.stem)
+            )
+        )
+
     def get(self, name: str) -> AgentSpec:
         if _invalid_agent_name(name):
             raise AgentNotFound(f"invalid agent name: {name!r}")

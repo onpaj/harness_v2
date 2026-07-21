@@ -5,7 +5,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from harness.models import Transition, Workflow
+from harness.models import END, FAILED, Transition, Workflow
+from harness.ports.board import DONE_COLUMN, TODO_COLUMN
 from harness.ports.workflows import WorkflowNotFound, WorkflowRepository
 
 
@@ -18,9 +19,29 @@ def invalid_workflow_name(name: str) -> bool:
     return "/" in name or "\\" in name or name in ("", ".", "..")
 
 
+_RESERVED_STEP_NAMES = (END, FAILED, DONE_COLUMN, TODO_COLUMN)
+
+
+def invalid_step_name(name: str) -> bool:
+    """Everything invalid_workflow_name rejects, plus the reserved board-level
+    names (`end`, `failed`, `done`, `todo`) — a step name now comes straight
+    from `--step`/a TaskSource, not only from inside a trusted workflow file,
+    so it must not collide with a board column."""
+    return invalid_workflow_name(name) or name in _RESERVED_STEP_NAMES
+
+
 class FilesystemWorkflowRepository(WorkflowRepository):
     def __init__(self, root: Path) -> None:
         self._root = Path(root)
+
+    def names(self) -> tuple[str, ...]:
+        return tuple(
+            sorted(
+                path.stem
+                for path in self._root.glob("*.json")
+                if not invalid_workflow_name(path.stem)
+            )
+        )
 
     def get(self, name: str) -> Workflow:
         if invalid_workflow_name(name):

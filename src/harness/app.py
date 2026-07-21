@@ -35,6 +35,7 @@ from harness.ports.forge import Forge
 from harness.ports.logs import StageOutputView
 from harness.ports.queue import TaskQueue
 from harness.ports.source import TaskSource
+from harness.ports.workflows import WorkflowNotFound
 from harness.ports.workspace import Workspace
 from harness.projection import BoardProjection
 from harness.ports.control import TaskControl
@@ -87,7 +88,7 @@ class Harness:
         self,
         *,
         layout: HarnessLayout,
-        workflow: Workflow,
+        workflow: Workflow | None,
         dispatcher: Dispatcher,
         consumers: list[Consumer],
         inbox: TaskQueue,
@@ -163,7 +164,9 @@ class Harness:
             failed=self._failed,
         )
         self._seed_pollers()
-        self._events.emit("started", workflow=self.workflow.name)
+        self._events.emit(
+            "started", workflow=self.workflow.name if self.workflow else None
+        )
         await asyncio.gather(
             self._dispatcher_loop(poll_interval, stop),
             *(self._consumer_loop(consumer, poll_interval, stop) for consumer in self.consumers),
@@ -199,7 +202,7 @@ class Harness:
 
 def build(
     root: Path,
-    workflow_name: str,
+    workflow_name: str | None = None,
     *,
     events: EventSink | None = None,
     clock: Clock | None = None,
@@ -231,9 +234,29 @@ def build(
     forge = forge or MemoryForge()
 
     workflows = FilesystemWorkflowRepository(layout.workflows)
-    workflow = workflows.get(workflow_name)
+    workflow: Workflow | None = None
+    if workflow_name is not None:
+        workflow = workflows.get(workflow_name)  # WorkflowNotFound still propagates, fail fast
 
-    projection = BoardProjection(workflow)
+    # FR-7: the live queue set is the union of every step reachable in every
+    # loadable workflow file plus every agent declared under agents/ — not
+    # just the one workflow named above. With one workflow and no catalog
+    # (today's shape) this degenerates to exactly workflow.steps().
+    known_steps: set[str] = set()
+    loadable_workflows: list[Workflow] = []
+    for name in workflows.names():
+        try:
+            loaded = workflows.get(name)
+        except WorkflowNotFound:
+            continue  # unreadable file during discovery: skipped, not fatal
+        loadable_workflows.append(loaded)
+        known_steps |= set(loaded.steps())
+    if catalog is not None:
+        known_steps |= set(catalog.names())
+
+    steps = tuple(sorted(known_steps))
+
+    projection = BoardProjection(steps=steps, workflows=loadable_workflows)
     stage_output = StageOutputProjection()
     # The reflector comes after ProjectionSink: the outward projection must not
     # get ahead of the board. The stage-output projection sits alongside the
@@ -255,7 +278,7 @@ def build(
         step: FilesystemTaskQueue(
             name=step, root=layout.queues / step, events=events, quarantine=failed
         )
-        for step in workflow.steps()
+        for step in steps
     }
 
     # Read side of artifacts: when passed in (phase 3: `WorktreeArtifactView`),

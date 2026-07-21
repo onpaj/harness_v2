@@ -24,7 +24,7 @@ def snapshot(status="plan", task_id="tsk_1", **kwargs) -> dict:
 
 
 def build():
-    projection = BoardProjection(WORKFLOW)
+    projection = BoardProjection(WORKFLOW.steps(), (WORKFLOW,))
     return projection, ProjectionSink(projection)
 
 

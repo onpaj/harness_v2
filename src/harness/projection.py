@@ -8,7 +8,7 @@ nothing about drivers.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterable
 
 from harness.models import END, Task, Workflow
 from harness.ports.board import (
@@ -22,25 +22,34 @@ from harness.ports.board import (
 from harness.ports.queue import TaskQueue
 
 
-def column_order(workflow: Workflow) -> tuple[str, ...]:
-    """Steps in order of reachability from the start, then done and failed.
+def column_order(
+    steps: Iterable[str], workflows: Iterable[Workflow] = ()
+) -> tuple[str, ...]:
+    """Steps ordered by reachability from every workflow's start (walked in
+    the order the workflows are given), then every remaining known step
+    (workflow-less, or unreferenced by any workflow) in the order `steps`
+    was given, then done and failed.
 
     Backward edges are ignored — a step already placed is never moved.
     Otherwise the column order would depend on which way the search went.
     """
     order: list[str] = []
-    pending: list[str] = [workflow.start]
+    known = set(steps)
+    pending: list[str] = [workflow.start for workflow in workflows]
+    edges = [
+        transition for workflow in workflows for transition in workflow.transitions
+    ]
 
     while pending:
         step = pending.pop(0)
-        if step == END or step in order:
+        if step == END or step in order or step not in known:
             continue
         order.append(step)
-        for transition in workflow.transitions:
+        for transition in edges:
             if transition.from_step == step and transition.to_step not in order:
                 pending.append(transition.to_step)
 
-    for step in workflow.steps():
+    for step in steps:
         if step not in order:
             order.append(step)
 
@@ -48,8 +57,8 @@ def column_order(workflow: Workflow) -> tuple[str, ...]:
 
 
 class BoardProjection(BoardView):
-    def __init__(self, workflow: Workflow) -> None:
-        self._order = column_order(workflow)
+    def __init__(self, steps: Iterable[str], workflows: Iterable[Workflow] = ()) -> None:
+        self._order = column_order(steps, workflows)
         self._tasks: dict[str, Task] = {}
         self._columns: dict[str, str] = {}
         self._revision = 0

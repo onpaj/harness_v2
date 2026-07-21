@@ -93,6 +93,68 @@ def test_submit_without_init_fails_cleanly(tmp_path, capsys):
     assert "initialized" in err
 
 
+def test_submit_step_writes_a_workflow_less_task(tmp_path, capsys):
+    main(["init", "--root", str(tmp_path), "--no-workflow"])
+    (tmp_path / "agents" / "development.json").write_text(
+        json.dumps({"prompt": "do it"}), encoding="utf-8"
+    )
+    capsys.readouterr()
+
+    assert main(
+        ["submit", "--root", str(tmp_path), "--step", "development"]
+    ) == 0
+
+    task_id = capsys.readouterr().out.strip()
+    raw = json.loads((tmp_path / "tasks" / f"{task_id}.json").read_text())
+    assert raw["workflowTemplate"] is None
+    assert raw["step"] == "development"
+    task = Task.from_dict(raw)
+    assert task.workflow_template is None
+    assert task.step == "development"
+
+
+def test_submit_rejects_workflow_and_step_together(tmp_path, capsys):
+    main(["init", "--root", str(tmp_path)])
+    capsys.readouterr()
+
+    with pytest.raises(SystemExit) as excinfo:
+        main(
+            [
+                "submit",
+                "--root",
+                str(tmp_path),
+                "--workflow",
+                "default",
+                "--step",
+                "development",
+            ]
+        )
+
+    assert excinfo.value.code == 2
+
+
+def test_submit_rejects_a_reserved_step_name(tmp_path, capsys):
+    main(["init", "--root", str(tmp_path)])
+    capsys.readouterr()
+
+    assert main(["submit", "--root", str(tmp_path), "--step", "end"]) == 2
+
+    out, err = capsys.readouterr()
+    assert out == ""
+    assert "end" in err
+    assert list((tmp_path / "tasks").glob("*.json")) == []
+
+
+def test_init_no_workflow_writes_no_default_workflow(tmp_path, capsys):
+    assert main(["init", "--root", str(tmp_path), "--no-workflow"]) == 0
+
+    out = capsys.readouterr().out
+    assert "no workflow" in out
+    assert not (tmp_path / "workflows" / "default.json").exists()
+    assert (tmp_path / "agents").is_dir()
+    assert (tmp_path / "repos.json").exists()
+
+
 def test_run_with_unknown_workflow_fails_cleanly(tmp_path, capsys):
     """The third documented error path: unknown workflow (via `run`)."""
     main(["init", "--root", str(tmp_path)])
@@ -150,6 +212,7 @@ def _github_args(**overrides):
     """The minimal namespace the `run` parser hands to `_github_sources`."""
     base = dict(
         github_workflow="default",
+        github_step=None,
         github_label="harness:todo",
         worktree_root=None,
     )
@@ -197,12 +260,99 @@ def test_github_sources_skips_repo_without_github_origin(monkeypatch, tmp_path, 
     assert "local has no GitHub origin" in capsys.readouterr().err
 
 
+def test_github_sources_default_to_default_workflow_when_neither_flag_given(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("GITHUB_TOKEN", "t0ken")
+    registry = MemoryRepositoryRegistry({"heblo": Path("/repos/heblo")})
+    slugs = {Path("/repos/heblo"): "onpaj/Anela.Heblo"}
+
+    sources = _github_sources(
+        _github_args(github_workflow=None),
+        tmp_path,
+        registry,
+        slug_of=slugs.get,
+        client=FakeGithubClient(),
+    )
+
+    assert sources[0]._workflow == DEFAULT_WORKFLOW
+    assert sources[0]._step is None
+
+
+def test_github_sources_step_alongside_workflow_none(monkeypatch, tmp_path):
+    monkeypatch.setenv("GITHUB_TOKEN", "t0ken")
+    registry = MemoryRepositoryRegistry({"heblo": Path("/repos/heblo")})
+    slugs = {Path("/repos/heblo"): "onpaj/Anela.Heblo"}
+
+    sources = _github_sources(
+        _github_args(github_workflow=None, github_step="development"),
+        tmp_path,
+        registry,
+        slug_of=slugs.get,
+        client=FakeGithubClient(),
+    )
+
+    assert sources[0]._workflow is None
+    assert sources[0]._step == "development"
+
+
+def test_run_github_workflow_and_github_step_are_mutually_exclusive():
+    with pytest.raises(SystemExit):
+        main(
+            [
+                "run",
+                "--github-workflow",
+                "default",
+                "--github-step",
+                "development",
+            ]
+        )
+
+
 def test_github_sources_empty_without_token(monkeypatch, tmp_path):
     """No GITHUB_TOKEN → no sources (harness runs on `submit` alone), silently."""
     monkeypatch.delenv("GITHUB_TOKEN", raising=False)
     registry = MemoryRepositoryRegistry({"heblo": Path("/repos/heblo")})
 
     assert _github_sources(_github_args(), tmp_path, registry) == []
+
+
+def test_run_resolves_default_workflow_when_omitted(tmp_path, monkeypatch):
+    """Plain `harness run` (no --workflow) against an ordinarily-initialized
+    harness must still carry `workflow_name="default"` into build() — the
+    same effective default as before --workflow's argparse default became
+    None to support --no-workflow harnesses."""
+    main(["init", "--root", str(tmp_path)])
+    seen = {}
+
+    def fake_build(root, workflow_name, **kwargs):
+        seen["workflow_name"] = workflow_name
+        raise SystemExit(0)
+
+    monkeypatch.setattr("harness.cli.build", fake_build)
+
+    with pytest.raises(SystemExit):
+        main(["run", "--root", str(tmp_path), "--api-port", "0"])
+
+    assert seen["workflow_name"] == "default"
+
+
+def test_run_with_no_workflow_harness_defaults_to_none(tmp_path, monkeypatch):
+    """A --no-workflow harness has no workflows/default.json, so an omitted
+    --workflow flag must resolve to None, not raise WorkflowNotFound."""
+    main(["init", "--root", str(tmp_path), "--no-workflow"])
+    seen = {}
+
+    def fake_build(root, workflow_name, **kwargs):
+        seen["workflow_name"] = workflow_name
+        raise SystemExit(0)
+
+    monkeypatch.setattr("harness.cli.build", fake_build)
+
+    with pytest.raises(SystemExit):
+        main(["run", "--root", str(tmp_path), "--api-port", "0"])
+
+    assert seen["workflow_name"] is None
 
 
 def test_run_accepts_api_port(monkeypatch, tmp_path):
@@ -248,7 +398,9 @@ async def test_serve_returns_when_uvicorn_stops_before_the_loop(monkeypatch):
 
     class FakeHarness:
         def __init__(self):
-            self.projection = BoardProjection(SERVE_TEST_WORKFLOW)
+            self.projection = BoardProjection(
+                SERVE_TEST_WORKFLOW.steps(), (SERVE_TEST_WORKFLOW,)
+            )
             self.artifacts = MemoryArtifactStore()
             self.stage_output = StageOutputProjection()
             self.control = FakeTaskControl()

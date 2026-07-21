@@ -77,3 +77,21 @@ def test_unknown_outcome_raises(tmp_path):
 
     with pytest.raises(AgentNotFound):
         catalog.get("weird")
+
+
+def test_names_lists_every_valid_agent_file(tmp_path):
+    (tmp_path / "planner.json").write_text(
+        json.dumps({"prompt": "x"}), encoding="utf-8"
+    )
+    (tmp_path / "reviewer.json").write_text(
+        json.dumps({"prompt": "y"}), encoding="utf-8"
+    )
+    catalog = FilesystemAgentCatalog(tmp_path)
+
+    assert catalog.names() == ("planner", "reviewer")
+
+
+def test_names_is_empty_for_a_missing_root(tmp_path):
+    catalog = FilesystemAgentCatalog(tmp_path / "nonexistent")
+
+    assert catalog.names() == ()
