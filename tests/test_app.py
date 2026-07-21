@@ -68,6 +68,20 @@ def test_build_creates_one_queue_per_step(tmp_path):
     assert (tmp_path / "queues" / "plan").is_dir()
     assert (tmp_path / "queues" / "review").is_dir()
     assert not (tmp_path / "queues" / "end").exists()
+
+
+def test_build_gives_every_discovered_workflow_a_board_tab(tmp_path):
+    layout = seed(tmp_path)
+    (layout.workflows / "hotfix.json").write_text(
+        json.dumps({"name": "hotfix", "start": "patch", "transitions": []})
+    )
+
+    harness = build(tmp_path, "default", events=MemoryEventSink())
+
+    board = harness.projection.snapshot()
+    assert {tab.name for tab in board.workflows} == {"default", "hotfix"}
+    # Only the active `--workflow` gets live step queues — dispatch is unchanged.
+    assert set(harness._step_queues) == {"plan", "review"}
     assert len(harness.consumers) == 2
 
 
@@ -155,7 +169,7 @@ async def test_projection_is_hydrated_from_queues_at_start(tmp_path):
     await harness.run(poll_interval=0.01, stop=stop)
 
     assert harness.projection.get("tsk_9") is not None
-    assert harness.projection.snapshot().column("review").tasks[0].id == "tsk_9"
+    assert harness.projection.snapshot().workflow("default").column("review").tasks[0].id == "tsk_9"
 
 
 def test_seed_pollers_collects_from_every_queue(tmp_path):

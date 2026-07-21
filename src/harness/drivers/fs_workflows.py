@@ -60,3 +60,13 @@ class FilesystemWorkflowRepository(WorkflowRepository):
         return Workflow(
             name=raw.get("name", name), start=raw["start"], transitions=transitions
         )
+
+    def names(self) -> list[str]:
+        names = []
+        for path in self._root.glob("*.json"):
+            try:
+                self.get(path.stem)
+            except WorkflowNotFound:
+                continue
+            names.append(path.stem)
+        return sorted(names)

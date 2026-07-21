@@ -248,7 +248,7 @@ async def test_serve_returns_when_uvicorn_stops_before_the_loop(monkeypatch):
 
     class FakeHarness:
         def __init__(self):
-            self.projection = BoardProjection(SERVE_TEST_WORKFLOW)
+            self.projection = BoardProjection([SERVE_TEST_WORKFLOW])
             self.artifacts = MemoryArtifactStore()
             self.stage_output = StageOutputProjection()
             self.control = FakeTaskControl()

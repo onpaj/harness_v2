@@ -3,7 +3,8 @@ import json
 import pytest
 
 from harness.drivers.fs_workflows import FilesystemWorkflowRepository
-from harness.models import END, Transition
+from harness.drivers.memory import MemoryWorkflowRepository
+from harness.models import END, Transition, Workflow
 from harness.ports.workflows import WorkflowNotFound
 
 DEFINITION = {
@@ -95,6 +96,36 @@ def test_non_dict_top_level_raises(tmp_path, raw_json):
 
     with pytest.raises(WorkflowNotFound):
         repository.get("bad_shape")
+
+
+def test_names_lists_valid_definitions_sorted_and_skips_broken(tmp_path):
+    (tmp_path / "hotfix.json").write_text(
+        json.dumps({"name": "hotfix", "start": "patch", "transitions": []})
+    )
+    (tmp_path / "default.json").write_text(json.dumps(DEFINITION))
+    (tmp_path / "broken.json").write_text("{this is not json")
+    repository = FilesystemWorkflowRepository(tmp_path)
+
+    assert repository.names() == ["default", "hotfix"]
+
+
+def test_names_missing_root_is_empty(tmp_path):
+    repository = FilesystemWorkflowRepository(tmp_path / "missing")
+
+    assert repository.names() == []
+
+
+def test_fs_and_memory_names_agree_on_ordering(tmp_path):
+    for name in ("hotfix", "default", "review"):
+        (tmp_path / f"{name}.json").write_text(
+            json.dumps({"name": name, "start": "plan", "transitions": []})
+        )
+    fs_repository = FilesystemWorkflowRepository(tmp_path)
+    memory_repository = MemoryWorkflowRepository(
+        {name: Workflow(name=name, start="plan", transitions=()) for name in ("hotfix", "default", "review")}
+    )
+
+    assert fs_repository.names() == memory_repository.names() == ["default", "hotfix", "review"]
 
 
 def test_path_separator_is_rejected_even_when_escape_target_exists(tmp_path):

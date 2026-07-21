@@ -35,6 +35,7 @@ from harness.ports.forge import Forge
 from harness.ports.logs import StageOutputView
 from harness.ports.queue import TaskQueue
 from harness.ports.source import TaskSource
+from harness.ports.workflows import WorkflowNotFound
 from harness.ports.workspace import Workspace
 from harness.projection import BoardProjection
 from harness.ports.control import TaskControl
@@ -233,7 +234,19 @@ def build(
     workflows = FilesystemWorkflowRepository(layout.workflows)
     workflow = workflows.get(workflow_name)
 
-    projection = BoardProjection(workflow)
+    # One tab per discovered workflow definition (read side only — step_queues
+    # below stays keyed to the single active `workflow`, driving dispatch).
+    discovered: list[Workflow] = []
+    for name in workflows.names():
+        try:
+            discovered.append(workflows.get(name))
+        except WorkflowNotFound:
+            continue  # names() already filters this; defensive only against a
+            # definition deleted between the two calls
+    if workflow.name not in {wf.name for wf in discovered}:
+        discovered.append(workflow)  # the active workflow always gets a tab
+
+    projection = BoardProjection(discovered)
     stage_output = StageOutputProjection()
     # The reflector comes after ProjectionSink: the outward projection must not
     # get ahead of the board. The stage-output projection sits alongside the

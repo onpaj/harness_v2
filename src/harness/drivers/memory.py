@@ -74,6 +74,9 @@ class MemoryWorkflowRepository(WorkflowRepository):
         except KeyError:
             raise WorkflowNotFound(f"workflow {name!r} does not exist") from None
 
+    def names(self) -> list[str]:
+        return sorted(self._workflows)
+
 
 class MemoryEventSink(EventSink):
     def __init__(self) -> None:
