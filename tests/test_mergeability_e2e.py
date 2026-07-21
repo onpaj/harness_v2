@@ -86,7 +86,7 @@ def build_harness(tmp_path, client, workspace):
     )
     harness = build(
         tmp_path,
-        "default",
+        ["default", "resolver"],
         events=MemoryEventSink(),
         clock=FakeClock(),
         workspace=workspace,
@@ -95,7 +95,6 @@ def build_harness(tmp_path, client, workspace):
         catalog=catalog,
         runner=runner,
         sources=[watcher],
-        extra_workflow_names=("resolver",),
         delay=0.0,
     )
     return harness, watcher

@@ -7,6 +7,7 @@ import urllib.error
 import pytest
 
 from harness.drivers.github_client import (
+    SELF_HEAL_LABEL,
     FakeGithubClient,
     HttpGithubClient,
     Issue,
@@ -55,6 +56,43 @@ def test_fake_add_existing_label_is_noop():
     client.add_label("o/r", 1, "harness:todo")
 
     assert client._issues[1].labels == ("harness:todo",)
+
+
+# --- issues (create + marker search), fake ---------------------------------
+
+
+def test_fake_create_issue_assigns_a_number_and_stores_it():
+    client = FakeGithubClient([Issue(1, "A", "", "u1", ("harness:todo",))])
+
+    created = client.create_issue(
+        "o/r", title="Heal", body="marker <!-- x -->", labels=(SELF_HEAL_LABEL,)
+    )
+
+    assert created.number == 2  # next after the existing issue
+    assert created.title == "Heal"
+    assert client.list_issues("o/r", label=SELF_HEAL_LABEL)[0].number == 2
+
+
+def test_fake_search_issue_by_marker_matches_body_within_the_label():
+    client = FakeGithubClient()
+    client.create_issue(
+        "o/r", title="Heal", body="diagnosis\n<!-- harness-heal:tsk_9 -->\n",
+        labels=(SELF_HEAL_LABEL,),
+    )
+
+    found = client.search_issue_by_marker("o/r", "<!-- harness-heal:tsk_9 -->")
+    missing = client.search_issue_by_marker("o/r", "<!-- harness-heal:other -->")
+
+    assert found is not None and found.title == "Heal"
+    assert missing is None
+
+
+def test_fake_search_ignores_issues_without_the_self_heal_label():
+    client = FakeGithubClient(
+        [Issue(1, "A", "<!-- harness-heal:tsk_9 -->", "u1", ("bug",))]
+    )
+
+    assert client.search_issue_by_marker("o/r", "<!-- harness-heal:tsk_9 -->") is None
 
 
 # --- HttpGithubClient with a fake opener -----------------------------------
@@ -462,3 +500,72 @@ def test_http_update_branch_other_error_propagates():
     client = HttpGithubClient("tok", opener=ServerErrorOpener())
     with pytest.raises(urllib.error.HTTPError):
         client.update_branch("o/r", 5)
+
+
+# --- issues, http ----------------------------------------------------------
+
+
+def test_http_create_issue_posts_title_body_labels():
+    opener = FakeOpener(
+        {
+            "number": 42,
+            "title": "Heal",
+            "body": "B",
+            "html_url": "https://github.com/o/r/issues/42",
+            "labels": [{"name": "harness:self-heal"}],
+        }
+    )
+    client = HttpGithubClient("tok", opener=opener)
+
+    created = client.create_issue(
+        "o/r", title="Heal", body="B", labels=("harness:self-heal",)
+    )
+
+    assert created.number == 42
+    assert created.url == "https://github.com/o/r/issues/42"
+    assert created.labels == ("harness:self-heal",)
+
+    req = opener.requests[0]
+    assert req.get_method() == "POST"
+    assert req.full_url == "https://api.github.com/repos/o/r/issues"
+    assert json.loads(req.data.decode("utf-8")) == {
+        "title": "Heal",
+        "body": "B",
+        "labels": ["harness:self-heal"],
+    }
+    assert req.get_header("Content-type") == "application/json"
+
+
+def test_http_search_issue_by_marker_scans_self_heal_issues():
+    payload = [
+        {
+            "number": 7,
+            "title": "Heal",
+            "body": "diagnosis <!-- harness-heal:tsk_9 --> end",
+            "html_url": "https://github.com/o/r/issues/7",
+            "labels": [{"name": "harness:self-heal"}],
+        }
+    ]
+    opener = FakeOpener(payload)
+    client = HttpGithubClient("tok", opener=opener)
+
+    found = client.search_issue_by_marker("o/r", "<!-- harness-heal:tsk_9 -->")
+    assert found is not None and found.number == 7
+
+    # scoped the listing to the self-heal label
+    assert "labels=harness%3Aself-heal" in opener.requests[0].full_url
+
+
+def test_http_search_issue_by_marker_returns_none_when_no_body_matches():
+    payload = [
+        {
+            "number": 7,
+            "title": "Heal",
+            "body": "unrelated",
+            "html_url": "https://github.com/o/r/issues/7",
+            "labels": [{"name": "harness:self-heal"}],
+        }
+    ]
+    client = HttpGithubClient("tok", opener=FakeOpener(payload))
+
+    assert client.search_issue_by_marker("o/r", "<!-- harness-heal:tsk_9 -->") is None
