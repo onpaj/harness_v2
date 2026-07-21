@@ -1,6 +1,20 @@
 # CHANGELOG
 
 
+## v0.7.0 (2026-07-21)
+
+### Features
+
+- Configurable per-step agent timeout, default raised to 1800s
+  ([#30](https://github.com/onpaj/harness_v2/pull/30),
+  [`56a50b8`](https://github.com/onpaj/harness_v2/commit/56a50b8b88670ed30f756b37288e84e5433b6d45))
+
+Raise the default agent timeout 600s->1800s and add a per-step override via an optional
+  AgentSpec.timeout field read from agents/<step>.json, resolved in app.py's behavior_for().
+
+Closes #28
+
+
 ## v0.6.0 (2026-07-21)
 
 ### Features
