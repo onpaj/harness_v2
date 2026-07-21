@@ -25,6 +25,7 @@ def build_wrapper(**overrides) -> str:
         "root": Path("/home/rem/harness-root"),
         "api_port": 8420,
         "path_entries": ["/opt/app/.venv/bin", "/usr/bin"],
+        "env_file": Path("/home/rem/harness-root/secrets.env"),
     }
     kwargs.update(overrides)
     return wrapper_script(**kwargs)
@@ -83,6 +84,34 @@ def test_wrapper_honours_a_disabled_board():
     text = build_wrapper(api_port=0)
 
     assert "--api-port 0" in text
+
+
+def test_wrapper_sources_the_secrets_file_with_export():
+    text = build_wrapper(env_file=Path("/home/rem/harness-root/secrets.env"))
+
+    assert 'ENV_FILE="/home/rem/harness-root/secrets.env"' in text
+    # `set -a` around the source is what exports CLAUDE_CODE_OAUTH_TOKEN into the
+    # child `claude` process; without it the var is set but not inherited.
+    assert "set -a" in text and "set +a" in text
+    assert '. "$ENV_FILE"' in text
+
+
+def test_wrapper_warns_when_the_claude_token_is_missing():
+    text = build_wrapper()
+
+    # The load-bearing failure mode: no keychain under launchd, so no token
+    # means every agent step dies. It must be called out, not silent.
+    assert 'if [ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]' in text
+    assert "claude setup-token" in text
+    # ...but a missing token warns, it does not abort the service.
+    assert "exit 1" not in text
+
+
+def test_wrapper_never_embeds_a_token():
+    text = build_wrapper()
+
+    for marker in ("sk-ant-", "ghp_", "gho_"):
+        assert marker not in text
 
 
 # --- plist -----------------------------------------------------------------

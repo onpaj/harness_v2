@@ -3,7 +3,8 @@ import json
 
 from harness.app import HarnessLayout, build
 from harness.drivers.memory import MemoryEventSink
-from harness.models import Task
+from harness.models import BehaviorResult, Outcome, Task
+from harness.ports.behavior import ConsumerBehavior
 from harness.ports.source import TaskSource
 
 
@@ -116,6 +117,82 @@ async def test_run_drives_a_task_all_the_way_to_done(tmp_path):
     finished = Task.from_dict(json.loads((tmp_path / "done" / "tsk_1.json").read_text()))
     visited = [entry.to_step for entry in finished.history if entry.actor == "dispatcher"]
     assert visited == ["plan", "review", "plan", "review", "end"]
+
+
+class ConcurrencyProbeBehavior(ConsumerBehavior):
+    """Records, per step, how many `run()` calls were in flight at once.
+
+    `task.status` is the step the task is currently queued under (the
+    dispatcher stamps it before handing the task to that step's queue), so a
+    single shared instance can distinguish concurrency per step even though
+    `build()` wires one behavior instance across every non-landing consumer.
+    """
+
+    def __init__(self, hold: float) -> None:
+        self._hold = hold
+        self.current: dict[str, int] = {}
+        self.max_seen: dict[str, int] = {}
+
+    async def run(self, task: Task) -> BehaviorResult:
+        step = task.status
+        self.current[step] = self.current.get(step, 0) + 1
+        self.max_seen[step] = max(self.max_seen.get(step, 0), self.current[step])
+        await asyncio.sleep(self._hold)
+        self.current[step] -= 1
+        return BehaviorResult(Outcome.DONE, summary="probed")
+
+
+async def test_max_parallel_bounds_concurrent_runs_per_step(tmp_path):
+    """FR-3: a step's configured maxParallel is the ceiling on concurrent
+    `ConsumerBehavior.run()` calls for that step, while a step with no
+    override never exceeds the default of 1 — in the same harness run."""
+    layout = HarnessLayout(tmp_path)
+    layout.workflows.mkdir(parents=True, exist_ok=True)
+    definition = {
+        "name": "default",
+        "start": "plan",
+        "transitions": [
+            {"from": "plan", "on": "done", "to": "review"},
+            {"from": "review", "on": "done", "to": "end"},
+        ],
+        "maxParallel": {"review": 2},
+    }
+    (layout.workflows / "default.json").write_text(json.dumps(definition))
+
+    probe = ConcurrencyProbeBehavior(hold=0.05)
+    harness = build(tmp_path, "default", events=MemoryEventSink(), behavior=probe)
+
+    for i in range(3):
+        plan_task = Task(
+            id=f"tsk_plan_{i}",
+            workflow_template="default",
+            created="2026-07-21T10:00:00Z",
+            status="plan",
+        )
+        (tmp_path / "queues" / "plan" / f"tsk_plan_{i}.json").write_text(
+            json.dumps(plan_task.to_dict())
+        )
+        review_task = Task(
+            id=f"tsk_review_{i}",
+            workflow_template="default",
+            created="2026-07-21T10:00:00Z",
+            status="review",
+        )
+        (tmp_path / "queues" / "review" / f"tsk_review_{i}.json").write_text(
+            json.dumps(review_task.to_dict())
+        )
+
+    stop = asyncio.Event()
+    runner = asyncio.create_task(harness.run(poll_interval=0.01, stop=stop))
+    for _ in range(400):
+        await asyncio.sleep(0.01)
+        if len(list((tmp_path / "done").glob("tsk_*.json"))) >= 6:
+            break
+    stop.set()
+    await asyncio.wait_for(runner, timeout=RUNNER_TIMEOUT)
+
+    assert probe.max_seen["review"] == 2
+    assert probe.max_seen["plan"] == 1
 
 
 def test_recover_returns_stranded_tasks(tmp_path):

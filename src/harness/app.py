@@ -170,10 +170,29 @@ class Harness:
         self._events.emit("started", workflows=sorted(self.workflows))
         await asyncio.gather(
             self._dispatcher_loop(poll_interval, stop),
-            *(self._consumer_loop(consumer, poll_interval, stop) for consumer in self.consumers),
+            *(
+                self._consumer_loop(consumer, poll_interval, stop)
+                for consumer in self.consumers
+                for _ in range(self._max_parallel_for(consumer.step))
+            ),
             *(self._source_loop(poller, source_interval, stop) for poller in self.pollers),
         )
         self._events.emit("stopped")
+
+    def _max_parallel_for(self, step: str) -> int:
+        """The concurrency ceiling for a step's shared consumer.
+
+        Step queues are unioned by name across served workflows, so a single
+        consumer serves every workflow that has the step. Its ceiling is the
+        largest limit any of those workflows assigns the step (default 1)."""
+        return max(
+            (
+                workflow.max_parallel_for(step)
+                for workflow in self.workflows.values()
+                if step in workflow.steps()
+            ),
+            default=1,
+        )
 
     async def _dispatcher_loop(self, poll_interval: float, stop: asyncio.Event) -> None:
         while not stop.is_set():

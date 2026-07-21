@@ -58,8 +58,34 @@ class FilesystemWorkflowRepository(WorkflowRepository):
                 f"workflow {name!r} has an invalid transition: {error}"
             ) from None
 
-        return Workflow(
+        provisional = Workflow(
             name=raw.get("name", name), start=raw["start"], transitions=transitions
+        )
+        known_steps = set(provisional.steps())
+
+        raw_limits = raw.get("maxParallel", {})
+        if not isinstance(raw_limits, dict):
+            raise WorkflowNotFound(
+                f"workflow {name!r} has an invalid maxParallel: expected object, "
+                f"got {type(raw_limits).__name__}"
+            )
+        max_parallel: dict[str, int] = {}
+        for step, limit in raw_limits.items():
+            if step not in known_steps:
+                raise WorkflowNotFound(
+                    f"workflow {name!r} has maxParallel for unknown step {step!r}"
+                )
+            if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+                raise WorkflowNotFound(
+                    f"workflow {name!r} has invalid maxParallel for step {step!r}: {limit!r}"
+                )
+            max_parallel[step] = limit
+
+        return Workflow(
+            name=raw.get("name", name),
+            start=raw["start"],
+            transitions=transitions,
+            max_parallel=max_parallel,
         )
 
     def names(self) -> tuple[str, ...]:
