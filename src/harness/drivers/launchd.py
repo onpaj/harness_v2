@@ -48,15 +48,24 @@ def wrapper_script(
     root: Path,
     api_port: int,
     path_entries: list[str],
+    env_file: Path,
 ) -> str:
     """The shell wrapper launchd executes.
 
-    Resolves `GITHUB_TOKEN` at start-up instead of baking it into the plist:
-    an explicit environment variable wins, otherwise `gh auth token` reads the
-    keyring. A missing token is a warning, not a failure — without one the
-    harness simply stops ingesting GitHub issues and still serves `harness
-    submit`, which is the same degradation `install.sh` warns about for a
-    missing `claude`.
+    Two credentials, neither in the plist:
+
+    - `CLAUDE_CODE_OAUTH_TOKEN` — the load-bearing one. Under launchd, `claude`
+      cannot read the login Keychain where an interactive `claude /login` stores
+      its credential, so every agent step fails with "Not logged in". A token
+      from `claude setup-token`, passed through the environment, makes `claude`
+      bypass the keychain entirely. It lives in `env_file` (a 0600 file), which
+      the wrapper sources.
+    - `GITHUB_TOKEN` — an explicit value (from `env_file`) wins, otherwise
+      `gh auth token` reads the keyring.
+
+    A missing token of either kind warns rather than aborts: without the claude
+    token agent steps fail (loudly, per task), without the GitHub token issue
+    ingestion is simply off — the harness still serves `harness submit`.
     """
     path = ":".join(path_entries)
     return f"""#!/usr/bin/env bash
@@ -68,8 +77,24 @@ set -euo pipefail
 
 export PATH="{path}"
 
-# launchd hands us no shell environment. Prefer an explicit token, else borrow
-# the one `gh` holds in the keyring — no secret is written to disk here.
+# Machine-local secrets: 0600, never committed, never in the plist. This is
+# where CLAUDE_CODE_OAUTH_TOKEN belongs — `claude` under launchd cannot reach
+# the login Keychain, so a background run needs the token in the environment.
+ENV_FILE="{env_file}"
+if [ -f "$ENV_FILE" ]; then
+    set -a
+    . "$ENV_FILE"
+    set +a
+fi
+
+if [ -z "${{CLAUDE_CODE_OAUTH_TOKEN:-}}" ]; then
+    echo "warning: CLAUDE_CODE_OAUTH_TOKEN is not set. Under launchd, claude" \\
+         "cannot read the macOS keychain, so every agent step will fail. Run" \\
+         "'claude setup-token' and put CLAUDE_CODE_OAUTH_TOKEN=<token> in" \\
+         "$ENV_FILE, then restart the service." >&2
+fi
+
+# GitHub token: an explicit value (possibly from ENV_FILE) wins, else the gh keyring.
 if [ -z "${{GITHUB_TOKEN:-}}" ] && command -v gh >/dev/null 2>&1; then
     GITHUB_TOKEN="$(gh auth token 2>/dev/null || true)"
     export GITHUB_TOKEN
@@ -173,6 +198,41 @@ def periodic_plist_bytes(
     return plistlib.dumps(definition)
 
 
+def autoupdate_plist_bytes(
+    *,
+    label: str,
+    harness: Path,
+    service_label: str,
+    hours: list[int],
+    path_entries: list[str],
+    log_dir: Path,
+    home: Path,
+) -> bytes:
+    """A LaunchAgent that runs `harness update --restart --only-if-idle` on a
+    schedule, so the box stays current without interrupting a running stage.
+
+    `StartCalendarInterval` fires at each of `hours` (minute 0). No `KeepAlive`:
+    this is a periodic one-shot, not a daemon. `--only-if-idle` is what makes a
+    firing that lands mid-stage skip the restart and leave it for the next slot.
+    """
+    definition = {
+        "Label": label,
+        "ProgramArguments": [
+            str(harness),
+            "update",
+            "--restart",
+            "--only-if-idle",
+            "--label",
+            service_label,
+        ],
+        "StartCalendarInterval": [{"Hour": h, "Minute": 0} for h in hours],
+        "StandardOutPath": str(log_dir / "autoupdate.log"),
+        "StandardErrorPath": str(log_dir / "autoupdate.log"),
+        "EnvironmentVariables": {"HOME": str(home), "PATH": ":".join(path_entries)},
+    }
+    return plistlib.dumps(definition)
+
+
 def autoupdate_wrapper_script(
     *,
     harness: Path,
@@ -245,6 +305,18 @@ def load(uid: int, path: Path, label: str) -> None:
     kickstart(uid, label)
 
 
+def kickstart(uid: int, label: str) -> None:
+    """Force-start (or restart) the agent now, without waiting for its own
+    schedule (`-k` kills the running copy first). The service must already be
+    loaded; `harness service install` is what loads it.
+
+    Keeps every raw `launchctl` argument vector inside this module — callers
+    (the CLI's `update --restart-service`, and `load` itself) never construct
+    one by hand.
+    """
+    _launchctl(["kickstart", "-k", f"gui/{uid}/{label}"])
+
+
 def unload(uid: int, label: str) -> bool:
     """Stop and forget the agent. True if it was loaded, False if it wasn't."""
     result = _launchctl(["bootout", f"gui/{uid}/{label}"], check=False)
@@ -257,13 +329,3 @@ def status(uid: int, label: str) -> str | None:
     if result.returncode != 0:
         return None
     return result.stdout
-
-
-def kickstart(uid: int, label: str) -> None:
-    """Force-start the agent now, without waiting for its own schedule.
-
-    Keeps every raw `launchctl` argument vector inside this module — callers
-    (the CLI's `update --restart-service`, and `load` itself) never construct
-    one by hand.
-    """
-    _launchctl(["kickstart", "-k", f"gui/{uid}/{label}"])

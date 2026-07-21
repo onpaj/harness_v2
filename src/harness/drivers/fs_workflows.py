@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from pathlib import Path
 
 from harness.models import Transition, Workflow
@@ -57,6 +58,61 @@ class FilesystemWorkflowRepository(WorkflowRepository):
                 f"workflow {name!r} has an invalid transition: {error}"
             ) from None
 
-        return Workflow(
+        provisional = Workflow(
             name=raw.get("name", name), start=raw["start"], transitions=transitions
         )
+        known_steps = set(provisional.steps())
+
+        raw_limits = raw.get("maxParallel", {})
+        if not isinstance(raw_limits, dict):
+            raise WorkflowNotFound(
+                f"workflow {name!r} has an invalid maxParallel: expected object, "
+                f"got {type(raw_limits).__name__}"
+            )
+        max_parallel: dict[str, int] = {}
+        for step, limit in raw_limits.items():
+            if step not in known_steps:
+                raise WorkflowNotFound(
+                    f"workflow {name!r} has maxParallel for unknown step {step!r}"
+                )
+            if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+                raise WorkflowNotFound(
+                    f"workflow {name!r} has invalid maxParallel for step {step!r}: {limit!r}"
+                )
+            max_parallel[step] = limit
+
+        return Workflow(
+            name=raw.get("name", name),
+            start=raw["start"],
+            transitions=transitions,
+            max_parallel=max_parallel,
+        )
+
+    def names(self) -> tuple[str, ...]:
+        if not self._root.is_dir():
+            return ()
+        return tuple(sorted(p.stem for p in self._root.glob("*.json")))
+
+
+class ServedWorkflowRepository(WorkflowRepository):
+    """Restricts an inner repository to a fixed served set.
+
+    A name outside the set fails with WorkflowNotFound, the same exception
+    type and dispatcher failure path as a genuinely missing workflow — so no
+    dispatcher change is needed to make an unserved workflow fail fast.
+    """
+
+    def __init__(self, inner: WorkflowRepository, names: Sequence[str]) -> None:
+        self._inner = inner
+        self._served = tuple(dict.fromkeys(names))
+
+    def get(self, name: str) -> Workflow:
+        if name not in self._served:
+            served = ", ".join(self._served) or "(none)"
+            raise WorkflowNotFound(
+                f"workflow {name!r} is not served by this harness (served: {served})"
+            )
+        return self._inner.get(name)
+
+    def names(self) -> tuple[str, ...]:
+        return self._served

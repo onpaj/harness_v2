@@ -4,9 +4,13 @@ Orchestration harness for multiple agents. The unit of work is a **task**; it mo
 between queues according to a **workflow**, which is a small state machine with
 explicit edges for each outcome.
 
-Phase 1 is a POC of the whole loop: a task flows through the workflow from `start`
-to `end`, but the work is stood in for by a dummy behavior for now. Real agents,
-persistent storage, and git arrive in later phases.
+Each step's work is done by a real agent (`claude -p`, or `--agent dummy` for
+testing the pipeline itself), running inside a git worktree the harness manages
+per task. The last step, landing, pushes the task's branch and opens a pull
+request — the harness proposes, a human decides the merge. Tasks arrive either
+by hand (`harness submit`) or ingested from GitHub issues; an operator board
+shows every task's state, its artifacts, its live stage output while a step is
+running, and a restart control for anything that failed.
 
 ## Installation
 
@@ -67,8 +71,27 @@ harness update
 ```
 
 Runs `uv tool upgrade harness` and reports the version it installed. A running
-service keeps the old code until you restart it — `harness update` prints the
-exact command.
+service keeps the old code until you restart it. To upgrade **and** restart in
+one step:
+
+```sh
+harness update --restart                 # restart now (may interrupt a stage)
+harness update --restart --only-if-idle  # restart only when no stage is running
+```
+
+To keep the box current on its own, schedule the idle-gated form a few times a
+day (macOS launchd):
+
+```sh
+harness service autoupdate               # runs at 02:00, 08:00, 14:00, 20:00
+harness service autoupdate --hours 3,15  # custom times
+harness service autoupdate --remove      # stop auto-updating
+```
+
+Each firing upgrades, then restarts the service **only if no stage is mid-run** —
+a firing that lands while a task is being worked skips the restart and leaves it
+for the next slot, so an update never kills a running agent. Output goes to
+`<root>/logs/autoupdate.log`.
 
 Versions are cut automatically: every push to `main` runs the test suite, and
 [python-semantic-release](https://python-semantic-release.readthedocs.io/)
@@ -116,6 +139,35 @@ issues, and `harness submit` keeps working.
 The LaunchAgent points at uv's shim rather than at a virtualenv, so
 `harness update` does not invalidate it; restart the service to pick the new
 version up.
+
+### The claude token (required for the service)
+
+Every agent step shells out to `claude`, and **`claude` cannot read the macOS
+login keychain when it runs under launchd** — an interactive `claude` login is
+invisible to the background service, so every task fails with "Not logged in".
+The service therefore needs a token in its environment instead:
+
+```sh
+claude setup-token                 # interactive, once — creates a long-lived token
+```
+
+Put the value in `<root>/secrets.env` (created 0600 by `harness service
+install`):
+
+```sh
+# ~/harness-root/secrets.env
+CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-...
+```
+
+then restart the service:
+
+```sh
+launchctl kickstart -k gui/$(id -u)/com.harness
+```
+
+`CLAUDE_CODE_OAUTH_TOKEN` makes `claude` skip the keychain entirely, which is
+what a background agent needs. Running `harness run` yourself in a terminal does
+*not* need this — there the keychain is reachable and your normal login works.
 
 Logs land in `<root>/logs/harness.log` and `<root>/logs/harness.error.log`.
 
@@ -186,15 +238,41 @@ around them stays real, including the PR that `land` opens. Pair it with
 
 ## Board
 
-Alongside the orchestration loop, `harness run` serves a read-only board at
+Alongside the orchestration loop, `harness run` serves a board at
 `http://127.0.0.1:8420/`. The columns are the workflow steps plus `done` and
-`failed`, the cards are tasks, and a click shows metadata and history. The board
-updates itself over SSE.
+`failed`, the cards are tasks, and a click shows metadata, history, the
+artifacts each step wrote, and — while a step is actively running — a live tail
+of the agent's output, streamed over SSE. A task in `failed/` gets a **Restart**
+control, which resets it and re-inboxes it for the dispatcher to route again.
+The board itself updates over SSE too.
 
 `--api-port 0` turns the board off.
 
-The board reads exclusively through the `BoardView` port. That the tasks are JSON
-files and the queues directories, it does not know — and must not.
+The board reads exclusively through the `BoardView`/`ArtifactView`/
+`StageOutputView` ports and writes only through `TaskControl`. That the tasks
+are JSON files and the queues directories, it does not know — and must not.
+
+## GitHub issue ingestion
+
+`harness run` watches every repository registered in `repos.json` whose git
+`origin` resolves to a GitHub slug, and pulls in issues labeled for pickup
+(default `harness:todo`, override with `--github-label`) as new tasks. A repo
+with no GitHub origin is skipped with a warning — there is no per-repo opt-out
+flag, ingestion is automatic for anything registered with a GitHub remote.
+
+Each ingested issue moves through a managed label lifecycle as its task
+progresses: `harness:todo` (selected) → `harness:queued` (claimed) → a
+per-step label from the workflow (e.g. `harness:in-progress` while in
+`development`, `harness:in-review` while in `review`) → `harness:pr-open` on
+success or `harness:failed` on failure. Foreign labels on the same issue (`bug`,
+`priority`, ...) are left untouched — only labels in this managed set are ever
+added or removed.
+
+`--github-workflow` picks which workflow a newly ingested issue starts on
+(default `default`); `--source-poll` sets how often GitHub is polled (default
+30s, deliberately coarser than `--poll` to respect rate limits). Without a
+`GITHUB_TOKEN` (see [Running it as a service](#running-it-as-a-service)), GitHub
+ingestion is simply inactive — `harness submit` keeps working regardless.
 
 ## How work flows
 
@@ -247,3 +325,6 @@ Every moving part sits behind a port and is swapped by swapping the driver:
 Decision-making is split into three non-overlapping roles: `ConsumerBehavior` says
 *what happened*, the dispatcher *where it goes next*, and the consumer just
 delivers.
+
+See `docs/adr/` for the *why* behind each of these — one Architecture Decision
+Record per load-bearing rule.
