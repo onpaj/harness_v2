@@ -23,6 +23,7 @@ def test_agent_spec_holds_fields_and_defaults():
     assert spec.fallback_model is None
     assert spec.allowed_tools == ()
     assert spec.allowed_outcomes == (Outcome.DONE,)
+    assert spec.timeout is None
 
 
 def test_agent_spec_accepts_overrides():
@@ -33,12 +34,14 @@ def test_agent_spec_accepts_overrides():
         fallback_model="sonnet",
         allowed_tools=("Read", "Edit"),
         allowed_outcomes=(Outcome.DONE, Outcome.REQUEST_CHANGES),
+        timeout=120.0,
     )
 
     assert spec.model == "opus"
     assert spec.fallback_model == "sonnet"
     assert spec.allowed_tools == ("Read", "Edit")
     assert spec.allowed_outcomes == (Outcome.DONE, Outcome.REQUEST_CHANGES)
+    assert spec.timeout == 120.0
 
 
 def test_memory_catalog_get_returns_spec():

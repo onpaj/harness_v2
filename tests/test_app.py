@@ -2,8 +2,9 @@ import asyncio
 import json
 
 from harness.app import HarnessLayout, build
-from harness.drivers.memory import MemoryEventSink
+from harness.drivers.memory import MemoryAgentCatalog, MemoryEventSink
 from harness.models import Task
+from harness.ports.agent import AgentSpec
 from harness.ports.source import TaskSource
 
 
@@ -116,6 +117,28 @@ async def test_run_drives_a_task_all_the_way_to_done(tmp_path):
     finished = Task.from_dict(json.loads((tmp_path / "done" / "tsk_1.json").read_text()))
     visited = [entry.to_step for entry in finished.history if entry.actor == "dispatcher"]
     assert visited == ["plan", "review", "plan", "review", "end"]
+
+
+def test_behavior_for_uses_spec_timeout_override_else_agent_timeout(tmp_path):
+    seed(tmp_path)
+    catalog = MemoryAgentCatalog(
+        {
+            "plan": AgentSpec(name="plan", prompt="p", timeout=45.0),
+            "review": AgentSpec(name="review", prompt="r"),
+        }
+    )
+
+    harness = build(
+        tmp_path,
+        "default",
+        events=MemoryEventSink(),
+        catalog=catalog,
+        agent_timeout=900.0,
+    )
+
+    by_actor = {consumer.actor: consumer for consumer in harness.consumers}
+    assert by_actor["consumer:plan"]._behavior._timeout == 45.0
+    assert by_actor["consumer:review"]._behavior._timeout == 900.0
 
 
 def test_recover_returns_stranded_tasks(tmp_path):

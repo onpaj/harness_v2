@@ -35,6 +35,49 @@ def test_init_creates_layout_and_default_workflow(tmp_path):
     assert (tmp_path / "failed").is_dir()
 
 
+def test_init_writes_default_agents_with_null_timeout(tmp_path):
+    assert main(["init", "--root", str(tmp_path)]) == 0
+
+    definition = json.loads((tmp_path / "agents" / "development.json").read_text())
+    assert definition["timeout"] is None
+
+
+def test_run_defaults_agent_timeout_to_1800(monkeypatch, tmp_path):
+    main(["init", "--root", str(tmp_path)])
+    captured = {}
+
+    def fake_build(*args, **kwargs):
+        captured["agent_timeout"] = kwargs["agent_timeout"]
+        return object()
+
+    async def fake_serve(harness, port, poll_interval, source_interval=30.0):
+        pass
+
+    monkeypatch.setattr("harness.cli.build", fake_build)
+    monkeypatch.setattr("harness.cli.serve", fake_serve)
+
+    assert main(["run", "--root", str(tmp_path)]) == 0
+    assert captured["agent_timeout"] == 1800.0
+
+
+def test_run_accepts_explicit_agent_timeout(monkeypatch, tmp_path):
+    main(["init", "--root", str(tmp_path)])
+    captured = {}
+
+    def fake_build(*args, **kwargs):
+        captured["agent_timeout"] = kwargs["agent_timeout"]
+        return object()
+
+    async def fake_serve(harness, port, poll_interval, source_interval=30.0):
+        pass
+
+    monkeypatch.setattr("harness.cli.build", fake_build)
+    monkeypatch.setattr("harness.cli.serve", fake_serve)
+
+    assert main(["run", "--root", str(tmp_path), "--agent-timeout", "60"]) == 0
+    assert captured["agent_timeout"] == 60.0
+
+
 def test_init_is_idempotent_and_keeps_edits(tmp_path):
     main(["init", "--root", str(tmp_path)])
     (tmp_path / "workflows" / "default.json").write_text(

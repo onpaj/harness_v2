@@ -110,7 +110,7 @@ async def test_runs_agent_in_worktree_cwd_with_spec(tmp_path):
     call = runner.calls[0]
     assert call["cwd"] == workspace.handles["tsk_1"].path == tmp_path
     assert call["spec"] is spec
-    assert call["timeout"] == 600.0
+    assert call["timeout"] == 1800.0
 
 
 async def test_prompt_carries_attempt_relpath(tmp_path):
