@@ -64,7 +64,7 @@ def test_build_creates_one_queue_per_step(tmp_path):
 
     harness = build(tmp_path, "default", events=MemoryEventSink())
 
-    assert sorted(step for step in harness.workflow.steps()) == ["plan", "review"]
+    assert sorted(step for step in harness.workflows["default"].steps()) == ["plan", "review"]
     assert (tmp_path / "queues" / "plan").is_dir()
     assert (tmp_path / "queues" / "review").is_dir()
     assert not (tmp_path / "queues" / "end").exists()
@@ -199,3 +199,97 @@ async def test_stranded_task_survives_into_the_projection(tmp_path):
     await harness.run(poll_interval=0.01, stop=stop)
 
     assert harness.projection.get("tsk_8") is not None
+
+
+HOTFIX_DEFINITION = {
+    "name": "hotfix",
+    "start": "plan",
+    "transitions": [
+        {"from": "plan", "on": "done", "to": "review"},
+        {"from": "review", "on": "done", "to": "end"},
+    ],
+}
+
+
+def seed_two_workflows(tmp_path):
+    """`default` (plan -> review) and `hotfix` (plan -> review), sharing the
+    `plan` and `review` step names."""
+    layout = seed(tmp_path)
+    (layout.workflows / "hotfix.json").write_text(json.dumps(HOTFIX_DEFINITION))
+    return layout
+
+
+def test_build_with_two_workflows_unions_step_queues(tmp_path):
+    seed_two_workflows(tmp_path)
+
+    harness = build(tmp_path, ["default", "hotfix"], events=MemoryEventSink())
+
+    assert set(harness.workflows) == {"default", "hotfix"}
+    assert sorted(harness._step_queues) == ["plan", "review"]
+    assert len(harness.consumers) == 2
+
+
+async def test_two_served_workflows_route_tasks_to_their_own_steps_via_shared_queue(
+    tmp_path,
+):
+    seed_two_workflows(tmp_path)
+    harness = build(tmp_path, ["default", "hotfix"], events=MemoryEventSink(), delay=0.0)
+    default_task = Task(
+        id="tsk_default", workflow_template="default", created="2026-07-19T10:00:00Z"
+    )
+    hotfix_task = Task(
+        id="tsk_hotfix", workflow_template="hotfix", created="2026-07-19T10:00:00Z"
+    )
+    (tmp_path / "tasks" / "tsk_default.json").write_text(json.dumps(default_task.to_dict()))
+    (tmp_path / "tasks" / "tsk_hotfix.json").write_text(json.dumps(hotfix_task.to_dict()))
+
+    stop = asyncio.Event()
+    runner = asyncio.create_task(harness.run(poll_interval=0.01, stop=stop))
+    for _ in range(400):
+        await asyncio.sleep(0.01)
+        if (tmp_path / "done" / "tsk_default.json").exists() and (
+            tmp_path / "done" / "tsk_hotfix.json"
+        ).exists():
+            break
+    stop.set()
+    await asyncio.wait_for(runner, timeout=RUNNER_TIMEOUT)
+
+    assert (tmp_path / "done" / "tsk_default.json").exists()
+    assert (tmp_path / "done" / "tsk_hotfix.json").exists()
+
+
+def test_task_for_unserved_but_existing_workflow_fails_with_clear_message(tmp_path):
+    """`hotfix` is a valid definition on disk, but this harness only serves
+    `default` — the task must fail fast with a message naming the unserved
+    workflow, not the generic "no queue" message."""
+    seed_two_workflows(tmp_path)
+    harness = build(tmp_path, "default", events=MemoryEventSink(), delay=0.0)
+    task = Task(
+        id="tsk_1", workflow_template="hotfix", created="2026-07-19T10:00:00Z"
+    )
+    (tmp_path / "tasks" / "tsk_1.json").write_text(json.dumps(task.to_dict()))
+
+    assert harness.dispatcher.tick() is True
+
+    failed = Task.from_dict(
+        json.loads((tmp_path / "failed" / "tsk_1.json").read_text())
+    )
+    assert "hotfix" in failed.history[-1].reason
+    assert "not served" in failed.history[-1].reason
+    assert "no queue" not in failed.history[-1].reason
+
+
+def test_task_for_nonexistent_workflow_still_fails_as_before(tmp_path):
+    seed_two_workflows(tmp_path)
+    harness = build(tmp_path, "default", events=MemoryEventSink(), delay=0.0)
+    task = Task(
+        id="tsk_1", workflow_template="does-not-exist", created="2026-07-19T10:00:00Z"
+    )
+    (tmp_path / "tasks" / "tsk_1.json").write_text(json.dumps(task.to_dict()))
+
+    assert harness.dispatcher.tick() is True
+
+    failed = Task.from_dict(
+        json.loads((tmp_path / "failed" / "tsk_1.json").read_text())
+    )
+    assert "does-not-exist" in failed.history[-1].reason

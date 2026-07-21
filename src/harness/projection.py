@@ -8,7 +8,7 @@ nothing about drivers.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 
 from harness.models import END, Task, Workflow
 from harness.ports.board import (
@@ -22,8 +22,8 @@ from harness.ports.board import (
 from harness.ports.queue import TaskQueue
 
 
-def column_order(workflow: Workflow) -> tuple[str, ...]:
-    """Steps in order of reachability from the start, then done and failed.
+def _reachable_order(workflow: Workflow) -> list[str]:
+    """Steps in order of reachability from the start.
 
     Backward edges are ignored — a step already placed is never moved.
     Otherwise the column order would depend on which way the search went.
@@ -44,12 +44,27 @@ def column_order(workflow: Workflow) -> tuple[str, ...]:
         if step not in order:
             order.append(step)
 
+    return order
+
+
+def column_order(workflows: Sequence[Workflow]) -> tuple[str, ...]:
+    """Union of each workflow's own reachability order, first-seen wins.
+
+    workflows[0]'s reachable steps (in its own order) come first, then
+    workflows[1]'s not-yet-seen steps, and so on.
+    """
+    order: list[str] = []
+    for workflow in workflows:
+        for step in _reachable_order(workflow):
+            if step not in order:
+                order.append(step)
+
     return (TODO_COLUMN,) + tuple(order) + (DONE_COLUMN, FAILED_COLUMN)
 
 
 class BoardProjection(BoardView):
-    def __init__(self, workflow: Workflow) -> None:
-        self._order = column_order(workflow)
+    def __init__(self, workflows: Sequence[Workflow]) -> None:
+        self._order = column_order(workflows)
         self._tasks: dict[str, Task] = {}
         self._columns: dict[str, str] = {}
         self._revision = 0

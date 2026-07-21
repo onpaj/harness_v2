@@ -20,7 +20,10 @@ from harness.drivers.claude_cli import ClaudeCliRunner
 from harness.drivers.fake_forge import FakeForge
 from harness.drivers.fs_agents import FilesystemAgentCatalog
 from harness.drivers.fs_repos import FilesystemRepositoryRegistry
-from harness.drivers.fs_workflows import invalid_workflow_name
+from harness.drivers.fs_workflows import (
+    FilesystemWorkflowRepository,
+    invalid_workflow_name,
+)
 from harness.drivers.git_remote import github_slug
 from harness.drivers.git_workspace import GitWorkspace
 from harness.drivers.github_client import GithubClient, HttpGithubClient
@@ -100,11 +103,12 @@ def _init(args: argparse.Namespace) -> int:
         print(f"error: {error}", file=sys.stderr)
         return 2
 
-    _write_default_agents(layout, harness.workflow)
+    workflow = harness.workflows[args.workflow]
+    _write_default_agents(layout, workflow)
     _write_default_repos(layout)
 
     print(f"harness ready at {root}")
-    print(f"steps: {', '.join(harness.workflow.steps())}")
+    print(f"steps: {', '.join(workflow.steps())}")
     return 0
 
 
@@ -631,6 +635,29 @@ def _service_status(args: argparse.Namespace) -> int:
     return 0
 
 
+def _resolve_served_workflows(
+    args: argparse.Namespace, layout: HarnessLayout
+) -> tuple[str, ...] | None:
+    """The set of workflow names `harness run` should serve, or None on error
+    (an error message has already been printed to stderr)."""
+    if args.workflows and args.all_workflows:
+        print(
+            "error: --workflow and --all-workflows are mutually exclusive",
+            file=sys.stderr,
+        )
+        return None
+    if args.all_workflows:
+        names = FilesystemWorkflowRepository(layout.workflows).names()
+        if not names:
+            print(
+                f"error: no workflow definitions found under {layout.workflows}",
+                file=sys.stderr,
+            )
+            return None
+        return names
+    return tuple(args.workflows) if args.workflows else (DEFAULT_WORKFLOW,)
+
+
 def _build_forge(kind: str, root: Path, registry: RepositoryRegistry | None = None):
     """The forge for a real run. `fake` writes into `<root>/forge/prs.json`.
 
@@ -649,6 +676,18 @@ def _build_forge(kind: str, root: Path, registry: RepositoryRegistry | None = No
 def _run(args: argparse.Namespace) -> int:
     root = _root(args.root)
     layout = HarnessLayout(root)
+
+    served_names = _resolve_served_workflows(args, layout)
+    if served_names is None:
+        return 2
+    if args.github_workflow not in served_names:
+        print(
+            f"error: --github-workflow {args.github_workflow!r} is not served "
+            f"by this harness (served: {', '.join(served_names)})",
+            file=sys.stderr,
+        )
+        return 2
+
     # The real run: agent behind `claude -p`, git worktree under a shared root,
     # repo name→path from `repos.json`, personas from `agents/`, artifacts
     # versioned in the worktree, and a real GitHub forge (`--forge fake` swaps
@@ -668,7 +707,7 @@ def _run(args: argparse.Namespace) -> int:
     try:
         harness = build(
             root,
-            args.workflow,
+            served_names,
             workspace=workspace,
             forge=forge,
             runner=runner,
@@ -754,7 +793,19 @@ def main(argv: list[str] | None = None) -> int:
 
     run = subparsers.add_parser("run", help="start the orchestration loop")
     run.add_argument("--root", default=None)
-    run.add_argument("--workflow", default=DEFAULT_WORKFLOW)
+    run.add_argument(
+        "--workflow",
+        action="append",
+        dest="workflows",
+        default=None,
+        help="workflow to serve (repeatable); unset serves just 'default'",
+    )
+    run.add_argument(
+        "--all-workflows",
+        action="store_true",
+        help="serve every workflow definition found under <root>/workflows "
+        "(mutually exclusive with --workflow)",
+    )
     run.add_argument("--delay", type=float, default=5.0)
     run.add_argument("--poll", type=float, default=0.2)
     run.add_argument(
