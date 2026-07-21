@@ -166,7 +166,11 @@ class Harness:
         self._events.emit("started", workflow=self.workflow.name)
         await asyncio.gather(
             self._dispatcher_loop(poll_interval, stop),
-            *(self._consumer_loop(consumer, poll_interval, stop) for consumer in self.consumers),
+            *(
+                self._consumer_loop(consumer, poll_interval, stop)
+                for consumer in self.consumers
+                for _ in range(self.workflow.max_parallel_for(consumer.step))
+            ),
             *(self._source_loop(poller, source_interval, stop) for poller in self.pollers),
         )
         self._events.emit("stopped")
