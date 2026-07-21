@@ -97,6 +97,71 @@ def test_non_dict_top_level_raises(tmp_path, raw_json):
         repository.get("bad_shape")
 
 
+def test_definition_without_max_parallel_defaults_every_step_to_one(tmp_path):
+    (tmp_path / "default.json").write_text(json.dumps(DEFINITION))
+    repository = FilesystemWorkflowRepository(tmp_path)
+
+    workflow = repository.get("default")
+
+    assert workflow.max_parallel_for("plan") == 1
+    assert workflow.max_parallel_for("review") == 1
+
+
+def test_max_parallel_is_parsed_and_exposed(tmp_path):
+    definition = {**DEFINITION, "maxParallel": {"review": 3}}
+    (tmp_path / "default.json").write_text(json.dumps(definition))
+    repository = FilesystemWorkflowRepository(tmp_path)
+
+    workflow = repository.get("default")
+
+    assert workflow.max_parallel_for("review") == 3
+    assert workflow.max_parallel_for("plan") == 1
+
+
+def test_max_parallel_not_an_object_raises(tmp_path):
+    definition = {**DEFINITION, "maxParallel": ["review"]}
+    (tmp_path / "default.json").write_text(json.dumps(definition))
+    repository = FilesystemWorkflowRepository(tmp_path)
+
+    with pytest.raises(WorkflowNotFound, match="maxParallel"):
+        repository.get("default")
+
+
+def test_max_parallel_for_unknown_step_raises(tmp_path):
+    definition = {**DEFINITION, "maxParallel": {"reviw": 3}}
+    (tmp_path / "default.json").write_text(json.dumps(definition))
+    repository = FilesystemWorkflowRepository(tmp_path)
+
+    with pytest.raises(WorkflowNotFound, match="reviw"):
+        repository.get("default")
+
+
+@pytest.mark.parametrize(
+    "limit",
+    [0, -1, 1.5, "3", None],
+    ids=["zero", "negative", "float", "string", "null"],
+)
+def test_max_parallel_invalid_value_raises(tmp_path, limit):
+    definition = {**DEFINITION, "maxParallel": {"review": limit}}
+    (tmp_path / "default.json").write_text(json.dumps(definition))
+    repository = FilesystemWorkflowRepository(tmp_path)
+
+    with pytest.raises(WorkflowNotFound, match="review"):
+        repository.get("default")
+
+
+def test_max_parallel_rejects_bool_even_though_bool_is_an_int_subclass(tmp_path):
+    """`isinstance(True, int)` is True in Python, so a naive `isinstance(limit, int)`
+    check alone would silently accept `{"review": true}` as a limit of 1. The loader
+    must check for bool first."""
+    definition = {**DEFINITION, "maxParallel": {"review": True}}
+    (tmp_path / "default.json").write_text(json.dumps(definition))
+    repository = FilesystemWorkflowRepository(tmp_path)
+
+    with pytest.raises(WorkflowNotFound, match="review"):
+        repository.get("default")
+
+
 def test_path_separator_is_rejected_even_when_escape_target_exists(tmp_path):
     """A weaker version of this test (no real file at the escaped path)
     would pass even if the separator guard were deleted entirely: the

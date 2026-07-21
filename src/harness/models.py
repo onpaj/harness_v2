@@ -146,6 +146,7 @@ class Workflow:
     name: str
     start: str
     transitions: tuple[Transition, ...]
+    max_parallel: dict[str, int] = field(default_factory=dict)
 
     def target(self, status: str, outcome: str) -> str | None:
         """Target of the matching edge, or None when none matches."""
@@ -164,6 +165,10 @@ class Workflow:
         if self.start != END and self.start not in found:
             found.append(self.start)
         return tuple(found)
+
+    def max_parallel_for(self, step: str) -> int:
+        """The configured concurrency limit for a step. Absent entries default to 1."""
+        return self.max_parallel.get(step, 1)
 
 
 @dataclass(frozen=True)

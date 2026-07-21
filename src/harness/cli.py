@@ -29,6 +29,8 @@ from harness.drivers.github_source import GithubTaskSource
 from harness.drivers.launchd import (
     DEFAULT_LABEL,
     ServiceError,
+    autoupdate_plist_bytes,
+    kickstart,
     load,
     plist_bytes,
     plist_path,
@@ -45,6 +47,22 @@ from harness.ports.source import TaskSource
 from harness.ports.workflows import WorkflowNotFound
 
 PACKAGE_NAME = "harness"
+
+# Written to `<root>/secrets.env` (0600) when the service is installed, unless
+# the file already exists. Sourced by the wrapper; the operator fills in the
+# token that `claude` needs under launchd, where the keychain is unreachable.
+_SECRETS_TEMPLATE = """\
+# harness service secrets — sourced by harness-run.sh. Keep this file 0600.
+# `claude` cannot read the macOS login keychain when run under launchd, so the
+# background service needs a token in the environment. Create one with
+# `claude setup-token` and uncomment the line below with its value:
+#
+# CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-...
+#
+# GITHUB_TOKEN is taken from `gh auth token` automatically; set it here only to
+# override that.
+# GITHUB_TOKEN=ghp_...
+"""
 
 DEFAULT_WORKFLOW = "default"
 
@@ -513,11 +531,52 @@ def _update(args: argparse.Namespace) -> int:
     # This process is still the *old* code, so version_string() here would
     # report the version we just replaced. Ask the freshly installed script.
     print(f"\nnow: {installed_version_report()}")
-    print(
-        "the running service still has the previous version — restart it with\n"
-        "  launchctl kickstart -k gui/$(id -u)/com.harness"
-    )
+
+    if not getattr(args, "restart", False):
+        print(
+            "the running service still has the previous version — restart it with\n"
+            f"  launchctl kickstart -k gui/$(id -u)/{getattr(args, 'label', DEFAULT_LABEL)}"
+        )
+        return 0
+
+    label = getattr(args, "label", DEFAULT_LABEL)
+    if getattr(args, "only_if_idle", False):
+        active = active_stages(_root(getattr(args, "root", None)))
+        if active:
+            print(
+                f"a stage is running ({', '.join(active)}); skipping the restart. "
+                "The update is on disk and will apply at the next idle restart."
+            )
+            return 0
+
+    problem = _require_macos()
+    if problem:
+        print(f"error: {problem}", file=sys.stderr)
+        return 2
+    try:
+        kickstart(os.getuid(), label)
+    except ServiceError as error:
+        print(f"error: restart failed: {error}", file=sys.stderr)
+        return 1
+    print(f"restarted service {label}")
     return 0
+
+
+def active_stages(root: Path) -> list[str]:
+    """Task ids currently claimed in a step queue — i.e. a stage is executing.
+
+    `claim()` is an atomic rename into `<queue>/.processing/`, so a `.json` there
+    means an agent is mid-run. This is the "no active work" signal the idle-gated
+    restart checks: restarting with one of these live would kill the agent
+    subprocess and waste the attempt.
+    """
+    queues = HarnessLayout(root).queues
+    if not queues.is_dir():
+        return []
+    return sorted(
+        path.stem
+        for path in queues.glob("*/.processing/*.json")
+    )
 
 
 def _require_macos() -> str | None:
@@ -555,6 +614,16 @@ def _service_install(args: argparse.Namespace) -> int:
     log_dir = root / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
 
+    # The secrets file the wrapper sources. Create it 0600 with a template if it
+    # is absent — never overwrite it, since that is where the operator's tokens
+    # live. `claude` under launchd cannot read the login keychain, so the claude
+    # token has to travel through the environment from here.
+    env_file = root / "secrets.env"
+    env_file_created = not env_file.exists()
+    if env_file_created:
+        env_file.write_text(_SECRETS_TEMPLATE, encoding="utf-8")
+    env_file.chmod(0o600)
+
     wrapper = root / "harness-run.sh"
     wrapper.write_text(
         wrapper_script(
@@ -562,6 +631,7 @@ def _service_install(args: argparse.Namespace) -> int:
             root=root,
             api_port=args.api_port,
             path_entries=service_path_entries(harness),
+            env_file=env_file,
         ),
         encoding="utf-8",
     )
@@ -588,8 +658,22 @@ def _service_install(args: argparse.Namespace) -> int:
     print(f"service {args.label} installed and started")
     print(f"  wrapper: {wrapper}")
     print(f"  plist:   {target}")
+    print(f"  secrets: {env_file}")
     print(f"  logs:    {log_dir}/harness.log, {log_dir}/harness.error.log")
     print(f"  board:   http://127.0.0.1:{args.api_port}/")
+
+    # An *active* assignment, not the commented example in the template.
+    token_set = any(
+        line.lstrip().startswith("CLAUDE_CODE_OAUTH_TOKEN=")
+        for line in env_file.read_text(encoding="utf-8").splitlines()
+    )
+    if not token_set:
+        print()
+        print("NEXT: claude cannot use the macOS keychain under launchd. Give the")
+        print("service a token so agent steps work:")
+        print("  1. claude setup-token")
+        print(f"  2. add CLAUDE_CODE_OAUTH_TOKEN=<token> to {env_file}")
+        print(f"  3. launchctl kickstart -k gui/{os.getuid()}/{args.label}")
     return 0
 
 
@@ -629,6 +713,78 @@ def _service_status(args: argparse.Namespace) -> int:
         if stripped.startswith(("state =", "pid =", "last exit code =")):
             print(f"        {stripped}")
     print("state:  loaded")
+    return 0
+
+
+def _parse_hours(raw: str) -> list[int]:
+    """Parse "2,8,14,20" into sorted unique hours, rejecting anything out of 0-23."""
+    hours = []
+    for piece in raw.split(","):
+        piece = piece.strip()
+        if not piece:
+            continue
+        if not piece.isdigit() or not (0 <= int(piece) <= 23):
+            raise ValueError(f"invalid hour {piece!r} (expected 0-23)")
+        hours.append(int(piece))
+    if not hours:
+        raise ValueError("no hours given")
+    return sorted(set(hours))
+
+
+def _service_autoupdate(args: argparse.Namespace) -> int:
+    problem = _require_macos()
+    if problem:
+        print(f"error: {problem}", file=sys.stderr)
+        return 2
+
+    home = Path.home()
+    autoupdate_label = f"{args.label}.autoupdate"
+    target = plist_path(home, autoupdate_label)
+
+    if args.remove:
+        was_loaded = unload(os.getuid(), autoupdate_label)
+        existed = target.exists()
+        target.unlink(missing_ok=True)
+        print(
+            f"autoupdate {autoupdate_label} removed"
+            if (was_loaded or existed)
+            else f"autoupdate {autoupdate_label} was not installed"
+        )
+        return 0
+
+    try:
+        hours = _parse_hours(args.hours)
+    except ValueError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
+
+    harness = service_entry_point()
+    root = _root(args.root)
+    log_dir = root / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(
+        autoupdate_plist_bytes(
+            label=autoupdate_label,
+            harness=harness,
+            service_label=args.label,
+            hours=hours,
+            path_entries=service_path_entries(harness),
+            log_dir=log_dir,
+            home=home,
+        )
+    )
+    try:
+        load(os.getuid(), target, autoupdate_label)
+    except ServiceError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+
+    pretty = ", ".join(f"{h:02d}:00" for h in hours)
+    print(f"autoupdate {autoupdate_label} installed — runs at {pretty}")
+    print(f"  it runs: harness update --restart --only-if-idle --label {args.label}")
+    print(f"  log:     {log_dir}/autoupdate.log")
     return 0
 
 
@@ -823,8 +979,37 @@ def main(argv: list[str] | None = None) -> int:
     service_status.add_argument("--label", default=DEFAULT_LABEL)
     service_status.set_defaults(handler=_service_status)
 
+    service_autoupdate = service_actions.add_parser(
+        "autoupdate",
+        help="schedule `harness update --restart --only-if-idle` a few times a day",
+    )
+    service_autoupdate.add_argument("--label", default=DEFAULT_LABEL)
+    service_autoupdate.add_argument("--root", default=None)
+    service_autoupdate.add_argument(
+        "--hours",
+        default="2,8,14,20",
+        help="comma-separated hours (0-23) to run the update (default: 2,8,14,20)",
+    )
+    service_autoupdate.add_argument(
+        "--remove", action="store_true", help="remove the autoupdate schedule"
+    )
+    service_autoupdate.set_defaults(handler=_service_autoupdate)
+
     update = subparsers.add_parser(
         "update", help="upgrade the installed harness via uv"
+    )
+    update.add_argument("--root", default=None)
+    update.add_argument("--label", default=DEFAULT_LABEL)
+    update.add_argument(
+        "--restart",
+        action="store_true",
+        help="restart the service after upgrading, so it runs the new version",
+    )
+    update.add_argument(
+        "--only-if-idle",
+        action="store_true",
+        dest="only_if_idle",
+        help="with --restart: skip the restart while a stage is running",
     )
     update.set_defaults(handler=_update)
 

@@ -47,6 +47,10 @@ class Consumer:
         self._clock = clock
 
     @property
+    def step(self) -> str:
+        return self._step
+
+    @property
     def actor(self) -> str:
         return f"consumer:{self._step}"
 

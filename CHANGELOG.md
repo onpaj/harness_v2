@@ -1,6 +1,121 @@
 # CHANGELOG
 
 
+## v0.6.0 (2026-07-21)
+
+### Features
+
+- Make the dashboard mobile friendly ([#21](https://github.com/onpaj/harness_v2/pull/21),
+  [`a530359`](https://github.com/onpaj/harness_v2/commit/a5303594ced4c487068d83aa77e9ea54552d2ce2))
+
+CSS-only responsive layout for the board: a @media(max-width:767px) block for
+  .column/.card/dialog/.tabs and a .table-scroll wrapper on the task-detail tables, layered onto the
+  tabbed task-detail design. Reconciled with the tab redesign that landed on main after this branch
+  was cut.
+
+Closes #16
+
+
+## v0.5.0 (2026-07-21)
+
+### Features
+
+- Add per-step max-parallel-task limits to workflows
+  ([#27](https://github.com/onpaj/harness_v2/pull/27),
+  [`6e16c73`](https://github.com/onpaj/harness_v2/commit/6e16c73a15b51c858952586579a194675416582f))
+
+Adds a validated maxParallel map on the workflow JSON (default 1 per step),
+  Workflow.max_parallel_for() accessor, Consumer.step property, and Harness.run() spawning N
+  concurrent consumer loops per step. Relies on the existing atomic queue claim; no changes to
+  Dispatcher or router.
+
+Closes #25
+
+- Create-harness-issue skill creates directly when inputs are complete
+  ([#26](https://github.com/onpaj/harness_v2/pull/26),
+  [`b0554f0`](https://github.com/onpaj/harness_v2/commit/b0554f0e6634c3d4f78e86d27285a057d01e9b0f))
+
+Rewrites SKILL.md step 4 into a completeness-check router
+  (repo_resolved/title_concrete/body_substantive) that creates the issue directly when all three
+  pass and asks a targeted question otherwise. Extends step 6 into a five-field post-creation
+  report.
+
+Closes #24
+
+
+## v0.4.0 (2026-07-21)
+
+### Features
+
+- One-step update+restart, idle-gated, and a schedule for it
+  ([`998c8b8`](https://github.com/onpaj/harness_v2/commit/998c8b8fb525445c0632a1f9ff2a6abe45dcac55))
+
+Updating meant two commands and remembering the second, and nothing kept the box current on its own.
+  Three additions:
+
+- `harness update --restart` upgrades and restarts the service in one step. - `--only-if-idle` skips
+  the restart when a stage is mid-run (a task claimed in a queue's .processing/), so an update never
+  kills a live agent — it applies at the next idle restart instead. - `harness service autoupdate`
+  installs a launchd timer that runs `update --restart --only-if-idle` a few times a day (default
+  02/08/14/20).
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+
+
+## v0.3.1 (2026-07-21)
+
+### Bug Fixes
+
+- Detect an active token, not the template's commented example
+  ([`89df965`](https://github.com/onpaj/harness_v2/commit/89df9650840eb5d622bd210c36f48acbc2f905ce))
+
+harness service install printed no setup-token guidance because the check matched the commented
+  CLAUDE_CODE_OAUTH_TOKEN= example line in the template it had just written. It now looks for an
+  uncommented assignment.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+
+
+## v0.3.0 (2026-07-21)
+
+### Features
+
+- Service sources a secrets file for CLAUDE_CODE_OAUTH_TOKEN
+  ([`e98a543`](https://github.com/onpaj/harness_v2/commit/e98a5439f877c7e977b17d842cc3c329f62148fb))
+
+Under launchd, claude cannot read the macOS login keychain where an interactive login stores its
+  credential, so every agent step failed with "Not logged in" even though the same binary works from
+  a shell. Proven by running claude inside a launchd agent.
+
+The service wrapper now sources <root>/secrets.env (created 0600, never overwritten) and exports
+  CLAUDE_CODE_OAUTH_TOKEN from it, which makes claude bypass the keychain — the supported headless
+  path via `claude setup-token`. A missing token warns loudly rather than failing silently, and the
+  install prints the exact setup-token steps.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+
+
+## v0.2.2 (2026-07-20)
+
+### Bug Fixes
+
+- Dummy writes where the agent does, and forge reports GitHub's reason
+  ([`0c8027b`](https://github.com/onpaj/harness_v2/commit/0c8027b58155dd01d68e502e4e838d424e8036ea))
+
+A live end-to-end run failed at land with a bare "HTTP Error 422: Unprocessable Entity". Two
+  separate faults behind it:
+
+- DummyBehavior wrote its work into `.harness/`, which repos routinely gitignore (this one does).
+  Ignored writes stage nothing, so commit() returned None, the task branch carried no diff, and
+  GitHub correctly refused a PR with no commits. It now writes into `.artifacts/<task>/`, the
+  versioned location the real agent uses (invariant 16) — so --agent dummy can actually exercise
+  landing. - urllib's HTTPError stringifies to just the status line. GitHub puts the real reason in
+  the response body ("No commits between main and ..."); the forge now surfaces it, along with the
+  head -> base it attempted.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+
+
 ## v0.2.1 (2026-07-20)
 
 ### Bug Fixes
