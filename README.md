@@ -119,6 +119,36 @@ version up.
 
 Logs land in `<root>/logs/harness.log` and `<root>/logs/harness.error.log`.
 
+### Autoupdating the service
+
+`harness update` above is manual. To have it run on a schedule — and, when a
+real update landed, restart the run-loop service so the new code is actually
+live — install a second, independent LaunchAgent:
+
+```sh
+harness service autoupdate install --root ~/harness-root --every 15m
+```
+
+`--every` accepts whole minutes, hours or days (`15m`, `2h`, `1d`) — there is
+no hourly floor, `1m` is a valid schedule. Each firing runs `harness update`
+and, only when the reported version actually changed, kickstarts the main
+service (`com.harness` by default; pass `--service-label` if you installed the
+run-loop service under a different `--label`). A no-op upgrade never restarts
+anything. Installing also runs the update once immediately (the LaunchAgent's
+`RunAtLoad`), so don't be surprised by an entry in the log the moment
+`install` returns.
+
+```sh
+harness service autoupdate status      # loaded? configured interval?
+harness service autoupdate uninstall   # stop it and remove the agent
+```
+
+`autoupdate uninstall` only touches the autoupdate LaunchAgent — the run-loop
+service it restarts is untouched. Logs land in
+`<root>/logs/harness-autoupdate.log` and `<root>/logs/harness-autoupdate.error.log`,
+separate from the run-loop's own log files. This needs no `GITHUB_TOKEN` — it
+only shells out to `uv` and, on a real change, `launchctl kickstart`.
+
 ## Developing
 
 Working on the harness itself needs a clone and an editable install:
