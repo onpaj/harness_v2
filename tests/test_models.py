@@ -149,6 +149,32 @@ def test_workflow_steps_excludes_end():
     assert workflow.steps() == ("plan", "review")
 
 
+def test_workflow_max_parallel_for_defaults_to_one():
+    workflow = Workflow(
+        name="default",
+        start="plan",
+        transitions=(Transition(from_step="plan", on="done", to_step=END),),
+    )
+
+    assert workflow.max_parallel_for("plan") == 1
+    assert workflow.max_parallel_for("unknown") == 1
+
+
+def test_workflow_max_parallel_for_reads_configured_limit():
+    workflow = Workflow(
+        name="default",
+        start="plan",
+        transitions=(
+            Transition(from_step="plan", on="done", to_step="review"),
+            Transition(from_step="review", on="done", to_step=END),
+        ),
+        max_parallel={"review": 3},
+    )
+
+    assert workflow.max_parallel_for("review") == 3
+    assert workflow.max_parallel_for("plan") == 1
+
+
 def test_outcome_values():
     assert Outcome.DONE.value == "done"
     assert Outcome.REQUEST_CHANGES.value == "request_changes"

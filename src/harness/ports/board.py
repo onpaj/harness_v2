@@ -20,7 +20,12 @@ DONE_COLUMN = "done"
 """Column for tasks that reached END."""
 
 FAILED_COLUMN = "failed"
-"""Column for tasks that cannot be routed."""
+"""Column for tasks that cannot be routed. With self-healing enabled it drains
+as the healer processes each task into `healed`."""
+
+HEALED_COLUMN = "healed"
+"""Column for tasks the healer has settled — the never-consumed terminal that
+takes over that role from `failed` once a healer is wired."""
 
 
 @dataclass(frozen=True)
