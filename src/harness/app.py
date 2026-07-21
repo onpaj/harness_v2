@@ -22,6 +22,7 @@ from harness.drivers.fs_workflows import (
 from harness.drivers.memory import (
     MemoryArtifactStore,
     MemoryForge,
+    MemoryIssueTracker,
     MemoryWorkspace,
 )
 from harness.drivers.projection_events import ProjectionSink
@@ -29,6 +30,7 @@ from harness.drivers.source_reflector import SourceReflectorSink
 from harness.drivers.stage_output import StageOutputProjection
 from harness.drivers.stdout_events import StdoutEventSink
 from harness.drivers.system_clock import SystemClock
+from harness.healer import Healer
 from harness.models import Workflow
 from harness.ports.agent import AgentCatalog, AgentRunner
 from harness.ports.artifacts import ArtifactStore, ArtifactView
@@ -36,6 +38,7 @@ from harness.ports.behavior import ConsumerBehavior
 from harness.ports.clock import Clock
 from harness.ports.events import EventSink
 from harness.ports.forge import Forge
+from harness.ports.issues import IssueTracker
 from harness.ports.logs import StageOutputView
 from harness.ports.queue import TaskQueue
 from harness.ports.source import TaskSource
@@ -47,6 +50,21 @@ from harness.task_control import TaskControlService
 
 LANDING_STEP = "land"
 """The step to which the wiring assigns LandingBehavior instead of DummyBehavior."""
+
+
+@dataclass(frozen=True)
+class HealConfig:
+    """Enables the healer: an agent assigned to the `failed/` queue.
+
+    `repository` is the slug the issue is opened on (the harness's own repo);
+    `spec_name` names the persona in the catalog; `labels` are added to the
+    opened issue. Absent → no healer, `failed/` stays a dead-end terminal.
+    """
+
+    repository: str
+    spec_name: str = "healer"
+    labels: tuple[str, ...] = ("harness:self-heal",)
+    timeout: float = 1800.0
 
 
 @dataclass(frozen=True)
@@ -72,6 +90,14 @@ class HarnessLayout:
     @property
     def failed(self) -> Path:
         return self.root / "failed"
+
+    @property
+    def healed(self) -> Path:
+        return self.root / "healed"
+
+    @property
+    def heal_scratch(self) -> Path:
+        return self.root / "heal"
 
     @property
     def worktrees(self) -> Path:
@@ -105,12 +131,15 @@ class Harness:
         events: EventSink,
         clock: Clock,
         pollers: list[SourcePoller] | None = None,
+        healer: Healer | None = None,
+        healed: TaskQueue | None = None,
     ) -> None:
         self.layout = layout
         self.workflows = workflows
         self.dispatcher = dispatcher
         self.consumers = consumers
         self.pollers = pollers or []
+        self.healer = healer
         self.projection = projection
         self.artifacts = artifacts
         self.stage_output = stage_output
@@ -119,11 +148,17 @@ class Harness:
         self._step_queues = step_queues
         self._done = done
         self._failed = failed
+        self._healed = healed
         self._events = events
         self._clock = clock
 
     def recover(self) -> int:
         queues = [self._inbox, *self._step_queues.values()]
+        # With a healer wired, `failed/` is a consumed queue too — a crash mid-heal
+        # leaves the task in `failed/.processing/`, so it must be recovered like any
+        # other. Without a healer, `failed/` is never claimed and this is a no-op.
+        if self.healer is not None:
+            queues.append(self._failed)
         total = sum(queue.recover() for queue in queues)
         if total:
             self._events.emit("recovered", count=total)
@@ -165,6 +200,7 @@ class Harness:
             step_queues=self._step_queues,
             done=self._done,
             failed=self._failed,
+            healed=self._healed,
         )
         self._seed_pollers()
         self._events.emit("started", workflows=sorted(self.workflows))
@@ -176,6 +212,7 @@ class Harness:
                 for _ in range(self._max_parallel_for(consumer.step))
             ),
             *(self._source_loop(poller, source_interval, stop) for poller in self.pollers),
+            *([self._heal_loop(poll_interval, stop)] if self.healer is not None else []),
         )
         self._events.emit("stopped")
 
@@ -219,6 +256,14 @@ class Harness:
             else:
                 await asyncio.sleep(0)
 
+    async def _heal_loop(self, poll_interval: float, stop: asyncio.Event) -> None:
+        assert self.healer is not None
+        while not stop.is_set():
+            if not await self.healer.tick():
+                await asyncio.sleep(poll_interval)
+            else:
+                await asyncio.sleep(0)
+
 
 def build(
     root: Path,
@@ -238,6 +283,8 @@ def build(
     landing_step: str = LANDING_STEP,
     delay: float = 5.0,
     request_changes_once_at: str | None = None,
+    issue_tracker: IssueTracker | None = None,
+    heal: HealConfig | None = None,
 ) -> Harness:
     layout = HarnessLayout(Path(root))
     events = events or StdoutEventSink()
@@ -259,7 +306,7 @@ def build(
     resolved = {name: raw_workflows.get(name) for name in names}
     served_workflows = ServedWorkflowRepository(raw_workflows, tuple(resolved))
 
-    projection = BoardProjection(list(resolved.values()))
+    projection = BoardProjection(list(resolved.values()), include_healed=heal is not None)
     stage_output = StageOutputProjection()
     # The reflector comes after ProjectionSink: the outward projection must not
     # get ahead of the board. The stage-output projection sits alongside the
@@ -359,6 +406,37 @@ def build(
         inbox=inbox, failed=failed, events=events, clock=clock
     )
 
+    # The healer: an agent assigned to the `failed/` queue. It reads a failed
+    # task, drafts + files an issue on the harness repo, and settles the task
+    # onto the terminal `healed/`. It reuses the agent runner/catalog (persona as
+    # data) — so it needs both; the issue tracker defaults to the in-memory fake
+    # (offline / tests), swapped for GitHub by `cli._run`.
+    healed_queue: TaskQueue | None = None
+    healer: Healer | None = None
+    if heal is not None:
+        if runner is None or catalog is None:
+            raise ValueError(
+                "self-healing needs an agent runner and a catalog "
+                "(pass runner= and catalog=, or leave heal=None)"
+            )
+        healed_queue = FilesystemTaskQueue(
+            name="healed", root=layout.healed, events=events
+        )
+        healer = Healer(
+            failed=failed,
+            healed=healed_queue,
+            runner=runner,
+            spec=catalog.get(heal.spec_name),
+            tracker=issue_tracker or MemoryIssueTracker(),
+            repo=heal.repository,
+            scratch_root=layout.heal_scratch,
+            strategy=strategy,
+            events=events,
+            clock=clock,
+            labels=heal.labels,
+            timeout=heal.timeout,
+        )
+
     return Harness(
         layout=layout,
         workflows=resolved,
@@ -375,4 +453,6 @@ def build(
         events=events,
         clock=clock,
         pollers=pollers,
+        healer=healer,
+        healed=healed_queue,
     )

@@ -12,7 +12,14 @@ END = "end"
 FAILED = "failed"
 """Reserved terminal status of a task that ended up in the `failed/` queue.
 Like END it has no outgoing edges — it just additionally isn't known to any
-workflow as one of its steps."""
+workflow as one of its steps. Unlike a true terminal, `failed/` has exactly one
+reader: the `Healer` loop, which drains it into `healed/` (invariant 24)."""
+
+HEALED = "healed"
+"""Reserved terminal status of a task the healer has settled onto the `healed/`
+queue. This is the never-consumed terminal that `failed/` used to be — the
+healer reads `failed/` and moves a task here once, success or failure, so a
+failure can never be healed twice (invariant 25)."""
 
 
 class Outcome(str, Enum):

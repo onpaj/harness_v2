@@ -14,6 +14,7 @@ from harness.models import END, Task, Workflow
 from harness.ports.board import (
     DONE_COLUMN,
     FAILED_COLUMN,
+    HEALED_COLUMN,
     TODO_COLUMN,
     Board,
     BoardColumn,
@@ -47,11 +48,15 @@ def _reachable_order(workflow: Workflow) -> list[str]:
     return order
 
 
-def column_order(workflows: Sequence[Workflow]) -> tuple[str, ...]:
+def column_order(
+    workflows: Sequence[Workflow], *, healed: bool = False
+) -> tuple[str, ...]:
     """Union of each workflow's own reachability order, first-seen wins.
 
     workflows[0]'s reachable steps (in its own order) come first, then
-    workflows[1]'s not-yet-seen steps, and so on.
+    workflows[1]'s not-yet-seen steps, and so on. `healed=True` appends the
+    `healed` terminal column — only when a healer is wired, so a plain harness
+    keeps its exact column set.
     """
     order: list[str] = []
     for workflow in workflows:
@@ -59,12 +64,15 @@ def column_order(workflows: Sequence[Workflow]) -> tuple[str, ...]:
             if step not in order:
                 order.append(step)
 
-    return (TODO_COLUMN,) + tuple(order) + (DONE_COLUMN, FAILED_COLUMN)
+    tail = (DONE_COLUMN, FAILED_COLUMN) + ((HEALED_COLUMN,) if healed else ())
+    return (TODO_COLUMN,) + tuple(order) + tail
 
 
 class BoardProjection(BoardView):
-    def __init__(self, workflows: Sequence[Workflow]) -> None:
-        self._order = column_order(workflows)
+    def __init__(
+        self, workflows: Sequence[Workflow], *, include_healed: bool = False
+    ) -> None:
+        self._order = column_order(workflows, healed=include_healed)
         self._tasks: dict[str, Task] = {}
         self._columns: dict[str, str] = {}
         self._revision = 0
@@ -77,6 +85,7 @@ class BoardProjection(BoardView):
         step_queues: dict[str, TaskQueue],
         done: TaskQueue,
         failed: TaskQueue,
+        healed: TaskQueue | None = None,
     ) -> None:
         """Build the initial state from the queues.
 
@@ -90,6 +99,9 @@ class BoardProjection(BoardView):
             self._store(DONE_COLUMN, task)
         for task in failed.list():
             self._store(FAILED_COLUMN, task)
+        if healed is not None:
+            for task in healed.list():
+                self._store(HEALED_COLUMN, task)
         for task in inbox.list():
             # A fresh task (never dispatched) shows in `todo`; one transiting the
             # inbox between steps keeps the column of the step it just left.

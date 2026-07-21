@@ -100,6 +100,30 @@ def test_source_poller_imports_only_ports_and_models():
     ), f"source_poller.py imports outside ports/models: {imports}"
 
 
+def test_healer_imports_only_ports_models_and_ids():
+    """The Healer loop is core (sibling of SourcePoller): it knows only ports,
+    models and ids — never a driver. Wiring lives in app.py."""
+    imports = {
+        module
+        for module in imported_modules(SOURCE / "healer.py")
+        if module.startswith("harness")
+    }
+    assert all(
+        module in ("harness.models", "harness.ids")
+        or module.startswith("harness.ports")
+        for module in imports
+    ), f"healer.py imports outside ports/models/ids: {imports}"
+
+
+def test_orchestration_does_not_import_issues_or_healer():
+    """The IssueTracker port and the Healer loop are unknown to the dispatcher and
+    consumer — only the healer/wiring reach for them (invariant 27)."""
+    for name in ("dispatcher.py", "consumer.py"):
+        imports = imported_modules(SOURCE / name)
+        assert "harness.ports.issues" not in imports, f"{name} imports ports.issues"
+        assert "harness.healer" not in imports, f"{name} imports healer"
+
+
 def test_orchestration_does_not_import_work_ports():
     """Worktree, forge, artifacts, agent and the repo registry are unknown to
     dispatcher/consumer — only behavior reaches for them. Otherwise orchestration
