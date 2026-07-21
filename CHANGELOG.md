@@ -1,6 +1,20 @@
 # CHANGELOG
 
 
+## v0.3.1 (2026-07-21)
+
+### Bug Fixes
+
+- Detect an active token, not the template's commented example
+  ([`89df965`](https://github.com/onpaj/harness_v2/commit/89df9650840eb5d622bd210c36f48acbc2f905ce))
+
+harness service install printed no setup-token guidance because the check matched the commented
+  CLAUDE_CODE_OAUTH_TOKEN= example line in the template it had just written. It now looks for an
+  uncommented assignment.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+
+
 ## v0.3.0 (2026-07-21)
 
 ### Features
