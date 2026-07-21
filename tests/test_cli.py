@@ -42,6 +42,101 @@ def test_init_writes_default_agents_with_null_timeout(tmp_path):
     assert definition["timeout"] is None
 
 
+def test_init_writes_healer_persona(tmp_path):
+    from harness.drivers.fs_agents import FilesystemAgentCatalog
+    from harness.models import Outcome
+
+    assert main(["init", "--root", str(tmp_path)]) == 0
+
+    path = tmp_path / "agents" / "healer.json"
+    assert path.is_file()
+    definition = json.loads(path.read_text())
+    assert definition["allowed_outcomes"] == ["done", "request_changes"]
+
+    # it parses to a valid AgentSpec with both outcomes
+    spec = FilesystemAgentCatalog(tmp_path / "agents").get("healer")
+    assert spec.allowed_outcomes == (Outcome.DONE, Outcome.REQUEST_CHANGES)
+    assert spec.prompt
+
+
+def test_run_heal_repo_passes_heal_config_and_tracker(monkeypatch, tmp_path):
+    from harness.app import HealConfig
+    from harness.drivers.memory import MemoryIssueTracker
+
+    main(["init", "--root", str(tmp_path)])
+    captured = {}
+
+    def fake_build(*args, **kwargs):
+        captured["heal"] = kwargs.get("heal")
+        captured["issue_tracker"] = kwargs.get("issue_tracker")
+        return object()
+
+    async def fake_serve(harness, port, poll_interval, source_interval=30.0):
+        pass
+
+    monkeypatch.setattr("harness.cli.build", fake_build)
+    monkeypatch.setattr("harness.cli.serve", fake_serve)
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+
+    assert main(["run", "--root", str(tmp_path), "--heal-repo", "onpaj/harness_v2"]) == 0
+    assert captured["heal"] == HealConfig(repository="onpaj/harness_v2")
+    # offline (no token) → the in-memory tracker, so the loop still runs
+    assert isinstance(captured["issue_tracker"], MemoryIssueTracker)
+
+
+def test_run_heal_repo_uses_github_tracker_with_a_token(monkeypatch, tmp_path):
+    from harness.drivers.github_issues import GithubIssueTracker
+
+    main(["init", "--root", str(tmp_path)])
+    captured = {}
+
+    def fake_build(*args, **kwargs):
+        captured["issue_tracker"] = kwargs.get("issue_tracker")
+        return object()
+
+    async def fake_serve(harness, port, poll_interval, source_interval=30.0):
+        pass
+
+    monkeypatch.setattr("harness.cli.build", fake_build)
+    monkeypatch.setattr("harness.cli.serve", fake_serve)
+    monkeypatch.setenv("GITHUB_TOKEN", "tok")
+
+    assert main(["run", "--root", str(tmp_path), "--heal-repo", "onpaj/harness_v2"]) == 0
+    assert isinstance(captured["issue_tracker"], GithubIssueTracker)
+
+
+def test_run_without_heal_repo_wires_no_healer(monkeypatch, tmp_path):
+    main(["init", "--root", str(tmp_path)])
+    captured = {}
+
+    def fake_build(*args, **kwargs):
+        captured["heal"] = kwargs.get("heal")
+        return object()
+
+    async def fake_serve(harness, port, poll_interval, source_interval=30.0):
+        pass
+
+    monkeypatch.setattr("harness.cli.build", fake_build)
+    monkeypatch.setattr("harness.cli.serve", fake_serve)
+
+    assert main(["run", "--root", str(tmp_path)]) == 0
+    assert captured["heal"] is None
+
+
+def test_run_heal_repo_needs_claude_agent(monkeypatch, tmp_path):
+    main(["init", "--root", str(tmp_path)])
+
+    def fake_build(*args, **kwargs):  # must not be reached
+        raise AssertionError("build should not run when --heal-repo rejects the args")
+
+    monkeypatch.setattr("harness.cli.build", fake_build)
+
+    code = main(
+        ["run", "--root", str(tmp_path), "--heal-repo", "o/r", "--agent", "dummy"]
+    )
+    assert code == 2
+
+
 def test_run_defaults_agent_timeout_to_1800(monkeypatch, tmp_path):
     main(["init", "--root", str(tmp_path)])
     captured = {}

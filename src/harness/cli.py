@@ -15,10 +15,12 @@ from pathlib import Path
 import uvicorn
 
 from harness.api.app import create_app
-from harness.app import LANDING_STEP, HarnessLayout, build
+from harness.app import LANDING_STEP, HarnessLayout, HealConfig, build
 from harness.drivers.claude_cli import ClaudeCliRunner
 from harness.drivers.fake_forge import FakeForge
 from harness.drivers.fs_agents import FilesystemAgentCatalog
+from harness.drivers.github_issues import GithubIssueTracker
+from harness.drivers.memory import MemoryIssueTracker
 from harness.drivers.fs_repos import FilesystemRepositoryRegistry
 from harness.drivers.fs_workflows import (
     FilesystemWorkflowRepository,
@@ -123,6 +125,7 @@ def _init(args: argparse.Namespace) -> int:
 
     workflow = harness.workflows[args.workflow]
     _write_default_agents(layout, workflow)
+    _write_healer_agent(layout)
     _write_default_repos(layout)
 
     print(f"harness ready at {root}")
@@ -260,6 +263,29 @@ _REVIEW_PERSONA = (
     "cleanup suggestions)."
 )
 
+_HEALER_PERSONA = (
+    "You are the harness healer. A task in the orchestration harness has failed "
+    "and landed in the `failed/` queue; your job is to read the failure report "
+    "you are given and diagnose it.\n\n"
+    "Decide whether the failure points at a fixable bug in the HARNESS ITSELF — "
+    "a driver contract that was violated, a wiring gap, a missing workflow edge, "
+    "an unhandled error path — as opposed to an external or expected failure (a "
+    "flaky network, an unauthenticated tool, a task whose own request was simply "
+    "wrong or impossible). Be conservative: only propose a change when there is a "
+    "concrete, plausible harness fix.\n\n"
+    "When it IS a fixable harness bug: write a proposed GitHub issue to the file "
+    "`issue.md` in your working directory. Its first line must be a title "
+    "`# <concise title>`; then a short diagnosis (what failed and why), and a "
+    "concrete proposed change (which module/contract, and what to do). Finish "
+    "with the verdict `done`.\n\n"
+    "When there is nothing actionable for the harness: do not write a file, and "
+    "finish with the verdict `request_changes` — its summary saying briefly why "
+    "the failure is not a harness bug.\n\n"
+    "You are working from the failure report alone; you do not have the task's "
+    "worktree. Do not attempt to run or fix code — your deliverable is the issue."
+)
+
+
 # Step → (persona, default tools). The tools are names of Claude Code tools,
 # which `claude_cli` passes through via `--allowedTools`.
 AGENT_PERSONAS: dict[str, tuple[str, list[str]]] = {
@@ -322,6 +348,27 @@ def _write_default_agents(layout: HarnessLayout, workflow) -> None:
         path.write_text(
             json.dumps(definition, indent=2, ensure_ascii=False), encoding="utf-8"
         )
+
+
+def _write_healer_agent(layout: HarnessLayout) -> None:
+    """Write the `healer` persona used by the self-healing loop (invariant 14:
+    persona as data). It is not a workflow step — the healer is a loop assigned to
+    the `failed/` queue — so it lives beside the step agents but is written here."""
+    layout.agents.mkdir(parents=True, exist_ok=True)
+    path = layout.agents / "healer.json"
+    if path.exists():
+        return
+    definition = {
+        "prompt": _HEALER_PERSONA,
+        "model": None,
+        "fallback_model": None,
+        "allowed_tools": ["Read", "Write"],
+        "allowed_outcomes": ["done", "request_changes"],
+        "timeout": None,
+    }
+    path.write_text(
+        json.dumps(definition, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
 
 
 def _write_default_repos(layout: HarnessLayout) -> None:
@@ -868,6 +915,28 @@ def _run(args: argparse.Namespace) -> int:
     artifact_view = WorktreeArtifactView(layout.worktrees)
     forge = _build_forge(args.forge, root, registry)
     sources = _github_sources(args, root, registry)
+
+    # Self-healing: an agent assigned to the `failed/` queue. Enabled by
+    # `--heal-repo <owner/repo>` (where the healer opens issues). It reuses the
+    # claude agent, so it needs `--agent claude`; offline (no GITHUB_TOKEN) it
+    # falls back to the in-memory tracker so the loop still runs harmlessly.
+    heal = None
+    issue_tracker = None
+    if args.heal_repo:
+        if not use_agent:
+            print(
+                "error: --heal-repo needs --agent claude (the healer is a claude agent)",
+                file=sys.stderr,
+            )
+            return 2
+        token = os.environ.get("GITHUB_TOKEN")
+        issue_tracker = (
+            GithubIssueTracker(HttpGithubClient(token))
+            if token
+            else MemoryIssueTracker()
+        )
+        heal = HealConfig(repository=args.heal_repo)
+
     try:
         harness = build(
             root,
@@ -881,6 +950,8 @@ def _run(args: argparse.Namespace) -> int:
             sources=sources or None,
             delay=args.delay,
             request_changes_once_at=args.request_changes_at,
+            issue_tracker=issue_tracker,
+            heal=heal,
         )
     except WorkflowNotFound as error:
         print(f"error: {error}", file=sys.stderr)
@@ -994,6 +1065,13 @@ def main(argv: list[str] | None = None) -> int:
         "an explicit value must be in the served set",
     )
     run.add_argument("--worktree-root", default=None, help="root of the task worktrees")
+    run.add_argument(
+        "--heal-repo",
+        default=None,
+        dest="heal_repo",
+        help="enable self-healing: assign a healer agent to the failed queue that "
+        "opens diagnostic issues on this repo (owner/repo); needs --agent claude",
+    )
     run.add_argument(
         "--api-port",
         type=int,
