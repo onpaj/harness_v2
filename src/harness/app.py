@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -14,7 +15,10 @@ from harness.drivers.composite_events import CompositeEventSink
 from harness.drivers.dummy_behavior import DummyBehavior
 from harness.drivers.fifo_strategy import FifoStrategy
 from harness.drivers.fs_queue import FilesystemTaskQueue
-from harness.drivers.fs_workflows import FilesystemWorkflowRepository
+from harness.drivers.fs_workflows import (
+    FilesystemWorkflowRepository,
+    ServedWorkflowRepository,
+)
 from harness.drivers.memory import (
     MemoryArtifactStore,
     MemoryForge,
@@ -87,7 +91,7 @@ class Harness:
         self,
         *,
         layout: HarnessLayout,
-        workflow: Workflow,
+        workflows: dict[str, Workflow],
         dispatcher: Dispatcher,
         consumers: list[Consumer],
         inbox: TaskQueue,
@@ -103,7 +107,7 @@ class Harness:
         pollers: list[SourcePoller] | None = None,
     ) -> None:
         self.layout = layout
-        self.workflow = workflow
+        self.workflows = workflows
         self.dispatcher = dispatcher
         self.consumers = consumers
         self.pollers = pollers or []
@@ -163,17 +167,32 @@ class Harness:
             failed=self._failed,
         )
         self._seed_pollers()
-        self._events.emit("started", workflow=self.workflow.name)
+        self._events.emit("started", workflows=sorted(self.workflows))
         await asyncio.gather(
             self._dispatcher_loop(poll_interval, stop),
             *(
                 self._consumer_loop(consumer, poll_interval, stop)
                 for consumer in self.consumers
-                for _ in range(self.workflow.max_parallel_for(consumer.step))
+                for _ in range(self._max_parallel_for(consumer.step))
             ),
             *(self._source_loop(poller, source_interval, stop) for poller in self.pollers),
         )
         self._events.emit("stopped")
+
+    def _max_parallel_for(self, step: str) -> int:
+        """The concurrency ceiling for a step's shared consumer.
+
+        Step queues are unioned by name across served workflows, so a single
+        consumer serves every workflow that has the step. Its ceiling is the
+        largest limit any of those workflows assigns the step (default 1)."""
+        return max(
+            (
+                workflow.max_parallel_for(step)
+                for workflow in self.workflows.values()
+                if step in workflow.steps()
+            ),
+            default=1,
+        )
 
     async def _dispatcher_loop(self, poll_interval: float, stop: asyncio.Event) -> None:
         while not stop.is_set():
@@ -203,7 +222,7 @@ class Harness:
 
 def build(
     root: Path,
-    workflow_name: str,
+    workflows: str | Sequence[str],
     *,
     events: EventSink | None = None,
     clock: Clock | None = None,
@@ -234,10 +253,13 @@ def build(
     artifacts = artifacts or MemoryArtifactStore()
     forge = forge or MemoryForge()
 
-    workflows = FilesystemWorkflowRepository(layout.workflows)
-    workflow = workflows.get(workflow_name)
+    names = (workflows,) if isinstance(workflows, str) else tuple(workflows)
 
-    projection = BoardProjection(workflow)
+    raw_workflows = FilesystemWorkflowRepository(layout.workflows)
+    resolved = {name: raw_workflows.get(name) for name in names}
+    served_workflows = ServedWorkflowRepository(raw_workflows, tuple(resolved))
+
+    projection = BoardProjection(list(resolved.values()))
     stage_output = StageOutputProjection()
     # The reflector comes after ProjectionSink: the outward projection must not
     # get ahead of the board. The stage-output projection sits alongside the
@@ -259,6 +281,7 @@ def build(
         step: FilesystemTaskQueue(
             name=step, root=layout.queues / step, events=events, quarantine=failed
         )
+        for workflow in resolved.values()
         for step in workflow.steps()
     }
 
@@ -308,7 +331,7 @@ def build(
         step_queues=step_queues,
         done=done,
         failed=failed,
-        workflows=workflows,
+        workflows=served_workflows,
         strategy=strategy,
         events=events,
         clock=clock,
@@ -338,7 +361,7 @@ def build(
 
     return Harness(
         layout=layout,
-        workflow=workflow,
+        workflows=resolved,
         dispatcher=dispatcher,
         consumers=consumers,
         inbox=inbox,

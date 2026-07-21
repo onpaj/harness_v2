@@ -148,6 +148,137 @@ def test_run_with_unknown_workflow_fails_cleanly(tmp_path, capsys):
     assert "nonexistent" in err
 
 
+HOTFIX_DEFINITION = {
+    "name": "hotfix",
+    "start": "plan",
+    "transitions": [{"from": "plan", "on": "done", "to": "end"}],
+}
+
+
+def test_run_serves_multiple_workflows_with_repeated_flag(monkeypatch, tmp_path):
+    main(["init", "--root", str(tmp_path)])
+    (tmp_path / "workflows" / "hotfix.json").write_text(json.dumps(HOTFIX_DEFINITION))
+    captured = {}
+
+    async def fake_serve(harness, port, poll_interval, source_interval=30.0):
+        captured["harness"] = harness
+
+    monkeypatch.setattr("harness.cli.serve", fake_serve)
+
+    assert main(
+        [
+            "run",
+            "--root",
+            str(tmp_path),
+            "--workflow",
+            "default",
+            "--workflow",
+            "hotfix",
+        ]
+    ) == 0
+    assert set(captured["harness"].workflows) == {"default", "hotfix"}
+
+
+def test_run_with_no_workflow_flag_serves_only_default(monkeypatch, tmp_path):
+    main(["init", "--root", str(tmp_path)])
+    (tmp_path / "workflows" / "hotfix.json").write_text(json.dumps(HOTFIX_DEFINITION))
+    captured = {}
+
+    async def fake_serve(harness, port, poll_interval, source_interval=30.0):
+        captured["harness"] = harness
+
+    monkeypatch.setattr("harness.cli.serve", fake_serve)
+
+    assert main(["run", "--root", str(tmp_path)]) == 0
+    assert set(captured["harness"].workflows) == {"default"}
+
+
+def test_run_all_workflows_serves_every_definition_found(monkeypatch, tmp_path):
+    main(["init", "--root", str(tmp_path)])
+    (tmp_path / "workflows" / "hotfix.json").write_text(json.dumps(HOTFIX_DEFINITION))
+    captured = {}
+
+    async def fake_serve(harness, port, poll_interval, source_interval=30.0):
+        captured["harness"] = harness
+
+    monkeypatch.setattr("harness.cli.serve", fake_serve)
+
+    assert main(["run", "--root", str(tmp_path), "--all-workflows"]) == 0
+    assert set(captured["harness"].workflows) == {"default", "hotfix"}
+
+
+def test_run_rejects_workflow_and_all_workflows_together(tmp_path, capsys):
+    main(["init", "--root", str(tmp_path)])
+    capsys.readouterr()
+
+    assert main(
+        ["run", "--root", str(tmp_path), "--workflow", "default", "--all-workflows"]
+    ) == 2
+
+    out, err = capsys.readouterr()
+    assert out == ""
+    assert "mutually exclusive" in err
+
+
+def test_run_all_workflows_with_no_definitions_is_a_startup_error(tmp_path, capsys):
+    (tmp_path / "workflows").mkdir(parents=True)
+
+    assert main(["run", "--root", str(tmp_path), "--all-workflows"]) == 2
+
+    out, err = capsys.readouterr()
+    assert out == ""
+    assert "no workflow definitions found" in err
+
+
+def test_run_rejects_github_workflow_not_in_served_set(tmp_path, capsys):
+    main(["init", "--root", str(tmp_path)])
+    (tmp_path / "workflows" / "hotfix.json").write_text(json.dumps(HOTFIX_DEFINITION))
+    capsys.readouterr()
+
+    assert main(
+        [
+            "run",
+            "--root",
+            str(tmp_path),
+            "--workflow",
+            "default",
+            "--github-workflow",
+            "hotfix",
+        ]
+    ) == 2
+
+    out, err = capsys.readouterr()
+    assert out == ""
+    assert "hotfix" in err
+    assert "not served" in err
+
+
+def test_run_single_custom_workflow_ignores_github_workflow_default(
+    monkeypatch, tmp_path, capsys
+):
+    """Regression: `--github-workflow` used to default to `DEFAULT_WORKFLOW`
+    ("default") and get checked against the served set unconditionally, so
+    `run --workflow hotfix` with no GitHub flags at all (and no GITHUB_TOKEN)
+    used to fail startup even though no GithubTaskSource is ever built in that
+    case. FR-6 requires single-workflow runs to behave exactly as before."""
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    main(["init", "--root", str(tmp_path)])
+    (tmp_path / "workflows" / "hotfix.json").write_text(json.dumps(HOTFIX_DEFINITION))
+    captured = {}
+
+    async def fake_serve(harness, port, poll_interval, source_interval=30.0):
+        captured["harness"] = harness
+
+    monkeypatch.setattr("harness.cli.serve", fake_serve)
+    capsys.readouterr()
+
+    assert main(["run", "--root", str(tmp_path), "--workflow", "hotfix"]) == 0
+
+    out, err = capsys.readouterr()
+    assert err == ""
+    assert set(captured["harness"].workflows) == {"hotfix"}
+
+
 def test_init_rejects_workflow_name_with_path_separator(tmp_path, capsys):
     assert main(["init", "--root", str(tmp_path), "--workflow", "foo/bar"]) == 2
 
@@ -291,7 +422,7 @@ async def test_serve_returns_when_uvicorn_stops_before_the_loop(monkeypatch):
 
     class FakeHarness:
         def __init__(self):
-            self.projection = BoardProjection(SERVE_TEST_WORKFLOW)
+            self.projection = BoardProjection([SERVE_TEST_WORKFLOW])
             self.artifacts = MemoryArtifactStore()
             self.stage_output = StageOutputProjection()
             self.control = FakeTaskControl()

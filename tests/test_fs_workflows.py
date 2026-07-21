@@ -2,7 +2,10 @@ import json
 
 import pytest
 
-from harness.drivers.fs_workflows import FilesystemWorkflowRepository
+from harness.drivers.fs_workflows import (
+    FilesystemWorkflowRepository,
+    ServedWorkflowRepository,
+)
 from harness.models import END, Transition
 from harness.ports.workflows import WorkflowNotFound
 
@@ -177,3 +180,71 @@ def test_path_separator_is_rejected_even_when_escape_target_exists(tmp_path):
 
     with pytest.raises(WorkflowNotFound):
         repository.get("../secret")
+
+
+def test_names_lists_definition_stems_sorted(tmp_path):
+    (tmp_path / "default.json").write_text(json.dumps(DEFINITION))
+    (tmp_path / "hotfix.json").write_text(json.dumps(DEFINITION))
+
+    repository = FilesystemWorkflowRepository(tmp_path)
+
+    assert repository.names() == ("default", "hotfix")
+
+
+def test_names_on_missing_root_is_empty(tmp_path):
+    repository = FilesystemWorkflowRepository(tmp_path / "does-not-exist")
+
+    assert repository.names() == ()
+
+
+def test_names_does_not_validate_broken_definitions(tmp_path):
+    """Lenient on enumeration: a broken file still shows up in names() and
+    only fails loud from get()."""
+    (tmp_path / "broken.json").write_text("{this is not json")
+
+    repository = FilesystemWorkflowRepository(tmp_path)
+
+    assert repository.names() == ("broken",)
+    with pytest.raises(WorkflowNotFound):
+        repository.get("broken")
+
+
+def test_served_repository_serves_only_the_given_names(tmp_path):
+    (tmp_path / "default.json").write_text(json.dumps(DEFINITION))
+    (tmp_path / "hotfix.json").write_text(json.dumps(DEFINITION))
+    inner = FilesystemWorkflowRepository(tmp_path)
+    served = ServedWorkflowRepository(inner, ["default"])
+
+    assert served.get("default").name == "default"
+    with pytest.raises(WorkflowNotFound, match="not served"):
+        served.get("hotfix")
+
+
+def test_served_repository_message_lists_the_served_set(tmp_path):
+    (tmp_path / "default.json").write_text(json.dumps(DEFINITION))
+    (tmp_path / "hotfix.json").write_text(json.dumps(DEFINITION))
+    inner = FilesystemWorkflowRepository(tmp_path)
+    served = ServedWorkflowRepository(inner, ["default", "hotfix"])
+
+    with pytest.raises(WorkflowNotFound, match="default, hotfix"):
+        served.get("other")
+
+
+def test_served_repository_dedupes_names(tmp_path):
+    """A duplicated served name (e.g. --workflow default --workflow default)
+    must not show up twice in the error message."""
+    inner = FilesystemWorkflowRepository(tmp_path)
+    served = ServedWorkflowRepository(inner, ["default", "default"])
+
+    assert served.names() == ("default",)
+    with pytest.raises(WorkflowNotFound, match=r"served: default\)$"):
+        served.get("other")
+
+
+def test_served_repository_names_returns_served_set_not_inners(tmp_path):
+    (tmp_path / "default.json").write_text(json.dumps(DEFINITION))
+    (tmp_path / "hotfix.json").write_text(json.dumps(DEFINITION))
+    inner = FilesystemWorkflowRepository(tmp_path)
+    served = ServedWorkflowRepository(inner, ["default"])
+
+    assert served.names() == ("default",)
