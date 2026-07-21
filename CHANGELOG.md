@@ -1,6 +1,22 @@
 # CHANGELOG
 
 
+## v0.8.0 (2026-07-21)
+
+### Features
+
+- Serve multiple workflows in a single running harness
+  ([#31](https://github.com/onpaj/harness_v2/pull/31),
+  [`24a34db`](https://github.com/onpaj/harness_v2/commit/24a34db2be66b2f781d14359795492a962a1c55d))
+
+Build queues, projection and consumers for every served workflow: union step queues by name, a
+  merged BoardProjection, a ServedWorkflowRepository decorator for clear unserved-workflow failures,
+  and repeatable --workflow/--all-workflows on `harness run`. Default single-workflow behavior is
+  preserved.
+
+Closes #29
+
+
 ## v0.7.0 (2026-07-21)
 
 ### Features
