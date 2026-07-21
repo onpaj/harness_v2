@@ -2,6 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>harness board</title>
   <script src="/static/htmx.min.js"></script>
   <script src="/static/sse.js"></script>
@@ -20,10 +21,35 @@
     .badge.done { background: #e3fcef; color: #006644; }
     .badge.request_changes { background: #fffae6; color: #974f0c; }
     .badge.working { background: #deebff; color: #0747a6; }
-    dialog { border: none; border-radius: 6px; padding: 16px; max-width: 640px; width: 90%; }
+    dialog { border: none; border-radius: 6px; padding: 0; max-width: none; width: 96vw; height: 92vh; }
+    dialog[open] { display: flex; flex-direction: column; }
     table { border-collapse: collapse; width: 100%; font-size: 13px; }
     td, th { text-align: left; padding: 4px 8px; border-bottom: 1px solid #ebecf0; vertical-align: top; }
     .status-bar { margin-top: 16px; padding-top: 8px; border-top: 1px solid #dfe1e6; color: #97a0af; font-size: 11px; font-family: ui-monospace, monospace; }
+    .task-detail { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+    .task-detail__header {
+      display: flex; align-items: center; gap: 8px; padding: 12px 16px;
+      border-bottom: 1px solid #ebecf0; flex: 0 0 auto;
+    }
+    .task-detail__header h2 { font-size: 14px; margin: 0; flex: 1; font-family: ui-monospace, monospace; }
+    .task-detail__close { border: none; background: none; font-size: 16px; cursor: pointer; padding: 4px 8px; }
+    .tabs { display: flex; gap: 4px; padding: 0 16px; border-bottom: 1px solid #ebecf0; flex: 0 0 auto; }
+    .tab {
+      border: none; background: none; cursor: pointer; padding: 8px 12px; font: 13px system-ui, sans-serif;
+      color: #5e6c84; border-bottom: 2px solid transparent;
+    }
+    .tab.active { color: #0747a6; border-bottom-color: #0747a6; font-weight: 500; }
+    .tab-panels { flex: 1; min-height: 0; overflow: auto; padding: 16px; display: flex; flex-direction: column; }
+    .tab-panel { display: none; }
+    .tab-panel.active { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+    .table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+    @media (max-width: 767px) {
+      .column { min-width: 85vw; flex: 0 0 auto; }
+      .card { padding: 12px 10px; }
+      dialog { width: 94vw; max-width: 94vw; height: 90vh; }
+      .tabs { overflow-x: auto; }
+      .tab-panels { padding: 12px; }
+    }
   </style>
 </head>
 <body hx-ext="sse" sse-connect="/api/events">
@@ -39,6 +65,23 @@
     });
     document.getElementById('detail').addEventListener('click', function (event) {
       if (event.target.id === 'detail') { event.target.close(); }
+    });
+    document.getElementById('detail').addEventListener('click', function (event) {
+      if (event.target.classList.contains('task-detail__close')) { event.target.closest('dialog').close(); }
+    });
+    // Tab switching is pure CSS visibility toggling, never DOM removal, so the
+    // Output panel's SSE-connected div stays mounted (and its EventSource stays
+    // open) while the user is looking at another tab.
+    document.getElementById('detail').addEventListener('click', function (event) {
+      var tab = event.target.closest('.tab');
+      if (!tab) { return; }
+      var name = tab.getAttribute('data-tab');
+      tab.parentElement.querySelectorAll('.tab').forEach(function (el) {
+        el.classList.toggle('active', el === tab);
+      });
+      tab.closest('.task-detail').querySelectorAll('.tab-panel').forEach(function (panel) {
+        panel.classList.toggle('active', panel.getAttribute('data-panel') === name);
+      });
     });
     // Clearing the modal on close removes the live-output element, which lets
     // the htmx SSE extension tear its EventSource down (htmx:beforeCleanupElement)

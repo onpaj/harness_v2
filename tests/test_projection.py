@@ -29,7 +29,30 @@ def make_task(task_id="tsk_1", status=None, created="2026-07-19T10:00:00Z", **kw
 
 
 def test_column_order_follows_reachability_and_ignores_back_edges():
-    assert column_order(WORKFLOW) == (
+    assert column_order([WORKFLOW]) == (
+        TODO_COLUMN,
+        "plan",
+        "design",
+        "development",
+        "review",
+        DONE_COLUMN,
+        FAILED_COLUMN,
+    )
+
+
+def test_column_order_unions_multiple_workflows_no_duplicates():
+    """A second workflow contributes only the steps not already seen, in its
+    own order, and a step shared by both (here "plan") shows up once."""
+    other = Workflow(
+        name="hotfix",
+        start="plan",
+        transitions=(
+            Transition(from_step="plan", on="done", to_step="review"),
+            Transition(from_step="review", on="done", to_step=END),
+        ),
+    )
+
+    assert column_order([WORKFLOW, other]) == (
         TODO_COLUMN,
         "plan",
         "design",
@@ -41,16 +64,16 @@ def test_column_order_follows_reachability_and_ignores_back_edges():
 
 
 def test_snapshot_has_every_column_even_when_empty():
-    projection = BoardProjection(WORKFLOW)
+    projection = BoardProjection([WORKFLOW])
 
     board = projection.snapshot()
 
-    assert [column.name for column in board.columns] == list(column_order(WORKFLOW))
+    assert [column.name for column in board.columns] == list(column_order([WORKFLOW]))
     assert all(column.tasks == () for column in board.columns)
 
 
 def test_apply_places_task_in_column():
-    projection = BoardProjection(WORKFLOW)
+    projection = BoardProjection([WORKFLOW])
 
     projection.apply("design", make_task(status="design"))
 
@@ -58,7 +81,7 @@ def test_apply_places_task_in_column():
 
 
 def test_apply_moves_task_between_columns():
-    projection = BoardProjection(WORKFLOW)
+    projection = BoardProjection([WORKFLOW])
     projection.apply("design", make_task(status="design"))
 
     projection.apply("development", make_task(status="development"))
@@ -68,7 +91,7 @@ def test_apply_moves_task_between_columns():
 
 
 def test_apply_handles_backward_edge():
-    projection = BoardProjection(WORKFLOW)
+    projection = BoardProjection([WORKFLOW])
     projection.apply("review", make_task(status="review"))
 
     projection.apply("development", make_task(status="development"))
@@ -77,7 +100,7 @@ def test_apply_handles_backward_edge():
 
 
 def test_apply_to_terminal_columns():
-    projection = BoardProjection(WORKFLOW)
+    projection = BoardProjection([WORKFLOW])
 
     projection.apply(DONE_COLUMN, make_task(status="end"))
     projection.apply(FAILED_COLUMN, make_task(task_id="tsk_2"))
@@ -87,7 +110,7 @@ def test_apply_to_terminal_columns():
 
 
 def test_unknown_column_is_ignored():
-    projection = BoardProjection(WORKFLOW)
+    projection = BoardProjection([WORKFLOW])
 
     projection.apply("nonsense", make_task(status="nonsense"))
 
@@ -95,7 +118,7 @@ def test_unknown_column_is_ignored():
 
 
 def test_tasks_are_ordered_by_created():
-    projection = BoardProjection(WORKFLOW)
+    projection = BoardProjection([WORKFLOW])
     projection.apply("plan", make_task("tsk_2", "plan", created="2026-07-19T10:00:05Z"))
     projection.apply("plan", make_task("tsk_1", "plan", created="2026-07-19T10:00:00Z"))
 
@@ -105,7 +128,7 @@ def test_tasks_are_ordered_by_created():
 
 
 def test_get_returns_full_task():
-    projection = BoardProjection(WORKFLOW)
+    projection = BoardProjection([WORKFLOW])
     projection.apply("plan", make_task(status="plan", last_outcome="done"))
 
     assert projection.get("tsk_1").last_outcome == "done"
@@ -113,7 +136,7 @@ def test_get_returns_full_task():
 
 
 def test_revision_grows_monotonically():
-    projection = BoardProjection(WORKFLOW)
+    projection = BoardProjection([WORKFLOW])
     first = projection.snapshot().revision
 
     projection.apply("plan", make_task(status="plan"))
@@ -125,7 +148,7 @@ def test_revision_grows_monotonically():
 
 
 def test_hydrate_reads_every_source():
-    projection = BoardProjection(WORKFLOW)
+    projection = BoardProjection([WORKFLOW])
     inbox = MemoryTaskQueue("tasks")
     plan = MemoryTaskQueue("plan")
     review = MemoryTaskQueue("review")
@@ -153,7 +176,7 @@ def test_hydrate_reads_every_source():
 
 
 def test_hydrate_places_statusless_inbox_task_in_todo():
-    projection = BoardProjection(WORKFLOW)
+    projection = BoardProjection([WORKFLOW])
     inbox = MemoryTaskQueue("tasks")
     inbox.put(make_task("tsk_1"))
 
@@ -168,7 +191,7 @@ def test_hydrate_places_statusless_inbox_task_in_todo():
 
 
 def test_apply_moves_task_from_failed_to_todo():
-    projection = BoardProjection(WORKFLOW)
+    projection = BoardProjection([WORKFLOW])
     projection.apply(FAILED_COLUMN, make_task(status="failed"))
 
     projection.apply(TODO_COLUMN, make_task(status=None))
@@ -178,7 +201,7 @@ def test_apply_moves_task_from_failed_to_todo():
 
 
 async def test_subscribe_yields_current_revision_first():
-    projection = BoardProjection(WORKFLOW)
+    projection = BoardProjection([WORKFLOW])
     projection.apply("plan", make_task(status="plan"))
 
     stream = projection.subscribe()
@@ -189,7 +212,7 @@ async def test_subscribe_yields_current_revision_first():
 
 
 async def test_subscribe_wakes_on_change():
-    projection = BoardProjection(WORKFLOW)
+    projection = BoardProjection([WORKFLOW])
     stream = projection.subscribe()
     await anext(stream)
 
@@ -201,7 +224,7 @@ async def test_subscribe_wakes_on_change():
 
 
 async def test_subscriber_that_falls_behind_does_not_block_applying():
-    projection = BoardProjection(WORKFLOW)
+    projection = BoardProjection([WORKFLOW])
     stream = projection.subscribe()
     await anext(stream)
 
