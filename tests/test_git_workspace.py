@@ -236,6 +236,58 @@ def test_attach_with_branch_override_creates_from_origin_when_no_local_copy(tmp_
     assert (handle.path / "feature.txt").read_text(encoding="utf-8") == "from elsewhere\n"
 
 
+def test_attach_with_branch_override_reconciles_stale_local_ref_with_origin(tmp_path):
+    """`GithubMergeabilityWatcher.update_branch` advances a PR branch entirely
+    server-side (merges base into head via the GitHub API) — no local git
+    operation touches it. Simulate that by advancing `origin/<branch>` through
+    a *second* clone that never shares the base repo's local refs, mirroring
+    the real `behind` -> `update_branch` -> `dirty` -> resolver sequence.
+    `attach`'s branch-override path must reconcile the reused local ref with
+    that new tip, not silently reuse the now-stale one — otherwise the
+    resolver's eventual push is rejected as non-fast-forward."""
+    workspace = _workspace_with_remote(tmp_path)
+    repo = tmp_path / "repo"
+    remote = tmp_path / "remote.git"
+
+    original = workspace.attach(_make_task("tsk_original"))
+    original.write("feature.txt", "hi\n")
+    original.commit("[development] work")
+    original.push()
+
+    # Advance origin independently of `repo`'s local refs — simulating
+    # GitHub's server-side update-branch merge, which never touches any local
+    # git state anywhere in this process.
+    other_clone = tmp_path / "other_clone"
+    _git(["clone", str(remote), str(other_clone)], tmp_path)
+    _git(["checkout", "harness/tsk_original"], other_clone)
+    (other_clone / "server_side.txt").write_text("from update_branch\n", encoding="utf-8")
+    _git(["add", "-A"], other_clone)
+    _git(["commit", "-m", "server-side update-branch merge"], other_clone)
+    _git(["push", "origin", "harness/tsk_original"], other_clone)
+
+    resolver_task = Task(
+        id="tsk_resolver",
+        workflow_template="resolver",
+        created="2026-07-20T10:00:00Z",
+        repository="app",
+        data={"branch": "harness/tsk_original"},
+    )
+
+    handle = workspace.attach(resolver_task)
+
+    # The new worktree must reflect origin's actual tip, not the stale local ref.
+    assert (handle.path / "server_side.txt").read_text(encoding="utf-8") == "from update_branch\n"
+    head = _git(["rev-parse", "HEAD"], handle.path).strip()
+    origin_head = _git(["rev-parse", "origin/harness/tsk_original"], repo).strip()
+    assert head == origin_head
+
+    # And a subsequent push (after the resolver's own commit) must succeed —
+    # not get rejected as non-fast-forward.
+    handle.write("resolved.txt", "resolved\n")
+    handle.commit("[resolve] merge conflict resolution")
+    handle.push()
+
+
 def test_attach_without_override_is_unchanged(tmp_path):
     """The absent-key path (every non-resolver task) is byte-for-byte unchanged."""
     workspace = _workspace(tmp_path)

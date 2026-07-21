@@ -19,7 +19,12 @@ ref as-is (not `-B` from `origin/<branch>`: git refuses to force-reset a
 branch checked out elsewhere no matter how many times you pass `--force` —
 that guard is separate from, and not overridden by, the "already checked out"
 guard `--force` does lift), falling back to creating it fresh from
-`origin/<branch>` only the one time no local copy exists yet.
+`origin/<branch>` only the one time no local copy exists yet. Reusing the
+local branch this way would leave the new worktree stale whenever the branch
+last advanced server-side (`GithubMergeabilityWatcher.update_branch`, which
+never touches any local ref) rather than through a harness-driven commit+push
+here — so once the reused worktree exists, it is immediately hard-reset to
+`origin/<branch>`'s actual tip before the caller does anything else with it.
 
 Calls the system `git` via subprocess — no new production dependency.
 """
@@ -194,6 +199,17 @@ class GitWorkspace(Workspace):
                     _git(
                         ["-C", str(base), "worktree", "add", "--force", str(worktree), branch]
                     )
+                    # The shared local ref can be behind `origin/<branch>`:
+                    # GithubMergeabilityWatcher's update_branch (FR-2) advances
+                    # the branch server-side via the GitHub API, touching no
+                    # local git state at all. Reconcile the *new* worktree with
+                    # origin's actual tip before anything (merge/agent/commit)
+                    # runs against it. Safe: this worktree was just created (no
+                    # local-only work in it yet), and unlike the porcelain
+                    # branch-reset commands run from `base`, this reset targets
+                    # the branch as checked out *in this worktree* — the
+                    # "checked out elsewhere" guard doesn't apply to it.
+                    _git(["-C", str(worktree), "reset", "--hard", f"origin/{branch}"])
                 else:
                     _git(
                         [
