@@ -32,3 +32,23 @@ def test_open_pull_request_is_idempotent_per_branch():
 
     assert second is first
     assert len(forge.opened) == 1
+
+
+def test_open_issue_records_details():
+    forge = MemoryForge()
+
+    issue = forge.open_issue(make_task(), title="harness bug", body="body")
+
+    assert issue.title == "harness bug"
+    assert issue.number == 1
+    assert forge.issues == [issue]
+
+
+def test_open_issue_is_idempotent_per_task():
+    forge = MemoryForge()
+
+    first = forge.open_issue(make_task(), title="t", body="b1")
+    second = forge.open_issue(make_task(), title="t", body="b2")
+
+    assert second is first
+    assert len(forge.issues) == 1

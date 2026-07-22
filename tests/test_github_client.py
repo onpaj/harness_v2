@@ -10,6 +10,7 @@ from harness.drivers.github_client import (
     FakeGithubClient,
     HttpGithubClient,
     Issue,
+    IssueRef,
     PullRequestRef,
 )
 
@@ -318,3 +319,86 @@ def test_http_create_pull_request_falls_back_to_argument_when_head_missing():
     )
 
     assert created.head == "o:harness/tsk_1"
+
+
+# --- issues, fake -----------------------------------------------------------
+
+
+def test_fake_find_issue_misses_then_hits():
+    client = FakeGithubClient()
+
+    assert client.find_issue("o/r", marker="<!-- harness-healer:tsk_1 -->") is None
+
+    created = client.create_issue(
+        "o/r", title="T", body="body\n\n<!-- harness-healer:tsk_1 -->\n"
+    )
+
+    assert client.find_issue("o/r", marker="<!-- harness-healer:tsk_1 -->") == created
+
+
+def test_fake_create_issue_records_the_call():
+    client = FakeGithubClient()
+
+    issue = client.create_issue("o/r", title="T", body="B")
+
+    assert issue.number == 1
+    assert issue.title == "T"
+    assert client.filed == [issue]
+
+
+# --- issues, http ------------------------------------------------------------
+
+
+def test_http_find_issue_scans_bodies_for_marker_and_filters_out_prs():
+    payload = [
+        {
+            "number": 1,
+            "title": "PR",
+            "body": "<!-- harness-healer:tsk_1 -->",
+            "html_url": "https://github.com/o/r/pull/1",
+            "pull_request": {"url": "..."},
+        },
+        {
+            "number": 2,
+            "title": "harness bug",
+            "body": "some text\n\n<!-- harness-healer:tsk_1 -->\n",
+            "html_url": "https://github.com/o/r/issues/2",
+        },
+    ]
+    opener = FakeOpener(payload)
+    client = HttpGithubClient("tok", opener=opener)
+
+    found = client.find_issue("o/r", marker="<!-- harness-healer:tsk_1 -->")
+
+    assert found.number == 2
+    assert found.url == "https://github.com/o/r/issues/2"
+
+    req = opener.requests[0]
+    assert req.get_method() == "GET"
+    assert req.full_url.startswith("https://api.github.com/repos/o/r/issues")
+    assert "state=all" in req.full_url
+    assert "per_page=100" in req.full_url
+
+
+def test_http_find_issue_returns_none_when_no_match():
+    payload = [{"number": 1, "title": "unrelated", "body": "nothing here"}]
+    client = HttpGithubClient("tok", opener=FakeOpener(payload))
+
+    assert client.find_issue("o/r", marker="<!-- harness-healer:tsk_1 -->") is None
+
+
+def test_http_create_issue_posts_the_payload():
+    opener = FakeOpener({"number": 5, "html_url": "https://github.com/o/r/issues/5", "title": "T"})
+    client = HttpGithubClient("tok", opener=opener)
+
+    created = client.create_issue("o/r", title="T", body="B")
+
+    assert created.number == 5
+    assert created.url == "https://github.com/o/r/issues/5"
+    assert created.title == "T"
+
+    req = opener.requests[0]
+    assert req.get_method() == "POST"
+    assert req.full_url == "https://api.github.com/repos/o/r/issues"
+    assert json.loads(req.data.decode("utf-8")) == {"title": "T", "body": "B"}
+    assert req.get_header("Content-type") == "application/json"

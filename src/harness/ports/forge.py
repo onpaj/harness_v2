@@ -20,6 +20,13 @@ class PullRequest:
     title: str
 
 
+@dataclass(frozen=True)
+class FiledIssue:
+    number: int
+    url: str
+    title: str
+
+
 class Forge(ABC):
     @abstractmethod
     def open_pull_request(
@@ -27,3 +34,9 @@ class Forge(ABC):
     ) -> PullRequest:
         """Open a PR for the branch. Idempotent — if a PR for the branch already
         exists, return it instead of creating another."""
+
+    @abstractmethod
+    def open_issue(self, task: Task, *, title: str, body: str) -> FiledIssue:
+        """File an issue against the task's own repository. Idempotent — a
+        retry for the same task returns the previously filed issue instead of
+        creating a second one."""

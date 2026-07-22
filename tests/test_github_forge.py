@@ -247,3 +247,69 @@ def test_api_error_without_a_body_still_reports_the_status():
 
     with pytest.raises(ForgeError, match="connection reset"):
         forge.open_pull_request(make_task(), branch="harness/tsk_1", title="T", body="B")
+
+
+# --- open_issue --------------------------------------------------------------
+
+
+def test_open_issue_files_a_new_issue_with_marker():
+    forge, client = build()
+
+    issue = forge.open_issue(make_task(), title="harness bug", body="B")
+
+    assert issue.number == 1
+    assert issue.title == "harness bug"
+    assert client.filed[0].title == "harness bug"
+    assert client.created == []  # a PR list must stay untouched
+    body = client._filed_bodies[1]
+    assert "B" in body
+    assert "<!-- harness-healer:tsk_1 -->" in body
+
+
+def test_open_issue_is_idempotent_via_find_issue():
+    forge, client = build()
+    task = make_task()
+
+    first = forge.open_issue(task, title="T", body="B")
+    second = forge.open_issue(task, title="T", body="B")
+
+    assert first.number == second.number
+    assert len(client.filed) == 1
+
+
+def test_open_issue_missing_token_fails_loudly():
+    forge = GithubForge(None, slug_of=lambda path: "onpaj/harness_v2")
+
+    with pytest.raises(ForgeError, match="GITHUB_TOKEN"):
+        forge.open_issue(make_task(), title="T", body="B")
+
+
+def test_open_issue_non_github_origin_fails_loudly():
+    forge, _ = build(slug=None)
+
+    with pytest.raises(ForgeError, match="no GitHub origin"):
+        forge.open_issue(make_task(), title="T", body="B")
+
+
+def test_open_issue_unlocatable_repository_fails_loudly():
+    forge, _ = build()
+    task = Task(
+        id="tsk_1",
+        workflow_template="healer",
+        created="2026-07-20T10:00:00Z",
+        repository="app",
+    )
+
+    with pytest.raises(ForgeError, match="cannot locate repository"):
+        forge.open_issue(task, title="T", body="B")
+
+
+def test_open_issue_api_error_becomes_a_forge_error():
+    class BrokenClient(FakeGithubClient):
+        def create_issue(self, repo, *, title, body):
+            raise RuntimeError("422 Unprocessable Entity")
+
+    forge, _ = build(BrokenClient())
+
+    with pytest.raises(ForgeError, match="422"):
+        forge.open_issue(make_task(), title="T", body="B")

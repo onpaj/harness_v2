@@ -1,7 +1,10 @@
 import asyncio
 import json
 
-from harness.app import HarnessLayout, build
+import pytest
+
+from harness.app import HarnessLayout, StepCollisionError, build
+from harness.drivers.failed_queue_source import FailedQueueTaskSource
 from harness.drivers.memory import MemoryEventSink
 from harness.models import Task
 from harness.ports.source import TaskSource
@@ -52,10 +55,27 @@ DEFINITION = {
 }
 
 
+HEALER_DEFINITION = {
+    "name": "healer",
+    "start": "diagnose",
+    "transitions": [
+        {"from": "diagnose", "on": "bug_confirmed", "to": "file_issue"},
+        {"from": "diagnose", "on": "not_a_bug", "to": "end"},
+        {"from": "file_issue", "on": "done", "to": "end"},
+    ],
+}
+
+
 def seed(tmp_path):
     layout = HarnessLayout(tmp_path)
     layout.workflows.mkdir(parents=True, exist_ok=True)
     (layout.workflows / "default.json").write_text(json.dumps(DEFINITION))
+    return layout
+
+
+def seed_healer(tmp_path):
+    layout = seed(tmp_path)
+    (layout.workflows / "healer.json").write_text(json.dumps(HEALER_DEFINITION))
     return layout
 
 
@@ -199,3 +219,70 @@ async def test_stranded_task_survives_into_the_projection(tmp_path):
     await harness.run(poll_interval=0.01, stop=stop)
 
     assert harness.projection.get("tsk_8") is not None
+
+
+# --- healing (heal=True) -----------------------------------------------------
+
+
+def test_heal_without_healer_repo_raises(tmp_path):
+    seed_healer(tmp_path)
+
+    with pytest.raises(ValueError, match="--healer-repo"):
+        build(tmp_path, "default", events=MemoryEventSink(), heal=True)
+
+
+def test_heal_unions_step_queues_and_columns(tmp_path):
+    seed_healer(tmp_path)
+
+    harness = build(
+        tmp_path, "default", events=MemoryEventSink(), heal=True, healer_repo="harness_v2"
+    )
+
+    assert sorted(harness._step_queues) == [
+        "diagnose",
+        "file_issue",
+        "plan",
+        "review",
+    ]
+    columns = [column.name for column in harness.projection.snapshot().columns]
+    assert "diagnose" in columns
+    assert "file_issue" in columns
+
+
+def test_heal_registers_a_failed_queue_source(tmp_path):
+    seed_healer(tmp_path)
+
+    harness = build(
+        tmp_path, "default", events=MemoryEventSink(), heal=True, healer_repo="harness_v2"
+    )
+
+    kinds = [poller._source.kind for poller in harness.pollers]
+    assert "failed-queue" in kinds
+    failed_source = next(
+        poller._source for poller in harness.pollers if poller._source.kind == "failed-queue"
+    )
+    assert isinstance(failed_source, FailedQueueTaskSource)
+
+
+def test_heal_false_builds_byte_identical_to_today(tmp_path):
+    seed_healer(tmp_path)
+
+    harness = build(tmp_path, "default", events=MemoryEventSink())
+
+    assert sorted(harness._step_queues) == ["plan", "review"]
+    assert harness.pollers == []
+
+
+def test_heal_with_colliding_step_name_raises(tmp_path):
+    layout = seed(tmp_path)
+    colliding = {
+        "name": "healer",
+        "start": "review",
+        "transitions": [{"from": "review", "on": "bug_confirmed", "to": "end"}],
+    }
+    (layout.workflows / "healer.json").write_text(json.dumps(colliding))
+
+    with pytest.raises(StepCollisionError):
+        build(
+            tmp_path, "default", events=MemoryEventSink(), heal=True, healer_repo="harness_v2"
+        )

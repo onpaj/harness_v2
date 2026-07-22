@@ -28,6 +28,17 @@ def make_task(task_id="tsk_1", status=None, created="2026-07-19T10:00:00Z", **kw
     )
 
 
+HEALER_WORKFLOW = Workflow(
+    name="healer",
+    start="diagnose",
+    transitions=(
+        Transition(from_step="diagnose", on="bug_confirmed", to_step="file_issue"),
+        Transition(from_step="diagnose", on="not_a_bug", to_step=END),
+        Transition(from_step="file_issue", on="done", to_step=END),
+    ),
+)
+
+
 def test_column_order_follows_reachability_and_ignores_back_edges():
     assert column_order(WORKFLOW) == (
         TODO_COLUMN,
@@ -38,6 +49,38 @@ def test_column_order_follows_reachability_and_ignores_back_edges():
         DONE_COLUMN,
         FAILED_COLUMN,
     )
+
+
+def test_column_order_unions_multiple_workflows():
+    assert column_order(WORKFLOW, HEALER_WORKFLOW) == (
+        TODO_COLUMN,
+        "plan",
+        "design",
+        "development",
+        "review",
+        "diagnose",
+        "file_issue",
+        DONE_COLUMN,
+        FAILED_COLUMN,
+    )
+
+
+def test_board_projection_with_two_workflows_shows_both_columns():
+    projection = BoardProjection(WORKFLOW, HEALER_WORKFLOW)
+    healer_task = Task(
+        id="tsk_1",
+        workflow_template="healer",
+        created="2026-07-19T10:00:00Z",
+        status="diagnose",
+    )
+
+    projection.apply("diagnose", healer_task)
+
+    board = projection.snapshot()
+    assert [column.name for column in board.columns] == list(
+        column_order(WORKFLOW, HEALER_WORKFLOW)
+    )
+    assert board.column("diagnose").tasks[0].id == "tsk_1"
 
 
 def test_snapshot_has_every_column_even_when_empty():

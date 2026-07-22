@@ -15,12 +15,22 @@ from pathlib import Path
 import uvicorn
 
 from harness.api.app import create_app
-from harness.app import LANDING_STEP, HarnessLayout, build
+from harness.app import (
+    DEFAULT_HEALER_WORKFLOW,
+    FILE_ISSUE_STEP,
+    LANDING_STEP,
+    HarnessLayout,
+    StepCollisionError,
+    build,
+)
 from harness.drivers.claude_cli import ClaudeCliRunner
 from harness.drivers.fake_forge import FakeForge
 from harness.drivers.fs_agents import FilesystemAgentCatalog
 from harness.drivers.fs_repos import FilesystemRepositoryRegistry
-from harness.drivers.fs_workflows import invalid_workflow_name
+from harness.drivers.fs_workflows import (
+    FilesystemWorkflowRepository,
+    invalid_workflow_name,
+)
 from harness.drivers.git_remote import github_slug
 from harness.drivers.git_workspace import GitWorkspace
 from harness.drivers.github_client import GithubClient, HttpGithubClient
@@ -70,6 +80,18 @@ DEFAULT_DEFINITION = {
     ],
 }
 
+HEALER_WORKFLOW = DEFAULT_HEALER_WORKFLOW
+
+HEALER_DEFINITION = {
+    "name": "healer",
+    "start": "diagnose",
+    "transitions": [
+        {"from": "diagnose", "on": "bug_confirmed", "to": "file_issue"},
+        {"from": "diagnose", "on": "not_a_bug", "to": "end"},
+        {"from": "file_issue", "on": "done", "to": "end"},
+    ],
+}
+
 
 def _root(value: str | None) -> Path:
     if value:
@@ -94,6 +116,16 @@ def _init(args: argparse.Namespace) -> int:
             encoding="utf-8",
         )
 
+    # The healer workflow is always seeded, independent of `--workflow` — so
+    # `--heal` can be turned on later without re-running init with
+    # `--workflow healer`. Harmless when unused, same posture as `land`.
+    healer_path = layout.workflows / f"{HEALER_WORKFLOW}.json"
+    if not healer_path.exists():
+        healer_path.write_text(
+            json.dumps(HEALER_DEFINITION, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+
     try:
         harness = build(root, args.workflow)
     except WorkflowNotFound as error:
@@ -101,6 +133,8 @@ def _init(args: argparse.Namespace) -> int:
         return 2
 
     _write_default_agents(layout, harness.workflow)
+    healer = FilesystemWorkflowRepository(layout.workflows).get(HEALER_WORKFLOW)
+    _write_default_agents(layout, healer, skip=frozenset({FILE_ISSUE_STEP}))
     _write_default_repos(layout)
 
     print(f"harness ready at {root}")
@@ -238,6 +272,30 @@ _REVIEW_PERSONA = (
     "cleanup suggestions)."
 )
 
+_DIAGNOSE_PERSONA = (
+    "You are a senior engineer on the harness's own team, diagnosing why one of "
+    "its tasks failed. You run non-interactively, healing the harness itself — "
+    "not the task that failed.\n\n"
+    "The task prompt gives you the original task's id, workflow, the step it "
+    "failed at and the failure reason. Your working directory is a checkout of "
+    "the harness's own source — read it (Read/Grep/Glob/Bash) to judge whether "
+    "the failure was caused by a defect in this codebase.\n\n"
+    "Decide: is this a genuine bug in the harness's own code, as opposed to a "
+    "problem in the target repository the failed task was working on, a flaky "
+    "agent run, a transient external error (e.g. a GitHub outage), or an "
+    "operator misconfiguration? Default to `not_a_bug` when unsure — a missed "
+    "bug just leaves the task quietly done; a false positive spams the issue "
+    "tracker.\n\n"
+    "Write the full write-up (what broke, the evidence, a suggested fix) to "
+    "your output artifact, as usual. Additionally, put an issue-ready title and "
+    "a complete explanation in the verdict's `summary` field — not a short "
+    "one-liner. There is no other channel from this step to the one that files "
+    "the GitHub issue; the `summary` you write becomes that issue's body "
+    "verbatim.\n\n"
+    "Finish with `bug_confirmed` (a real harness bug, worth an issue) or "
+    "`not_a_bug` (anything else)."
+)
+
 # Step → (persona, default tools). The tools are names of Claude Code tools,
 # which `claude_cli` passes through via `--allowedTools`.
 AGENT_PERSONAS: dict[str, tuple[str, list[str]]] = {
@@ -249,6 +307,7 @@ AGENT_PERSONAS: dict[str, tuple[str, list[str]]] = {
         ["Read", "Write", "Edit", "Bash", "Grep", "Glob", "Task"],
     ),
     "review": (_REVIEW_PERSONA, ["Read", "Grep", "Glob", "Bash"]),
+    "diagnose": (_DIAGNOSE_PERSONA, ["Read", "Grep", "Glob", "Bash"]),
 }
 
 
@@ -281,10 +340,12 @@ def _allowed_outcomes_for(workflow, step: str) -> list[str]:
     return seen
 
 
-def _write_default_agents(layout: HarnessLayout, workflow) -> None:
+def _write_default_agents(
+    layout: HarnessLayout, workflow, skip: frozenset[str] = frozenset({LANDING_STEP})
+) -> None:
     layout.agents.mkdir(parents=True, exist_ok=True)
     for step in workflow.steps():
-        if step == LANDING_STEP:
+        if step in skip:
             continue
         path = layout.agents / f"{step}.json"
         if path.exists():
@@ -647,6 +708,10 @@ def _build_forge(kind: str, root: Path, registry: RepositoryRegistry | None = No
 
 
 def _run(args: argparse.Namespace) -> int:
+    if args.heal and not args.healer_repo:
+        print("error: --heal requires --healer-repo", file=sys.stderr)
+        return 2
+
     root = _root(args.root)
     layout = HarnessLayout(root)
     # The real run: agent behind `claude -p`, git worktree under a shared root,
@@ -678,8 +743,10 @@ def _run(args: argparse.Namespace) -> int:
             sources=sources or None,
             delay=args.delay,
             request_changes_once_at=args.request_changes_at,
+            heal=args.heal,
+            healer_repo=args.healer_repo,
         )
-    except WorkflowNotFound as error:
+    except (WorkflowNotFound, StepCollisionError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 2
 
@@ -791,6 +858,22 @@ def main(argv: list[str] | None = None) -> int:
         choices=("github", "fake"),
         default="github",
         help="where landing proposes the change (default: real GitHub)",
+    )
+    run.add_argument(
+        "--heal",
+        action="store_true",
+        help="watch failed/ for default-workflow failures and diagnose them "
+        "(files a GitHub issue on --healer-repo for a confirmed harness bug). "
+        "The first poll after enabling this heals every failure already "
+        "sitting in failed/, however old — clear/archive it first if that "
+        "backlog would be disruptive.",
+    )
+    run.add_argument(
+        "--healer-repo",
+        default=None,
+        dest="healer_repo",
+        help="repos.json name the healer task attaches to and files issues "
+        "against; required when --heal is set",
     )
     run.set_defaults(handler=_run)
 

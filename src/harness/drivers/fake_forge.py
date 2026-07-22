@@ -12,20 +12,22 @@ import json
 from pathlib import Path
 
 from harness.models import Task
-from harness.ports.forge import Forge, PullRequest
+from harness.ports.forge import FiledIssue, Forge, PullRequest
 
 
 class FakeForge(Forge):
-    """Records PRs into `<root>/prs.json`. Idempotent by branch."""
+    """Records PRs into `<root>/prs.json`, idempotent by branch, and issues
+    into `<root>/issues.json`, idempotent by task id."""
 
     def __init__(self, root: Path) -> None:
         self._root = Path(root)
         self._file = self._root / "prs.json"
+        self._issues_file = self._root / "issues.json"
 
     def open_pull_request(
         self, task: Task, *, branch: str, title: str, body: str
     ) -> PullRequest:
-        records = self._load()
+        records = self._load(self._file)
         for record in records:
             if record["branch"] == branch:
                 return self._to_pr(record)
@@ -38,18 +40,36 @@ class FakeForge(Forge):
             "body": body,
         }
         records.append(record)
-        self._store(records)
+        self._store(self._file, records)
         return self._to_pr(record)
 
-    def _load(self) -> list[dict]:
+    def open_issue(self, task: Task, *, title: str, body: str) -> FiledIssue:
+        records = self._load(self._issues_file)
+        for record in records:
+            if record["task_id"] == task.id:
+                return self._to_issue(record)
+        number = len(records) + 1
+        record = {
+            "number": number,
+            "url": f"file://{self._root}/issues.json#{number}",
+            "title": title,
+            "body": body,
+            "task_id": task.id,
+        }
+        records.append(record)
+        self._store(self._issues_file, records)
+        return self._to_issue(record)
+
+    @staticmethod
+    def _load(file: Path) -> list[dict]:
         try:
-            return json.loads(self._file.read_text(encoding="utf-8"))
+            return json.loads(file.read_text(encoding="utf-8"))
         except FileNotFoundError:
             return []
 
-    def _store(self, records: list[dict]) -> None:
+    def _store(self, file: Path, records: list[dict]) -> None:
         self._root.mkdir(parents=True, exist_ok=True)
-        self._file.write_text(
+        file.write_text(
             json.dumps(records, indent=2, ensure_ascii=False), encoding="utf-8"
         )
 
@@ -59,5 +79,13 @@ class FakeForge(Forge):
             number=record["number"],
             url=record["url"],
             branch=record["branch"],
+            title=record["title"],
+        )
+
+    @staticmethod
+    def _to_issue(record: dict) -> FiledIssue:
+        return FiledIssue(
+            number=record["number"],
+            url=record["url"],
             title=record["title"],
         )

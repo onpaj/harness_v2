@@ -7,11 +7,13 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from harness.behaviors.agent import ClaudeCliBehavior
+from harness.behaviors.file_issue import FileIssueBehavior
 from harness.behaviors.landing import LandingBehavior
 from harness.consumer import Consumer
 from harness.dispatcher import Dispatcher
 from harness.drivers.composite_events import CompositeEventSink
 from harness.drivers.dummy_behavior import DummyBehavior
+from harness.drivers.failed_queue_source import FailedQueueTaskSource
 from harness.drivers.fifo_strategy import FifoStrategy
 from harness.drivers.fs_queue import FilesystemTaskQueue
 from harness.drivers.fs_workflows import FilesystemWorkflowRepository
@@ -43,6 +45,26 @@ from harness.task_control import TaskControlService
 
 LANDING_STEP = "land"
 """The step to which the wiring assigns LandingBehavior instead of DummyBehavior."""
+
+DEFAULT_HEALER_WORKFLOW = "healer"
+FILE_ISSUE_STEP = "file_issue"
+"""The step to which the wiring assigns FileIssueBehavior instead of DummyBehavior."""
+
+
+class StepCollisionError(ValueError):
+    """Two concurrently-active workflows declare the same step name."""
+
+
+def _assert_no_step_collision(workflows: list[Workflow]) -> None:
+    owner: dict[str, str] = {}
+    for wf in workflows:
+        for step in wf.steps():
+            if step in owner and owner[step] != wf.name:
+                raise StepCollisionError(
+                    f"step {step!r} is declared by both {owner[step]!r} and "
+                    f"{wf.name!r} workflows — active workflow step names must be unique"
+                )
+            owner[step] = wf.name
 
 
 @dataclass(frozen=True)
@@ -215,11 +237,20 @@ def build(
     landing_step: str = LANDING_STEP,
     delay: float = 5.0,
     request_changes_once_at: str | None = None,
+    heal: bool = False,
+    healer_repo: str | None = None,
+    healer_workflow_name: str = DEFAULT_HEALER_WORKFLOW,
 ) -> Harness:
+    if heal and not healer_repo:
+        raise ValueError("--heal requires --healer-repo")
+
     layout = HarnessLayout(Path(root))
     events = events or StdoutEventSink()
     clock = clock or SystemClock()
-    sources = sources or []
+    # This is the exact list object handed to SourceReflectorSink below — kept
+    # around so FailedQueueTaskSource can be appended to it once `failed`
+    # exists (see the mutation further down).
+    sources = list(sources or [])
     strategy = FifoStrategy()
 
     # Working drivers: the default is in-memory (the substrate of the dummy
@@ -232,8 +263,12 @@ def build(
 
     workflows = FilesystemWorkflowRepository(layout.workflows)
     workflow = workflows.get(workflow_name)
+    active_workflows = [workflow]
+    if heal:
+        active_workflows.append(workflows.get(healer_workflow_name))
+    _assert_no_step_collision(active_workflows)
 
-    projection = BoardProjection(workflow)
+    projection = BoardProjection(*active_workflows)
     stage_output = StageOutputProjection()
     # The reflector comes after ProjectionSink: the outward projection must not
     # get ahead of the board. The stage-output projection sits alongside the
@@ -255,8 +290,23 @@ def build(
         step: FilesystemTaskQueue(
             name=step, root=layout.queues / step, events=events, quarantine=failed
         )
-        for step in workflow.steps()
+        for wf in active_workflows
+        for step in wf.steps()
     }
+
+    if heal:
+        # `sources` is the same list object SourceReflectorSink already holds a
+        # live reference to — appending here is visible to it, and to the
+        # `pollers` list comprehension built further below.
+        sources.append(
+            FailedQueueTaskSource(
+                failed=failed,
+                clock=clock,
+                target_workflow=workflow_name,
+                healer_workflow=healer_workflow_name,
+                healer_repo=healer_repo,
+            )
+        )
 
     # Read side of artifacts: when passed in (phase 3: `WorktreeArtifactView`),
     # both landing and `api/` get it; otherwise the write store (also an
@@ -279,10 +329,14 @@ def build(
         forge=forge,
         copy_artifacts=artifact_view is None,
     )
+    # Harmless if unused (`heal=False`), same as `landing`'s unconditional construction.
+    file_issue_behavior = FileIssueBehavior(forge=forge)
 
     def behavior_for(step: str) -> ConsumerBehavior:
         if step == landing_step:
             return landing
+        if step == FILE_ISSUE_STEP:
+            return file_issue_behavior
         if catalog is not None:
             # Missing spec → AgentNotFound surfaces already at build time (fail fast).
             return ClaudeCliBehavior(

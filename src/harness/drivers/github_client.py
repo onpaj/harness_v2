@@ -33,6 +33,15 @@ class PullRequestRef:
     head: str
 
 
+@dataclass(frozen=True)
+class IssueRef:
+    """An issue as the API returns it, once filed."""
+
+    number: int
+    url: str
+    title: str
+
+
 class GithubClient(ABC):
     """The minimal GitHub API the connector needs."""
 
@@ -62,6 +71,14 @@ class GithubClient(ABC):
     ) -> PullRequestRef:
         """Open a PR from `head` into `base`."""
 
+    @abstractmethod
+    def find_issue(self, repo: str, *, marker: str) -> IssueRef | None:
+        """An issue (open or closed) whose body contains `marker`, or None."""
+
+    @abstractmethod
+    def create_issue(self, repo: str, *, title: str, body: str) -> IssueRef:
+        """File a new issue."""
+
 
 class FakeGithubClient(GithubClient):
     """Issues in a dict. For unit/e2e and smoke — no network."""
@@ -73,6 +90,8 @@ class FakeGithubClient(GithubClient):
         self._default_branch = default_branch
         self.pulls: list[PullRequestRef] = []
         self.created: list[dict] = []
+        self.filed: list[IssueRef] = []
+        self._filed_bodies: dict[int, str] = {}
 
     def add_issue(self, issue: Issue) -> None:
         self._issues[issue.number] = issue
@@ -116,6 +135,21 @@ class FakeGithubClient(GithubClient):
             {"repo": repo, "head": head, "base": base, "title": title, "body": body}
         )
         return pull
+
+    def find_issue(self, repo: str, *, marker: str) -> IssueRef | None:
+        for issue in self.filed:
+            if marker in self._filed_bodies.get(issue.number, ""):
+                return issue
+        return None
+
+    def create_issue(self, repo: str, *, title: str, body: str) -> IssueRef:
+        number = len(self.filed) + 1
+        issue = IssueRef(
+            number=number, url=f"https://github.com/{repo}/issues/{number}", title=title
+        )
+        self.filed.append(issue)
+        self._filed_bodies[number] = body
+        return issue
 
 
 class HttpGithubClient(GithubClient):
@@ -238,4 +272,38 @@ class HttpGithubClient(GithubClient):
             number=item["number"],
             url=item.get("html_url", ""),
             head=self._pr_head(item, head),
+        )
+
+    def find_issue(self, repo: str, *, marker: str) -> IssueRef | None:
+        # Deliberately not the Search API: its indexing lag could miss an issue
+        # just created by a fast retry. `state=all` + unpaginated `per_page=100`
+        # matches the direct-fetch pattern `list_issues` already uses.
+        query = urllib.parse.urlencode({"state": "all", "per_page": 100})
+        url = f"{self._api}/repos/{repo}/issues?{query}"
+        request = urllib.request.Request(url, headers=self._headers(), method="GET")
+        with self._opener.open(request) as response:
+            raw = json.loads(response.read())
+        for item in raw:
+            if "pull_request" in item:  # PRs are also "issues" — filter them out
+                continue
+            if marker in (item.get("body") or ""):
+                return IssueRef(
+                    number=item["number"],
+                    url=item.get("html_url", ""),
+                    title=item.get("title", ""),
+                )
+        return None
+
+    def create_issue(self, repo: str, *, title: str, body: str) -> IssueRef:
+        url = f"{self._api}/repos/{repo}/issues"
+        payload = json.dumps({"title": title, "body": body}).encode("utf-8")
+        request = urllib.request.Request(
+            url, data=payload, headers=self._json_headers(), method="POST"
+        )
+        with self._opener.open(request) as response:
+            item = json.loads(response.read())
+        return IssueRef(
+            number=item["number"],
+            url=item.get("html_url", ""),
+            title=item.get("title", title),
         )

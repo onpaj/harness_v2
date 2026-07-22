@@ -24,7 +24,7 @@ from harness.ports.artifacts import (
 from harness.ports.behavior import ConsumerBehavior
 from harness.ports.clock import Clock
 from harness.ports.events import EventSink
-from harness.ports.forge import Forge, PullRequest
+from harness.ports.forge import FiledIssue, Forge, PullRequest
 from harness.ports.queue import TaskQueue
 from harness.ports.repos import RepositoryNotFound, RepositoryRegistry
 from harness.ports.source import FinishResult, Progress, TaskSource, dedup_key
@@ -271,11 +271,14 @@ class MemoryTaskSource(TaskSource):
 
 
 class MemoryForge(Forge):
-    """Records PRs. Idempotent by branch."""
+    """Records PRs. Idempotent by branch. Records issues, idempotent by task id
+    (in-process — no text search needed, unlike the real GitHub client)."""
 
     def __init__(self) -> None:
         self.opened: list[PullRequest] = []
         self.bodies: dict[str, str] = {}
+        self.issues: list[FiledIssue] = []
+        self._issues_by_task: dict[str, FiledIssue] = {}
 
     def open_pull_request(
         self, task: Task, *, branch: str, title: str, body: str
@@ -292,6 +295,19 @@ class MemoryForge(Forge):
         self.opened.append(pull)
         self.bodies[branch] = body
         return pull
+
+    def open_issue(self, task: Task, *, title: str, body: str) -> FiledIssue:
+        existing = self._issues_by_task.get(task.id)
+        if existing is not None:
+            return existing
+        issue = FiledIssue(
+            number=len(self.issues) + 1,
+            url=f"https://forge.local/issues/{len(self.issues) + 1}",
+            title=title,
+        )
+        self.issues.append(issue)
+        self._issues_by_task[task.id] = issue
+        return issue
 
 
 class MemoryAgentCatalog(AgentCatalog):

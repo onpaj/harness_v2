@@ -604,3 +604,102 @@ def test_run_agent_defaults_to_claude_and_accepts_dummy(tmp_path, monkeypatch):
     with pytest.raises(SystemExit):
         main(["run", "--root", str(tmp_path), "--api-port", "0"])
     assert seen["catalog"] is not None and seen["runner"] is not None
+
+
+# --- healer workflow ---------------------------------------------------------
+
+
+def test_init_seeds_healer_workflow_and_diagnose_agent(tmp_path):
+    assert main(["init", "--root", str(tmp_path)]) == 0
+
+    definition = json.loads((tmp_path / "workflows" / "healer.json").read_text())
+    assert definition["start"] == "diagnose"
+    assert {"from": "diagnose", "on": "bug_confirmed", "to": "file_issue"} in definition["transitions"]
+
+    assert (tmp_path / "agents" / "diagnose.json").exists()
+    assert not (tmp_path / "agents" / "file_issue.json").exists()
+
+    diagnose = json.loads((tmp_path / "agents" / "diagnose.json").read_text())
+    assert set(diagnose["allowed_outcomes"]) == {"bug_confirmed", "not_a_bug"}
+
+
+def test_init_seeds_healer_workflow_regardless_of_chosen_workflow(tmp_path):
+    """--heal can be turned on later without re-running init with --workflow healer."""
+    assert main(["init", "--root", str(tmp_path), "--workflow", "custom"]) == 0
+
+    assert (tmp_path / "workflows" / "healer.json").exists()
+
+
+def test_run_heal_without_healer_repo_fails_cleanly(tmp_path, capsys):
+    main(["init", "--root", str(tmp_path)])
+    capsys.readouterr()
+
+    assert main(["run", "--root", str(tmp_path), "--heal"]) == 2
+
+    out, err = capsys.readouterr()
+    assert out == ""
+    assert "--healer-repo" in err
+
+
+def test_run_heal_with_healer_repo_passes_through_to_build(tmp_path, monkeypatch):
+    main(["init", "--root", str(tmp_path)])
+    seen = {}
+
+    def fake_build(*args, **kwargs):
+        seen.update(kwargs)
+        raise SystemExit(0)
+
+    monkeypatch.setattr("harness.cli.build", fake_build)
+
+    with pytest.raises(SystemExit):
+        main(
+            [
+                "run",
+                "--root",
+                str(tmp_path),
+                "--heal",
+                "--healer-repo",
+                "harness_v2",
+                "--api-port",
+                "0",
+            ]
+        )
+
+    assert seen["heal"] is True
+    assert seen["healer_repo"] == "harness_v2"
+
+
+def test_run_without_heal_defaults_to_disabled(tmp_path, monkeypatch):
+    main(["init", "--root", str(tmp_path)])
+    seen = {}
+
+    def fake_build(*args, **kwargs):
+        seen.update(kwargs)
+        raise SystemExit(0)
+
+    monkeypatch.setattr("harness.cli.build", fake_build)
+
+    with pytest.raises(SystemExit):
+        main(["run", "--root", str(tmp_path), "--api-port", "0"])
+
+    assert seen["heal"] is False
+    assert seen["healer_repo"] is None
+
+
+def test_run_heal_with_step_collision_fails_cleanly(tmp_path, capsys):
+    main(["init", "--root", str(tmp_path)])
+    colliding = {
+        "name": "healer",
+        "start": "review",
+        "transitions": [{"from": "review", "on": "bug_confirmed", "to": "end"}],
+    }
+    (tmp_path / "workflows" / "healer.json").write_text(json.dumps(colliding))
+    capsys.readouterr()
+
+    assert main(
+        ["run", "--root", str(tmp_path), "--heal", "--healer-repo", "harness_v2", "--api-port", "0"]
+    ) == 2
+
+    out, err = capsys.readouterr()
+    assert out == ""
+    assert "review" in err

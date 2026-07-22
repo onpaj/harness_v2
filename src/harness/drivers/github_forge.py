@@ -17,8 +17,10 @@ from typing import Callable
 from harness.drivers.git_remote import github_slug
 from harness.drivers.github_client import GithubClient
 from harness.models import Task
-from harness.ports.forge import Forge, PullRequest
+from harness.ports.forge import FiledIssue, Forge, PullRequest
 from harness.ports.repos import RepositoryRegistry
+
+_HEALER_MARKER = "<!-- harness-healer:{task_id} -->"
 
 
 class ForgeError(RuntimeError):
@@ -128,6 +130,39 @@ class GithubForge(Forge):
         return PullRequest(
             number=created.number, url=created.url, branch=branch, title=title
         )
+
+    def open_issue(self, task: Task, *, title: str, body: str) -> FiledIssue:
+        client = self._client
+        if client is None:
+            raise ForgeError(
+                "GITHUB_TOKEN is not set — cannot file an issue. "
+                "Export it, or run with --forge fake."
+            )
+        repo_path = self._repo_path(task)
+        if repo_path is None:
+            raise ForgeError(
+                f"task {task.id}: cannot locate repository {task.repository!r} — "
+                "not in repos.json and the task carries no worktree"
+            )
+        slug = self._slug_of(repo_path)
+        if slug is None:
+            raise ForgeError(f"{task.repository} has no GitHub origin — cannot file an issue")
+
+        marker = _HEALER_MARKER.format(task_id=task.id)
+        try:
+            existing = client.find_issue(slug, marker=marker)
+            if existing is not None:
+                return FiledIssue(existing.number, existing.url, existing.title)
+            created = client.create_issue(
+                slug, title=title, body=f"{body.rstrip()}\n\n{marker}\n"
+            )
+        except ForgeError:
+            raise
+        except Exception as error:  # noqa: BLE001 - any API failure is a forge failure
+            raise ForgeError(
+                f"GitHub refused to file an issue on {slug}: {_explain(error)}"
+            ) from error
+        return FiledIssue(created.number, created.url, title)
 
     def _default_branch(self, client: GithubClient, slug: str) -> str:
         """The repo's default branch, fetched once per slug per process."""

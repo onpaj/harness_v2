@@ -20,6 +20,8 @@ class Outcome(str, Enum):
 
     DONE = "done"
     REQUEST_CHANGES = "request_changes"
+    BUG_CONFIRMED = "bug_confirmed"
+    NOT_A_BUG = "not_a_bug"
 
 
 @dataclass(frozen=True)
