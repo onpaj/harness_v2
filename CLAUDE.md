@@ -14,6 +14,8 @@ Phase 2 spec: `docs/superpowers/specs/2026-07-20-orchestration-phase2-design.md`
 Phase 2 plan: `docs/superpowers/plans/2026-07-20-orchestration-phase2.md`
 Phase 3 spec: `docs/superpowers/specs/2026-07-20-orchestration-phase3-design.md`
 Phase 3 plan: `docs/superpowers/plans/2026-07-20-orchestration-phase3.md`
+Generic triggers spec: `docs/superpowers/specs/2026-07-22-generic-triggers-design.md`
+Generic triggers plan: `docs/superpowers/plans/2026-07-22-generic-triggers.md`
 
 The project is built **phase by phase**. Phase 1 is a POC of the orchestration loop.
 Phase 2 adds **worktrees, artifacts and landing**: each phase works in a worktree,
@@ -71,6 +73,10 @@ swapped out later.
 32. **`MergeChecker` is touched only by `MergeReconciler` (core) and wiring.** `dispatcher.py`/`consumer.py` don't import `ports.merge` — guarded by `test_architecture.py`, mirroring invariant 20's shape for `TaskSource`.
 33. **`AgentAdmin`/`WorkflowAdmin` are unknown to the dispatcher and consumer.** They are UI-facing admin ports, not orchestration ports — like `BoardView`/`TaskControl`, not like `AgentCatalog`/`WorkflowRepository`. `api/` touches only the two admin ports; the filesystem drivers (`FilesystemAgentAdmin`, `FilesystemWorkflowAdmin`) are wired exclusively in `cli.py`'s `serve()`. Guarded by `test_architecture.py`'s existing glob-based checks (no dedicated test needed).
 34. **`IssueChecker` is touched only by `IssueReconciler` (core) and wiring.** `dispatcher.py`/`consumer.py` don't import `ports.issue_state` — guarded by `test_architecture.py`, mirroring invariant 32's shape for `MergeChecker`. The reconciler retires a stale task the same way merge/PR resolution already does — into `archived/` (invariant 24's terminal-queue shape, off every board column but gettable by id) — so "remove from the dashboard" adds no new board mechanism. See ADR-0013.
+35. **A trigger produces tasks, never queue placements.** A `Trigger` (schedule- or condition-driven) hands a fresh `Task` to the inbox with a `workflow_template` **or** a `step`; the dispatcher alone places it (`route()`, invariants #3/#8). No trigger writes into a step queue. The "target any queue" capability is a workflow-less task carrying `step`, not a producer reaching past the dispatcher. See ADR-0014.
+36. **A `Trigger` is a `TaskSource` that reflects nothing outward.** It implements only `poll()`; `report_progress`/`finish` are inherited no-ops. It stamps no `data.source`, so `SourceReflectorSink` lists it and ignores it — the same path that ignores a `harness submit` task. `TaskSource` stays whole (invariants #18–#20 unchanged); `Trigger` is a convenience base, not a new port.
+37. **A scheduled trigger owns its cadence via the `Clock`, not via a loop.** `poll()` gates on the interval bucket `floor(now / interval)` and returns `[]` cheaply between fires; the shared `source_interval` is only polling granularity. The gate reads solely `Clock`, so it is `FakeClock`-testable and survives the poller's `sleep(0)` fast-path without re-firing.
+38. **A scheduled trigger's `dedup_key` is bucket-keyed, giving at-most-once per interval across restarts.** The key includes `floor(now / interval)` (and, for `per-state` dedup, an observed `state_key` instead), so the existing `SourcePoller._seen` seeding makes one period yield one task even across a restart — the same exactly-once mechanism as GitHub ingestion (ADR-0010), with a non-constant key.
 
 ## Working here
 
@@ -130,10 +136,10 @@ Dependencies flow strictly downward, no cycles.
 | Base | `models` (imports nothing from the package), `ids` |
 | Logic | `router` (knows only `models`) |
 | Base (package-free) | `models`, `ids`, `artifacts_layout` (the `.artifacts/<id>/<step>-NN` convention) |
-| Ports | `ports/{queue,workflows,strategy,behavior,events,clock,workspace,artifacts,forge,board,agent,repos,source,control,logs,issues,merge,issue_state}` |
+| Ports | `ports/{queue,workflows,strategy,behavior,events,clock,workspace,artifacts,forge,board,agent,repos,source,control,logs,issues,merge,issue_state,triggers}` |
 | Orchestration | `dispatcher`, `consumer`, `source_poller`, `task_control`, `healer`, `pr_watcher`, `merge_reconciler`, `issue_reconciler` — know only ports (and, for `pr_watcher`/`merge_reconciler`/`issue_reconciler`, the base `ids` module — not `workspace`/`forge`/`artifacts`/`agent`/`repos`/`drivers`) |
 | Behaviors | `behaviors/{landing,agent,resolve_conflict}` — touch ports, not drivers |
-| Drivers | `drivers/{fs_queue,fs_workflows,fifo_strategy,dummy_behavior,stdout_events,system_clock,memory,fs_artifacts,git_workspace,fake_forge,claude_cli,fs_agents,fs_repos,worktree_artifacts,source_reflector,github_client,github_source,github_forge,github_issues,github_merge_checker,github_issue_checker,mergeability_watcher,launchd,composite_events,git_remote,projection_events,stage_output}` |
+| Drivers | `drivers/{fs_queue,fs_workflows,fifo_strategy,dummy_behavior,stdout_events,system_clock,memory,fs_artifacts,git_workspace,fake_forge,claude_cli,fs_agents,fs_repos,worktree_artifacts,source_reflector,github_client,github_source,github_forge,github_issues,github_merge_checker,github_issue_checker,mergeability_watcher,launchd,composite_events,git_remote,projection_events,stage_output,scheduled_trigger,checks,fs_triggers}` |
 | UI | `api/{app,routes}` — reads through `BoardView`/`ArtifactView`/`StageOutputView`, writes through `TaskControl`; never a driver |
 | Edges | `app` (wiring), `cli` |
 
@@ -182,6 +188,10 @@ Dependencies flow strictly downward, no cycles.
 - `ports/issue_state.py` — the `IssueChecker` port: `is_open(task) -> bool | None` (`None`: no `data.source` this checker resolves; raises on a transient failure — the caller must retry, never treat that as "closed")
 - `issue_reconciler.py` — `IssueReconciler`: the core that sweeps every live queue and archives a task whose source issue was closed or deleted out from under it (knows only ports/models/ids, mirrors `pr_watcher.py`)
 - `drivers/github_issue_checker.py` — `GithubIssueChecker`: reads `repo`/`issue` straight off `task.data["source"]` at check time; a deleted issue (404) reads as "not open", one checker serves every repo the token can reach
+- `ports/triggers.py` — the `Check` (ABC) protocol (`evaluate() -> list[Observation]`), `Observation` (optional `state_key` + task `data`), `CheckFactory` and `parse_interval` (a duration string → seconds). A trigger's condition is code behind this port; the schedule is data
+- `drivers/scheduled_trigger.py` — `ScheduledTrigger(Trigger)`: composes an `interval` (data) × a `Check` (code) × a `target` (workflow **or** step). Cadence is a clock-gate on the interval bucket; `dedup_key` is bucket-keyed (`per-interval`) or state-keyed (`per-state`), never constant
+- `drivers/checks.py` — the built-in `Check`s (`AlwaysCheck`, `DiskThresholdCheck`) and the `BUILTIN_CHECKS` registry mapping a check name → factory; a bespoke condition is a new factory registered by name
+- `drivers/fs_triggers.py` — `FilesystemTriggerRepository`: reads `triggers/*.json` and builds one `ScheduledTrigger` per file, validating fast at load (`TriggerValidationError` on a bad `interval`, an unknown `check`, or a `target` naming neither a served workflow nor a known step) — exactly as `FilesystemAgentCatalog` reads `agents/*.json`
 
 ## What is responsible for what
 
@@ -279,6 +289,23 @@ Dependencies flow strictly downward, no cycles.
   `ArtifactView` shows *what it produced*, `StageOutputView` shows *what the
   running stage is doing right now* — a bounded, in-memory, live-only tail
   (`drivers/stage_output.py`), gone once the stage ends. See ADR-0012.
+- **A trigger** is a third way a task is born (alongside `harness submit` and a
+  `TaskSource.poll()` over the outside world): a `Trigger` is a `TaskSource` that
+  *produces* tasks and reflects nothing outward — it implements only `poll()`, its
+  `report_progress`/`finish` are inherited no-ops, and it stamps no `data.source`, so
+  the reflector ignores it exactly as it ignores a `harness submit` task.
+  `ScheduledTrigger` composes an `interval` × a `Check` × a `target` (a workflow **or**
+  a single step — the dispatcher does the placement, never the trigger). Its cadence is
+  a **clock-gate**: `poll()` compares the current interval bucket (`floor(now /
+  interval)`) against the last it fired and returns `[]` cheaply between fires, so the
+  shared `source_interval` is only polling granularity, no new loop. Dedup is
+  **bucket-keyed** (`per-interval`, one fire per period) or **state-keyed**
+  (`per-state`, re-fire when an observed `state_key` changes), giving at-most-once per
+  interval across restarts via the same `SourcePoller._seen` mechanism as GitHub
+  ingestion. Triggers are **data** — `triggers/*.json`, each naming a built-in `check`
+  from `BUILTIN_CHECKS` — with the schedule as data and the condition as code (the same
+  split as personas). `FilesystemTriggerRepository` reads them and validates fast at
+  build; `harness init` writes an empty `triggers/`.
 
 ## Gotchas
 
@@ -342,6 +369,19 @@ Dependencies flow strictly downward, no cycles.
   could disable reconciliation between restarts). Gating it on `self.reconciler is not
   None` would leave such a task stuck forever; recovering an idle queue is a no-op, so
   it's unconditional and free.
+- **A scheduled trigger's `dedup_key` is NON-constant — this is deliberate, don't
+  "fix" it.** A trigger fires *fresh work* each period, so a constant key would make
+  `SourcePoller._seen` suppress every fire after the first, forever (the opposite of a
+  GitHub issue, whose key is its stable number). The key is bucket-keyed
+  (`floor(now / interval)`), or state-keyed on `observation.state_key` for `per-state`
+  — a `per-state` check with a `None` `state_key` is a usage error (every state would
+  collapse into one), not a silent default. The clock-gate (`_last_bucket`) is only an
+  optimization that short-circuits the poller's `sleep(0)` re-poll within a run; the
+  persisted `dedup_key` + seeded `_seen` is the cross-restart guarantee. And that
+  guarantee is **at-most-once per interval**, NOT suppress-while-in-flight: `_seen`
+  remembers "ever ingested", not "currently open", so `per-state` re-fires if a state
+  recurs after its task has terminated and `per-interval` can't coalesce an unresolved
+  backlog — a live-task-consulting mode is a deliberate follow-up.
 
 ## Operator
 
