@@ -236,6 +236,13 @@ The step behaviors become stubs that write an artifact and commit; everything
 around them stays real, including the PR that `land` opens. Pair it with
 `--forge fake` if you want no GitHub calls at all.
 
+## Documentation
+
+The full architecture — an animated ports-and-adapters explorer you can drill
+into, backed by the ADRs under `docs/adr/` — is published at
+[onpaj.github.io/harness_v2](https://onpaj.github.io/harness_v2/). Rebuild it
+locally with `python scripts/build_docs.py --out site` and open `site/index.html`.
+
 ## Board
 
 Alongside the orchestration loop, `harness run` serves a board at
