@@ -59,6 +59,7 @@ from harness.drivers.system_clock import SystemClock
 from harness.drivers.worktree_artifacts import WorktreeArtifactView
 from harness.ids import new_task_id
 from harness.models import Task
+from harness.ports.clock import Clock
 from harness.ports.issue_state import IssueChecker
 from harness.ports.merge import MergeChecker
 from harness.ports.repos import RepositoryRegistry
@@ -130,6 +131,7 @@ def _init(args: argparse.Namespace) -> int:
     layout = HarnessLayout(root)
 
     layout.agents.mkdir(parents=True, exist_ok=True)
+    (root / "triggers").mkdir(parents=True, exist_ok=True)
     _write_default_repos(layout)
 
     if args.no_workflow:
@@ -575,6 +577,34 @@ def _mergeability_sources(
             )
         )
     return sources
+
+
+def _scheduled_sources(
+    args: argparse.Namespace,
+    root: Path,
+    registry: RepositoryRegistry,
+    *,
+    clock: Clock,
+    known_targets: set[str] | None,
+) -> list[TaskSource]:
+    """Scheduled triggers declared under `<root>/triggers/*.json`.
+
+    Each becomes a `ScheduledTrigger` — a `TaskSource` that produces tasks on a
+    clock gate and reflects nothing outward (a `Trigger`) — appended to the run's
+    existing `sources` list; `build()` gains no parameter. A missing/empty
+    `triggers/` directory yields `[]`, so the harness runs exactly as before.
+    `known_targets` (served workflow names ∪ known step names) lets the
+    repository reject a trigger that names an unknown target up front."""
+    from harness.drivers.fs_triggers import FilesystemTriggerRepository
+
+    repo = FilesystemTriggerRepository(root / "triggers")
+    worktree_root = args.worktree_root or str(root / "worktrees")
+    return repo.build(
+        clock=clock,
+        repository=None,
+        worktree_root=worktree_root,
+        known_targets=known_targets,
+    )
 
 
 def service_path_entries(harness: Path) -> list[str]:
@@ -1269,6 +1299,24 @@ def _run(args: argparse.Namespace) -> int:
     # by the mergeability watcher) get their own step queues and board columns.
     if mergeability and args.resolver_workflow not in served_names:
         served_names = [*served_names, args.resolver_workflow]
+
+    # Scheduled triggers (`triggers/*.json`) are `TaskSource`s that ride the
+    # existing `sources` list — no new loop, no `build()` parameter. A trigger's
+    # target must be a served workflow or a known step; `known_targets` (served
+    # workflow names ∪ their steps ∪ any catalog agent) lets the repository
+    # reject a misnamed target up front rather than failing at dispatch time.
+    known_targets: set[str] = set(served_names)
+    wf_repo = FilesystemWorkflowRepository(layout.workflows)
+    for name in served_names:
+        try:
+            known_targets |= set(wf_repo.get(name).steps())
+        except WorkflowNotFound:
+            continue
+    if catalog is not None:
+        known_targets |= set(catalog.names())
+    sources = sources + _scheduled_sources(
+        args, root, registry, clock=SystemClock(), known_targets=known_targets
+    )
 
     # Self-healing: an agent assigned to the `failed/` queue. Enabled by
     # `--heal-repo <owner/repo>` (where the healer opens issues). It reuses the
