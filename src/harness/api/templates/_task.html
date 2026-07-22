@@ -21,7 +21,8 @@
         <li><span class="k">id</span><span class="v">{{ task.id }}</span></li>
         <li><span class="k">repository</span><span class="v">{{ task.repository or "—" }}</span></li>
         <li><span class="k">worktree</span><span class="v">{{ task.worktree or "—" }}</span></li>
-        <li><span class="k">workflow</span><span class="v">{{ task.workflow_template }}</span></li>
+        <li><span class="k">workflow</span><span class="v">{{ task.workflow_template or "—" }}</span></li>
+        <li><span class="k">step</span><span class="v">{{ task.step or "—" }}</span></li>
         <li><span class="k">status</span><span class="v">{{ task.status or "—" }}</span></li>
         <li><span class="k">lastOutcome</span><span class="v">{{ task.last_outcome or "—" }}</span></li>
         <li><span class="k">lockId</span><span class="v">{{ task.lock_id or "—" }}</span></li>

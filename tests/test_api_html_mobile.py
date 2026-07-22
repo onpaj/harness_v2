@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 from harness.api.app import create_app
 from harness.drivers.memory import FakeClock
 from harness.models import HistoryEntry, Task
-from harness.ports.board import Board, BoardColumn
+from harness.ports.board import Board, BoardColumn, BoardTab
 from tests.fakes import FakeBoardView
 
 WORKING = Task(
@@ -42,10 +42,15 @@ EMPTY = Task(
 def client() -> TestClient:
     board = Board(
         revision=1,
-        columns=(
-            BoardColumn(name="todo", tasks=()),
-            BoardColumn(name="development", tasks=(WORKING,)),
-            BoardColumn(name="done", tasks=()),
+        workflows=(
+            BoardTab(
+                name="default",
+                columns=(
+                    BoardColumn(name="todo", tasks=()),
+                    BoardColumn(name="development", tasks=(WORKING,)),
+                    BoardColumn(name="done", tasks=()),
+                ),
+            ),
         ),
     )
     view = FakeBoardView(board, {"tsk_1": WORKING, "tsk_2": EMPTY})

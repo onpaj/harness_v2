@@ -1,6 +1,232 @@
 # CHANGELOG
 
 
+## v0.9.1 (2026-07-22)
+
+### Bug Fixes
+
+- Give the resolver's git merge an identity and reconcile its branch on reattach
+  ([#61](https://github.com/onpaj/harness_v2/pull/61),
+  [`fd700ae`](https://github.com/onpaj/harness_v2/commit/fd700ae1ea2809ceaf144e0ddc0d933e350fe39c))
+
+
+## v0.9.0 (2026-07-22)
+
+### Bug Fixes
+
+- Update Board.columns access to per-workflow tabs
+  ([#62](https://github.com/onpaj/harness_v2/pull/62),
+  [`14a1e28`](https://github.com/onpaj/harness_v2/commit/14a1e28fdf57b37ad4b730190028176870b740c5))
+
+PR #48 refactored Board from a flat `columns` tuple into `workflows` (a tuple of BoardTab, each
+  carrying its own columns), but three call sites still read the old flat `.columns`:
+
+- `_new_step_warnings` in api/routes.py raised AttributeError on every workflow-admin PUT /
+  create-form request, taking CI red. - the client fixtures in test_api_agents.py and
+  test_api_workflows.py built a Board with the removed `columns=` kwarg (TypeError at setup).
+
+Collect known step names across every tab's columns and rebuild the test boards through BoardTab.
+
+Co-authored-by: ci <ci@local>
+
+### Continuous Integration
+
+- Publish the docs drill-down to GitHub Pages ([#54](https://github.com/onpaj/harness_v2/pull/54),
+  [`2ba3122`](https://github.com/onpaj/harness_v2/commit/2ba3122309b66f0ff77b55dd37809c981e46cb74))
+
+### Documentation
+
+- Add self-healing design spec and implementation plan
+  ([#42](https://github.com/onpaj/harness_v2/pull/42),
+  [`6d96d36`](https://github.com/onpaj/harness_v2/commit/6d96d365e8ab9ba3bd64ac50236fdf1b84d499fa))
+
+- Ground the architecture in ADRs, refresh README/CLAUDE.md, and ship an HTML drill-down
+  ([#39](https://github.com/onpaj/harness_v2/pull/39),
+  [`7bae036`](https://github.com/onpaj/harness_v2/commit/7bae03653c211fa75c532281fda663b7dced5127))
+
+### Features
+
+- Retire dashboard tasks whose GitHub issue was closed or deleted
+  ([#58](https://github.com/onpaj/harness_v2/pull/58),
+  [`a80afef`](https://github.com/onpaj/harness_v2/commit/a80afef3af8ee227c47bd393448889616ade34ca))
+
+- **docs**: Interactive Architecture Explorer documentation site
+  ([#63](https://github.com/onpaj/harness_v2/pull/63),
+  [`b533208`](https://github.com/onpaj/harness_v2/commit/b5332080e0c121e2f6d3d8615c85a430b2f5a104))
+
+
+## v0.8.1 (2026-07-21)
+
+### Bug Fixes
+
+- Recover a finished agent run whose verdict block is missing
+  ([`6333c6e`](https://github.com/onpaj/harness_v2/commit/6333c6e729e074310eec896c75865a2a604f6920))
+
+An agent that ran to completion but ended with a prose summary instead of the required ```json
+  {outcome, summary}``` block was failing the whole task ("verdict is not readable JSON"),
+  discarding a green run (tests passing, artifact written, uncommitted). This hit the development
+  step repeatedly.
+
+Three composed defenses: - A (fallback_verdict): a single-outcome step (development/plan/design/
+  architecture) is unambiguous, so a missing block is synthesized to that outcome with the final
+  text as the summary — no second claude call. - C (_reprompt_verdict): a multi-outcome step
+  (review) is genuinely ambiguous, so re-enter the same session via `claude -p --resume` and ask for
+  just the verdict; best-effort, any failure falls through. - B (compose_prompt): state the verdict
+  block as mandatory and last, so the model omits it less often to begin with.
+
+Envelope-level failures (is_error, no result, non-zero exit, timeout) still fail hard — only a
+  forgotten/garbled/disallowed verdict is now recoverable. verdict parsing is split into a strict
+  path (parse_verdict/verdict_from_final, unchanged contract) and a tolerant try_verdict the runner
+  drives.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+
+
+## v0.8.0 (2026-07-21)
+
+### Features
+
+- Serve multiple workflows in a single running harness
+  ([#31](https://github.com/onpaj/harness_v2/pull/31),
+  [`24a34db`](https://github.com/onpaj/harness_v2/commit/24a34db2be66b2f781d14359795492a962a1c55d))
+
+Build queues, projection and consumers for every served workflow: union step queues by name, a
+  merged BoardProjection, a ServedWorkflowRepository decorator for clear unserved-workflow failures,
+  and repeatable --workflow/--all-workflows on `harness run`. Default single-workflow behavior is
+  preserved.
+
+Closes #29
+
+
+## v0.7.0 (2026-07-21)
+
+### Features
+
+- Configurable per-step agent timeout, default raised to 1800s
+  ([#30](https://github.com/onpaj/harness_v2/pull/30),
+  [`56a50b8`](https://github.com/onpaj/harness_v2/commit/56a50b8b88670ed30f756b37288e84e5433b6d45))
+
+Raise the default agent timeout 600s->1800s and add a per-step override via an optional
+  AgentSpec.timeout field read from agents/<step>.json, resolved in app.py's behavior_for().
+
+Closes #28
+
+
+## v0.6.0 (2026-07-21)
+
+### Features
+
+- Make the dashboard mobile friendly ([#21](https://github.com/onpaj/harness_v2/pull/21),
+  [`a530359`](https://github.com/onpaj/harness_v2/commit/a5303594ced4c487068d83aa77e9ea54552d2ce2))
+
+CSS-only responsive layout for the board: a @media(max-width:767px) block for
+  .column/.card/dialog/.tabs and a .table-scroll wrapper on the task-detail tables, layered onto the
+  tabbed task-detail design. Reconciled with the tab redesign that landed on main after this branch
+  was cut.
+
+Closes #16
+
+
+## v0.5.0 (2026-07-21)
+
+### Features
+
+- Add per-step max-parallel-task limits to workflows
+  ([#27](https://github.com/onpaj/harness_v2/pull/27),
+  [`6e16c73`](https://github.com/onpaj/harness_v2/commit/6e16c73a15b51c858952586579a194675416582f))
+
+Adds a validated maxParallel map on the workflow JSON (default 1 per step),
+  Workflow.max_parallel_for() accessor, Consumer.step property, and Harness.run() spawning N
+  concurrent consumer loops per step. Relies on the existing atomic queue claim; no changes to
+  Dispatcher or router.
+
+Closes #25
+
+- Create-harness-issue skill creates directly when inputs are complete
+  ([#26](https://github.com/onpaj/harness_v2/pull/26),
+  [`b0554f0`](https://github.com/onpaj/harness_v2/commit/b0554f0e6634c3d4f78e86d27285a057d01e9b0f))
+
+Rewrites SKILL.md step 4 into a completeness-check router
+  (repo_resolved/title_concrete/body_substantive) that creates the issue directly when all three
+  pass and asks a targeted question otherwise. Extends step 6 into a five-field post-creation
+  report.
+
+Closes #24
+
+
+## v0.4.0 (2026-07-21)
+
+### Features
+
+- One-step update+restart, idle-gated, and a schedule for it
+  ([`998c8b8`](https://github.com/onpaj/harness_v2/commit/998c8b8fb525445c0632a1f9ff2a6abe45dcac55))
+
+Updating meant two commands and remembering the second, and nothing kept the box current on its own.
+  Three additions:
+
+- `harness update --restart` upgrades and restarts the service in one step. - `--only-if-idle` skips
+  the restart when a stage is mid-run (a task claimed in a queue's .processing/), so an update never
+  kills a live agent — it applies at the next idle restart instead. - `harness service autoupdate`
+  installs a launchd timer that runs `update --restart --only-if-idle` a few times a day (default
+  02/08/14/20).
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+
+
+## v0.3.1 (2026-07-21)
+
+### Bug Fixes
+
+- Detect an active token, not the template's commented example
+  ([`89df965`](https://github.com/onpaj/harness_v2/commit/89df9650840eb5d622bd210c36f48acbc2f905ce))
+
+harness service install printed no setup-token guidance because the check matched the commented
+  CLAUDE_CODE_OAUTH_TOKEN= example line in the template it had just written. It now looks for an
+  uncommented assignment.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+
+
+## v0.3.0 (2026-07-21)
+
+### Features
+
+- Service sources a secrets file for CLAUDE_CODE_OAUTH_TOKEN
+  ([`e98a543`](https://github.com/onpaj/harness_v2/commit/e98a5439f877c7e977b17d842cc3c329f62148fb))
+
+Under launchd, claude cannot read the macOS login keychain where an interactive login stores its
+  credential, so every agent step failed with "Not logged in" even though the same binary works from
+  a shell. Proven by running claude inside a launchd agent.
+
+The service wrapper now sources <root>/secrets.env (created 0600, never overwritten) and exports
+  CLAUDE_CODE_OAUTH_TOKEN from it, which makes claude bypass the keychain — the supported headless
+  path via `claude setup-token`. A missing token warns loudly rather than failing silently, and the
+  install prints the exact setup-token steps.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+
+
+## v0.2.2 (2026-07-20)
+
+### Bug Fixes
+
+- Dummy writes where the agent does, and forge reports GitHub's reason
+  ([`0c8027b`](https://github.com/onpaj/harness_v2/commit/0c8027b58155dd01d68e502e4e838d424e8036ea))
+
+A live end-to-end run failed at land with a bare "HTTP Error 422: Unprocessable Entity". Two
+  separate faults behind it:
+
+- DummyBehavior wrote its work into `.harness/`, which repos routinely gitignore (this one does).
+  Ignored writes stage nothing, so commit() returned None, the task branch carried no diff, and
+  GitHub correctly refused a PR with no commits. It now writes into `.artifacts/<task>/`, the
+  versioned location the real agent uses (invariant 16) — so --agent dummy can actually exercise
+  landing. - urllib's HTTPError stringifies to just the status line. GitHub puts the real reason in
+  the response body ("No commits between main and ..."); the forge now surfaces it, along with the
+  head -> base it attempted.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+
+
 ## v0.2.1 (2026-07-20)
 
 ### Bug Fixes

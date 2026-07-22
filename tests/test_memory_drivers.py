@@ -79,6 +79,13 @@ def test_workflow_repository_get_and_miss():
         repository.get("missing")
 
 
+def test_workflow_repository_names_lists_keys_sorted():
+    workflow = Workflow(name="default", start="plan", transitions=())
+    repository = MemoryWorkflowRepository({"hotfix": workflow, "default": workflow})
+
+    assert repository.names() == ("default", "hotfix")
+
+
 def test_event_sink_records():
     sink = MemoryEventSink()
 

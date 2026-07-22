@@ -1,34 +1,47 @@
-<div class="board">
-  {% for column in board.columns %}
-  <div class="column {% if not column.tasks %}column--empty{% endif %}">
-    <div class="column__head">
-      <h2>{{ column.name }}</h2>
-      <span class="column__count">{{ column.tasks|length }}</span>
-    </div>
-    {% if column.tasks %}
-    <div class="column__list">
-    {% for task in column.tasks %}
-    <div class="card{% if task.status == 'failed' %} is-failed{% elif task.lock_id %} is-working{% elif task.last_outcome == 'done' %} is-done{% elif task.last_outcome == 'request_changes' %} is-changes{% endif %}"
-         hx-get="/fragment/task/{{ task.id }}"
-         hx-target="#detail"
-         hx-swap="innerHTML">
-      <div class="card__title">{{ task.data.title or task.id }}</div>
-      {% if task.repository or task.worktree %}
-      <div class="card__repo">
-        {{ task.repository | basename }}{% if task.repository and task.worktree %} · {% endif %}{{ task.worktree | basename }}
-      </div>
-      {% endif %}
-      <div class="card__meta">
-        {% if task.lock_id %}<span class="badge working">processing</span>{% endif %}
-        {% if task.last_outcome %}<span class="badge {{ task.last_outcome }}">{{ task.last_outcome }}</span>{% endif %}
-        {% if task.history %}<span class="card__time" title="{{ task.history[-1].at }}">{{ task.history[-1].at | shorttime }}</span>{% endif %}
-      </div>
-    </div>
+<div class="board-wrap">
+  {% if board.workflows|length > 1 %}
+  <div class="tab-strip">
+    {% for tab in board.workflows %}
+    <button class="tab" data-workflow="{{ tab.name }}">{{ tab.name }}</button>
     {% endfor %}
+  </div>
+  {% endif %}
+  {% for tab in board.workflows %}
+  <div class="workflow-panel" data-workflow="{{ tab.name }}">
+    <div class="board">
+      {% for column in tab.columns %}
+      <div class="column {% if not column.tasks %}column--empty{% endif %}">
+        <div class="column__head">
+          <h2>{{ column.name }}</h2>
+          <span class="column__count">{{ column.tasks|length }}</span>
+        </div>
+        {% if column.tasks %}
+        <div class="column__list">
+        {% for task in column.tasks %}
+        <div class="card{% if task.status == 'failed' %} is-failed{% elif task.lock_id %} is-working{% elif task.last_outcome == 'done' %} is-done{% elif task.last_outcome == 'request_changes' %} is-changes{% endif %}"
+             hx-get="/fragment/task/{{ task.id }}"
+             hx-target="#detail"
+             hx-swap="innerHTML">
+          <div class="card__title">{{ task.data.title or task.id }}</div>
+          {% if task.repository or task.worktree %}
+          <div class="card__repo">
+            {{ task.repository | basename }}{% if task.repository and task.worktree %} · {% endif %}{{ task.worktree | basename }}
+          </div>
+          {% endif %}
+          <div class="card__meta">
+            {% if task.lock_id %}<span class="badge working">processing</span>{% endif %}
+            {% if task.last_outcome %}<span class="badge {{ task.last_outcome }}">{{ task.last_outcome }}</span>{% endif %}
+            {% if task.history %}<span class="card__time" title="{{ task.history[-1].at }}">{{ task.history[-1].at | shorttime }}</span>{% endif %}
+          </div>
+        </div>
+        {% endfor %}
+        </div>
+        {% else %}
+        <div class="column__empty">No tasks</div>
+        {% endif %}
+      </div>
+      {% endfor %}
     </div>
-    {% else %}
-    <div class="column__empty">No tasks</div>
-    {% endif %}
   </div>
   {% endfor %}
 </div>

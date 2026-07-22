@@ -12,7 +12,12 @@ from pathlib import Path
 
 from harness.drivers.launchd import (
     DEFAULT_LABEL,
+    ServiceError,
     agents_dir,
+    autoupdate_wrapper_script,
+    format_interval,
+    parse_interval_minutes,
+    periodic_plist_bytes,
     plist_bytes,
     plist_path,
     wrapper_script,
@@ -25,6 +30,7 @@ def build_wrapper(**overrides) -> str:
         "root": Path("/home/rem/harness-root"),
         "api_port": 8420,
         "path_entries": ["/opt/app/.venv/bin", "/usr/bin"],
+        "env_file": Path("/home/rem/harness-root/secrets.env"),
     }
     kwargs.update(overrides)
     return wrapper_script(**kwargs)
@@ -83,6 +89,34 @@ def test_wrapper_honours_a_disabled_board():
     text = build_wrapper(api_port=0)
 
     assert "--api-port 0" in text
+
+
+def test_wrapper_sources_the_secrets_file_with_export():
+    text = build_wrapper(env_file=Path("/home/rem/harness-root/secrets.env"))
+
+    assert 'ENV_FILE="/home/rem/harness-root/secrets.env"' in text
+    # `set -a` around the source is what exports CLAUDE_CODE_OAUTH_TOKEN into the
+    # child `claude` process; without it the var is set but not inherited.
+    assert "set -a" in text and "set +a" in text
+    assert '. "$ENV_FILE"' in text
+
+
+def test_wrapper_warns_when_the_claude_token_is_missing():
+    text = build_wrapper()
+
+    # The load-bearing failure mode: no keychain under launchd, so no token
+    # means every agent step dies. It must be called out, not silent.
+    assert 'if [ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]' in text
+    assert "claude setup-token" in text
+    # ...but a missing token warns, it does not abort the service.
+    assert "exit 1" not in text
+
+
+def test_wrapper_never_embeds_a_token():
+    text = build_wrapper()
+
+    for marker in ("sk-ant-", "ghp_", "gho_"):
+        assert marker not in text
 
 
 # --- plist -----------------------------------------------------------------
@@ -203,3 +237,186 @@ def test_load_refuses_to_bootstrap_over_a_stuck_job(monkeypatch):
 
     with pytest.raises(launchd.ServiceError, match="still loaded"):
         launchd.load(501, Path("/tmp/x.plist"), "com.harness")
+
+
+# --- kickstart ---------------------------------------------------------
+
+
+def test_kickstart_runs_the_launchctl_kickstart_verb(monkeypatch):
+    from harness.drivers import launchd
+
+    calls = []
+
+    def fake_launchctl(args, *, check=True):
+        calls.append(args)
+
+        class Result:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
+        return Result()
+
+    monkeypatch.setattr(launchd, "_launchctl", fake_launchctl)
+
+    launchd.kickstart(501, "com.harness")
+
+    assert calls == [["kickstart", "-k", "gui/501/com.harness"]]
+
+
+# --- interval parsing --------------------------------------------------
+
+
+def test_parse_interval_minutes_accepts_minutes_hours_days():
+    assert parse_interval_minutes("15m") == 900
+    assert parse_interval_minutes("2h") == 7200
+    assert parse_interval_minutes("1d") == 86400
+
+
+def test_parse_interval_minutes_accepts_one_minute_as_the_floor():
+    assert parse_interval_minutes("1m") == 60
+
+
+def test_parse_interval_minutes_is_case_insensitive_on_the_suffix():
+    assert parse_interval_minutes("15M") == 900
+    assert parse_interval_minutes("2H") == 7200
+
+
+def test_parse_interval_minutes_rejects_zero():
+    import pytest
+
+    with pytest.raises(ServiceError, match="at least 1m"):
+        parse_interval_minutes("0m")
+
+
+def test_parse_interval_minutes_rejects_seconds():
+    import pytest
+
+    with pytest.raises(ServiceError, match="expected <N>m, <N>h or <N>d"):
+        parse_interval_minutes("90s")
+
+
+def test_parse_interval_minutes_rejects_a_bare_integer():
+    import pytest
+
+    with pytest.raises(ServiceError, match="expected <N>m, <N>h or <N>d"):
+        parse_interval_minutes("90")
+
+
+def test_parse_interval_minutes_rejects_a_decimal():
+    import pytest
+
+    with pytest.raises(ServiceError, match="expected <N>m, <N>h or <N>d"):
+        parse_interval_minutes("1.5m")
+
+
+def test_parse_interval_minutes_rejects_a_negative_value():
+    import pytest
+
+    with pytest.raises(ServiceError, match="expected <N>m, <N>h or <N>d"):
+        parse_interval_minutes("-5m")
+
+
+def test_format_interval_is_the_inverse_of_parse_interval_minutes():
+    assert format_interval(60) == "every 1m"
+    assert format_interval(900) == "every 15m"
+    assert format_interval(3600) == "every 1h"
+    assert format_interval(86400) == "every 1d"
+
+
+def test_format_interval_falls_back_to_the_largest_exact_divisor():
+    # 90 minutes doesn't divide evenly into hours; minutes still round-trips.
+    assert format_interval(5400) == "every 90m"
+
+
+# --- autoupdate wrapper script ------------------------------------------
+
+
+def build_autoupdate_wrapper(**overrides) -> str:
+    kwargs = {
+        "harness": Path("/opt/app/.venv/bin/harness"),
+        "service_label": "com.harness",
+        "path_entries": ["/opt/app/.venv/bin", "/usr/bin"],
+    }
+    kwargs.update(overrides)
+    return autoupdate_wrapper_script(**kwargs)
+
+
+def test_autoupdate_wrapper_is_a_strict_bash_script():
+    text = build_autoupdate_wrapper()
+
+    assert text.startswith("#!/usr/bin/env bash")
+    assert "set -euo pipefail" in text
+
+
+def test_autoupdate_wrapper_execs_update_with_the_service_label():
+    text = build_autoupdate_wrapper()
+
+    assert 'exec "/opt/app/.venv/bin/harness" update --restart-service "com.harness"' in text
+
+
+def test_autoupdate_wrapper_exports_the_supplied_path():
+    text = build_autoupdate_wrapper(path_entries=["/a/bin", "/b/bin"])
+
+    assert 'export PATH="/a/bin:/b/bin"' in text
+
+
+def test_autoupdate_wrapper_carries_no_secret():
+    """Unlike the run wrapper, this one needs no GITHUB_TOKEN at all."""
+    text = build_autoupdate_wrapper()
+
+    assert "GITHUB_TOKEN" not in text
+
+
+# --- periodic plist ------------------------------------------------------
+
+
+def build_periodic_plist(**overrides) -> dict:
+    kwargs = {
+        "label": f"{DEFAULT_LABEL}.autoupdate",
+        "wrapper": Path("/home/rem/harness-root/harness-autoupdate.sh"),
+        "working_dir": Path("/home/rem/harness-root"),
+        "log_dir": Path("/home/rem/harness-root/logs"),
+        "home": Path("/home/rem"),
+        "start_interval_seconds": 900,
+    }
+    kwargs.update(overrides)
+    return plistlib.loads(periodic_plist_bytes(**kwargs))
+
+
+def test_periodic_plist_sets_the_start_interval():
+    definition = build_periodic_plist()
+
+    assert definition["StartInterval"] == 900
+
+
+def test_periodic_plist_has_no_keep_alive():
+    """KeepAlive and StartInterval are mutually exclusive launchd job kinds."""
+    definition = build_periodic_plist()
+
+    assert "KeepAlive" not in definition
+
+
+def test_periodic_plist_runs_at_load_to_catch_up_after_a_missed_window():
+    definition = build_periodic_plist()
+
+    assert definition["RunAtLoad"] is True
+
+
+def test_periodic_plist_sends_both_streams_to_the_autoupdate_log_files():
+    definition = build_periodic_plist()
+
+    assert (
+        definition["StandardOutPath"]
+        == "/home/rem/harness-root/logs/harness-autoupdate.log"
+    )
+    assert (
+        definition["StandardErrorPath"]
+        == "/home/rem/harness-root/logs/harness-autoupdate.error.log"
+    )
+
+
+def test_periodic_plist_carries_no_secret():
+    definition = build_periodic_plist()
+
+    assert "GITHUB_TOKEN" not in definition["EnvironmentVariables"]

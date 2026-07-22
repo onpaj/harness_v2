@@ -207,6 +207,27 @@ h3 {
 .badge.working { background: var(--working-bg); color: var(--working-fg); }
 .badge.failed { background: var(--failed-bg); color: var(--failed-fg); }
 
+/* --- Per-workflow tabs ----------------------------------------------------
+ * The board renders one panel per served workflow; when more than one exists
+ * a segmented tab strip switches between them (board.html toggles visibility
+ * via data-active-workflow). A single-workflow board emits no strip. */
+
+.board-wrap { display: flex; flex-direction: column; gap: 14px; }
+.tab-strip {
+  display: flex; gap: 4px; margin: 0 2px; padding: 4px;
+  background: var(--surface-2); border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  overflow-x: auto; -webkit-overflow-scrolling: touch; scrollbar-width: none;
+}
+.tab-strip::-webkit-scrollbar { display: none; }
+.tab-strip .tab {
+  flex: 1 0 auto; border: none; cursor: pointer; padding: 8px 16px; min-height: 40px;
+  font: inherit; font-size: 14px; font-weight: 600; white-space: nowrap;
+  color: var(--text-2); background: transparent; border-radius: var(--radius-pill);
+}
+.tab-strip .tab.active { color: var(--on-accent); background: var(--accent); }
+.workflow-panel { min-width: 0; }
+
 /* --- Task detail (full-screen sheet on phone, dialog on desktop) ---------- */
 
 dialog#detail {

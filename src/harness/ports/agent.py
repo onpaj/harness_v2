@@ -27,6 +27,7 @@ class AgentSpec:
     fallback_model: str | None = None
     allowed_tools: tuple[str, ...] = ()
     allowed_outcomes: tuple[Outcome, ...] = (Outcome.DONE,)
+    timeout: float | None = None
 
 
 @dataclass(frozen=True)
@@ -65,6 +66,10 @@ class AgentCatalog(ABC):
     @abstractmethod
     def get(self, name: str) -> AgentSpec:
         """Return the spec for the name, or raise `AgentNotFound`."""
+
+    @abstractmethod
+    def names(self) -> tuple[str, ...]:
+        """Every agent name discoverable without raising."""
 
 
 class AgentNotFound(Exception):
