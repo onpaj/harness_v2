@@ -1,3 +1,4 @@
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -211,6 +212,68 @@ def test_compose_prompt_mentions_task_artifacts_and_allowed_outcomes():
     assert ".artifacts/tsk_1/review-01.md" in prompt
     assert ".artifacts/tsk_1/" in prompt
     assert "done" in prompt and "request_changes" in prompt
+
+
+def _prompt_for(task: Task, *, spec: AgentSpec | None = None) -> str:
+    spec = spec or AgentSpec(name="development", prompt="you are a developer")
+    return compose_prompt(
+        task,
+        step="development",
+        artifact_relpath=ARTIFACT_01,
+        spec=spec,
+    )
+
+
+def test_compose_prompt_includes_issue_body_when_present():
+    task = replace(
+        make_task(),
+        data={"title": "add rate limiting", "body": "Repro: ...\nAC: ..."},
+    )
+
+    prompt = _prompt_for(task)
+
+    assert "add rate limiting" in prompt
+    assert "Repro: ...\nAC: ..." in prompt
+
+
+def test_compose_prompt_unchanged_when_body_absent():
+    with_body_absent = _prompt_for(make_task())
+
+    assert with_body_absent == (
+        "You are the agent for step 'development' of task tsk_1.\n"
+        "Task: add rate limiting\n"
+        "\n"
+        "You'll find the context from previous steps as files in the "
+        ".artifacts/tsk_1/ directory in your working directory — read them "
+        "before you start.\n"
+        "Write your output for this step to the file .artifacts/tsk_1/development-01.md.\n"
+        "\n"
+        "The harness reads your result by machine, not by eye. Your final "
+        "message MUST end with exactly this fenced verdict block and nothing "
+        "after it — not a prose summary, even once the artifact is written and "
+        "the tests pass. A missing block fails the task:\n"
+        "```json\n"
+        '{"outcome": "<one of: done>", "summary": "<short summary>"}\n'
+        "```"
+    )
+
+
+def test_compose_prompt_treats_whitespace_only_body_as_absent():
+    task = replace(
+        make_task(),
+        data={"request": "add rate limiting", "body": "   \n  "},
+    )
+
+    assert _prompt_for(task) == _prompt_for(make_task())
+
+
+def test_compose_prompt_does_not_duplicate_body_equal_to_request():
+    task = replace(
+        make_task(),
+        data={"request": "add rate limiting", "body": "add rate limiting"},
+    )
+
+    assert _prompt_for(task) == _prompt_for(make_task())
 
 
 def test_compose_prompt_demands_the_verdict_block_as_the_last_thing():
