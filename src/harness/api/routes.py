@@ -27,6 +27,7 @@ from harness.ports.board import DONE_COLUMN, FAILED_COLUMN, TODO_COLUMN, BoardVi
 from harness.ports.clock import Clock
 from harness.ports.control import TaskControl
 from harness.ports.logs import StageOutputView
+from harness.ports.updater import Updater, UpdateError
 from harness.ports.workflow_admin import WorkflowAdmin, WorkflowValidationError
 from harness.ports.workflows import WorkflowNotFound
 
@@ -315,6 +316,7 @@ def build_html_router(
     coalesce_seconds: float,
     agent_admin: AgentAdmin,
     workflow_admin: WorkflowAdmin,
+    updater: Updater,
     version: str,
     build_time: str | None,
 ) -> APIRouter:
@@ -361,6 +363,30 @@ def build_html_router(
         # The projection updated synchronously via the emitted event, so the
         # refreshed fragment shows the task now in `todo`. The board redraws via SSE.
         return _task_fragment(request, task_id)
+
+    # Sync `def`, so FastAPI runs it in a threadpool: the blocking `uv` upgrade
+    # never stalls the event loop the harness shares. A successful restart may
+    # kill this process before the response flushes (invariant: the button asked
+    # for exactly that) — the driver reports what it did so the common
+    # not-under-launchd path still returns a message.
+    @router.post("/admin/update", response_class=HTMLResponse)
+    def trigger_update(request: Request) -> HTMLResponse:
+        try:
+            result = updater.update()
+        except UpdateError as error:
+            return TEMPLATES.TemplateResponse(
+                request=request,
+                name="admin/_update_result.html",
+                context={"kind": "error", "message": str(error)},
+            )
+        return TEMPLATES.TemplateResponse(
+            request=request,
+            name="admin/_update_result.html",
+            context={
+                "kind": "ok" if result.changed else "muted",
+                "message": result.detail,
+            },
+        )
 
     @router.get("/api/events")
     async def events() -> StreamingResponse:

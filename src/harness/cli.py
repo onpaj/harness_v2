@@ -38,6 +38,7 @@ from harness.drivers.github_issue_checker import GithubIssueChecker
 from harness.drivers.github_merge_checker import GithubMergeChecker
 from harness.drivers.github_source import GithubTaskSource
 from harness.drivers.mergeability_watcher import GithubMergeabilityWatcher
+from harness.drivers.uv_updater import UvUpdater
 from harness.drivers.launchd import (
     DEFAULT_LABEL,
     ServiceError,
@@ -1400,6 +1401,14 @@ async def serve(
         await loop
         return
 
+    root = harness.layout.root
+    updater = UvUpdater(
+        package=PACKAGE_NAME,
+        entry_point=service_entry_point(),
+        uid=os.getuid(),
+        label=DEFAULT_LABEL,
+        is_stage_active=lambda: active_stages(root),
+    )
     app = create_app(
         view=harness.projection,
         artifacts=harness.artifacts,
@@ -1408,6 +1417,7 @@ async def serve(
         clock=SystemClock(),
         agent_admin=FilesystemAgentAdmin(harness.layout.agents),
         workflow_admin=FilesystemWorkflowAdmin(harness.layout.workflows),
+        updater=updater,
         version=version_string(),
         build_time=build_timestamp(),
     )

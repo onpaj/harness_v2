@@ -10,6 +10,17 @@
     <a href="{{ item.href }}" data-section="{{ item.section }}">{{ item.label }}</a>
     {% endfor %}
   </nav>
+  <span class="appbar__actions">
+    <button type="button"
+            class="btn small"
+            hx-post="/admin/update"
+            hx-target="#update-result"
+            hx-swap="innerHTML"
+            hx-confirm="Upgrade the harness now and restart the service? A running stage defers the restart.">
+      Update
+    </button>
+    <span id="update-result"></span>
+  </span>
 </header>
 <nav class="tabbar" aria-label="Primary">
   {% for item in nav_items %}

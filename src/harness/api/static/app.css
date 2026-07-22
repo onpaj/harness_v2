@@ -111,6 +111,11 @@ h3 {
   font-size: 14px; font-weight: 500;
 }
 .appbar__links a.active { background: var(--accent-weak); color: var(--accent); }
+.appbar__actions {
+  margin-left: auto; display: inline-flex; align-items: center; gap: 8px; min-width: 0;
+}
+.appbar__actions .btn { min-height: 36px; padding: 6px 14px; }
+.appbar__actions #update-result { color: var(--text-3); font-size: 12px; }
 
 .tabbar {
   position: fixed; left: 0; right: 0; bottom: 0; z-index: 40;
