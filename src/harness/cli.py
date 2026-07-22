@@ -656,22 +656,44 @@ def _process_sources(
     *,
     clock: Clock,
     known_targets: set[str] | None,
+    client: GithubClient | None = None,
 ) -> list[TaskSource]:
     """Processes declared under `<root>/processes/*.json`.
 
-    A Process is the top-level authoring aggregate (trigger × action × target ×
-    sink); `FilesystemProcessRepository` compiles each into a `ScheduledTrigger`
-    — a `TaskSource` that produces tasks on a clock gate and reflects nothing
-    outward — appended to the run's existing `sources` list, exactly like a raw
-    `triggers/*.json` (`_scheduled_sources`). A missing/empty `processes/` yields
-    `[]`, so the harness runs exactly as before. `known_targets` (served workflow
-    names ∪ known steps) lets the repository reject an unknown target up front."""
-    from harness.drivers.fs_processes import FilesystemProcessRepository
+    Compiles each into a `ScheduledTrigger` (see `_scheduled_sources`), and
+    additionally registers the `github-issues` action: a `GithubIssuesCheck`
+    closed over a `GithubClient` + the repo registry. The client comes from the
+    caller (tests) or `GITHUB_TOKEN`. `BUILTIN_CHECKS` stays client-free; the
+    github-issues factory is added only here at wiring time. A `github-issues`
+    process without a client fails fast at build (`ProcessValidationError`)."""
+    from harness.drivers.checks import BUILTIN_CHECKS
+    from harness.drivers.fs_processes import (
+        FilesystemProcessRepository,
+        ProcessValidationError,
+    )
+    from harness.drivers.github_issues_check import GithubIssuesCheck
 
+    if client is None:
+        token = os.environ.get("GITHUB_TOKEN")
+        client = HttpGithubClient(token) if token else None
+
+    def github_issues_factory(params: dict) -> GithubIssuesCheck:
+        if client is None:
+            raise ProcessValidationError(
+                "github-issues action requires GITHUB_TOKEN", field="check"
+            )
+        return GithubIssuesCheck(
+            client=client,
+            registry=registry,
+            label=params.get("label", args.github_label),
+        )
+
+    checks = {**BUILTIN_CHECKS, "github-issues": github_issues_factory}
     repo = FilesystemProcessRepository(root / "processes")
     worktree_root = args.worktree_root or str(root / "worktrees")
     return repo.build(
         clock=clock,
+        checks=checks,
         repository=None,
         worktree_root=worktree_root,
         known_targets=known_targets,
@@ -1363,7 +1385,8 @@ def _run(args: argparse.Namespace) -> int:
     artifact_view = WorktreeArtifactView(layout.worktrees)
     forge = _build_forge(args.forge, root, registry)
     mergeability = _mergeability_sources(args, root, registry) if args.watch_mergeability else []
-    sources = _github_sources(args, root, registry) + mergeability
+    github = [] if args.no_github_source else _github_sources(args, root, registry)
+    sources = github + mergeability
     merge_checker = _build_merge_checker(args)
     issue_checker = _build_issue_checker(args)
     # The resolver workflow rides alongside the primary one so its tasks (queued
@@ -1603,6 +1626,13 @@ def main(argv: list[str] | None = None) -> int:
         "--github-label",
         default="harness:todo",
         help="label that selects issues to ingest",
+    )
+    run.add_argument(
+        "--no-github-source",
+        action="store_true",
+        dest="no_github_source",
+        help="skip the built-in GithubTaskSource ingestion (use when a "
+        "github-issues process owns it) — avoids double-claiming the same issue",
     )
     github_target = run.add_mutually_exclusive_group()
     github_target.add_argument(
