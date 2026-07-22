@@ -1,6 +1,128 @@
 # CHANGELOG
 
 
+## v0.10.0 (2026-07-22)
+
+### Documentation
+
+- Add generic triggers design spec and ADR-0014 ([#57](https://github.com/onpaj/harness_v2/pull/57),
+  [`2f7b6a6`](https://github.com/onpaj/harness_v2/commit/2f7b6a69b9fa9b111f14c61af9ad2b3ddbdcdf55))
+
+* docs: add generic triggers design spec and ADR-0013
+
+Design a generic trigger mechanism for schedule- and condition-driven task creation, on top of the
+  existing TaskSource port.
+
+- Spec: 2026-07-22-generic-triggers-design.md — a Trigger is a TaskSource that produces tasks and
+  reflects nothing outward; ScheduledTrigger composes interval x check x target; cadence is gated on
+  the Clock; dedup is bucket-keyed for at-most-once per interval across restarts; triggers declared
+  as data in triggers/*.json with a named check registry. - ADR-0013: triggers produce tasks, never
+  queue placements — the dispatcher stays the sole placement authority (invariants #3/#8), and "any
+  queue" is a workflow-less task naming a step.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+
+Claude-Session: https://claude.ai/code/session_01UDvCSno7r1B5tLSF5HHzi6
+
+* docs: add generic triggers implementation plan
+
+TDD task-by-task plan for the generic triggers spec: Trigger base, Check port + interval parsing,
+  ScheduledTrigger, built-in checks, FilesystemTriggerRepository, wiring + e2e, and
+  architecture/docs. Seven tasks with a dependency graph and implementation notes; no new production
+  dependency, no build() signature change, no new run loop.
+
+* feat: Trigger base — a TaskSource with no outward projection
+
+Add Trigger(TaskSource) with concrete no-op report_progress/finish and an inherited abstract poll();
+  a schedule- or condition-trigger implements only poll() and is listed-and-ignored by
+  SourceReflectorSink (it stamps no matching data.source). Implements invariant #35.
+
+* feat: Check port, Observation, interval parsing
+
+Add ports/triggers.py: Observation (state_key + data), the Check ABC (evaluate ->
+  list[Observation]), the CheckFactory alias, and parse_interval for "s"/"m"/"h" durations. Pure
+  port — no driver imports.
+
+* feat: built-in trigger checks (always, disk-threshold)
+
+AlwaysCheck fires one empty observation per interval; DiskThresholdCheck fires when used/total
+  crosses a percent (injectable usage reader, guards total==0). BUILTIN_CHECKS maps the names to
+  CheckFactory callables.
+
+* feat: ScheduledTrigger — interval x check x target
+
+A Trigger that fires a Check on a clock-gated interval bucket and emits one task per Observation,
+  targeting a workflow or a single step. dedup_key is bucket-keyed (per-interval) or state-keyed
+  (per-state) for at-most-once ingestion across restarts. Stamps no data.source. Implements
+  invariants #34/#36/#37.
+
+* feat: FilesystemTriggerRepository — triggers/*.json
+
+Reads triggers/*.json and builds one ScheduledTrigger per file, failing fast (TriggerValidationError
+  naming the file) on a bad kind/interval/check/ target/dedup, or a target outside a supplied
+  known_targets set. Missing directory yields an empty list.
+
+* feat: wire scheduled triggers; harness init writes triggers/
+
+_run reads triggers/*.json via FilesystemTriggerRepository and appends the ScheduledTriggers to the
+  existing sources list — no build() parameter and no new run loop, since a Trigger is a TaskSource.
+  known_targets (served workflow names, their steps, and catalog agents) lets the repository reject
+  a misnamed target at startup. harness init now creates triggers/. Missing triggers/ keeps
+  behaviour identical to before.
+
+* docs+test: architecture guards and CLAUDE.md for generic triggers
+
+Add test_orchestration_does_not_import_triggers_port and
+  test_scheduled_trigger_imports_only_ports_models_and_ids. Document the feature in CLAUDE.md:
+  invariants 34-37, module-map rows and bullets for ports/triggers and
+  drivers/{scheduled_trigger,checks,fs_triggers}, a responsibilities note, and a gotcha on the
+  non-constant bucket-keyed dedup_key and the at-most-once-per-interval limitation.
+
+* feat: retire dashboard tasks whose GitHub issue was closed or deleted (#58)
+
+* fix: update Board.columns access to per-workflow tabs (#62)
+
+PR #48 refactored Board from a flat `columns` tuple into `workflows` (a tuple of BoardTab, each
+  carrying its own columns), but three call sites still read the old flat `.columns`:
+
+- `_new_step_warnings` in api/routes.py raised AttributeError on every workflow-admin PUT /
+  create-form request, taking CI red. - the client fixtures in test_api_agents.py and
+  test_api_workflows.py built a Board with the removed `columns=` kwarg (TypeError at setup).
+
+Collect known step names across every tab's columns and rebuild the test boards through BoardTab.
+
+Co-authored-by: ci <ci@local>
+
+* feat(docs): interactive Architecture Explorer documentation site (#63)
+
+* chore(release): 0.9.0
+
+[skip ci]
+
+* Add a CI gate that runs the full test suite on every pull request and blocks merge unless all
+  tests pass (#60)
+
+* fix: give the resolver's git merge an identity and reconcile its branch on reattach (#61)
+
+* chore(release): 0.9.1
+
+* Add a 'healer' workflow: a new failed-queue TaskSource polls failed/ for default-workflow failures
+  and enqueues a deduped healer task that diagnoses the failure and, on a confirmed harness bug,
+  auto-files a GitHub issue via a new Forge.open_issue verb (#55)
+
+---------
+
+Co-authored-by: Claude <noreply@anthropic.com>
+
+Co-authored-by: semantic-release <semantic-release>
+
+### Features
+
+- Add a board Update button that upgrades the harness and restarts
+  ([#67](https://github.com/onpaj/harness_v2/pull/67),
+  [`cd8a67e`](https://github.com/onpaj/harness_v2/commit/cd8a67eb522df6c2b416bdb4c5cd4ddcefafd725))
+
+
 ## v0.9.1 (2026-07-22)
 
 ### Bug Fixes
