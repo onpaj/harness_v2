@@ -1,6 +1,21 @@
 # CHANGELOG
 
 
+## v0.12.0 (2026-07-22)
+
+### Documentation
+
+- Spec, plan and ADR-0015 for the Process authoring aggregate
+  ([#77](https://github.com/onpaj/harness_v2/pull/77),
+  [`ebaa9b5`](https://github.com/onpaj/harness_v2/commit/ebaa9b500f54eee11df2059ce230070054e9acd4))
+
+### Features
+
+- Structured board editor for processes (ProcessAdmin UI)
+  ([#78](https://github.com/onpaj/harness_v2/pull/78),
+  [`a550521`](https://github.com/onpaj/harness_v2/commit/a5505212d049dc9eb9099748be2852ce93430dfa))
+
+
 ## v0.11.0 (2026-07-22)
 
 ### Features
