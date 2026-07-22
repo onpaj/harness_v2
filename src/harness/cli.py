@@ -184,8 +184,10 @@ def _init(args: argparse.Namespace) -> int:
 # artifacts of previous steps, where to write output, and how to close with a
 # verdict block is supplied at runtime by `compose_prompt`, so we don't repeat
 # it here. The persona is data (invariant 14): a step → (prompt, tools) map, not
-# a branch in code. We leave the model at `null` — it's per queue (invariant),
-# and the operator tunes the default in `agents/<step>.json`.
+# a branch in code. The model is per queue (invariant): each step gets the tier
+# its v1 persona ran on (see `AGENT_MODELS`), written as an alias so it tracks
+# the latest of that tier; the operator can still pin an exact id in
+# `agents/<step>.json`.
 #
 #   plan          ← v1 analyst + planner (first step: brief → spec + rough plan)
 #   design        ← v1 designer
@@ -381,6 +383,32 @@ AGENT_PERSONAS: dict[str, tuple[str, list[str]]] = {
 }
 
 
+# Step → model tier, carried over from the v1 personas (repo onpaj/harness,
+# agentharness/data/agents/). v1 pinned exact ids per persona; we keep the same
+# tier per step but write it as a CLI alias so it resolves to the latest of that
+# tier and doesn't rot to a retired version:
+#   plan          ← analyst + planner (opus)
+#   design        ← designer (sonnet)
+#   architecture  ← architect (opus)
+#   development    ← developer (sonnet)
+#   review        ← code-reviewer, the full-diff reviewer (sonnet)
+#   resolve       ← developer-class conflict fix (sonnet)
+# A step with no entry keeps `model = null` (the CLI's configured default).
+AGENT_MODELS: dict[str, str] = {
+    "plan": "opus",
+    "design": "sonnet",
+    "architecture": "opus",
+    "development": "sonnet",
+    "review": "sonnet",
+    "resolve": "sonnet",
+}
+
+
+def _agent_model(step: str) -> str | None:
+    """Default model tier for the step; an unknown step gets none (`null`)."""
+    return AGENT_MODELS.get(step)
+
+
 def _agent_persona(step: str) -> str:
     """Step persona. Known steps have a persona carried over from v1; an unknown
     step gets a generic instruction (the rest of the boilerplate is supplied by
@@ -420,7 +448,7 @@ def _write_default_agents(layout: HarnessLayout, workflow) -> None:
             continue
         definition = {
             "prompt": _agent_persona(step),
-            "model": None,
+            "model": _agent_model(step),
             "fallback_model": None,
             "allowed_tools": _agent_tools(step),
             "allowed_outcomes": _allowed_outcomes_for(workflow, step),
@@ -441,7 +469,8 @@ def _write_healer_agent(layout: HarnessLayout) -> None:
         return
     definition = {
         "prompt": _HEALER_PERSONA,
-        "model": None,
+        # Diagnosis is conservative-judgment work (v1's analyst/architect tier).
+        "model": "opus",
         "fallback_model": None,
         "allowed_tools": ["Read", "Write"],
         "allowed_outcomes": ["done", "request_changes"],
