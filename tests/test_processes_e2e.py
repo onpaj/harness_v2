@@ -185,3 +185,61 @@ async def test_no_processes_behaves_as_before(tmp_path):
         json.loads((tmp_path / "done" / "tsk_plain.json").read_text())
     )
     assert finished.status == "end"
+
+
+def test_github_issues_process_ingests_a_labelled_issue_once_per_bucket(tmp_path):
+    from pathlib import Path
+
+    from harness.cli import _process_sources
+    from harness.drivers.github_client import FakeGithubClient, Issue
+    from harness.drivers.memory import FakeClock, MemoryRepositoryRegistry
+
+    (tmp_path / "processes").mkdir()
+    (tmp_path / "processes" / "harness-todo.json").write_text(
+        '{"trigger": {"interval": "30s"},'
+        ' "action": {"check": "github-issues", "params": {"label": "harness:todo"}},'
+        ' "target": {"workflow": "default"}, "dedup": "per-state",'
+        ' "sink": {"kind": "none"}}'
+    )
+    client = FakeGithubClient(
+        [Issue(42, "Do the thing", "body", "https://gh/i/42", ("harness:todo",))]
+    )
+    registry = MemoryRepositoryRegistry({"heblo": Path("/repos/heblo")})
+    slugs = {Path("/repos/heblo"): "onpaj/Anela.Heblo"}
+    clock = FakeClock("2026-07-22T10:00:00Z")
+
+    import argparse
+
+    args = argparse.Namespace(worktree_root=None, github_label="harness:todo")
+    # Inject the slug resolver via a subclassed check factory path: pass a client
+    # and rely on the registry; slug resolution uses git origin in production, so
+    # monkeypatch github_slug for the test.
+    import harness.drivers.github_issues_check as mod
+
+    orig = mod.github_slug
+    mod.github_slug = slugs.get  # type: ignore[assignment]
+    try:
+        (source,) = _process_sources(
+            args, tmp_path, registry,
+            clock=clock, known_targets={"default"}, client=client,
+        )
+
+        first = source.poll()
+        assert len(first) == 1
+        task = first[0]
+        assert task.workflow_template == "default"
+        assert task.repository == "heblo"
+        assert task.data["source"] == {
+            "kind": "github", "repo": "onpaj/Anela.Heblo",
+            "issue": 42, "url": "https://gh/i/42",
+        }
+
+        # Same 30s bucket → no re-fire.
+        clock.instant = "2026-07-22T10:00:20Z"
+        assert source.poll() == []
+
+        # The issue was claimed (label swapped) → next bucket sees nothing new.
+        clock.instant = "2026-07-22T10:01:00Z"
+        assert source.poll() == []
+    finally:
+        mod.github_slug = orig  # type: ignore[assignment]
