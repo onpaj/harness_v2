@@ -181,3 +181,13 @@ def test_embedded_model_json_parses_and_matches_model(tmp_path: Path):
     from harness_docs_site.architecture import MODEL
 
     assert [p["id"] for p in data["parts"]] == [p.id for p in MODEL.parts]
+
+
+def test_app_css_defines_theme_and_kind_colours(tmp_path: Path):
+    _write_fixture_tree(tmp_path)
+    build_site(discover_docs(tmp_path), tmp_path, tmp_path / "site")
+    css = (tmp_path / "site" / "assets" / "app.css").read_text(encoding="utf-8")
+    assert '[data-theme="light"]' in css
+    assert "prefers-reduced-motion" in css
+    for kind in ("port", "driver", "core", "ui", "store"):
+        assert f"--kind-{kind}" in css
