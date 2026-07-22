@@ -39,7 +39,7 @@ class GithubIssuesCheck(Check):
         self._slug_of = slug_of or github_slug
         self._label = label
         self._claimed_label = claimed_label
-        # In-process ledger of already-claimed issue numbers — the label
+        # In-process ledger of already-claimed (slug, number) pairs — the label
         # swap gives at-most-once across restarts, but `list_issues` reads with
         # read-after-write lag, so a fast re-evaluate can still see the issue
         # under the select label. This cuts that off within the process.

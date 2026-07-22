@@ -188,11 +188,9 @@ async def test_no_processes_behaves_as_before(tmp_path):
 
 
 def test_github_issues_process_ingests_a_labelled_issue_once_per_bucket(tmp_path):
-    from pathlib import Path
-
     from harness.cli import _process_sources
     from harness.drivers.github_client import FakeGithubClient, Issue
-    from harness.drivers.memory import FakeClock, MemoryRepositoryRegistry
+    from harness.drivers.memory import MemoryRepositoryRegistry
 
     (tmp_path / "processes").mkdir()
     (tmp_path / "processes" / "harness-todo.json").write_text(
