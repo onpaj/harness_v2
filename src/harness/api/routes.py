@@ -69,12 +69,21 @@ async def stage_output_stream(
     yield "event: end\ndata: \n\n"
 
 
-def build_json_router(view: BoardView, artifacts: ArtifactView) -> APIRouter:
+def build_json_router(
+    view: BoardView,
+    artifacts: ArtifactView,
+    version: str,
+    build_time: str | None,
+) -> APIRouter:
     router = APIRouter(prefix="/api")
 
     @router.get("/board")
     def board() -> dict:
         return view.snapshot().to_dict()
+
+    @router.get("/version")
+    def version_info() -> dict:
+        return {"version": version, "build_time": build_time}
 
     @router.get("/tasks/{task_id}")
     def task(task_id: str) -> dict:
@@ -109,6 +118,8 @@ def build_html_router(
     control: TaskControl,
     clock: Clock,
     coalesce_seconds: float,
+    version: str,
+    build_time: str | None,
 ) -> APIRouter:
     router = APIRouter()
 
@@ -125,7 +136,13 @@ def build_html_router(
     @router.get("/", response_class=HTMLResponse)
     def index(request: Request) -> HTMLResponse:
         return TEMPLATES.TemplateResponse(
-            request=request, name="board.html", context={"board": view.snapshot()}
+            request=request,
+            name="board.html",
+            context={
+                "board": view.snapshot(),
+                "version": version,
+                "build_time": build_time,
+            },
         )
 
     @router.get("/fragment/board", response_class=HTMLResponse)

@@ -42,6 +42,21 @@ class PullRequestDetail:
     merged: bool
 
 
+@dataclass(frozen=True)
+class PullRequestInfo:
+    """A pull request as the mergeability watcher sees it — distinct from
+    `PullRequestRef` (owned by the forge's find/create pair, which has no
+    `mergeable_state`): this answers "is this PR ours, and does it need
+    action", not "does a PR already exist for this branch"."""
+
+    number: int
+    url: str
+    head_branch: str
+    head_sha: str
+    base_branch: str
+    mergeable_state: str  # "behind" | "dirty" | "clean" | "blocked" | "unstable" | "unknown"
+
+
 class GithubClient(ABC):
     """The minimal GitHub API the connector needs."""
 
@@ -75,6 +90,39 @@ class GithubClient(ABC):
     def get_pull_request(self, repo: str, number: int) -> PullRequestDetail:
         """The PR's current state, including whether it has been merged."""
 
+    @abstractmethod
+    def list_pull_requests(
+        self, repo: str, *, head_prefix: str | None = None
+    ) -> list[PullRequestInfo]:
+        """Open PRs, optionally restricted to a head-branch prefix."""
+
+    @abstractmethod
+    def update_branch(self, repo: str, number: int) -> None:
+        """Merge base into head server-side (GitHub's "Update branch" button).
+
+        Idempotent: a PR that is already up to date / not behind is a no-op,
+        not a failure — safe to call every tick.
+        """
+
+    @abstractmethod
+    def create_issue(
+        self, repo: str, *, title: str, body: str, labels: tuple[str, ...]
+    ) -> Issue:
+        """Open a fresh issue on `repo`."""
+
+    @abstractmethod
+    def search_issue_by_marker(self, repo: str, marker: str) -> Issue | None:
+        """The open self-heal issue whose body carries `marker`, or None.
+
+        Used to keep issue creation idempotent without the Search API — it scans
+        the `harness:self-heal`-labelled open issues and matches the marker in
+        the body.
+        """
+
+
+SELF_HEAL_LABEL = "harness:self-heal"
+"""Label every healer-opened issue carries — also the scope of the marker search."""
+
 
 class FakeGithubClient(GithubClient):
     """Issues in a dict. For unit/e2e and smoke — no network."""
@@ -87,6 +135,11 @@ class FakeGithubClient(GithubClient):
         self.pulls: list[PullRequestRef] = []
         self.created: list[dict] = []
         self.merged: set[int] = set()
+        # Separate store from `pulls`: `PullRequestInfo` answers "is this PR
+        # ours, does it need action" (mergeable_state), a different question
+        # from `pulls`' "does a PR already exist for this branch".
+        self._pull_requests: dict[int, PullRequestInfo] = {}
+        self.updated_branches: list[tuple[str, int]] = []
 
     def add_issue(self, issue: Issue) -> None:
         self._issues[issue.number] = issue
@@ -142,6 +195,46 @@ class FakeGithubClient(GithubClient):
                     number=pull.number, url=pull.url, merged=number in self.merged
                 )
         raise KeyError(f"no such pull request: {repo}#{number}")
+
+    def add_pull_request(self, info: PullRequestInfo) -> None:
+        """Test helper: register a PR the watcher will see via `list_pull_requests`."""
+        self._pull_requests[info.number] = info
+
+    def list_pull_requests(
+        self, repo: str, *, head_prefix: str | None = None
+    ) -> list[PullRequestInfo]:
+        infos = self._pull_requests.values()
+        if head_prefix is not None:
+            infos = (i for i in infos if i.head_branch.startswith(head_prefix))
+        return list(infos)
+
+    def update_branch(self, repo: str, number: int) -> None:
+        self.updated_branches.append((repo, number))
+        # Simulate a successful server-side update so e2e tests can drive both
+        # branches (behind → clean) without touching real git.
+        info = self._pull_requests.get(number)
+        if info is not None:
+            self._pull_requests[number] = replace(info, mergeable_state="clean")
+
+    def create_issue(
+        self, repo: str, *, title: str, body: str, labels: tuple[str, ...]
+    ) -> Issue:
+        number = (max(self._issues) if self._issues else 0) + 1
+        issue = Issue(
+            number=number,
+            title=title,
+            body=body,
+            url=f"https://github.com/{repo}/issues/{number}",
+            labels=tuple(labels),
+        )
+        self._issues[number] = issue
+        return issue
+
+    def search_issue_by_marker(self, repo: str, marker: str) -> Issue | None:
+        for issue in self.list_issues(repo, label=SELF_HEAL_LABEL):
+            if marker in issue.body:
+                return issue
+        return None
 
 
 class HttpGithubClient(GithubClient):
@@ -276,3 +369,83 @@ class HttpGithubClient(GithubClient):
             url=item.get("html_url", ""),
             merged=bool(item.get("merged")),
         )
+
+    def list_pull_requests(
+        self, repo: str, *, head_prefix: str | None = None
+    ) -> list[PullRequestInfo]:
+        # `GET .../pulls` does not return `mergeable_state` — that field is only
+        # computed and returned by the single-PR endpoint. So this is two-tier:
+        # one cheap list call, then one detail call per matching PR only.
+        query = urllib.parse.urlencode({"state": "open"})
+        url = f"{self._api}/repos/{repo}/pulls?{query}"
+        request = urllib.request.Request(url, headers=self._headers(), method="GET")
+        with self._opener.open(request) as response:
+            raw = json.loads(response.read())
+
+        matching = []
+        for item in raw:
+            head = item.get("head") or {}
+            branch = head.get("ref", "")
+            if head_prefix is not None and not branch.startswith(head_prefix):
+                continue
+            matching.append((item["number"], branch, item))
+
+        infos: list[PullRequestInfo] = []
+        for number, branch, item in matching:
+            detail_url = f"{self._api}/repos/{repo}/pulls/{number}"
+            detail_request = urllib.request.Request(
+                detail_url, headers=self._headers(), method="GET"
+            )
+            with self._opener.open(detail_request) as response:
+                detail = json.loads(response.read())
+            base = item.get("base") or detail.get("base") or {}
+            head_detail = detail.get("head") or item.get("head") or {}
+            infos.append(
+                PullRequestInfo(
+                    number=number,
+                    url=item.get("html_url", ""),
+                    head_branch=branch,
+                    head_sha=head_detail.get("sha", ""),
+                    base_branch=base.get("ref", ""),
+                    mergeable_state=detail.get("mergeable_state") or "unknown",
+                )
+            )
+        return infos
+
+    def update_branch(self, repo: str, number: int) -> None:
+        url = f"{self._api}/repos/{repo}/pulls/{number}/update-branch"
+        request = urllib.request.Request(
+            url, data=b"{}", headers=self._json_headers(), method="PUT"
+        )
+        try:
+            self._opener.open(request)
+        except urllib.error.HTTPError as error:
+            if error.code == 422:  # not behind / already up to date
+                return
+            raise
+
+    def create_issue(
+        self, repo: str, *, title: str, body: str, labels: tuple[str, ...]
+    ) -> Issue:
+        url = f"{self._api}/repos/{repo}/issues"
+        payload = json.dumps(
+            {"title": title, "body": body, "labels": list(labels)}
+        ).encode("utf-8")
+        request = urllib.request.Request(
+            url, data=payload, headers=self._json_headers(), method="POST"
+        )
+        with self._opener.open(request) as response:
+            item = json.loads(response.read())
+        return Issue(
+            number=item["number"],
+            title=item.get("title", title),
+            body=item.get("body") or body,
+            url=item.get("html_url", ""),
+            labels=tuple(l["name"] for l in item.get("labels", [])),
+        )
+
+    def search_issue_by_marker(self, repo: str, marker: str) -> Issue | None:
+        for issue in self.list_issues(repo, label=SELF_HEAL_LABEL):
+            if marker in issue.body:
+                return issue
+        return None

@@ -77,12 +77,12 @@ async def test_landed_task_is_archived_once_its_pr_is_merged(tmp_path):
     assert len(done_files) == 1
     landed = Task.from_dict(json.loads(done_files[0].read_text()))
     repo, number = landed.data["pr"]["repo"], landed.data["pr"]["number"]
-    assert harness.projection.snapshot().column(DONE_COLUMN).tasks[0].id == "tsk_1"
+    assert harness.projection.snapshot().workflow("default").column(DONE_COLUMN).tasks[0].id == "tsk_1"
 
     # The merge check has nothing to report yet — PR still open.
     await drive_until_quiet(harness)
     assert (tmp_path / "done" / "tsk_1.json").exists()
-    assert harness.projection.snapshot().column(DONE_COLUMN).tasks[0].id == "tsk_1"
+    assert harness.projection.snapshot().workflow("default").column(DONE_COLUMN).tasks[0].id == "tsk_1"
 
     # Merge on GitHub (the fake), then reconcile.
     checker.merged.add((repo, number))
@@ -97,7 +97,12 @@ async def test_landed_task_is_archived_once_its_pr_is_merged(tmp_path):
 
     # Off the board, but still fetchable by id with full history and data.pr.
     board = harness.projection.snapshot()
-    assert all(task.id != "tsk_1" for column in board.columns for task in column.tasks)
+    assert all(
+        task.id != "tsk_1"
+        for tab in board.workflows
+        for column in tab.columns
+        for task in column.tasks
+    )
     fetched = harness.projection.get("tsk_1")
     assert fetched is not None
     assert fetched.data["pr"]["repo"] == repo
