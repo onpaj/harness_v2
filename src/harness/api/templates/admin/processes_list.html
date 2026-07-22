@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#f8f8fa" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#141416" media="(prefers-color-scheme: dark)">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <title>harness board — processes</title>
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+  {% include "_nav.html" %}
+  <main class="page">
+    <div class="page-header">
+      <h1>Processes</h1>
+      <a class="btn small primary page-header__action" href="/admin/processes/new">+ New process</a>
+    </div>
+    {% if names %}
+    <div class="table-scroll">
+      <table>
+        {% for name in names %}
+        <tr><td><a href="/admin/processes/{{ name }}">{{ name }}</a></td></tr>
+        {% endfor %}
+      </table>
+    </div>
+    {% else %}
+    <p class="hint">No processes defined yet.</p>
+    {% endif %}
+  </main>
+</body>
+</html>
