@@ -270,3 +270,24 @@ def test_non_none_sink_raises_naming_the_file(tmp_path: Path) -> None:
     with pytest.raises(ProcessValidationError) as excinfo:
         _build(tmp_path)
     assert "slack-sink" in str(excinfo.value)
+
+
+def test_disk_threshold_missing_params_raises_process_error_not_keyerror(
+    tmp_path: Path,
+) -> None:
+    # The `disk-threshold` factory reads `params["path"]`; a file missing it used
+    # to surface a raw KeyError from the factory. `compile_process` now wraps the
+    # factory call, so the build fails as a ProcessValidationError naming the file.
+    _write(
+        tmp_path,
+        "no-params",
+        {
+            "trigger": {"interval": "1h"},
+            "action": {"check": "disk-threshold"},
+            "target": {"step": "cleanup"},
+        },
+    )
+
+    with pytest.raises(ProcessValidationError) as excinfo:
+        _build(tmp_path)
+    assert "no-params" in str(excinfo.value)
