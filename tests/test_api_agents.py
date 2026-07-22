@@ -17,7 +17,7 @@ def admin(tmp_path):
 
 @pytest.fixture
 def client(admin):
-    view = FakeBoardView(Board(revision=1, columns=()))
+    view = FakeBoardView(Board(revision=1, workflows=()))
     return TestClient(create_app(view=view, clock=FakeClock(), agent_admin=admin))
 
 
