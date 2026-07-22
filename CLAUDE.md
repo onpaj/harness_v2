@@ -70,6 +70,7 @@ swapped out later.
 31. **The branch-override's reused local ref is untrusted until reconciled with `origin`.** The shared `refs/heads/<branch>` only tracks `origin/<branch>` while every advance of the branch goes through a local commit+push in *some* worktree — `GithubMergeabilityWatcher.update_branch` breaks that by advancing the branch server-side with no local git touch at all. So immediately after the `--force`d `worktree add` in the reuse path, `GitWorkspace.attach` hard-resets the *new* worktree to `origin/<branch>`'s fetched tip before returning the handle. That reset targets the branch as checked out in the new worktree, not "elsewhere," so it isn't blocked by the guard invariant 30 relies on. Don't drop this reset — without it, a `behind`→`update_branch`→`dirty`→resolver sequence on the same PR leaves the resolver's worktree stale and its final `push` fails as non-fast-forward.
 32. **`MergeChecker` is touched only by `MergeReconciler` (core) and wiring.** `dispatcher.py`/`consumer.py` don't import `ports.merge` — guarded by `test_architecture.py`, mirroring invariant 20's shape for `TaskSource`.
 33. **`AgentAdmin`/`WorkflowAdmin` are unknown to the dispatcher and consumer.** They are UI-facing admin ports, not orchestration ports — like `BoardView`/`TaskControl`, not like `AgentCatalog`/`WorkflowRepository`. `api/` touches only the two admin ports; the filesystem drivers (`FilesystemAgentAdmin`, `FilesystemWorkflowAdmin`) are wired exclusively in `cli.py`'s `serve()`. Guarded by `test_architecture.py`'s existing glob-based checks (no dedicated test needed).
+34. **`IssueChecker` is touched only by `IssueReconciler` (core) and wiring.** `dispatcher.py`/`consumer.py` don't import `ports.issue_state` — guarded by `test_architecture.py`, mirroring invariant 32's shape for `MergeChecker`. The reconciler retires a stale task the same way merge/PR resolution already does — into `archived/` (invariant 24's terminal-queue shape, off every board column but gettable by id) — so "remove from the dashboard" adds no new board mechanism. See ADR-0013.
 
 ## Working here
 
@@ -119,10 +120,10 @@ Dependencies flow strictly downward, no cycles.
 | Base | `models` (imports nothing from the package), `ids` |
 | Logic | `router` (knows only `models`) |
 | Base (package-free) | `models`, `ids`, `artifacts_layout` (the `.artifacts/<id>/<step>-NN` convention) |
-| Ports | `ports/{queue,workflows,strategy,behavior,events,clock,workspace,artifacts,forge,board,agent,repos,source,control,logs,issues,merge}` |
-| Orchestration | `dispatcher`, `consumer`, `source_poller`, `task_control`, `healer`, `pr_watcher`, `merge_reconciler` — know only ports (and, for `pr_watcher`/`merge_reconciler`, the base `ids` module — not `workspace`/`forge`/`artifacts`/`agent`/`repos`/`drivers`) |
+| Ports | `ports/{queue,workflows,strategy,behavior,events,clock,workspace,artifacts,forge,board,agent,repos,source,control,logs,issues,merge,issue_state}` |
+| Orchestration | `dispatcher`, `consumer`, `source_poller`, `task_control`, `healer`, `pr_watcher`, `merge_reconciler`, `issue_reconciler` — know only ports (and, for `pr_watcher`/`merge_reconciler`/`issue_reconciler`, the base `ids` module — not `workspace`/`forge`/`artifacts`/`agent`/`repos`/`drivers`) |
 | Behaviors | `behaviors/{landing,agent,resolve_conflict}` — touch ports, not drivers |
-| Drivers | `drivers/{fs_queue,fs_workflows,fifo_strategy,dummy_behavior,stdout_events,system_clock,memory,fs_artifacts,git_workspace,fake_forge,claude_cli,fs_agents,fs_repos,worktree_artifacts,source_reflector,github_client,github_source,github_forge,github_issues,github_merge_checker,mergeability_watcher,launchd,composite_events,git_remote,projection_events,stage_output}` |
+| Drivers | `drivers/{fs_queue,fs_workflows,fifo_strategy,dummy_behavior,stdout_events,system_clock,memory,fs_artifacts,git_workspace,fake_forge,claude_cli,fs_agents,fs_repos,worktree_artifacts,source_reflector,github_client,github_source,github_forge,github_issues,github_merge_checker,github_issue_checker,mergeability_watcher,launchd,composite_events,git_remote,projection_events,stage_output}` |
 | UI | `api/{app,routes}` — reads through `BoardView`/`ArtifactView`/`StageOutputView`, writes through `TaskControl`; never a driver |
 | Edges | `app` (wiring), `cli` |
 
@@ -168,6 +169,9 @@ Dependencies flow strictly downward, no cycles.
 - `ports/merge.py` — the `MergeChecker` port: `is_merged(task) -> bool | None` (`None`: no `data.pr`; raises on a transient failure — the caller must retry, never treat that as "not merged")
 - `merge_reconciler.py` — `MergeReconciler`: the core that checks a `done` task's PR and archives it once merged (knows only ports/models, mirrors `source_poller.py`)
 - `drivers/github_merge_checker.py` — `GithubMergeChecker`: reads `repo`/`number` straight off `task.data["pr"]` at check time, no per-repo construction
+- `ports/issue_state.py` — the `IssueChecker` port: `is_open(task) -> bool | None` (`None`: no `data.source` this checker resolves; raises on a transient failure — the caller must retry, never treat that as "closed")
+- `issue_reconciler.py` — `IssueReconciler`: the core that sweeps every live queue and archives a task whose source issue was closed or deleted out from under it (knows only ports/models/ids, mirrors `pr_watcher.py`)
+- `drivers/github_issue_checker.py` — `GithubIssueChecker`: reads `repo`/`issue` straight off `task.data["source"]` at check time; a deleted issue (404) reads as "not open", one checker serves every repo the token can reach
 
 ## What is responsible for what
 
@@ -250,6 +254,16 @@ Dependencies flow strictly downward, no cycles.
   don't destroy the record. Only wired when a `merge_checker` is supplied to `build()`
   (real runs: gated on `GITHUB_TOKEN`, same as `GithubForge` — a fake/memory forge's
   synthesized `repo` placeholder is never checked against a live `MergeChecker`).
+- **`IssueReconciler`** is `PrWatcher`'s structural sibling on the *source* side:
+  where `PrWatcher`/`MergeReconciler` retire a `done` task once its *PR* resolves,
+  the issue reconciler retires *any* board-visible task once its *source issue*
+  resolves — closed by a human, closed automatically when its PR merged, or
+  deleted. It sweeps every live queue (`inbox`, the step queues, `done`, `failed`)
+  each tick via `IssueChecker.is_open(task)` and moves a closed-issue task into
+  `archived/`. All-per-tick (like `PrWatcher`), on the slow `reconcile_interval`.
+  Only wired when an `issue_checker` is supplied to `build()` (real runs gate it
+  on `GITHUB_TOKEN`, exactly like the `MergeReconciler`); a submitted task with no
+  `data.source`, or a foreign `kind`, is `None` from the checker and left alone.
 - **`StageOutputView`** is a third, read-only UI surface alongside `BoardView`
   and `ArtifactView`: where `BoardView` shows *where* a task is and
   `ArtifactView` shows *what it produced*, `StageOutputView` shows *what the

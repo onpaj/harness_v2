@@ -34,6 +34,7 @@ from harness.drivers.git_remote import github_slug
 from harness.drivers.git_workspace import GitWorkspace
 from harness.drivers.github_client import GithubClient, HttpGithubClient
 from harness.drivers.github_forge import GithubForge
+from harness.drivers.github_issue_checker import GithubIssueChecker
 from harness.drivers.github_merge_checker import GithubMergeChecker
 from harness.drivers.github_source import GithubTaskSource
 from harness.drivers.mergeability_watcher import GithubMergeabilityWatcher
@@ -57,6 +58,7 @@ from harness.drivers.system_clock import SystemClock
 from harness.drivers.worktree_artifacts import WorktreeArtifactView
 from harness.ids import new_task_id
 from harness.models import Task
+from harness.ports.issue_state import IssueChecker
 from harness.ports.merge import MergeChecker
 from harness.ports.repos import RepositoryRegistry
 from harness.ports.source import TaskSource
@@ -1209,6 +1211,17 @@ def _build_merge_checker(args: argparse.Namespace) -> MergeChecker | None:
     return GithubMergeChecker(HttpGithubClient(token)) if token else None
 
 
+def _build_issue_checker(args: argparse.Namespace) -> IssueChecker | None:
+    """A live `IssueChecker`, gated on `GITHUB_TOKEN` — same condition as the
+    merge checker. It reads the repo/issue off each task's own `data.source`, so
+    one checker serves every GitHub-sourced task; a submitted task (no source)
+    is left untouched. Without a token there is no checker and the issue
+    reconciler loop simply never runs.
+    """
+    token = os.environ.get("GITHUB_TOKEN")
+    return GithubIssueChecker(HttpGithubClient(token)) if token else None
+
+
 def _run(args: argparse.Namespace) -> int:
     root = _root(args.root)
     layout = HarnessLayout(root)
@@ -1250,6 +1263,7 @@ def _run(args: argparse.Namespace) -> int:
     mergeability = _mergeability_sources(args, root, registry) if args.watch_mergeability else []
     sources = _github_sources(args, root, registry) + mergeability
     merge_checker = _build_merge_checker(args)
+    issue_checker = _build_issue_checker(args)
     # The resolver workflow rides alongside the primary one so its tasks (queued
     # by the mergeability watcher) get their own step queues and board columns.
     if mergeability and args.resolver_workflow not in served_names:
@@ -1288,6 +1302,7 @@ def _run(args: argparse.Namespace) -> int:
             agent_timeout=args.agent_timeout,
             sources=sources or None,
             merge_checker=merge_checker,
+            issue_checker=issue_checker,
             delay=args.delay,
             request_changes_once_at=args.request_changes_at,
             issue_tracker=issue_tracker,

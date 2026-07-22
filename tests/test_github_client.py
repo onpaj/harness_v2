@@ -95,6 +95,39 @@ def test_fake_search_ignores_issues_without_the_self_heal_label():
     assert client.search_issue_by_marker("o/r", "<!-- harness-heal:tsk_9 -->") is None
 
 
+# --- issue state (open/closed/gone), fake ----------------------------------
+
+
+def test_fake_get_issue_state_open_by_default():
+    client = FakeGithubClient([Issue(1, "A", "", "u1", ("harness:todo",))])
+
+    assert client.get_issue_state("o/r", 1) == "open"
+
+
+def test_fake_get_issue_state_closed_after_close():
+    client = FakeGithubClient([Issue(1, "A", "", "u1", ("harness:todo",))])
+
+    client.close_issue(1)
+
+    assert client.get_issue_state("o/r", 1) == "closed"
+    # A closed issue also drops out of the label listing, mirroring state=open.
+    assert client.list_issues("o/r", label="harness:todo") == []
+
+
+def test_fake_get_issue_state_none_when_missing():
+    client = FakeGithubClient()
+
+    assert client.get_issue_state("o/r", 999) is None
+
+
+def test_fake_close_issue_deleted_removes_it():
+    client = FakeGithubClient([Issue(1, "A", "", "u1", ("harness:todo",))])
+
+    client.close_issue(1, deleted=True)
+
+    assert client.get_issue_state("o/r", 1) is None
+
+
 # --- HttpGithubClient with a fake opener -----------------------------------
 
 
@@ -205,6 +238,45 @@ def test_http_remove_label_other_error_propagates():
     client = HttpGithubClient("tok", opener=ServerErrorOpener())
     with pytest.raises(urllib.error.HTTPError):
         client.remove_label("o/r", 5, "x")
+
+
+# --- issue state (open/closed/gone), http ----------------------------------
+
+
+def test_http_get_issue_state_reads_the_state_field():
+    opener = FakeOpener({"number": 7, "state": "closed"})
+    client = HttpGithubClient("tok", opener=opener)
+
+    assert client.get_issue_state("o/r", 7) == "closed"
+
+    req = opener.requests[0]
+    assert req.get_method() == "GET"
+    assert req.full_url == "https://api.github.com/repos/o/r/issues/7"
+
+
+def test_http_get_issue_state_404_is_none():
+    class NotFoundOpener:
+        def open(self, request):
+            raise urllib.error.HTTPError(
+                request.full_url, 404, "Not Found", {}, io.BytesIO(b"")
+            )
+
+    client = HttpGithubClient("tok", opener=NotFoundOpener())
+
+    assert client.get_issue_state("o/r", 7) is None
+
+
+def test_http_get_issue_state_other_error_propagates():
+    class ServerErrorOpener:
+        def open(self, request):
+            raise urllib.error.HTTPError(
+                request.full_url, 500, "Server Error", {}, io.BytesIO(b"")
+            )
+
+    client = HttpGithubClient("tok", opener=ServerErrorOpener())
+
+    with pytest.raises(urllib.error.HTTPError):
+        client.get_issue_state("o/r", 7)
 
 
 # --- pull requests, fake ---------------------------------------------------

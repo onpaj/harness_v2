@@ -1551,6 +1551,30 @@ def test_build_merge_checker_with_a_token_wires_the_http_client(monkeypatch):
     assert isinstance(checker._client, HttpGithubClient)
 
 
+# --- issue checker selection -------------------------------------------------
+
+
+def test_build_issue_checker_returns_none_without_a_token(monkeypatch):
+    from harness.cli import _build_issue_checker
+
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+
+    assert _build_issue_checker(_github_args()) is None
+
+
+def test_build_issue_checker_with_a_token_wires_the_http_client(monkeypatch):
+    from harness.cli import _build_issue_checker
+    from harness.drivers.github_client import HttpGithubClient
+    from harness.drivers.github_issue_checker import GithubIssueChecker
+
+    monkeypatch.setenv("GITHUB_TOKEN", "tok")
+
+    checker = _build_issue_checker(_github_args())
+
+    assert isinstance(checker, GithubIssueChecker)
+    assert isinstance(checker._client, HttpGithubClient)
+
+
 def test_run_agent_defaults_to_claude_and_accepts_dummy(tmp_path, monkeypatch):
     """`--agent dummy` runs the real pipeline (worktree, push, forge) with a stub
     step behavior — the only way to exercise landing where claude is unusable."""

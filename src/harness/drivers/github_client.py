@@ -68,6 +68,15 @@ class GithubClient(ABC):
         """Open issues with the given label (no PRs)."""
 
     @abstractmethod
+    def get_issue_state(self, repo: str, number: int) -> str | None:
+        """The issue's state — "open" or "closed" — or None when it is gone (404).
+
+        Deliberately does not raise on a missing issue: a deleted issue is a
+        legitimate "no longer open" answer for the reconciler, not a transient
+        failure. Every other error path (network, auth, 5xx) still propagates.
+        """
+
+    @abstractmethod
     def add_label(self, repo: str, number: int, label: str) -> None:
         """Add a label. Adding one that is already set is a no-op."""
 
@@ -134,6 +143,9 @@ class FakeGithubClient(GithubClient):
         self, issues: list[Issue] | None = None, *, default_branch: str = "main"
     ) -> None:
         self._issues: dict[int, Issue] = {i.number: i for i in (issues or [])}
+        # Issue numbers explicitly closed via `close_issue`. An issue absent from
+        # `_issues` reads as gone (404); one present but here reads as "closed".
+        self._closed_issues: set[int] = set()
         self._default_branch = default_branch
         self.pulls: list[PullRequestRef] = []
         self.created: list[dict] = []
@@ -153,8 +165,26 @@ class FakeGithubClient(GithubClient):
     def add_issue(self, issue: Issue) -> None:
         self._issues[issue.number] = issue
 
+    def close_issue(self, number: int, *, deleted: bool = False) -> None:
+        """Test helper: simulate GitHub closing (or deleting) the issue."""
+        if deleted:
+            self._issues.pop(number, None)
+            self._closed_issues.discard(number)
+        else:
+            self._closed_issues.add(number)
+
+    def get_issue_state(self, repo: str, number: int) -> str | None:
+        if number not in self._issues:
+            return None
+        return "closed" if number in self._closed_issues else "open"
+
     def list_issues(self, repo: str, *, label: str) -> list[Issue]:
-        return [i for i in self._issues.values() if label in i.labels]
+        # Mirror GitHub's `state=open` filter: a closed issue never appears here.
+        return [
+            i
+            for i in self._issues.values()
+            if label in i.labels and i.number not in self._closed_issues
+        ]
 
     def add_label(self, repo: str, number: int, label: str) -> None:
         issue = self._issues[number]
@@ -319,6 +349,18 @@ class HttpGithubClient(GithubClient):
                 )
             )
         return issues
+
+    def get_issue_state(self, repo: str, number: int) -> str | None:
+        url = f"{self._api}/repos/{repo}/issues/{number}"
+        request = urllib.request.Request(url, headers=self._headers(), method="GET")
+        try:
+            with self._opener.open(request) as response:
+                item = json.loads(response.read())
+        except urllib.error.HTTPError as error:
+            if error.code == 404:  # the issue was deleted → gone, not an error
+                return None
+            raise
+        return item.get("state")
 
     def add_label(self, repo: str, number: int, label: str) -> None:
         url = f"{self._api}/repos/{repo}/issues/{number}/labels"
