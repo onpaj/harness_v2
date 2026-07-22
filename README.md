@@ -247,7 +247,8 @@ locally with `python scripts/build_docs.py --out site` and open `site/index.html
 
 Alongside the orchestration loop, `harness run` serves a board at
 `http://127.0.0.1:8420/`. The columns are the workflow steps plus `done` and
-`failed`, the cards are tasks, and a click shows metadata, history, the
+`failed` (and `healed` when [self-healing](#self-healing-the-failed-queue) is
+enabled), the cards are tasks, and a click shows metadata, history, the
 artifacts each step wrote, and — while a step is actively running — a live tail
 of the agent's output, streamed over SSE. A task in `failed/` gets a **Restart**
 control, which resets it and re-inboxes it for the dispatcher to route again.
@@ -280,6 +281,42 @@ added or removed.
 30s, deliberately coarser than `--poll` to respect rate limits). Without a
 `GITHUB_TOKEN` (see [Running it as a service](#running-it-as-a-service)), GitHub
 ingestion is simply inactive — `harness submit` keeps working regardless.
+
+## Self-healing the failed queue
+
+By default a task that fails comes to rest in `failed/` and stays there — an
+operator has to notice, read its history, and decide whether the harness itself
+was at fault. `--heal-repo <owner/repo>` turns `failed/` into a queue that
+drains, by assigning a **healer** agent to it:
+
+```sh
+harness run --root ~/harness-root --agent claude --heal-repo onpaj/harness_v2
+```
+
+The healer is **not a workflow** — not a step, and not a workflow of its own. It
+is a loop assigned to the `failed/` queue, the same way each workflow step has an
+agent behind it (so there is no `healer` workflow file to find). It claims one
+failed task at a time, reads a **failure report** built from that task's reason
+and history — no worktree, no git — and decides whether the failure points at a
+fixable bug in the harness itself (a driver contract, a wiring gap, a missing
+workflow edge) as opposed to an external or expected failure (a flaky network, a
+task whose request was simply wrong). When it judges it a harness bug, the healer
+opens a diagnostic **issue** on the repo you named, with a diagnosis and a
+concrete proposed change. Either way the task then settles onto a new terminal
+`healed/` queue and leaves `failed/`.
+
+The healer only ever opens an *issue* — never a PR, never a new task — so nothing
+it does can re-enter `failed/` and loop; a failed heal (agent error, or the issue
+can't be opened) still settles to `healed/`, with the reason in the task's
+history. The issue is idempotent per failed task (a hidden marker in its body),
+so a restart mid-heal never files a second one.
+
+`--heal-repo` needs `--agent claude` — the healer is a claude agent. Its persona
+lives in `agents/healer.json`, written by `harness init` alongside the step
+personas (data, not code). With a `GITHUB_TOKEN` present the issue is opened on
+GitHub; offline it falls back to an in-memory tracker so the loop still runs
+harmlessly. Without `--heal-repo`, `failed/` stays a dead-end terminal exactly as
+before.
 
 ## How work flows
 
