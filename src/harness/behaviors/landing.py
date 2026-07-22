@@ -61,7 +61,14 @@ class LandingBehavior(ConsumerBehavior):
         return BehaviorResult(
             Outcome.DONE,
             f"opened PR {pull.url}",
-            data={"pr": {"number": pull.number, "url": pull.url, "branch": pull.branch}},
+            data={
+                "pr": {
+                    "repo": pull.repo,
+                    "number": pull.number,
+                    "url": pull.url,
+                    "branch": pull.branch,
+                }
+            },
         )
 
     @staticmethod

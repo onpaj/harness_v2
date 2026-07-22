@@ -19,6 +19,7 @@ def test_open_pull_request_records_details():
     assert pull.branch == "harness/tsk_1"
     assert pull.title == "add rate limiting"
     assert pull.number == 1
+    assert pull.repo == "memory/harness/tsk_1"
     assert forge.opened == [pull]
     assert forge.bodies["harness/tsk_1"] == "body"
 

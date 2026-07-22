@@ -8,7 +8,7 @@ nothing about drivers.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Iterable, Sequence
 
 from harness.models import END, Task, Workflow
 from harness.ports.board import (
@@ -51,14 +51,20 @@ def _reachable_order(workflow: Workflow) -> list[str]:
 
 
 def column_order(
-    workflows: Sequence[Workflow], *, healed: bool = False
+    steps: Iterable[str],
+    workflows: Sequence[Workflow] = (),
+    *,
+    healed: bool = False,
 ) -> tuple[str, ...]:
-    """Union of each workflow's own reachability order, first-seen wins.
+    """Union of each workflow's own reachability order (first-seen wins), then
+    every remaining known step in the order `steps` was given, then terminals.
 
     workflows[0]'s reachable steps (in its own order) come first, then
-    workflows[1]'s not-yet-seen steps, and so on. `healed=True` appends the
-    `healed` terminal column — only when a healer is wired, so a plain harness
-    keeps its exact column set.
+    workflows[1]'s not-yet-seen steps, and so on; a step shared by two
+    workflows shows up once. Any remaining known step (workflow-less, or
+    unreferenced by any workflow) then follows in the order `steps` was given.
+    `healed=True` appends the `healed` terminal column — only when a healer is
+    wired, so a plain harness keeps its exact column set.
     """
     order: list[str] = []
     for workflow in workflows:
@@ -66,31 +72,36 @@ def column_order(
             if step not in order:
                 order.append(step)
 
+    for step in steps:
+        if step != END and step not in order:
+            order.append(step)
+
     tail = (DONE_COLUMN, FAILED_COLUMN) + ((HEALED_COLUMN,) if healed else ())
     return (TODO_COLUMN,) + tuple(order) + tail
 
 
 class BoardProjection(BoardView):
     def __init__(
-        self, workflows: Sequence[Workflow], *, include_healed: bool = False
+        self,
+        steps: Iterable[str],
+        workflows: Sequence[Workflow] = (),
+        *,
+        include_healed: bool = False,
     ) -> None:
         # One tab per served workflow, each carrying that workflow's own column
         # order. `include_healed` appends the `healed` terminal column — only
         # when a healer is wired, so a plain harness keeps its exact column set.
         self._orders: dict[str, tuple[str, ...]] = {
-            workflow.name: column_order([workflow], healed=include_healed)
+            workflow.name: column_order((), [workflow], healed=include_healed)
             for workflow in workflows
         }
-        # A task can only end up under an unrecognized template via a dispatch
-        # failure or historical done/failed data from a removed definition —
-        # never legitimately mid-flight — except for the narrow window before
-        # the dispatcher's first tick, where hydrate() sees it still sitting
-        # in `todo`. TODO_COLUMN must stay in this tuple or such a task is
+        # The UNKNOWN tab catches tasks whose template isn't a served workflow —
+        # a dispatch failure, historical done/failed data from a removed
+        # definition, the narrow pre-first-tick `todo` window, and (workflows
+        # being optional) workflow-less step-only tasks, whose bare `steps`
+        # become real columns here. TODO_COLUMN must stay or such a task is
         # silently dropped from the board until the dispatcher fails it.
-        unknown_tail = (DONE_COLUMN, FAILED_COLUMN) + (
-            (HEALED_COLUMN,) if include_healed else ()
-        )
-        self._orders[UNKNOWN_WORKFLOW] = (TODO_COLUMN,) + unknown_tail
+        self._orders[UNKNOWN_WORKFLOW] = column_order(steps, healed=include_healed)
         self._tasks: dict[str, Task] = {}
         self._locations: dict[str, tuple[str, str]] = {}
         self._revision = 0
@@ -145,10 +156,15 @@ class BoardProjection(BoardView):
     def snapshot(self) -> Board:
         tabs = []
         for tab_name, order in self._orders.items():
-            if tab_name == UNKNOWN_WORKFLOW and not any(
-                location[0] == UNKNOWN_WORKFLOW for location in self._locations.values()
+            if (
+                tab_name == UNKNOWN_WORKFLOW
+                and len(self._orders) > 1  # keep it when it is the whole board
+                and not any(
+                    location[0] == UNKNOWN_WORKFLOW
+                    for location in self._locations.values()
+                )
             ):
-                continue  # FR-4: omit the unknown tab from the strip when empty
+                continue  # FR-4: omit the empty unknown tab, unless it is the board
             columns = tuple(
                 BoardColumn(
                     name=column_name,

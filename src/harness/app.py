@@ -41,12 +41,14 @@ from harness.ports.events import EventSink
 from harness.ports.forge import Forge
 from harness.ports.issues import IssueTracker
 from harness.ports.logs import StageOutputView
+from harness.ports.merge import MergeChecker
 from harness.ports.queue import TaskQueue
 from harness.ports.source import TaskSource
 from harness.ports.workflows import WorkflowNotFound
 from harness.ports.workspace import Workspace
 from harness.projection import BoardProjection
 from harness.ports.control import TaskControl
+from harness.merge_reconciler import MergeReconciler
 from harness.pr_watcher import PrWatcher
 from harness.source_poller import SourcePoller
 from harness.task_control import TaskControlService
@@ -144,6 +146,7 @@ class Harness:
         clock: Clock,
         pollers: list[SourcePoller] | None = None,
         pr_watcher: PrWatcher | None = None,
+        reconciler: MergeReconciler | None = None,
         healer: Healer | None = None,
         healed: TaskQueue | None = None,
     ) -> None:
@@ -166,12 +169,16 @@ class Harness:
         self._healed = healed
         self._events = events
         self._clock = clock
+        self.archived = archived
+        self.reconciler = reconciler
 
     def recover(self) -> int:
-        # `done` is included because PrWatcher claims out of it (unlike every
-        # other consumer of this queue, which only ever writes into it) — a
-        # crash between its claim and transfer would otherwise strand a task
-        # in done/.processing/, invisible to both done.list() and hydrate().
+        # `done` is included because it is the one write-into queue that also
+        # gets claimed out of — by PrWatcher (#44) and/or the MergeReconciler
+        # (#50). A crash between a claim and its transfer would otherwise strand
+        # a task in done/.processing/, invisible to both done.list() and
+        # hydrate(). Recovering an idle queue is a no-op, so this is free when
+        # neither claimer is wired.
         queues = [self._inbox, *self._step_queues.values(), self._done]
         # With a healer wired, `failed/` is a consumed queue too — a crash mid-heal
         # leaves the task in `failed/.processing/`, so it must be recovered like any
@@ -207,13 +214,16 @@ class Harness:
         poll_interval: float = 0.2,
         source_interval: float = 30.0,
         pr_poll_interval: float = 0.0,
+        reconcile_interval: float = 300.0,
         stop: asyncio.Event | None = None,
     ) -> None:
         # The internal loops (dispatcher, consumers) poll local queues off disk,
         # so a tight `poll_interval` keeps the board responsive. A `TaskSource`,
         # by contrast, is a remote API with rate limits (GitHub), so its loop
-        # gets its own, much slower `source_interval` — same reasoning for the
-        # PR watcher's `pr_poll_interval` (0 disables the loop entirely).
+        # gets its own, much slower `source_interval`. The PR watcher's
+        # `pr_poll_interval` (0 disables its loop entirely) and the reconciler's
+        # `reconcile_interval` are likewise separate housekeeping sweeps rather
+        # than latency-sensitive "pick up new work" paths — distinct intervals.
         stop = stop or asyncio.Event()
         self.recover()
         self.projection.hydrate(
@@ -234,6 +244,11 @@ class Harness:
                 for _ in range(self._max_parallel_for(consumer.step))
             ),
             *(self._source_loop(poller, source_interval, stop) for poller in self.pollers),
+            *(
+                [self._reconcile_loop(self.reconciler, reconcile_interval, stop)]
+                if self.reconciler is not None
+                else []
+            ),
             *([self._heal_loop(poll_interval, stop)] if self.healer is not None else []),
         ]
         if pr_poll_interval > 0 and self.pr_watcher is not None:
@@ -288,6 +303,15 @@ class Harness:
             else:
                 await asyncio.sleep(0)
 
+    async def _reconcile_loop(
+        self, reconciler: MergeReconciler, reconcile_interval: float, stop: asyncio.Event
+    ) -> None:
+        while not stop.is_set():
+            if not reconciler.tick():
+                await asyncio.sleep(reconcile_interval)
+            else:
+                await asyncio.sleep(0)
+
     async def _heal_loop(self, poll_interval: float, stop: asyncio.Event) -> None:
         assert self.healer is not None
         while not stop.is_set():
@@ -299,7 +323,7 @@ class Harness:
 
 def build(
     root: Path,
-    workflows: str | Sequence[str],
+    workflows: str | Sequence[str] | None = None,
     *,
     events: EventSink | None = None,
     clock: Clock | None = None,
@@ -312,6 +336,7 @@ def build(
     agent_timeout: float = 1800.0,
     artifact_view: ArtifactView | None = None,
     sources: list[TaskSource] | None = None,
+    merge_checker: MergeChecker | None = None,
     landing_step: str = LANDING_STEP,
     delay: float = 5.0,
     request_changes_once_at: str | None = None,
@@ -332,10 +357,19 @@ def build(
     artifacts = artifacts or MemoryArtifactStore()
     forge = forge or MemoryForge()
 
-    names = (workflows,) if isinstance(workflows, str) else tuple(workflows)
+    # The served set: the workflow(s) this harness actually routes. `None`
+    # means workflow-less (FR-6) — the harness runs its catalog agents with no
+    # workflow at all. A named-but-unserved workflow still fails fast at
+    # dispatch via ServedWorkflowRepository, so no dispatcher change is needed.
+    if workflows is None:
+        names: tuple[str, ...] = ()
+    elif isinstance(workflows, str):
+        names = (workflows,)
+    else:
+        names = tuple(workflows)
 
     raw_workflows = FilesystemWorkflowRepository(layout.workflows)
-    resolved = {name: raw_workflows.get(name) for name in names}
+    resolved = {name: raw_workflows.get(name) for name in names}  # WorkflowNotFound => fail fast
     served_workflows = ServedWorkflowRepository(raw_workflows, tuple(resolved))
 
     # One tab per discovered workflow definition (read side only — dispatch below
@@ -349,10 +383,25 @@ def build(
         try:
             discovered[name] = raw_workflows.get(name)
         except WorkflowNotFound:
-            continue
+            continue  # unreadable file during discovery: skipped, not fatal
+
+    # FR-6/FR-7: the live queue set is the union of every step reachable in the
+    # served workflow(s) plus every agent declared under agents/ — so a
+    # workflow-less catalog agent still gets a queue, a consumer and a column.
+    # Unserved (but on-disk) workflows contribute a read-only board tab (above)
+    # but no live queue: dispatch stays keyed to the served `resolved` set.
+    known_steps: set[str] = set()
+    for workflow in resolved.values():
+        known_steps |= set(workflow.steps())
+    if catalog is not None:
+        known_steps |= set(catalog.names())
+
+    steps = tuple(sorted(known_steps))
 
     projection = BoardProjection(
-        list(discovered.values()), include_healed=heal is not None
+        steps=steps,
+        workflows=list(discovered.values()),
+        include_healed=heal is not None,
     )
     stage_output = StageOutputProjection()
     # The reflector comes after ProjectionSink: the outward projection must not
@@ -381,9 +430,26 @@ def build(
         step: FilesystemTaskQueue(
             name=step, root=layout.queues / step, events=events, quarantine=failed
         )
-        for workflow in resolved.values()
-        for step in workflow.steps()
+        for step in steps
     }
+
+    # The archived queue is shared infrastructure for the two "drop a resolved
+    # task off the board" paths — PrWatcher (always built, below) and the
+    # MergeReconciler — so it always exists. The reconciler itself only exists
+    # when a merge_checker is supplied; a run without GitHub wiring pays nothing
+    # for that path.
+    archived = FilesystemTaskQueue(
+        name="archived", root=layout.archived, events=events
+    )
+    reconciler: MergeReconciler | None = None
+    if merge_checker is not None:
+        reconciler = MergeReconciler(
+            done=done,
+            archived=archived,
+            checker=merge_checker,
+            events=events,
+            clock=clock,
+        )
 
     # Read side of artifacts: when passed in (phase 3: `WorktreeArtifactView`),
     # both landing and `api/` get it; otherwise the write store (also an
@@ -524,6 +590,7 @@ def build(
         clock=clock,
         pollers=pollers,
         pr_watcher=pr_watcher,
+        reconciler=reconciler,
         healer=healer,
         healed=healed_queue,
     )

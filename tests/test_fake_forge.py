@@ -37,6 +37,7 @@ def test_open_pull_request_writes_file_and_returns_details(tmp_path):
     assert pr.branch == "harness/tsk_1"
     assert pr.title == "Task tsk_1"
     assert pr.url == f"file://{tmp_path}/prs.json#1"
+    assert pr.repo == "local/harness/tsk_1"
 
     records = json.loads((tmp_path / "prs.json").read_text(encoding="utf-8"))
     assert len(records) == 1

@@ -27,12 +27,14 @@ from harness.drivers.fs_repos import FilesystemRepositoryRegistry
 from harness.drivers.fs_workflows import (
     FilesystemWorkflowAdmin,
     FilesystemWorkflowRepository,
+    invalid_step_name,
     invalid_workflow_name,
 )
 from harness.drivers.git_remote import github_slug
 from harness.drivers.git_workspace import GitWorkspace
 from harness.drivers.github_client import GithubClient, HttpGithubClient
 from harness.drivers.github_forge import GithubForge
+from harness.drivers.github_merge_checker import GithubMergeChecker
 from harness.drivers.github_source import GithubTaskSource
 from harness.drivers.mergeability_watcher import GithubMergeabilityWatcher
 from harness.drivers.launchd import (
@@ -55,6 +57,7 @@ from harness.drivers.system_clock import SystemClock
 from harness.drivers.worktree_artifacts import WorktreeArtifactView
 from harness.ids import new_task_id
 from harness.models import Task
+from harness.ports.merge import MergeChecker
 from harness.ports.repos import RepositoryRegistry
 from harness.ports.source import TaskSource
 from harness.ports.workflows import WorkflowNotFound
@@ -123,6 +126,14 @@ def _init(args: argparse.Namespace) -> int:
     root = _root(args.root)
     layout = HarnessLayout(root)
 
+    layout.agents.mkdir(parents=True, exist_ok=True)
+    _write_default_repos(layout)
+
+    if args.no_workflow:
+        layout.tasks.mkdir(parents=True, exist_ok=True)
+        print(f"harness ready at {root} (no workflow — add steps under {layout.agents})")
+        return 0
+
     if invalid_workflow_name(args.workflow):
         print(f"error: invalid workflow name: {args.workflow!r}", file=sys.stderr)
         return 2
@@ -156,7 +167,6 @@ def _init(args: argparse.Namespace) -> int:
     _write_default_agents(layout, workflow)
     _write_default_agents(layout, resolver_workflow)
     _write_healer_agent(layout)
-    _write_default_repos(layout)
 
     print(f"harness ready at {root}")
     print(f"steps: {', '.join(workflow.steps())}")
@@ -270,6 +280,28 @@ _REVIEW_PERSONA = (
     "specification and architecture from the previous steps. Be fair but "
     "rigorous — this is about correctness and conformance to the request, not "
     "stylistic preferences.\n\n"
+    "Before anything else, sync the task branch with the repository's base "
+    "branch:\n"
+    "1. Run `git fetch origin`.\n"
+    "2. Determine the base branch: run `git symbolic-ref "
+    "refs/remotes/origin/HEAD` and strip the `refs/remotes/origin/` prefix; "
+    "if that fails, use `main`.\n"
+    "3. Run `git merge origin/<base>`. You are already checked out on the "
+    "task branch — DO NOT create or switch branches, and DO NOT force-push "
+    "or force-resolve anything.\n"
+    "4. If the merge reports conflicts:\n"
+    "   - Run `git diff --name-only --diff-filter=U` to capture the "
+    "conflicting file paths.\n"
+    "   - Run `git merge --abort` to leave the working tree clean.\n"
+    "   - Do not attempt to resolve the conflict yourself, and do not judge "
+    "code correctness — skip the rest of this review below.\n"
+    "   - Write your output artifact and finish with outcome "
+    "`request_changes`. The summary and the artifact must both state that "
+    "merging `origin/<base>` produced conflicts and must list every "
+    "conflicting file path from the previous step.\n"
+    "5. If the merge succeeds — fast-forward, a merge commit, or \"Already "
+    "up to date\" — continue with the review exactly as below. This sync "
+    "step alone must never change your verdict.\n\n"
     "Check:\n"
     "- Conformance to the spec — does the implementation meet the functional "
     "requirements?\n"
@@ -435,9 +467,18 @@ def _submit(args: argparse.Namespace) -> int:
         print(f"error: --data is not valid JSON: {error}", file=sys.stderr)
         return 2
 
+    workflow_name = args.workflow
+    step = args.step
+    if workflow_name is None and step is None:
+        workflow_name = DEFAULT_WORKFLOW
+    if step is not None and invalid_step_name(step):
+        print(f"error: invalid step name: {step!r}", file=sys.stderr)
+        return 2
+
     task = Task(
         id=new_task_id(),
-        workflow_template=args.workflow,
+        workflow_template=workflow_name,
+        step=step,
         created=SystemClock().now(),
         repository=args.repo,
         worktree=args.worktree,
@@ -471,6 +512,10 @@ def _github_sources(
         client = HttpGithubClient(token)
 
     worktree_root = args.worktree_root or str(root / "worktrees")
+    workflow = args.github_workflow
+    step = args.github_step
+    if workflow is None and step is None:
+        workflow = DEFAULT_WORKFLOW
     sources: list[TaskSource] = []
     for name in registry.names():
         slug = slug_of(registry.resolve(name))
@@ -482,7 +527,8 @@ def _github_sources(
                 client=client,
                 clock=SystemClock(),
                 repo=slug,
-                workflow=args.github_workflow,
+                workflow=workflow,
+                step=step,
                 repository=name,
                 worktree_root=worktree_root,
                 select_label=args.github_label,
@@ -930,7 +976,15 @@ def _resolve_served_workflows(
             )
             return None
         return names
-    return tuple(args.workflows) if args.workflows else (DEFAULT_WORKFLOW,)
+    if args.workflows:
+        return tuple(args.workflows)
+    # Neither --workflow nor --all-workflows: probe for the default workflow.
+    # Present (a normal `harness init`) → serve it, the unchanged default.
+    # Absent → workflow-less (FR-6): serve no workflow and run the catalog
+    # agents directly, rather than failing on a missing `default.json`.
+    if (layout.workflows / f"{DEFAULT_WORKFLOW}.json").is_file():
+        return (DEFAULT_WORKFLOW,)
+    return ()
 
 
 def _parse_hours(raw: str) -> list[int]:
@@ -1144,6 +1198,17 @@ def _build_forge(kind: str, root: Path, registry: RepositoryRegistry | None = No
     )
 
 
+def _build_merge_checker(args: argparse.Namespace) -> MergeChecker | None:
+    """A live `MergeChecker`, gated on `GITHUB_TOKEN` — same condition as
+    `GithubForge`, independent of `--forge`. Reconciliation only ever exists
+    for tasks a real forge landed: `--forge fake` synthesizes non-GitHub
+    `repo` placeholders (`local/<branch>`) that a real merge check can't
+    resolve, so a fake-forge run must never get a live checker.
+    """
+    token = os.environ.get("GITHUB_TOKEN")
+    return GithubMergeChecker(HttpGithubClient(token)) if token else None
+
+
 def _run(args: argparse.Namespace) -> int:
     root = _root(args.root)
     layout = HarnessLayout(root)
@@ -1157,14 +1222,15 @@ def _run(args: argparse.Namespace) -> int:
     # ingestion. Validating the *default* against the served set would reject
     # e.g. `run --workflow hotfix` with no GitHub flags at all -- a regression
     # against FR-6, since no GithubTaskSource is ever built in that case.
+    # `--github-step` (workflow-less GitHub ingestion) skips the check: it names
+    # a step, not a workflow, and `_github_sources` applies its own defaulting.
     if args.github_workflow is not None and args.github_workflow not in served_names:
         print(
             f"error: --github-workflow {args.github_workflow!r} is not served "
-            f"by this harness (served: {', '.join(served_names)})",
+            f"by this harness (served: {', '.join(served_names) or '(none)'})",
             file=sys.stderr,
         )
         return 2
-    args.github_workflow = args.github_workflow or DEFAULT_WORKFLOW
 
     # The real run: agent behind `claude -p`, git worktree under a shared root,
     # repo name→path from `repos.json`, personas from `agents/`, artifacts
@@ -1183,6 +1249,7 @@ def _run(args: argparse.Namespace) -> int:
     forge = _build_forge(args.forge, root, registry)
     mergeability = _mergeability_sources(args, root, registry) if args.watch_mergeability else []
     sources = _github_sources(args, root, registry) + mergeability
+    merge_checker = _build_merge_checker(args)
     # The resolver workflow rides alongside the primary one so its tasks (queued
     # by the mergeability watcher) get their own step queues and board columns.
     if mergeability and args.resolver_workflow not in served_names:
@@ -1220,6 +1287,7 @@ def _run(args: argparse.Namespace) -> int:
             artifact_view=artifact_view,
             agent_timeout=args.agent_timeout,
             sources=sources or None,
+            merge_checker=merge_checker,
             delay=args.delay,
             request_changes_once_at=args.request_changes_at,
             issue_tracker=issue_tracker,
@@ -1231,7 +1299,14 @@ def _run(args: argparse.Namespace) -> int:
 
     try:
         asyncio.run(
-            serve(harness, args.api_port, args.poll, args.source_poll, args.pr_poll)
+            serve(
+                harness,
+                args.api_port,
+                args.poll,
+                args.source_poll,
+                args.pr_poll,
+                args.reconcile_poll,
+            )
         )
     except KeyboardInterrupt:
         return 0
@@ -1244,6 +1319,7 @@ async def serve(
     poll_interval: float,
     source_interval: float = 30.0,
     pr_poll_interval: float = 0.0,
+    reconcile_interval: float = 300.0,
 ) -> None:
     """The loop and the board in a single event loop."""
     stop = asyncio.Event()
@@ -1252,6 +1328,7 @@ async def serve(
             poll_interval=poll_interval,
             source_interval=source_interval,
             pr_poll_interval=pr_poll_interval,
+            reconcile_interval=reconcile_interval,
             stop=stop,
         )
     )
@@ -1301,11 +1378,26 @@ def main(argv: list[str] | None = None) -> int:
     init = subparsers.add_parser("init", help="create the directory tree")
     init.add_argument("--root", default=None)
     init.add_argument("--workflow", default=DEFAULT_WORKFLOW)
+    init.add_argument(
+        "--no-workflow",
+        action="store_true",
+        help="skip writing a default workflow; add steps under agents/ directly",
+    )
     init.set_defaults(handler=_init)
 
     submit = subparsers.add_parser("submit", help="submit a new task")
     submit.add_argument("--root", default=None)
-    submit.add_argument("--workflow", default=DEFAULT_WORKFLOW)
+    submit_target = submit.add_mutually_exclusive_group()
+    submit_target.add_argument(
+        "--workflow",
+        default=None,
+        help="run the named workflow (mutually exclusive with --step)",
+    )
+    submit_target.add_argument(
+        "--step",
+        default=None,
+        help="run this one step and finish (mutually exclusive with --workflow)",
+    )
     submit.add_argument("--repo", default=None)
     submit.add_argument("--worktree", default=None, help="path to the task's worktree")
     submit.add_argument("--data", default=None, help="JSON payload")
@@ -1318,7 +1410,8 @@ def main(argv: list[str] | None = None) -> int:
         action="append",
         dest="workflows",
         default=None,
-        help="workflow to serve (repeatable); unset serves just 'default'",
+        help="workflow to serve (repeatable); unset serves 'default' when it "
+        "exists, otherwise runs workflow-less on the catalog agents",
     )
     run.add_argument(
         "--all-workflows",
@@ -1344,6 +1437,15 @@ def main(argv: list[str] | None = None) -> int:
         help="interval (s) for archiving landed tasks whose PR has resolved "
         "(merged or closed unmerged); 0 disables it (default)",
     )
+    run.add_argument(
+        "--reconcile-poll",
+        type=float,
+        default=300.0,
+        dest="reconcile_poll",
+        help="interval (s) for checking done tasks' PR merge status and "
+        "archiving them once merged; deliberately long to respect GitHub "
+        "rate limits",
+    )
     run.add_argument("--agent-timeout", type=float, default=1800.0, dest="agent_timeout")
     run.add_argument("--request-changes-at", default=None, dest="request_changes_at")
     run.add_argument(
@@ -1351,11 +1453,19 @@ def main(argv: list[str] | None = None) -> int:
         default="harness:todo",
         help="label that selects issues to ingest",
     )
-    run.add_argument(
+    github_target = run.add_mutually_exclusive_group()
+    github_target.add_argument(
         "--github-workflow",
         default=None,
         help="workflow assigned to GitHub-sourced tasks (default: 'default'); "
         "an explicit value must be in the served set",
+    )
+    github_target.add_argument(
+        "--github-step",
+        default=None,
+        dest="github_step",
+        help="single step assigned to GitHub-sourced tasks (workflow-less; "
+        "mutually exclusive with --github-workflow)",
     )
     run.add_argument("--worktree-root", default=None, help="root of the task worktrees")
     run.add_argument(

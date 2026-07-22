@@ -30,7 +30,8 @@ class GithubTaskSource(TaskSource):
         client: GithubClient,
         clock: Clock,
         repo: str,
-        workflow: str = "default",
+        workflow: str | None = "default",
+        step: str | None = None,
         repository: str,
         worktree_root: str,
         select_label: str = "harness:todo",
@@ -43,6 +44,7 @@ class GithubTaskSource(TaskSource):
         self._clock = clock
         self._repo = repo
         self._workflow = workflow
+        self._step = step
         self._repository = repository
         self._worktree_root = worktree_root
         self._select_label = select_label
@@ -79,6 +81,7 @@ class GithubTaskSource(TaskSource):
                 Task(
                     id=task_id,
                     workflow_template=self._workflow,
+                    step=self._step,
                     created=self._clock.now(),
                     repository=self._repository,
                     worktree=f"{self._worktree_root}/{task_id}",

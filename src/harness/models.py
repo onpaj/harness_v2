@@ -40,6 +40,10 @@ class BehaviorResult:
 
     `outcome` is the control signal the dispatcher routes on. `summary` is a short
     terminal statement about the run — commit message, history line, PR body, board.
+    `data`, when present, is shallow-merged into `task.data` by the consumer — a way
+    for a behavior to attach structured facts about what it produced (e.g. landing's
+    PR identity). Not a general escape hatch: it exists for a behavior's own output,
+    not for reaching into unrelated keys.
     """
 
     outcome: Outcome
@@ -102,8 +106,9 @@ class Task:
     """
 
     id: str
-    workflow_template: str
     created: str
+    workflow_template: str | None = None
+    step: str | None = None
     repository: str | None = None
     worktree: str | None = None
     status: str | None = None
@@ -119,6 +124,7 @@ class Task:
             "repository": self.repository,
             "worktree": self.worktree,
             "workflowTemplate": self.workflow_template,
+            "step": self.step,
             "status": self.status,
             "lastOutcome": self.last_outcome,
             "lockId": self.lock_id,
@@ -132,7 +138,8 @@ class Task:
     def from_dict(cls, raw: dict[str, Any]) -> Task:
         return cls(
             id=raw["id"],
-            workflow_template=raw["workflowTemplate"],
+            workflow_template=raw.get("workflowTemplate"),
+            step=raw.get("step"),
             created=raw["created"],
             repository=raw.get("repository"),
             worktree=raw.get("worktree"),

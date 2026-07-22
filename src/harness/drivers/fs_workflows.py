@@ -8,7 +8,8 @@ import uuid
 from collections.abc import Sequence
 from pathlib import Path
 
-from harness.models import Transition, Workflow
+from harness.models import END, FAILED, Transition, Workflow
+from harness.ports.board import DONE_COLUMN, TODO_COLUMN
 from harness.ports.workflow_admin import WorkflowAdmin, WorkflowValidationError
 from harness.ports.workflows import WorkflowNotFound, WorkflowRepository
 
@@ -20,6 +21,17 @@ def invalid_workflow_name(name: str) -> bool:
     before writing the definition file, i.e. before it ever reaches this
     repository."""
     return "/" in name or "\\" in name or name in ("", ".", "..")
+
+
+_RESERVED_STEP_NAMES = (END, FAILED, DONE_COLUMN, TODO_COLUMN)
+
+
+def invalid_step_name(name: str) -> bool:
+    """Everything invalid_workflow_name rejects, plus the reserved board-level
+    names (`end`, `failed`, `done`, `todo`) — a step name now comes straight
+    from `--step`/a TaskSource, not only from inside a trusted workflow file,
+    so it must not collide with a board column."""
+    return invalid_workflow_name(name) or name in _RESERVED_STEP_NAMES
 
 
 def _parse_workflow(name: str, raw: dict) -> Workflow:
@@ -78,6 +90,15 @@ class FilesystemWorkflowRepository(WorkflowRepository):
     def __init__(self, root: Path) -> None:
         self._root = Path(root)
 
+    def names(self) -> tuple[str, ...]:
+        return tuple(
+            sorted(
+                path.stem
+                for path in self._root.glob("*.json")
+                if not invalid_workflow_name(path.stem)
+            )
+        )
+
     def get(self, name: str) -> Workflow:
         if invalid_workflow_name(name):
             raise WorkflowNotFound(f"invalid workflow name: {name!r}")
@@ -96,11 +117,6 @@ class FilesystemWorkflowRepository(WorkflowRepository):
             return _parse_workflow(name, raw)
         except ValueError as error:
             raise WorkflowNotFound(str(error)) from None
-
-    def names(self) -> tuple[str, ...]:
-        if not self._root.is_dir():
-            return ()
-        return tuple(sorted(p.stem for p in self._root.glob("*.json")))
 
 
 class FilesystemWorkflowAdmin(WorkflowAdmin):

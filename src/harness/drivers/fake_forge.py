@@ -38,6 +38,7 @@ class FakeForge(Forge):
             "body": body,
             "state": "open",
             "merged": False,
+            "repo": f"local/{branch}",
         }
         records.append(record)
         self._store(records)
@@ -88,4 +89,5 @@ class FakeForge(Forge):
             url=record["url"],
             branch=record["branch"],
             title=record["title"],
+            repo=record.get("repo") or f"local/{record['branch']}",
         )

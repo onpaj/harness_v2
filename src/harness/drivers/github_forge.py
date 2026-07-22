@@ -109,6 +109,7 @@ class GithubForge(Forge):
                     url=existing.url,
                     branch=branch,
                     title=title,
+                    repo=slug,
                 )
             created = client.create_pull_request(
                 slug,
@@ -126,7 +127,11 @@ class GithubForge(Forge):
             ) from error
 
         return PullRequest(
-            number=created.number, url=created.url, branch=branch, title=title
+            number=created.number,
+            url=created.url,
+            branch=branch,
+            title=title,
+            repo=slug,
         )
 
     def pull_request_state(self, task: Task) -> PullRequestState:

@@ -96,7 +96,7 @@ class Consumer:
             outcome=result.outcome.value,
             summary=result.summary or None,
         )
-        merged_data = {**task.data, **result.data} if result.data else task.data
+        merged_data = {**task.data, **(result.data or {})}
         updated = append_history(
             replace(
                 task, data=merged_data, last_outcome=result.outcome.value, lock_id=None
