@@ -375,3 +375,67 @@ td.wrap, th.wrap { white-space: normal; }
 @media (prefers-reduced-motion: reduce) {
   .card, a, .btn { transition: none; }
 }
+
+/* --- Forms (admin editors) ------------------------------------------------- */
+
+.panel {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius); box-shadow: var(--shadow);
+  padding: 18px 20px; max-width: 640px;
+}
+.panel.wide { max-width: 720px; }
+
+.field { margin-bottom: 16px; }
+.field label {
+  display: block; font-size: 13px; font-weight: 600;
+  color: var(--text-2); margin-bottom: 6px;
+}
+
+input[type="text"], textarea {
+  width: 100%; box-sizing: border-box; font: inherit; font-size: 15px;
+  padding: 10px 12px; border-radius: var(--radius-sm);
+  border: 1px solid var(--border-strong); background: var(--surface); color: var(--text);
+}
+input[type="text"] { min-height: 44px; }
+textarea { min-height: 44px; resize: vertical; }
+textarea.editor {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 13px; line-height: 1.5;
+}
+input[type="text"]:focus, textarea:focus {
+  outline: 2px solid var(--accent); outline-offset: 1px;
+}
+
+.field.error input, .field.error textarea { border-color: var(--failed-fg); }
+.field-error { color: var(--failed-fg); font-size: 12px; margin-top: 6px; }
+
+.outcomes { display: flex; flex-wrap: wrap; gap: 4px 16px; }
+.outcomes label {
+  font-weight: 400; font-size: 14px; color: var(--text);
+  display: inline-flex; align-items: center; gap: 6px; margin: 0;
+}
+
+.actions { margin-top: 20px; display: flex; gap: 10px; }
+
+/* --- Banners ---------------------------------------------------------------- */
+
+.banner {
+  padding: 10px 14px; border-radius: var(--radius-sm);
+  margin-top: 16px; font-size: 14px; max-width: 720px;
+}
+.banner.success { background: var(--done-bg); color: var(--done-fg); }
+.banner.error   { background: var(--failed-bg); color: var(--failed-fg); white-space: pre-wrap; }
+.banner.warning { background: var(--changes-bg); color: var(--changes-fg); }
+
+/* --- Buttons: danger variant ------------------------------------------------- */
+
+.btn.danger { color: var(--failed-fg); border-color: var(--failed-fg); background: var(--surface); }
+
+/* --- Page header action slot ------------------------------------------------- */
+
+.page-header__action { margin-left: auto; }
+
+/* --- Update result (appbar "Update" button feedback) ------------------------- */
+
+.update-result-ok { color: var(--done-fg); }
+.update-result-error { color: var(--failed-fg); }
