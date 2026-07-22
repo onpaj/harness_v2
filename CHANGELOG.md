@@ -1,6 +1,33 @@
 # CHANGELOG
 
 
+## v0.10.1 (2026-07-22)
+
+### Bug Fixes
+
+- Correct black-on-dark task-detail text in dark mode
+  ([#72](https://github.com/onpaj/harness_v2/pull/72),
+  [`4195c5b`](https://github.com/onpaj/harness_v2/commit/4195c5b2fe9825d0967c98fe8198b9213e4ae116))
+
+The task-detail sheet renders inside a <dialog>, whose UA rule `color: CanvasText` overrides
+  inherited color. With no `color-scheme` declared, CanvasText resolved to its light value (black)
+  even in dark mode, so the .kv values rendered black-on-dark (the keys stayed visible because they
+  set an explicit color).
+
+Declare `color-scheme: light dark` on :root so system colors track the theme, and set an explicit
+  `color: var(--text)` on .task-detail so the detail content never depends on system colors.
+
+Claude-Session: https://claude.ai/code/session_0168J1hKcrtu7JKdNJ3Y3Jeb
+
+Co-authored-by: Claude <noreply@anthropic.com>
+
+### Documentation
+
+- Document self-healing (the healer on the failed queue) in the README
+  ([#68](https://github.com/onpaj/harness_v2/pull/68),
+  [`d76a170`](https://github.com/onpaj/harness_v2/commit/d76a17080dd92a1176ccdc3e06b264463613fae6))
+
+
 ## v0.10.0 (2026-07-22)
 
 ### Documentation
