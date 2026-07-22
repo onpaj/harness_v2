@@ -1,6 +1,51 @@
 # CHANGELOG
 
 
+## v0.9.0 (2026-07-22)
+
+### Bug Fixes
+
+- Update Board.columns access to per-workflow tabs
+  ([#62](https://github.com/onpaj/harness_v2/pull/62),
+  [`14a1e28`](https://github.com/onpaj/harness_v2/commit/14a1e28fdf57b37ad4b730190028176870b740c5))
+
+PR #48 refactored Board from a flat `columns` tuple into `workflows` (a tuple of BoardTab, each
+  carrying its own columns), but three call sites still read the old flat `.columns`:
+
+- `_new_step_warnings` in api/routes.py raised AttributeError on every workflow-admin PUT /
+  create-form request, taking CI red. - the client fixtures in test_api_agents.py and
+  test_api_workflows.py built a Board with the removed `columns=` kwarg (TypeError at setup).
+
+Collect known step names across every tab's columns and rebuild the test boards through BoardTab.
+
+Co-authored-by: ci <ci@local>
+
+### Continuous Integration
+
+- Publish the docs drill-down to GitHub Pages ([#54](https://github.com/onpaj/harness_v2/pull/54),
+  [`2ba3122`](https://github.com/onpaj/harness_v2/commit/2ba3122309b66f0ff77b55dd37809c981e46cb74))
+
+### Documentation
+
+- Add self-healing design spec and implementation plan
+  ([#42](https://github.com/onpaj/harness_v2/pull/42),
+  [`6d96d36`](https://github.com/onpaj/harness_v2/commit/6d96d365e8ab9ba3bd64ac50236fdf1b84d499fa))
+
+- Ground the architecture in ADRs, refresh README/CLAUDE.md, and ship an HTML drill-down
+  ([#39](https://github.com/onpaj/harness_v2/pull/39),
+  [`7bae036`](https://github.com/onpaj/harness_v2/commit/7bae03653c211fa75c532281fda663b7dced5127))
+
+### Features
+
+- Retire dashboard tasks whose GitHub issue was closed or deleted
+  ([#58](https://github.com/onpaj/harness_v2/pull/58),
+  [`a80afef`](https://github.com/onpaj/harness_v2/commit/a80afef3af8ee227c47bd393448889616ade34ca))
+
+- **docs**: Interactive Architecture Explorer documentation site
+  ([#63](https://github.com/onpaj/harness_v2/pull/63),
+  [`b533208`](https://github.com/onpaj/harness_v2/commit/b5332080e0c121e2f6d3d8615c85a430b2f5a104))
+
+
 ## v0.8.1 (2026-07-21)
 
 ### Bug Fixes
