@@ -200,3 +200,18 @@ def test_app_js_reads_embedded_data_and_has_no_external_calls(tmp_path: Path):
     assert "model-data" in js
     assert "adr-html" in js
     assert "fetch(" not in js  # fully client-side, no network
+
+
+def test_explorer_index_structure_snapshot(tmp_path: Path):
+    _write_fixture_tree(tmp_path)
+    build_site(discover_docs(tmp_path), tmp_path, tmp_path / "site")
+    index = (tmp_path / "site" / "index.html").read_text(encoding="utf-8")
+    # Controls and containers the JS binds to must all be present.
+    for needle in ('id="play"', 'id="step"', 'id="caption"', 'id="drawer"',
+                   'id="token"', 'id="theme-toggle"', 'class="legend"'):
+        assert needle in index, needle
+    # Flow order is preserved in the embedded model.
+    data = json.loads(re.search(
+        r'id="model-data">(.*?)</script>', index, re.DOTALL).group(1))
+    assert data["flow"][0]["part_id"] == "task-source"
+    assert data["flow"][-1]["part_id"] == "github-source"
