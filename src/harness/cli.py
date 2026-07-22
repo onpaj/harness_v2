@@ -20,11 +20,12 @@ from harness.api.app import create_app
 from harness.app import LANDING_STEP, HarnessLayout, HealConfig, build
 from harness.drivers.claude_cli import ClaudeCliRunner
 from harness.drivers.fake_forge import FakeForge
-from harness.drivers.fs_agents import FilesystemAgentCatalog
+from harness.drivers.fs_agents import FilesystemAgentAdmin, FilesystemAgentCatalog
 from harness.drivers.github_issues import GithubIssueTracker
 from harness.drivers.memory import MemoryIssueTracker
 from harness.drivers.fs_repos import FilesystemRepositoryRegistry
 from harness.drivers.fs_workflows import (
+    FilesystemWorkflowAdmin,
     FilesystemWorkflowRepository,
     invalid_step_name,
     invalid_workflow_name,
@@ -1287,6 +1288,8 @@ async def serve(
         output=harness.stage_output,
         control=harness.control,
         clock=SystemClock(),
+        agent_admin=FilesystemAgentAdmin(harness.layout.agents),
+        workflow_admin=FilesystemWorkflowAdmin(harness.layout.workflows),
         version=version_string(),
         build_time=build_timestamp(),
     )

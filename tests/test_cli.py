@@ -6,7 +6,14 @@ from pathlib import Path
 
 import pytest
 
-from harness.cli import DEFAULT_WORKFLOW, _github_sources, _mergeability_sources, main, serve
+from harness.app import HarnessLayout
+from harness.cli import (
+    DEFAULT_WORKFLOW,
+    _github_sources,
+    _mergeability_sources,
+    main,
+    serve,
+)
 from harness.drivers.github_client import FakeGithubClient
 from harness.drivers.memory import MemoryArtifactStore, MemoryRepositoryRegistry
 from harness.drivers.stage_output import StageOutputProjection
@@ -749,7 +756,7 @@ def test_run_forwards_source_poll(monkeypatch, tmp_path):
     assert captured["source_interval"] == 5.0
 
 
-async def test_serve_returns_when_uvicorn_stops_before_the_loop(monkeypatch):
+async def test_serve_returns_when_uvicorn_stops_before_the_loop(monkeypatch, tmp_path):
     """Regression: `serve()` used to do `await asyncio.gather(loop, uvicorn.Server(...).serve())`
     and only called `stop.set()` in `finally`. When uvicorn (after Ctrl+C)
     finishes first and returns WITHOUT an exception, `gather` kept waiting on
@@ -764,6 +771,7 @@ async def test_serve_returns_when_uvicorn_stops_before_the_loop(monkeypatch):
 
     class FakeHarness:
         def __init__(self):
+            self.layout = HarnessLayout(tmp_path)
             self.projection = BoardProjection(
                 SERVE_TEST_WORKFLOW.steps(), (SERVE_TEST_WORKFLOW,)
             )
