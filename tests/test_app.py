@@ -4,6 +4,7 @@ import json
 from harness.app import HarnessLayout, build
 from harness.drivers.fake_forge import FakeForge
 from harness.drivers.memory import (
+    FakeIssueChecker,
     FakeMergeChecker,
     MemoryAgentCatalog,
     MemoryEventSink,
@@ -615,6 +616,68 @@ async def test_run_archives_a_done_task_once_its_pr_is_merged(tmp_path):
     assert harness.projection.get("tsk_1") is not None
     assert all(
         task.id != "tsk_1"
+        for tab in harness.projection.snapshot().workflows
+        for column in tab.columns
+        for task in column.tasks
+    )
+
+
+def test_build_without_issue_checker_has_no_issue_reconciler(tmp_path):
+    seed(tmp_path)
+
+    harness = build(tmp_path, "default", events=MemoryEventSink())
+
+    assert harness.issue_reconciler is None
+
+
+def test_build_with_issue_checker_wires_the_issue_reconciler(tmp_path):
+    seed(tmp_path)
+
+    harness = build(
+        tmp_path, "default", events=MemoryEventSink(), issue_checker=FakeIssueChecker()
+    )
+
+    assert harness.issue_reconciler is not None
+    assert (tmp_path / "archived").is_dir()
+
+
+async def test_run_archives_a_task_once_its_source_issue_is_closed(tmp_path):
+    seed(tmp_path)
+    checker = FakeIssueChecker()
+    checker.closed.add(("o/r", 1))
+    events = MemoryEventSink()
+    harness = build(
+        tmp_path, "default", events=events, delay=0.0, issue_checker=checker
+    )
+    # A task sitting mid-workflow (in the `plan` step queue) whose issue was
+    # closed out from under it — not a done/landed task.
+    stale = Task(
+        id="tsk_stale",
+        workflow_template="default",
+        created="2026-07-19T10:00:00Z",
+        status="plan",
+        data={"source": {"kind": "github", "repo": "o/r", "issue": 1}},
+    )
+    (tmp_path / "queues" / "plan" / "tsk_stale.json").write_text(
+        json.dumps(stale.to_dict())
+    )
+
+    stop = asyncio.Event()
+    runner = asyncio.create_task(
+        harness.run(poll_interval=0.01, reconcile_interval=0.01, stop=stop)
+    )
+    for _ in range(400):
+        await asyncio.sleep(0.01)
+        if (tmp_path / "archived" / "tsk_stale.json").exists():
+            break
+    stop.set()
+    await asyncio.wait_for(runner, timeout=RUNNER_TIMEOUT)
+
+    assert (tmp_path / "archived" / "tsk_stale.json").exists()
+    # Off the board, still gettable by id (the `archived/` contract).
+    assert harness.projection.get("tsk_stale") is not None
+    assert all(
+        task.id != "tsk_stale"
         for tab in harness.projection.snapshot().workflows
         for column in tab.columns
         for task in column.tasks

@@ -139,6 +139,30 @@ def test_orchestration_does_not_import_merge_port():
         )
 
 
+def test_issue_reconciler_imports_only_ports_and_models():
+    """IssueReconciler is core (sibling of PrWatcher/MergeReconciler): it knows
+    only ports, models and the base `ids` module (for the claim lock id), never a
+    driver."""
+    imports = {
+        module
+        for module in imported_modules(SOURCE / "issue_reconciler.py")
+        if module.startswith("harness")
+    }
+    assert all(
+        module in ("harness.models", "harness.ids") or module.startswith("harness.ports")
+        for module in imports
+    ), f"issue_reconciler.py imports outside ports/models/ids: {imports}"
+
+
+def test_orchestration_does_not_import_issue_state_port():
+    """IssueChecker is unknown to dispatcher/consumer. Only IssueReconciler
+    (core) and app.py/cli.py (wiring) reach for it — mirroring MergeChecker."""
+    for name in ("dispatcher.py", "consumer.py"):
+        assert "harness.ports.issue_state" not in imported_modules(SOURCE / name), (
+            f"{name} imports ports.issue_state"
+        )
+
+
 def test_healer_imports_only_ports_models_and_ids():
     """The Healer loop is core (sibling of SourcePoller): it knows only ports,
     models and ids — never a driver. Wiring lives in app.py."""

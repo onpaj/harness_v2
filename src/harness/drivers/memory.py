@@ -25,6 +25,7 @@ from harness.ports.behavior import ConsumerBehavior
 from harness.ports.clock import Clock
 from harness.ports.events import EventSink
 from harness.ports.forge import Forge, PullRequest, PullRequestState
+from harness.ports.issue_state import IssueChecker
 from harness.ports.issues import IssueRef, IssueTracker
 from harness.ports.merge import MergeChecker
 from harness.ports.queue import TaskQueue
@@ -338,6 +339,29 @@ class FakeMergeChecker(MergeChecker):
         if key in self.raises:
             raise RuntimeError(f"merge check failed for {key}")
         return key in self.merged
+
+
+class FakeIssueChecker(IssueChecker):
+    """Test double: direct control over which source issues are still open.
+
+    Keyed by `(repo, issue)` read from `task.data.source`, mirroring
+    `FakeMergeChecker`'s `(repo, number)` keying. A task whose source `kind` is
+    not `github`, or which carries no source, is `None` (not ours to judge)."""
+
+    kind = "github"
+
+    def __init__(self) -> None:
+        self.closed: set[tuple[str, int]] = set()
+        self.raises: set[tuple[str, int]] = set()
+
+    def is_open(self, task: Task) -> bool | None:
+        source = task.data.get("source")
+        if not isinstance(source, dict) or source.get("kind") != self.kind:
+            return None
+        key = (source.get("repo"), source.get("issue"))
+        if key in self.raises:
+            raise RuntimeError(f"issue check failed for {key}")
+        return key not in self.closed
 
 
 class MemoryIssueTracker(IssueTracker):

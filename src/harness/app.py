@@ -39,6 +39,7 @@ from harness.ports.behavior import ConsumerBehavior
 from harness.ports.clock import Clock
 from harness.ports.events import EventSink
 from harness.ports.forge import Forge
+from harness.ports.issue_state import IssueChecker
 from harness.ports.issues import IssueTracker
 from harness.ports.logs import StageOutputView
 from harness.ports.merge import MergeChecker
@@ -48,6 +49,7 @@ from harness.ports.workflows import WorkflowNotFound
 from harness.ports.workspace import Workspace
 from harness.projection import BoardProjection
 from harness.ports.control import TaskControl
+from harness.issue_reconciler import IssueReconciler
 from harness.merge_reconciler import MergeReconciler
 from harness.pr_watcher import PrWatcher
 from harness.source_poller import SourcePoller
@@ -147,6 +149,7 @@ class Harness:
         pollers: list[SourcePoller] | None = None,
         pr_watcher: PrWatcher | None = None,
         reconciler: MergeReconciler | None = None,
+        issue_reconciler: IssueReconciler | None = None,
         healer: Healer | None = None,
         healed: TaskQueue | None = None,
     ) -> None:
@@ -171,6 +174,7 @@ class Harness:
         self._clock = clock
         self.archived = archived
         self.reconciler = reconciler
+        self.issue_reconciler = issue_reconciler
 
     def recover(self) -> int:
         # `done` is included because it is the one write-into queue that also
@@ -249,6 +253,11 @@ class Harness:
                 if self.reconciler is not None
                 else []
             ),
+            *(
+                [self._issue_reconcile_loop(reconcile_interval, stop)]
+                if self.issue_reconciler is not None
+                else []
+            ),
             *([self._heal_loop(poll_interval, stop)] if self.healer is not None else []),
         ]
         if pr_poll_interval > 0 and self.pr_watcher is not None:
@@ -312,6 +321,19 @@ class Harness:
             else:
                 await asyncio.sleep(0)
 
+    async def _issue_reconcile_loop(
+        self, reconcile_interval: float, stop: asyncio.Event
+    ) -> None:
+        # Shares the reconciler's cadence: retiring a task whose issue was closed
+        # is the same kind of slow GitHub housekeeping sweep as checking a done
+        # task's PR — not a latency-sensitive "pick up new work" path.
+        assert self.issue_reconciler is not None
+        while not stop.is_set():
+            if not self.issue_reconciler.tick():
+                await asyncio.sleep(reconcile_interval)
+            else:
+                await asyncio.sleep(0)
+
     async def _heal_loop(self, poll_interval: float, stop: asyncio.Event) -> None:
         assert self.healer is not None
         while not stop.is_set():
@@ -337,6 +359,7 @@ def build(
     artifact_view: ArtifactView | None = None,
     sources: list[TaskSource] | None = None,
     merge_checker: MergeChecker | None = None,
+    issue_checker: IssueChecker | None = None,
     landing_step: str = LANDING_STEP,
     delay: float = 5.0,
     request_changes_once_at: str | None = None,
@@ -447,6 +470,20 @@ def build(
             done=done,
             archived=archived,
             checker=merge_checker,
+            events=events,
+            clock=clock,
+        )
+
+    # The issue reconciler retires tasks whose source issue was closed or deleted
+    # out from under them — off every live column into `archived/`. Only built
+    # when a checker is supplied (real runs gate it on `GITHUB_TOKEN`, like the
+    # merge reconciler); it sweeps every board-visible queue, not just `done/`.
+    issue_reconciler: IssueReconciler | None = None
+    if issue_checker is not None:
+        issue_reconciler = IssueReconciler(
+            queues=[inbox, *step_queues.values(), done, failed],
+            archived=archived,
+            checker=issue_checker,
             events=events,
             clock=clock,
         )
@@ -591,6 +628,7 @@ def build(
         pollers=pollers,
         pr_watcher=pr_watcher,
         reconciler=reconciler,
+        issue_reconciler=issue_reconciler,
         healer=healer,
         healed=healed_queue,
     )
