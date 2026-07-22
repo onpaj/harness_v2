@@ -24,7 +24,10 @@ from harness.ports.artifacts import (
 from harness.ports.behavior import ConsumerBehavior
 from harness.ports.clock import Clock
 from harness.ports.events import EventSink
-from harness.ports.forge import FiledIssue, Forge, PullRequest
+from harness.ports.forge import Forge, PullRequest, PullRequestState
+from harness.ports.issue_state import IssueChecker
+from harness.ports.issues import IssueRef, IssueTracker
+from harness.ports.merge import MergeChecker
 from harness.ports.queue import TaskQueue
 from harness.ports.repos import RepositoryNotFound, RepositoryRegistry
 from harness.ports.source import FinishResult, Progress, TaskSource, dedup_key
@@ -73,6 +76,9 @@ class MemoryWorkflowRepository(WorkflowRepository):
             return self._workflows[name]
         except KeyError:
             raise WorkflowNotFound(f"workflow {name!r} does not exist") from None
+
+    def names(self) -> tuple[str, ...]:
+        return tuple(sorted(self._workflows))
 
 
 class MemoryEventSink(EventSink):
@@ -156,12 +162,16 @@ class MemoryArtifactStore(ArtifactStore):
 
 
 class MemoryWorkspaceHandle(WorkspaceHandle):
-    def __init__(self, task_id: str) -> None:
-        self._branch = f"harness/{task_id}"
+    def __init__(self, task_id: str, *, branch: str | None = None) -> None:
+        self._branch = branch or f"harness/{task_id}"
         self._path = Path("/memory/worktrees") / task_id
         self.writes: list[tuple[str, str]] = []
         self.commits: list[str] = []
         self.pushes: list[str] = []
+        # Test seam for ResolveConflictBehavior: preset whether the next
+        # merge() call should report a conflict.
+        self.conflicted: bool = False
+        self.merges: list[str] = []
 
     @property
     def path(self) -> Path:
@@ -181,6 +191,10 @@ class MemoryWorkspaceHandle(WorkspaceHandle):
     def push(self) -> None:
         self.pushes.append(self._branch)
 
+    def merge(self, base: str) -> bool:
+        self.merges.append(base)
+        return self.conflicted
+
 
 class MemoryWorkspace(Workspace):
     """Worktree in memory. Re-attaching the same task returns the same handle."""
@@ -191,7 +205,7 @@ class MemoryWorkspace(Workspace):
     def attach(self, task: Task) -> MemoryWorkspaceHandle:
         handle = self.handles.get(task.id)
         if handle is None:
-            handle = MemoryWorkspaceHandle(task.id)
+            handle = MemoryWorkspaceHandle(task.id, branch=task.data.get("branch"))
             self.handles[task.id] = handle
         return handle
 
@@ -271,14 +285,14 @@ class MemoryTaskSource(TaskSource):
 
 
 class MemoryForge(Forge):
-    """Records PRs. Idempotent by branch. Records issues, idempotent by task id
-    (in-process — no text search needed, unlike the real GitHub client)."""
+    """Records PRs. Idempotent by branch."""
 
     def __init__(self) -> None:
         self.opened: list[PullRequest] = []
         self.bodies: dict[str, str] = {}
-        self.issues: list[FiledIssue] = []
-        self._issues_by_task: dict[str, FiledIssue] = {}
+        # (state, merged) per branch. A branch with no recorded state change
+        # defaults to OPEN.
+        self._states: dict[str, tuple[PullRequestState, bool]] = {}
 
     def open_pull_request(
         self, task: Task, *, branch: str, title: str, body: str
@@ -291,23 +305,97 @@ class MemoryForge(Forge):
             url=f"https://forge.local/pr/{len(self.opened) + 1}",
             branch=branch,
             title=title,
+            repo=f"memory/{branch}",
         )
         self.opened.append(pull)
         self.bodies[branch] = body
         return pull
 
-    def open_issue(self, task: Task, *, title: str, body: str) -> FiledIssue:
-        existing = self._issues_by_task.get(task.id)
-        if existing is not None:
-            return existing
-        issue = FiledIssue(
-            number=len(self.issues) + 1,
-            url=f"https://forge.local/issues/{len(self.issues) + 1}",
-            title=title,
+    def pull_request_state(self, task: Task) -> PullRequestState:
+        pr = task.data.get("pr")
+        if not isinstance(pr, dict):
+            raise RuntimeError(f"task {task.id}: carries no PR reference to check")
+        state, _ = self._states.get(pr.get("branch"), (PullRequestState.OPEN, False))
+        return state
+
+    def close(self, branch: str, *, merged: bool) -> None:
+        """Test helper: simulate the PR for `branch` resolving."""
+        state = PullRequestState.MERGED if merged else PullRequestState.CLOSED
+        self._states[branch] = (state, merged)
+
+
+class FakeMergeChecker(MergeChecker):
+    """Test double: direct control over merge state, no `GithubClient` needed."""
+
+    def __init__(self) -> None:
+        self.merged: set[tuple[str, int]] = set()
+        self.raises: set[tuple[str, int]] = set()
+
+    def is_merged(self, task: Task) -> bool | None:
+        pr = task.data.get("pr")
+        if not isinstance(pr, dict):
+            return None
+        key = (pr.get("repo"), pr.get("number"))
+        if key in self.raises:
+            raise RuntimeError(f"merge check failed for {key}")
+        return key in self.merged
+
+
+class FakeIssueChecker(IssueChecker):
+    """Test double: direct control over which source issues are still open.
+
+    Keyed by `(repo, issue)` read from `task.data.source`, mirroring
+    `FakeMergeChecker`'s `(repo, number)` keying. A task whose source `kind` is
+    not `github`, or which carries no source, is `None` (not ours to judge)."""
+
+    kind = "github"
+
+    def __init__(self) -> None:
+        self.closed: set[tuple[str, int]] = set()
+        self.raises: set[tuple[str, int]] = set()
+
+    def is_open(self, task: Task) -> bool | None:
+        source = task.data.get("source")
+        if not isinstance(source, dict) or source.get("kind") != self.kind:
+            return None
+        key = (source.get("repo"), source.get("issue"))
+        if key in self.raises:
+            raise RuntimeError(f"issue check failed for {key}")
+        return key not in self.closed
+
+
+class MemoryIssueTracker(IssueTracker):
+    """Records opened issues in a list. Idempotent by marker — the twin of
+    `MemoryForge`'s idempotency by branch. For unit/e2e/smoke, no network."""
+
+    def __init__(self) -> None:
+        self.opened: list[dict[str, Any]] = []
+
+    def open_issue(
+        self,
+        repo: str,
+        *,
+        title: str,
+        body: str,
+        labels: tuple[str, ...],
+        marker: str,
+    ) -> IssueRef:
+        for existing in self.opened:
+            if existing["repo"] == repo and existing["marker"] == marker:
+                return existing["ref"]
+        number = len(self.opened) + 1
+        ref = IssueRef(number=number, url=f"https://forge.local/{repo}/issues/{number}")
+        self.opened.append(
+            {
+                "repo": repo,
+                "title": title,
+                "body": body,
+                "labels": labels,
+                "marker": marker,
+                "ref": ref,
+            }
         )
-        self.issues.append(issue)
-        self._issues_by_task[task.id] = issue
-        return issue
+        return ref
 
 
 class MemoryAgentCatalog(AgentCatalog):
@@ -321,6 +409,9 @@ class MemoryAgentCatalog(AgentCatalog):
             return self._specs[name]
         except KeyError:
             raise AgentNotFound(f"agent {name!r} does not exist") from None
+
+    def names(self) -> list[str]:
+        return list(self._specs)
 
 
 class FakeAgentRunner(AgentRunner):

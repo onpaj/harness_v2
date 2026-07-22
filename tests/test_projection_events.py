@@ -24,7 +24,7 @@ def snapshot(status="plan", task_id="tsk_1", **kwargs) -> dict:
 
 
 def build():
-    projection = BoardProjection(WORKFLOW)
+    projection = BoardProjection(WORKFLOW.steps(), (WORKFLOW,))
     return projection, ProjectionSink(projection)
 
 
@@ -33,7 +33,7 @@ def test_event_with_task_and_queue_lands_on_board():
 
     sink.emit("dispatched", task_id="tsk_1", queue="plan", task=snapshot())
 
-    assert projection.snapshot().column("plan").tasks[0].id == "tsk_1"
+    assert projection.snapshot().workflow("default").column("plan").tasks[0].id == "tsk_1"
 
 
 def test_terminal_event_lands_in_done():
@@ -41,13 +41,13 @@ def test_terminal_event_lands_in_done():
 
     sink.emit("finished", task_id="tsk_1", queue="done", task=snapshot("end"))
 
-    assert projection.snapshot().column(DONE_COLUMN).tasks[0].id == "tsk_1"
+    assert projection.snapshot().workflow("default").column(DONE_COLUMN).tasks[0].id == "tsk_1"
 
 
 def test_event_without_task_is_ignored():
     projection, sink = build()
 
-    sink.emit("started", workflow="default")
+    sink.emit("started", workflows=["default"])
     sink.emit("recovered", count=3)
     sink.emit("corrupt", path="/tmp/x.json")
 
@@ -68,3 +68,46 @@ def test_malformed_task_snapshot_does_not_raise():
     sink.emit("dispatched", queue="plan", task={"something": "else"})
 
     assert projection.snapshot().revision == 0
+
+
+def test_archived_event_removes_task_from_the_board():
+    projection, sink = build()
+    sink.emit("finished", task_id="tsk_1", queue="done", task=snapshot("end"))
+
+    sink.emit(
+        "archived",
+        task_id="tsk_1",
+        resolution="merged",
+        queue="archived",
+        task=snapshot("archived"),
+    )
+
+    assert projection.snapshot().workflow("default").column(DONE_COLUMN).tasks == ()
+    assert projection.get("tsk_1") is not None
+    assert projection.get("tsk_1").status == "archived"
+
+
+def test_archived_event_with_malformed_task_does_not_raise():
+    projection, sink = build()
+
+    sink.emit("archived", resolution="merged", queue="archived", task={"bad": "shape"})
+
+    assert projection.snapshot().revision == 0
+
+
+def test_archived_event_routes_to_archive_not_apply():
+    projection, sink = build()
+    sink.emit("finished", task_id="tsk_1", queue="done", task=snapshot("end"))
+
+    sink.emit("archived", task_id="tsk_1", queue="archived", task=snapshot("end"))
+
+    assert projection.snapshot().workflow("default").column(DONE_COLUMN).tasks == ()
+    assert projection.get("tsk_1") is not None
+
+
+def test_rechecked_event_flows_through_the_existing_apply_path():
+    projection, sink = build()
+
+    sink.emit("rechecked", task_id="tsk_1", queue="done", task=snapshot("end"))
+
+    assert projection.snapshot().workflow("default").column(DONE_COLUMN).tasks[0].id == "tsk_1"

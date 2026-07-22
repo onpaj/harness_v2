@@ -100,6 +100,93 @@ def test_source_poller_imports_only_ports_and_models():
     ), f"source_poller.py imports outside ports/models: {imports}"
 
 
+def test_pr_watcher_imports_only_ports_and_models():
+    """PrWatcher is core: it knows only ports, models and the base `ids` module
+    (needed for the same reason dispatcher.py/consumer.py need it — claiming a
+    task requires a lock id) — never a driver."""
+    imports = {
+        module
+        for module in imported_modules(SOURCE / "pr_watcher.py")
+        if module.startswith("harness")
+    }
+    assert all(
+        module in ("harness.models", "harness.ids") or module.startswith("harness.ports")
+        for module in imports
+    ), f"pr_watcher.py imports outside ports/models/ids: {imports}"
+
+
+def test_reconciler_imports_only_ports_and_models():
+    """MergeReconciler is core: it knows only ports, models and the base `ids`
+    module (the same base layer dispatcher/consumer draw lock ids from), no
+    driver."""
+    imports = {
+        module
+        for module in imported_modules(SOURCE / "merge_reconciler.py")
+        if module.startswith("harness")
+    }
+    assert all(
+        module in ("harness.models", "harness.ids") or module.startswith("harness.ports")
+        for module in imports
+    ), f"merge_reconciler.py imports outside ports/models/ids: {imports}"
+
+
+def test_orchestration_does_not_import_merge_port():
+    """MergeChecker is unknown to dispatcher/consumer. Only MergeReconciler
+    (core) and app.py/cli.py (wiring) reach for it."""
+    for name in ("dispatcher.py", "consumer.py"):
+        assert "harness.ports.merge" not in imported_modules(SOURCE / name), (
+            f"{name} imports ports.merge"
+        )
+
+
+def test_issue_reconciler_imports_only_ports_and_models():
+    """IssueReconciler is core (sibling of PrWatcher/MergeReconciler): it knows
+    only ports, models and the base `ids` module (for the claim lock id), never a
+    driver."""
+    imports = {
+        module
+        for module in imported_modules(SOURCE / "issue_reconciler.py")
+        if module.startswith("harness")
+    }
+    assert all(
+        module in ("harness.models", "harness.ids") or module.startswith("harness.ports")
+        for module in imports
+    ), f"issue_reconciler.py imports outside ports/models/ids: {imports}"
+
+
+def test_orchestration_does_not_import_issue_state_port():
+    """IssueChecker is unknown to dispatcher/consumer. Only IssueReconciler
+    (core) and app.py/cli.py (wiring) reach for it — mirroring MergeChecker."""
+    for name in ("dispatcher.py", "consumer.py"):
+        assert "harness.ports.issue_state" not in imported_modules(SOURCE / name), (
+            f"{name} imports ports.issue_state"
+        )
+
+
+def test_healer_imports_only_ports_models_and_ids():
+    """The Healer loop is core (sibling of SourcePoller): it knows only ports,
+    models and ids — never a driver. Wiring lives in app.py."""
+    imports = {
+        module
+        for module in imported_modules(SOURCE / "healer.py")
+        if module.startswith("harness")
+    }
+    assert all(
+        module in ("harness.models", "harness.ids")
+        or module.startswith("harness.ports")
+        for module in imports
+    ), f"healer.py imports outside ports/models/ids: {imports}"
+
+
+def test_orchestration_does_not_import_issues_or_healer():
+    """The IssueTracker port and the Healer loop are unknown to the dispatcher and
+    consumer — only the healer/wiring reach for them (invariant 27)."""
+    for name in ("dispatcher.py", "consumer.py"):
+        imports = imported_modules(SOURCE / name)
+        assert "harness.ports.issues" not in imports, f"{name} imports ports.issues"
+        assert "harness.healer" not in imports, f"{name} imports healer"
+
+
 def test_orchestration_does_not_import_work_ports():
     """Worktree, forge, artifacts, agent and the repo registry are unknown to
     dispatcher/consumer — only behavior reaches for them. Otherwise orchestration
@@ -218,6 +305,17 @@ def _imported_names_from(path: Path, module: str) -> set[str]:
         if isinstance(node, ast.ImportFrom) and node.module == module:
             names.update(alias.name for alias in node.names)
     return names
+
+
+def test_api_does_not_import_cli():
+    """`create_app` receives version/build_time as already-computed strings —
+    it must not reach back into `cli.py` (or `importlib.metadata` directly) to
+    compute them itself, which would both cycle (`cli.py` imports
+    `create_app`) and leak how the harness is packaged/run into the UI layer."""
+    for path in (SOURCE / "api").rglob("*.py"):
+        imports = imported_modules(path)
+        assert "harness.cli" not in imports, f"{path.name} imports harness.cli"
+        assert "importlib.metadata" not in imports, f"{path.name} imports importlib.metadata"
 
 
 def test_api_reads_artifacts_only_through_view():

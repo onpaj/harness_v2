@@ -7,7 +7,7 @@ from fastapi.testclient import TestClient
 from harness.api.app import create_app
 from harness.drivers.memory import FakeClock, MemoryArtifactStore
 from harness.models import Task
-from harness.ports.board import Board
+from harness.ports.board import Board, BoardTab
 from tests.fakes import FakeBoardView
 
 SOURCE = Path(__file__).resolve().parents[1] / "src" / "harness"
@@ -37,7 +37,7 @@ def store() -> MemoryArtifactStore:
 @pytest.fixture
 def client(store) -> TestClient:
     task = make_task()
-    board = Board(revision=1, columns=())
+    board = Board(revision=1, workflows=(BoardTab(name="default", columns=()),))
     view = FakeBoardView(board, {"tsk_1": task})
     return TestClient(create_app(view=view, artifacts=store, clock=FakeClock()))
 
@@ -72,7 +72,7 @@ def test_content_route_404s_for_missing_artifact(client):
 
 
 def test_fragment_task_lists_artifacts_with_links(store):
-    view = FakeBoardView(Board(revision=1, columns=()), {"tsk_1": make_task()})
+    view = FakeBoardView(Board(revision=1, workflows=(BoardTab(name="default", columns=()),)), {"tsk_1": make_task()})
     client = TestClient(create_app(view=view, artifacts=store, clock=FakeClock()))
 
     body = client.get("/fragment/task/tsk_1").text
@@ -82,7 +82,7 @@ def test_fragment_task_lists_artifacts_with_links(store):
 
 
 def test_create_app_works_without_artifacts():
-    view = FakeBoardView(Board(revision=1, columns=()), {"tsk_1": make_task()})
+    view = FakeBoardView(Board(revision=1, workflows=(BoardTab(name="default", columns=()),)), {"tsk_1": make_task()})
     client = TestClient(create_app(view=view, clock=FakeClock()))
 
     assert client.get("/api/tasks/tsk_1/artifacts").json() == {"artifacts": []}

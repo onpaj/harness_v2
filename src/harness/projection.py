@@ -8,54 +8,102 @@ nothing about drivers.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterable, Sequence
 
 from harness.models import END, Task, Workflow
 from harness.ports.board import (
     DONE_COLUMN,
     FAILED_COLUMN,
+    HEALED_COLUMN,
     TODO_COLUMN,
+    UNKNOWN_WORKFLOW,
     Board,
     BoardColumn,
+    BoardTab,
     BoardView,
 )
 from harness.ports.queue import TaskQueue
 
 
-def column_order(*workflows: Workflow) -> tuple[str, ...]:
-    """Steps in order of reachability from the start, then done and failed.
+def _reachable_order(workflow: Workflow) -> list[str]:
+    """Steps in order of reachability from the start.
 
     Backward edges are ignored — a step already placed is never moved.
     Otherwise the column order would depend on which way the search went.
+    """
+    order: list[str] = []
+    pending: list[str] = [workflow.start]
 
-    Accepts one workflow (today's only caller) or several — with healing on,
-    the healer workflow's columns are appended after the primary workflow's.
+    while pending:
+        step = pending.pop(0)
+        if step == END or step in order:
+            continue
+        order.append(step)
+        for transition in workflow.transitions:
+            if transition.from_step == step and transition.to_step not in order:
+                pending.append(transition.to_step)
+
+    for step in workflow.steps():
+        if step not in order:
+            order.append(step)
+
+    return order
+
+
+def column_order(
+    steps: Iterable[str],
+    workflows: Sequence[Workflow] = (),
+    *,
+    healed: bool = False,
+) -> tuple[str, ...]:
+    """Union of each workflow's own reachability order (first-seen wins), then
+    every remaining known step in the order `steps` was given, then terminals.
+
+    workflows[0]'s reachable steps (in its own order) come first, then
+    workflows[1]'s not-yet-seen steps, and so on; a step shared by two
+    workflows shows up once. Any remaining known step (workflow-less, or
+    unreferenced by any workflow) then follows in the order `steps` was given.
+    `healed=True` appends the `healed` terminal column — only when a healer is
+    wired, so a plain harness keeps its exact column set.
     """
     order: list[str] = []
     for workflow in workflows:
-        pending: list[str] = [workflow.start]
-
-        while pending:
-            step = pending.pop(0)
-            if step == END or step in order:
-                continue
-            order.append(step)
-            for transition in workflow.transitions:
-                if transition.from_step == step and transition.to_step not in order:
-                    pending.append(transition.to_step)
-
-        for step in workflow.steps():
+        for step in _reachable_order(workflow):
             if step not in order:
                 order.append(step)
 
-    return (TODO_COLUMN,) + tuple(order) + (DONE_COLUMN, FAILED_COLUMN)
+    for step in steps:
+        if step != END and step not in order:
+            order.append(step)
+
+    tail = (DONE_COLUMN, FAILED_COLUMN) + ((HEALED_COLUMN,) if healed else ())
+    return (TODO_COLUMN,) + tuple(order) + tail
 
 
 class BoardProjection(BoardView):
-    def __init__(self, *workflows: Workflow) -> None:
-        self._order = column_order(*workflows)
+    def __init__(
+        self,
+        steps: Iterable[str],
+        workflows: Sequence[Workflow] = (),
+        *,
+        include_healed: bool = False,
+    ) -> None:
+        # One tab per served workflow, each carrying that workflow's own column
+        # order. `include_healed` appends the `healed` terminal column — only
+        # when a healer is wired, so a plain harness keeps its exact column set.
+        self._orders: dict[str, tuple[str, ...]] = {
+            workflow.name: column_order((), [workflow], healed=include_healed)
+            for workflow in workflows
+        }
+        # The UNKNOWN tab catches tasks whose template isn't a served workflow —
+        # a dispatch failure, historical done/failed data from a removed
+        # definition, the narrow pre-first-tick `todo` window, and (workflows
+        # being optional) workflow-less step-only tasks, whose bare `steps`
+        # become real columns here. TODO_COLUMN must stay or such a task is
+        # silently dropped from the board until the dispatcher fails it.
+        self._orders[UNKNOWN_WORKFLOW] = column_order(steps, healed=include_healed)
         self._tasks: dict[str, Task] = {}
-        self._columns: dict[str, str] = {}
+        self._locations: dict[str, tuple[str, str]] = {}
         self._revision = 0
         self._subscribers: set[asyncio.Queue[int]] = set()
 
@@ -66,6 +114,8 @@ class BoardProjection(BoardView):
         step_queues: dict[str, TaskQueue],
         done: TaskQueue,
         failed: TaskQueue,
+        archived: TaskQueue | None = None,
+        healed: TaskQueue | None = None,
     ) -> None:
         """Build the initial state from the queues.
 
@@ -79,10 +129,18 @@ class BoardProjection(BoardView):
             self._store(DONE_COLUMN, task)
         for task in failed.list():
             self._store(FAILED_COLUMN, task)
+        if healed is not None:
+            for task in healed.list():
+                self._store(HEALED_COLUMN, task)
         for task in inbox.list():
             # A fresh task (never dispatched) shows in `todo`; one transiting the
             # inbox between steps keeps the column of the step it just left.
             self._store(task.status if task.status is not None else TODO_COLUMN, task)
+        if archived is not None:
+            for task in archived.list():
+                # Archived in a previous run: queryable by id, in no column —
+                # a restart must not lose get()-ability for it.
+                self._register(task)
         self._bump()
 
     def apply(self, column: str, task: Task) -> None:
@@ -90,21 +148,45 @@ class BoardProjection(BoardView):
         self._store(column, task)
         self._bump()
 
+    def archive(self, task: Task) -> None:
+        """Task resolved (PR merged/closed): drop from every column, keep gettable by id."""
+        self._register(task)
+        self._bump()
+
     def snapshot(self) -> Board:
-        columns = []
-        for name in self._order:
-            tasks = tuple(
-                sorted(
-                    (
-                        task
-                        for task_id, task in self._tasks.items()
-                        if self._columns[task_id] == name
-                    ),
-                    key=lambda task: (task.created, task.id),
+        tabs = []
+        for tab_name, order in self._orders.items():
+            if (
+                tab_name == UNKNOWN_WORKFLOW
+                and len(self._orders) > 1  # keep it when it is the whole board
+                and not any(
+                    location[0] == UNKNOWN_WORKFLOW
+                    for location in self._locations.values()
                 )
+            ):
+                continue  # FR-4: omit the empty unknown tab, unless it is the board
+            columns = tuple(
+                BoardColumn(
+                    name=column_name,
+                    tasks=tuple(
+                        sorted(
+                            (
+                                task
+                                for task_id, task in self._tasks.items()
+                                # .get(): an archived task lives in _tasks with no
+                                # _locations entry — it must fall out of every column,
+                                # not raise KeyError.
+                                if self._locations.get(task_id) == (tab_name, column_name)
+                            ),
+                            key=lambda task: (task.created, task.id),
+                        )
+                    ),
+                )
+                for column_name in order
             )
-            columns.append(BoardColumn(name=name, tasks=tasks))
-        return Board(revision=self._revision, columns=tuple(columns))
+            tabs.append(BoardTab(name=tab_name, columns=columns))
+        tabs.sort(key=lambda tab: tab.name)
+        return Board(revision=self._revision, workflows=tuple(tabs))
 
     def get(self, task_id: str) -> Task | None:
         return self._tasks.get(task_id)
@@ -121,10 +203,17 @@ class BoardProjection(BoardView):
             self._subscribers.discard(inbox)
 
     def _store(self, column: str, task: Task) -> None:
-        if column not in self._order:
+        tab = task.workflow_template if task.workflow_template in self._orders else UNKNOWN_WORKFLOW
+        order = self._orders[tab]
+        if column not in order:
             return
         self._tasks[task.id] = task
-        self._columns[task.id] = column
+        self._locations[task.id] = (tab, column)
+
+    def _register(self, task: Task) -> None:
+        """Keep the task queryable by id, with no column — never listed."""
+        self._tasks[task.id] = task
+        self._locations.pop(task.id, None)
 
     def _bump(self) -> None:
         self._revision += 1

@@ -8,6 +8,7 @@ import pytest
 from harness.drivers.github_client import FakeGithubClient
 from harness.drivers.github_forge import ForgeError, GithubForge
 from harness.models import Task
+from harness.ports.forge import PullRequestState
 
 
 def make_task(**data) -> Task:
@@ -38,6 +39,7 @@ def test_opens_a_pull_request_against_the_default_branch():
     assert pull.branch == "harness/tsk_1"
     assert pull.title == "T"
     assert pull.url == "https://github.com/onpaj/harness_v2/pull/1"
+    assert pull.repo == "onpaj/harness_v2"
     assert client.created[0]["head"] == "onpaj:harness/tsk_1"
     assert client.created[0]["base"] == "trunk"
 
@@ -50,6 +52,7 @@ def test_second_call_returns_the_existing_pull_request():
     second = forge.open_pull_request(task, branch="harness/tsk_1", title="T", body="B")
 
     assert first.number == second.number
+    assert second.repo == "onpaj/harness_v2"
     assert len(client.created) == 1
 
 
@@ -249,67 +252,69 @@ def test_api_error_without_a_body_still_reports_the_status():
         forge.open_pull_request(make_task(), branch="harness/tsk_1", title="T", body="B")
 
 
-# --- open_issue --------------------------------------------------------------
+# --- pull_request_state ------------------------------------------------------
 
 
-def test_open_issue_files_a_new_issue_with_marker():
-    forge, client = build()
+def _land(forge, client, task):
+    """Open a PR through the forge and return the task carrying its reference,
+    the way LandingBehavior would after a successful `open_pull_request`."""
+    pull = forge.open_pull_request(task, branch="harness/tsk_1", title="T", body="B")
+    from dataclasses import replace
 
-    issue = forge.open_issue(make_task(), title="harness bug", body="B")
-
-    assert issue.number == 1
-    assert issue.title == "harness bug"
-    assert client.filed[0].title == "harness bug"
-    assert client.created == []  # a PR list must stay untouched
-    body = client._filed_bodies[1]
-    assert "B" in body
-    assert "<!-- harness-healer:tsk_1 -->" in body
-
-
-def test_open_issue_is_idempotent_via_find_issue():
-    forge, client = build()
-    task = make_task()
-
-    first = forge.open_issue(task, title="T", body="B")
-    second = forge.open_issue(task, title="T", body="B")
-
-    assert first.number == second.number
-    assert len(client.filed) == 1
-
-
-def test_open_issue_missing_token_fails_loudly():
-    forge = GithubForge(None, slug_of=lambda path: "onpaj/harness_v2")
-
-    with pytest.raises(ForgeError, match="GITHUB_TOKEN"):
-        forge.open_issue(make_task(), title="T", body="B")
-
-
-def test_open_issue_non_github_origin_fails_loudly():
-    forge, _ = build(slug=None)
-
-    with pytest.raises(ForgeError, match="no GitHub origin"):
-        forge.open_issue(make_task(), title="T", body="B")
-
-
-def test_open_issue_unlocatable_repository_fails_loudly():
-    forge, _ = build()
-    task = Task(
-        id="tsk_1",
-        workflow_template="healer",
-        created="2026-07-20T10:00:00Z",
-        repository="app",
+    return replace(
+        task,
+        data={
+            **task.data,
+            "pr": {"number": pull.number, "url": pull.url, "branch": pull.branch},
+        },
     )
 
-    with pytest.raises(ForgeError, match="cannot locate repository"):
-        forge.open_issue(task, title="T", body="B")
+
+def test_pull_request_state_open():
+    forge, client = build()
+    landed = _land(forge, client, make_task())
+
+    assert forge.pull_request_state(landed) is PullRequestState.OPEN
 
 
-def test_open_issue_api_error_becomes_a_forge_error():
+def test_pull_request_state_merged():
+    forge, client = build()
+    landed = _land(forge, client, make_task())
+    client.close_pull_request(landed.data["pr"]["number"], merged=True)
+
+    assert forge.pull_request_state(landed) is PullRequestState.MERGED
+
+
+def test_pull_request_state_closed_unmerged():
+    forge, client = build()
+    landed = _land(forge, client, make_task())
+    client.close_pull_request(landed.data["pr"]["number"], merged=False)
+
+    assert forge.pull_request_state(landed) is PullRequestState.CLOSED
+
+
+def test_pull_request_state_missing_token_fails_loudly():
+    forge = GithubForge(None, slug_of=lambda path: "onpaj/harness_v2")
+    task = make_task(pr={"number": 1, "url": "u", "branch": "harness/tsk_1"})
+
+    with pytest.raises(ForgeError, match="GITHUB_TOKEN"):
+        forge.pull_request_state(task)
+
+
+def test_pull_request_state_no_pr_reference_fails_loudly():
+    forge, _ = build()
+
+    with pytest.raises(ForgeError, match="carries no PR reference"):
+        forge.pull_request_state(make_task())
+
+
+def test_pull_request_state_api_error_becomes_forge_error():
     class BrokenClient(FakeGithubClient):
-        def create_issue(self, repo, *, title, body):
-            raise RuntimeError("422 Unprocessable Entity")
+        def get_pull_request(self, repo, *, number):
+            raise RuntimeError("network down")
 
-    forge, _ = build(BrokenClient())
+    forge, client = build(BrokenClient())
+    landed = _land(forge, client, make_task())
 
-    with pytest.raises(ForgeError, match="422"):
-        forge.open_issue(make_task(), title="T", body="B")
+    with pytest.raises(ForgeError, match="network down"):
+        forge.pull_request_state(landed)

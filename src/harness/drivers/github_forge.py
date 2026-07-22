@@ -17,10 +17,8 @@ from typing import Callable
 from harness.drivers.git_remote import github_slug
 from harness.drivers.github_client import GithubClient
 from harness.models import Task
-from harness.ports.forge import FiledIssue, Forge, PullRequest
+from harness.ports.forge import Forge, PullRequest, PullRequestState
 from harness.ports.repos import RepositoryRegistry
-
-_HEALER_MARKER = "<!-- harness-healer:{task_id} -->"
 
 
 class ForgeError(RuntimeError):
@@ -111,6 +109,7 @@ class GithubForge(Forge):
                     url=existing.url,
                     branch=branch,
                     title=title,
+                    repo=slug,
                 )
             created = client.create_pull_request(
                 slug,
@@ -128,14 +127,18 @@ class GithubForge(Forge):
             ) from error
 
         return PullRequest(
-            number=created.number, url=created.url, branch=branch, title=title
+            number=created.number,
+            url=created.url,
+            branch=branch,
+            title=title,
+            repo=slug,
         )
 
-    def open_issue(self, task: Task, *, title: str, body: str) -> FiledIssue:
+    def pull_request_state(self, task: Task) -> PullRequestState:
         client = self._client
         if client is None:
             raise ForgeError(
-                "GITHUB_TOKEN is not set — cannot file an issue. "
+                "GITHUB_TOKEN is not set — cannot check a pull request. "
                 "Export it, or run with --forge fake."
             )
         repo_path = self._repo_path(task)
@@ -146,23 +149,24 @@ class GithubForge(Forge):
             )
         slug = self._slug_of(repo_path)
         if slug is None:
-            raise ForgeError(f"{task.repository} has no GitHub origin — cannot file an issue")
-
-        marker = _HEALER_MARKER.format(task_id=task.id)
-        try:
-            existing = client.find_issue(slug, marker=marker)
-            if existing is not None:
-                return FiledIssue(existing.number, existing.url, existing.title)
-            created = client.create_issue(
-                slug, title=title, body=f"{body.rstrip()}\n\n{marker}\n"
+            raise ForgeError(
+                f"{task.repository} has no GitHub origin — cannot check a pull request"
             )
-        except ForgeError:
-            raise
+        pr = task.data.get("pr")
+        if not isinstance(pr, dict) or not isinstance(pr.get("number"), int):
+            raise ForgeError(f"task {task.id}: carries no PR reference to check")
+
+        try:
+            detail = client.get_pull_request(slug, number=pr["number"])
         except Exception as error:  # noqa: BLE001 - any API failure is a forge failure
             raise ForgeError(
-                f"GitHub refused to file an issue on {slug}: {_explain(error)}"
+                f"GitHub refused to fetch pull request {pr['number']} for {slug}: "
+                f"{_explain(error)}"
             ) from error
-        return FiledIssue(created.number, created.url, title)
+
+        if detail.state == "open":
+            return PullRequestState.OPEN
+        return PullRequestState.MERGED if detail.merged else PullRequestState.CLOSED
 
     def _default_branch(self, client: GithubClient, slug: str) -> str:
         """The repo's default branch, fetched once per slug per process."""

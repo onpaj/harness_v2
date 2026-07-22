@@ -12,22 +12,20 @@ import json
 from pathlib import Path
 
 from harness.models import Task
-from harness.ports.forge import FiledIssue, Forge, PullRequest
+from harness.ports.forge import Forge, PullRequest, PullRequestState
 
 
 class FakeForge(Forge):
-    """Records PRs into `<root>/prs.json`, idempotent by branch, and issues
-    into `<root>/issues.json`, idempotent by task id."""
+    """Records PRs into `<root>/prs.json`. Idempotent by branch."""
 
     def __init__(self, root: Path) -> None:
         self._root = Path(root)
         self._file = self._root / "prs.json"
-        self._issues_file = self._root / "issues.json"
 
     def open_pull_request(
         self, task: Task, *, branch: str, title: str, body: str
     ) -> PullRequest:
-        records = self._load(self._file)
+        records = self._load()
         for record in records:
             if record["branch"] == branch:
                 return self._to_pr(record)
@@ -38,38 +36,49 @@ class FakeForge(Forge):
             "branch": branch,
             "title": title,
             "body": body,
+            "state": "open",
+            "merged": False,
+            "repo": f"local/{branch}",
         }
         records.append(record)
-        self._store(self._file, records)
+        self._store(records)
         return self._to_pr(record)
 
-    def open_issue(self, task: Task, *, title: str, body: str) -> FiledIssue:
-        records = self._load(self._issues_file)
-        for record in records:
-            if record["task_id"] == task.id:
-                return self._to_issue(record)
-        number = len(records) + 1
-        record = {
-            "number": number,
-            "url": f"file://{self._root}/issues.json#{number}",
-            "title": title,
-            "body": body,
-            "task_id": task.id,
-        }
-        records.append(record)
-        self._store(self._issues_file, records)
-        return self._to_issue(record)
+    def pull_request_state(self, task: Task) -> PullRequestState:
+        pr = task.data.get("pr")
+        if not isinstance(pr, dict):
+            raise RuntimeError(f"task {task.id}: carries no PR reference to check")
+        branch = pr.get("branch")
+        for record in self._load():
+            if record["branch"] == branch:
+                # Missing state/merged means a prs.json written before this
+                # feature shipped — treat that as "still open", not an error.
+                state = record.get("state", "open")
+                merged = record.get("merged", False)
+                if state == "open":
+                    return PullRequestState.OPEN
+                return PullRequestState.MERGED if merged else PullRequestState.CLOSED
+        raise RuntimeError(f"task {task.id}: no PR found for branch {branch!r}")
 
-    @staticmethod
-    def _load(file: Path) -> list[dict]:
+    def close_pull_request(self, branch: str, *, merged: bool) -> None:
+        """Test/smoke helper: simulate GitHub resolving the PR for `branch`."""
+        records = self._load()
+        for record in records:
+            if record["branch"] == branch:
+                record["state"] = "closed"
+                record["merged"] = merged
+                break
+        self._store(records)
+
+    def _load(self) -> list[dict]:
         try:
-            return json.loads(file.read_text(encoding="utf-8"))
+            return json.loads(self._file.read_text(encoding="utf-8"))
         except FileNotFoundError:
             return []
 
-    def _store(self, file: Path, records: list[dict]) -> None:
+    def _store(self, records: list[dict]) -> None:
         self._root.mkdir(parents=True, exist_ok=True)
-        file.write_text(
+        self._file.write_text(
             json.dumps(records, indent=2, ensure_ascii=False), encoding="utf-8"
         )
 
@@ -80,12 +89,5 @@ class FakeForge(Forge):
             url=record["url"],
             branch=record["branch"],
             title=record["title"],
-        )
-
-    @staticmethod
-    def _to_issue(record: dict) -> FiledIssue:
-        return FiledIssue(
-            number=record["number"],
-            url=record["url"],
-            title=record["title"],
+            repo=record.get("repo") or f"local/{record['branch']}",
         )

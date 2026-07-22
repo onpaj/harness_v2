@@ -57,7 +57,11 @@ class Dispatcher:
             return False
 
         try:
-            workflow = self._workflows.get(task.workflow_template)
+            workflow = (
+                self._workflows.get(task.workflow_template)
+                if task.workflow_template is not None
+                else None
+            )
         except WorkflowNotFound as error:
             self._fail(task, str(error))
             return True

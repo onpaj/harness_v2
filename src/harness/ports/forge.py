@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from enum import Enum
 
 from harness.models import Task
 
@@ -18,13 +19,15 @@ class PullRequest:
     url: str
     branch: str
     title: str
+    repo: str
 
 
-@dataclass(frozen=True)
-class FiledIssue:
-    number: int
-    url: str
-    title: str
+class PullRequestState(str, Enum):
+    """The tri-state result of asking a forge what happened to a PR."""
+
+    OPEN = "open"
+    MERGED = "merged"
+    CLOSED = "closed"  # closed, not merged
 
 
 class Forge(ABC):
@@ -36,7 +39,9 @@ class Forge(ABC):
         exists, return it instead of creating another."""
 
     @abstractmethod
-    def open_issue(self, task: Task, *, title: str, body: str) -> FiledIssue:
-        """File an issue against the task's own repository. Idempotent — a
-        retry for the same task returns the previously filed issue instead of
-        creating a second one."""
+    def pull_request_state(self, task: Task) -> PullRequestState:
+        """Current state of the PR referenced by task.data["pr"].
+
+        Raises whatever the driver raises on failure (GithubForge: ForgeError) —
+        PrWatcher treats any exception here as a transient failure to isolate,
+        same as SourcePoller does around TaskSource.poll()."""

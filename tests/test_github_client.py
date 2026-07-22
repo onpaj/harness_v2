@@ -7,10 +7,11 @@ import urllib.error
 import pytest
 
 from harness.drivers.github_client import (
+    SELF_HEAL_LABEL,
     FakeGithubClient,
     HttpGithubClient,
     Issue,
-    IssueRef,
+    PullRequestInfo,
     PullRequestRef,
 )
 
@@ -55,6 +56,76 @@ def test_fake_add_existing_label_is_noop():
     client.add_label("o/r", 1, "harness:todo")
 
     assert client._issues[1].labels == ("harness:todo",)
+
+
+# --- issues (create + marker search), fake ---------------------------------
+
+
+def test_fake_create_issue_assigns_a_number_and_stores_it():
+    client = FakeGithubClient([Issue(1, "A", "", "u1", ("harness:todo",))])
+
+    created = client.create_issue(
+        "o/r", title="Heal", body="marker <!-- x -->", labels=(SELF_HEAL_LABEL,)
+    )
+
+    assert created.number == 2  # next after the existing issue
+    assert created.title == "Heal"
+    assert client.list_issues("o/r", label=SELF_HEAL_LABEL)[0].number == 2
+
+
+def test_fake_search_issue_by_marker_matches_body_within_the_label():
+    client = FakeGithubClient()
+    client.create_issue(
+        "o/r", title="Heal", body="diagnosis\n<!-- harness-heal:tsk_9 -->\n",
+        labels=(SELF_HEAL_LABEL,),
+    )
+
+    found = client.search_issue_by_marker("o/r", "<!-- harness-heal:tsk_9 -->")
+    missing = client.search_issue_by_marker("o/r", "<!-- harness-heal:other -->")
+
+    assert found is not None and found.title == "Heal"
+    assert missing is None
+
+
+def test_fake_search_ignores_issues_without_the_self_heal_label():
+    client = FakeGithubClient(
+        [Issue(1, "A", "<!-- harness-heal:tsk_9 -->", "u1", ("bug",))]
+    )
+
+    assert client.search_issue_by_marker("o/r", "<!-- harness-heal:tsk_9 -->") is None
+
+
+# --- issue state (open/closed/gone), fake ----------------------------------
+
+
+def test_fake_get_issue_state_open_by_default():
+    client = FakeGithubClient([Issue(1, "A", "", "u1", ("harness:todo",))])
+
+    assert client.get_issue_state("o/r", 1) == "open"
+
+
+def test_fake_get_issue_state_closed_after_close():
+    client = FakeGithubClient([Issue(1, "A", "", "u1", ("harness:todo",))])
+
+    client.close_issue(1)
+
+    assert client.get_issue_state("o/r", 1) == "closed"
+    # A closed issue also drops out of the label listing, mirroring state=open.
+    assert client.list_issues("o/r", label="harness:todo") == []
+
+
+def test_fake_get_issue_state_none_when_missing():
+    client = FakeGithubClient()
+
+    assert client.get_issue_state("o/r", 999) is None
+
+
+def test_fake_close_issue_deleted_removes_it():
+    client = FakeGithubClient([Issue(1, "A", "", "u1", ("harness:todo",))])
+
+    client.close_issue(1, deleted=True)
+
+    assert client.get_issue_state("o/r", 1) is None
 
 
 # --- HttpGithubClient with a fake opener -----------------------------------
@@ -167,6 +238,45 @@ def test_http_remove_label_other_error_propagates():
     client = HttpGithubClient("tok", opener=ServerErrorOpener())
     with pytest.raises(urllib.error.HTTPError):
         client.remove_label("o/r", 5, "x")
+
+
+# --- issue state (open/closed/gone), http ----------------------------------
+
+
+def test_http_get_issue_state_reads_the_state_field():
+    opener = FakeOpener({"number": 7, "state": "closed"})
+    client = HttpGithubClient("tok", opener=opener)
+
+    assert client.get_issue_state("o/r", 7) == "closed"
+
+    req = opener.requests[0]
+    assert req.get_method() == "GET"
+    assert req.full_url == "https://api.github.com/repos/o/r/issues/7"
+
+
+def test_http_get_issue_state_404_is_none():
+    class NotFoundOpener:
+        def open(self, request):
+            raise urllib.error.HTTPError(
+                request.full_url, 404, "Not Found", {}, io.BytesIO(b"")
+            )
+
+    client = HttpGithubClient("tok", opener=NotFoundOpener())
+
+    assert client.get_issue_state("o/r", 7) is None
+
+
+def test_http_get_issue_state_other_error_propagates():
+    class ServerErrorOpener:
+        def open(self, request):
+            raise urllib.error.HTTPError(
+                request.full_url, 500, "Server Error", {}, io.BytesIO(b"")
+            )
+
+    client = HttpGithubClient("tok", opener=ServerErrorOpener())
+
+    with pytest.raises(urllib.error.HTTPError):
+        client.get_issue_state("o/r", 7)
 
 
 # --- pull requests, fake ---------------------------------------------------
@@ -321,84 +431,376 @@ def test_http_create_pull_request_falls_back_to_argument_when_head_missing():
     assert created.head == "o:harness/tsk_1"
 
 
-# --- issues, fake -----------------------------------------------------------
+# --- get_pull_request, fake --------------------------------------------------
 
 
-def test_fake_find_issue_misses_then_hits():
+def test_fake_get_pull_request_defaults_to_open():
     client = FakeGithubClient()
-
-    assert client.find_issue("o/r", marker="<!-- harness-healer:tsk_1 -->") is None
-
-    created = client.create_issue(
-        "o/r", title="T", body="body\n\n<!-- harness-healer:tsk_1 -->\n"
+    created = client.create_pull_request(
+        "o/r", head="o:harness/tsk_1", base="main", title="T", body="B"
     )
 
-    assert client.find_issue("o/r", marker="<!-- harness-healer:tsk_1 -->") == created
+    detail = client.get_pull_request("o/r", number=created.number)
+
+    assert detail.number == created.number
+    assert detail.url == created.url
+    assert detail.state == "open"
+    assert detail.merged is False
 
 
-def test_fake_create_issue_records_the_call():
+def test_fake_close_pull_request_marks_merged():
     client = FakeGithubClient()
+    created = client.create_pull_request(
+        "o/r", head="o:harness/tsk_1", base="main", title="T", body="B"
+    )
 
-    issue = client.create_issue("o/r", title="T", body="B")
+    client.close_pull_request(created.number, merged=True)
 
-    assert issue.number == 1
-    assert issue.title == "T"
-    assert client.filed == [issue]
-
-
-# --- issues, http ------------------------------------------------------------
+    detail = client.get_pull_request("o/r", number=created.number)
+    assert detail.state == "closed"
+    assert detail.merged is True
 
 
-def test_http_find_issue_scans_bodies_for_marker_and_filters_out_prs():
-    payload = [
-        {
-            "number": 1,
-            "title": "PR",
-            "body": "<!-- harness-healer:tsk_1 -->",
-            "html_url": "https://github.com/o/r/pull/1",
-            "pull_request": {"url": "..."},
-        },
-        {
-            "number": 2,
-            "title": "harness bug",
-            "body": "some text\n\n<!-- harness-healer:tsk_1 -->\n",
-            "html_url": "https://github.com/o/r/issues/2",
-        },
-    ]
-    opener = FakeOpener(payload)
+def test_fake_close_pull_request_marks_closed_unmerged():
+    client = FakeGithubClient()
+    created = client.create_pull_request(
+        "o/r", head="o:harness/tsk_1", base="main", title="T", body="B"
+    )
+
+    client.close_pull_request(created.number, merged=False)
+
+    detail = client.get_pull_request("o/r", number=created.number)
+    assert detail.state == "closed"
+    assert detail.merged is False
+
+
+# --- get_pull_request, http ---------------------------------------------------
+
+
+def test_http_get_pull_request_maps_open_state():
+    payload = {
+        "number": 7,
+        "html_url": "https://github.com/o/r/pull/7",
+        "state": "open",
+        "merged": False,
+        "head": {"label": "o:harness/tsk_1"},
+    }
+    client = HttpGithubClient("tok", opener=FakeOpener(payload))
+
+    detail = client.get_pull_request("o/r", number=7)
+
+    assert detail.number == 7
+    assert detail.state == "open"
+    assert detail.merged is False
+
+
+def test_http_get_pull_request_maps_merged():
+    payload = {
+        "number": 7,
+        "html_url": "https://github.com/o/r/pull/7",
+        "state": "closed",
+        "merged": True,
+    }
+    client = HttpGithubClient("tok", opener=FakeOpener(payload))
+
+    detail = client.get_pull_request("o/r", number=7)
+
+    assert detail.state == "closed"
+    assert detail.merged is True
+
+
+def test_http_get_pull_request_maps_closed_unmerged():
+    payload = {
+        "number": 7,
+        "html_url": "https://github.com/o/r/pull/7",
+        "state": "closed",
+        "merged": False,
+    }
+    client = HttpGithubClient("tok", opener=FakeOpener(payload))
+
+    detail = client.get_pull_request("o/r", number=7)
+
+    assert detail.state == "closed"
+    assert detail.merged is False
+
+
+def test_http_get_pull_request_uses_the_right_url():
+    opener = FakeOpener({"number": 7, "state": "open", "merged": False})
     client = HttpGithubClient("tok", opener=opener)
 
-    found = client.find_issue("o/r", marker="<!-- harness-healer:tsk_1 -->")
-
-    assert found.number == 2
-    assert found.url == "https://github.com/o/r/issues/2"
+    client.get_pull_request("o/r", number=7)
 
     req = opener.requests[0]
     assert req.get_method() == "GET"
-    assert req.full_url.startswith("https://api.github.com/repos/o/r/issues")
-    assert "state=all" in req.full_url
-    assert "per_page=100" in req.full_url
+    assert req.full_url == "https://api.github.com/repos/o/r/pulls/7"
 
 
-def test_http_find_issue_returns_none_when_no_match():
-    payload = [{"number": 1, "title": "unrelated", "body": "nothing here"}]
-    client = HttpGithubClient("tok", opener=FakeOpener(payload))
+def test_fake_get_pull_request_reports_merged_state():
+    client = FakeGithubClient()
+    created = client.create_pull_request(
+        "o/r", head="o:harness/tsk_1", base="main", title="T", body="B"
+    )
 
-    assert client.find_issue("o/r", marker="<!-- harness-healer:tsk_1 -->") is None
+    assert client.get_pull_request("o/r", created.number).merged is False
+
+    client.merge_pull_request(created.number)
+
+    assert client.get_pull_request("o/r", created.number).merged is True
 
 
-def test_http_create_issue_posts_the_payload():
-    opener = FakeOpener({"number": 5, "html_url": "https://github.com/o/r/issues/5", "title": "T"})
+def test_fake_get_pull_request_unknown_number_raises():
+    client = FakeGithubClient()
+
+    with pytest.raises(KeyError):
+        client.get_pull_request("o/r", 999)
+
+
+# --- get_pull_request, http --------------------------------------------------
+
+
+def test_http_get_pull_request_reads_merged_field():
+    payload = {"number": 7, "html_url": "https://github.com/o/r/pull/7", "merged": True}
+    opener = FakeOpener(payload)
     client = HttpGithubClient("tok", opener=opener)
 
-    created = client.create_issue("o/r", title="T", body="B")
+    detail = client.get_pull_request("o/r", 7)
 
-    assert created.number == 5
-    assert created.url == "https://github.com/o/r/issues/5"
-    assert created.title == "T"
+    assert detail.number == 7
+    assert detail.url == "https://github.com/o/r/pull/7"
+    assert detail.merged is True
+
+    req = opener.requests[0]
+    assert req.get_method() == "GET"
+    assert req.full_url == "https://api.github.com/repos/o/r/pulls/7"
+
+
+def test_http_get_pull_request_open_pr_is_not_merged():
+    payload = {"number": 7, "html_url": "https://github.com/o/r/pull/7", "merged": False}
+    client = HttpGithubClient("tok", opener=FakeOpener(payload))
+
+    assert client.get_pull_request("o/r", 7).merged is False
+
+
+def test_http_get_pull_request_error_propagates():
+    class ServerErrorOpener:
+        def open(self, request):
+            raise urllib.error.HTTPError(
+                request.full_url, 500, "Server Error", {}, io.BytesIO(b"")
+            )
+
+    client = HttpGithubClient("tok", opener=ServerErrorOpener())
+
+    with pytest.raises(urllib.error.HTTPError):
+        client.get_pull_request("o/r", 7)
+
+
+# --- mergeability watcher support: PullRequestInfo, list_pull_requests, update_branch ---
+
+
+def test_fake_list_pull_requests_filters_by_head_prefix():
+    client = FakeGithubClient()
+    client.add_pull_request(
+        PullRequestInfo(1, "u1", "harness/tsk_1", "sha1", "main", "behind")
+    )
+    client.add_pull_request(
+        PullRequestInfo(2, "u2", "someone/manual", "sha2", "main", "dirty")
+    )
+
+    watched = client.list_pull_requests("o/r", head_prefix="harness/")
+
+    assert [pr.number for pr in watched] == [1]
+
+
+def test_fake_list_pull_requests_without_prefix_returns_all():
+    client = FakeGithubClient()
+    client.add_pull_request(
+        PullRequestInfo(1, "u1", "harness/tsk_1", "sha1", "main", "clean")
+    )
+
+    assert len(client.list_pull_requests("o/r")) == 1
+
+
+def test_fake_update_branch_records_call_and_flips_to_clean():
+    client = FakeGithubClient()
+    client.add_pull_request(
+        PullRequestInfo(1, "u1", "harness/tsk_1", "sha1", "main", "behind")
+    )
+
+    client.update_branch("o/r", 1)
+
+    assert client.updated_branches == [("o/r", 1)]
+    [pr] = client.list_pull_requests("o/r")
+    assert pr.mergeable_state == "clean"
+
+
+def test_http_list_pull_requests_two_tier_fetch():
+    list_payload = [
+        {
+            "number": 1,
+            "html_url": "https://github.com/o/r/pull/1",
+            "head": {"ref": "harness/tsk_1"},
+            "base": {"ref": "main"},
+        },
+        {
+            "number": 2,
+            "html_url": "https://github.com/o/r/pull/2",
+            "head": {"ref": "someone/manual"},
+            "base": {"ref": "main"},
+        },
+    ]
+    detail_payload = {
+        "head": {"sha": "abc123"},
+        "base": {"ref": "main"},
+        "mergeable_state": "behind",
+    }
+
+    class TieredOpener:
+        def __init__(self):
+            self.requests = []
+
+        def open(self, request):
+            self.requests.append(request)
+            if request.full_url.endswith("/pulls/1"):
+                return FakeResponse(detail_payload)
+            return FakeResponse(list_payload)
+
+    opener = TieredOpener()
+    client = HttpGithubClient("tok", opener=opener)
+
+    infos = client.list_pull_requests("o/r", head_prefix="harness/")
+
+    assert len(infos) == 1
+    info = infos[0]
+    assert info.number == 1
+    assert info.head_branch == "harness/tsk_1"
+    assert info.head_sha == "abc123"
+    assert info.base_branch == "main"
+    assert info.mergeable_state == "behind"
+    # exactly one list call + one detail call (for the matching PR only)
+    assert len(opener.requests) == 2
+
+
+def test_http_list_pull_requests_missing_mergeable_state_is_unknown():
+    class TieredOpener:
+        def open(self, request):
+            if "/pulls/1" in request.full_url and request.full_url.endswith("/pulls/1"):
+                return FakeResponse({"head": {"sha": "x"}, "base": {"ref": "main"}})
+            return FakeResponse(
+                [
+                    {
+                        "number": 1,
+                        "html_url": "u",
+                        "head": {"ref": "harness/tsk_1"},
+                        "base": {"ref": "main"},
+                    }
+                ]
+            )
+
+    client = HttpGithubClient("tok", opener=TieredOpener())
+
+    [info] = client.list_pull_requests("o/r", head_prefix="harness/")
+
+    assert info.mergeable_state == "unknown"
+
+
+def test_http_update_branch_puts_update_branch_endpoint():
+    opener = FakeOpener({})
+    client = HttpGithubClient("tok", opener=opener)
+
+    client.update_branch("o/r", 5)
+
+    req = opener.requests[0]
+    assert req.get_method() == "PUT"
+    assert req.full_url == "https://api.github.com/repos/o/r/pulls/5/update-branch"
+
+
+def test_http_update_branch_422_is_swallowed():
+    class NotBehindOpener:
+        def open(self, request):
+            raise urllib.error.HTTPError(
+                request.full_url, 422, "Unprocessable", {}, io.BytesIO(b"")
+            )
+
+    client = HttpGithubClient("tok", opener=NotBehindOpener())
+    client.update_branch("o/r", 5)  # must not raise
+
+
+def test_http_update_branch_other_error_propagates():
+    class ServerErrorOpener:
+        def open(self, request):
+            raise urllib.error.HTTPError(
+                request.full_url, 500, "Server Error", {}, io.BytesIO(b"")
+            )
+
+    client = HttpGithubClient("tok", opener=ServerErrorOpener())
+    with pytest.raises(urllib.error.HTTPError):
+        client.update_branch("o/r", 5)
+
+
+# --- issues, http ----------------------------------------------------------
+
+
+def test_http_create_issue_posts_title_body_labels():
+    opener = FakeOpener(
+        {
+            "number": 42,
+            "title": "Heal",
+            "body": "B",
+            "html_url": "https://github.com/o/r/issues/42",
+            "labels": [{"name": "harness:self-heal"}],
+        }
+    )
+    client = HttpGithubClient("tok", opener=opener)
+
+    created = client.create_issue(
+        "o/r", title="Heal", body="B", labels=("harness:self-heal",)
+    )
+
+    assert created.number == 42
+    assert created.url == "https://github.com/o/r/issues/42"
+    assert created.labels == ("harness:self-heal",)
 
     req = opener.requests[0]
     assert req.get_method() == "POST"
     assert req.full_url == "https://api.github.com/repos/o/r/issues"
-    assert json.loads(req.data.decode("utf-8")) == {"title": "T", "body": "B"}
+    assert json.loads(req.data.decode("utf-8")) == {
+        "title": "Heal",
+        "body": "B",
+        "labels": ["harness:self-heal"],
+    }
     assert req.get_header("Content-type") == "application/json"
+
+
+def test_http_search_issue_by_marker_scans_self_heal_issues():
+    payload = [
+        {
+            "number": 7,
+            "title": "Heal",
+            "body": "diagnosis <!-- harness-heal:tsk_9 --> end",
+            "html_url": "https://github.com/o/r/issues/7",
+            "labels": [{"name": "harness:self-heal"}],
+        }
+    ]
+    opener = FakeOpener(payload)
+    client = HttpGithubClient("tok", opener=opener)
+
+    found = client.search_issue_by_marker("o/r", "<!-- harness-heal:tsk_9 -->")
+    assert found is not None and found.number == 7
+
+    # scoped the listing to the self-heal label
+    assert "labels=harness%3Aself-heal" in opener.requests[0].full_url
+
+
+def test_http_search_issue_by_marker_returns_none_when_no_body_matches():
+    payload = [
+        {
+            "number": 7,
+            "title": "Heal",
+            "body": "unrelated",
+            "html_url": "https://github.com/o/r/issues/7",
+            "labels": [{"name": "harness:self-heal"}],
+        }
+    ]
+    client = HttpGithubClient("tok", opener=FakeOpener(payload))
+
+    assert client.search_issue_by_marker("o/r", "<!-- harness-heal:tsk_9 -->") is None
