@@ -5,6 +5,7 @@ from __future__ import annotations
 import html
 import json
 from collections.abc import AsyncIterator
+from datetime import datetime
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request
@@ -45,6 +46,26 @@ def _basename(value: str | None) -> str:
 
 
 TEMPLATES.env.filters["basename"] = _basename
+
+
+def _shorttime(value: str | None) -> str:
+    """Compact display form of a stored ISO-8601 UTC timestamp, e.g.
+    "Jul 22, 09:03". Defensive like `_basename`: anything it can't parse
+    (None, already-short text, garbage) passes through unchanged — the
+    template always keeps the raw value available too (e.g. in a `title`
+    attribute), so a parse failure here never hides data.
+    """
+    if not value:
+        return value or ""
+    text = value[:-1] + "+00:00" if value.endswith("Z") else value
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return value
+    return parsed.strftime("%b %d, %H:%M")
+
+
+TEMPLATES.env.filters["shorttime"] = _shorttime
 
 
 async def board_event_stream(
