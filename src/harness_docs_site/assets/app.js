@@ -112,10 +112,12 @@
   });
 
   // ---- Drill-down drawer + router ----
-  function esc(s) { return String(s).replace(/[&<>"]/g, function (c) {
-    return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]; }); }
+  var closeTimer = null;
+  function esc(s) { return String(s).replace(/[&<>"']/g, function (c) {
+    return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]; }); }
 
   function renderDrawer(part) {
+    clearTimeout(closeTimer);
     var h = [];
     h.push('<button class="close" aria-label="Close">×</button>');
     h.push('<span class="kind-badge">' + esc(part.kind) + "</span>");
@@ -151,7 +153,8 @@
   }
   function closeDrawer() {
     drawer.classList.remove("open");
-    setTimeout(function () { drawer.hidden = true; drawer.innerHTML = ""; }, 280);
+    clearTimeout(closeTimer);
+    closeTimer = setTimeout(function () { drawer.hidden = true; drawer.innerHTML = ""; }, 280);
   }
 
   function route() {
