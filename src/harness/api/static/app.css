@@ -10,6 +10,12 @@
  * inline SVG icons live in the templates), so the page works offline. */
 
 :root {
+  /* Follow the OS theme for system colors (native controls, scrollbars and,
+   * crucially, the UA `dialog { color: CanvasText }` rule) — without this,
+   * CanvasText resolves to its light value (black) even in dark mode, which
+   * left the task-detail values black-on-dark. */
+  color-scheme: light dark;
+
   --bg: #f2f2f7;
   --surface: #ffffff;
   --surface-2: #f7f7fa;
@@ -245,7 +251,7 @@ dialog#detail[open] { display: flex; }
 
 .task-detail {
   flex: 1; min-height: 0; display: flex; flex-direction: column;
-  background: var(--bg); width: 100%;
+  background: var(--bg); color: var(--text); width: 100%;
 }
 .task-detail__header {
   display: flex; align-items: center; gap: 10px;
