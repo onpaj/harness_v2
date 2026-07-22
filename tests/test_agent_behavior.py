@@ -45,6 +45,9 @@ class RealFsHandle(WorkspaceHandle):
     def push(self) -> None:
         self.pushes.append(self._branch)
 
+    def merge(self, base: str) -> bool:  # pragma: no cover - unused by these tests
+        return False
+
 
 class RealFsWorkspace(Workspace):
     """Re-attaching the same task returns the same handle over `root` (real path)."""
@@ -111,7 +114,7 @@ async def test_runs_agent_in_worktree_cwd_with_spec(tmp_path):
     call = runner.calls[0]
     assert call["cwd"] == workspace.handles["tsk_1"].path == tmp_path
     assert call["spec"] is spec
-    assert call["timeout"] == 600.0
+    assert call["timeout"] == 1800.0
 
 
 async def test_prompt_carries_attempt_relpath(tmp_path):
@@ -245,8 +248,10 @@ def test_compose_prompt_unchanged_when_body_absent():
         "before you start.\n"
         "Write your output for this step to the file .artifacts/tsk_1/development-01.md.\n"
         "\n"
-        "When you're done, finish with exactly this machine-readable verdict "
-        "(and nothing after it):\n"
+        "The harness reads your result by machine, not by eye. Your final "
+        "message MUST end with exactly this fenced verdict block and nothing "
+        "after it — not a prose summary, even once the artifact is written and "
+        "the tests pass. A missing block fails the task:\n"
         "```json\n"
         '{"outcome": "<one of: done>", "summary": "<short summary>"}\n'
         "```"
@@ -269,3 +274,23 @@ def test_compose_prompt_does_not_duplicate_body_equal_to_request():
     )
 
     assert _prompt_for(task) == _prompt_for(make_task())
+
+
+def test_compose_prompt_demands_the_verdict_block_as_the_last_thing():
+    # Fix B: the closing verdict must be stated as mandatory (a forgotten block
+    # is what fails a finished run), and it must be the final thing in the prompt.
+    spec = AgentSpec(
+        name="development",
+        prompt="you are dev",
+        allowed_outcomes=(Outcome.DONE,),
+    )
+    prompt = compose_prompt(
+        make_task(status="development"),
+        step="development",
+        artifact_relpath=".artifacts/tsk_1/development-01.md",
+        spec=spec,
+    )
+
+    assert "```json" in prompt
+    assert "must" in prompt.lower()
+    assert prompt.rstrip().endswith("```")

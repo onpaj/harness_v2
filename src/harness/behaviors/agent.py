@@ -31,7 +31,7 @@ class ClaudeCliBehavior(ConsumerBehavior):
         runner: AgentRunner,
         spec: AgentSpec,
         events: EventSink,
-        timeout: float = 600.0,
+        timeout: float = 1800.0,
     ) -> None:
         self._clock = clock
         self._workspace = workspace
@@ -109,8 +109,10 @@ def compose_prompt(
             f"before you start.",
             f"Write your output for this step to the file {artifact_relpath}.",
             "",
-            "When you're done, finish with exactly this machine-readable verdict "
-            "(and nothing after it):",
+            "The harness reads your result by machine, not by eye. Your final "
+            "message MUST end with exactly this fenced verdict block and nothing "
+            "after it — not a prose summary, even once the artifact is written and "
+            "the tests pass. A missing block fails the task:",
             "```json",
             '{"outcome": "<one of: ' + allowed + '>", "summary": "<short summary>"}',
             "```",

@@ -8,9 +8,11 @@ from harness.drivers.claude_cli import (
     _drain,
     _iter_lines,
     build_argv,
+    fallback_verdict,
     parse_stream_line,
     parse_verdict,
     render_stream_line,
+    try_verdict,
     verdict_from_final,
 )
 from harness.models import Outcome
@@ -379,6 +381,136 @@ def test_verdict_from_final_outside_allowed_raises():
 
     with pytest.raises(VerdictError):
         verdict_from_final(final, allowed=(Outcome.DONE,), raw="RAW")
+
+
+# --- try_verdict (tolerant: the runner's recovery path) ----------------------
+
+
+def _final(result: str, *, is_error: bool = False) -> dict:
+    return {
+        "type": "result",
+        "subtype": "success",
+        "is_error": is_error,
+        "result": result,
+    }
+
+
+def test_try_verdict_reads_valid_block():
+    run = try_verdict(
+        _final('done.\n```json\n{"outcome": "done", "summary": "ok"}\n```'),
+        allowed=(Outcome.DONE,),
+        raw="RAW",
+    )
+
+    assert run is not None
+    assert run.outcome is Outcome.DONE
+    assert run.summary == "ok"
+    assert run.raw == "RAW"
+
+
+def test_try_verdict_none_when_no_block():
+    # The exact failure we saw: a prose wrap-up, no verdict block at all.
+    run = try_verdict(
+        _final("Implementation complete. Summary:\n\nprose, no json."),
+        allowed=(Outcome.DONE,),
+        raw="RAW",
+    )
+
+    assert run is None
+
+
+def test_try_verdict_none_when_outcome_missing():
+    run = try_verdict(
+        _final('```json\n{"summary": "no outcome"}\n```'),
+        allowed=(Outcome.DONE,),
+        raw="RAW",
+    )
+
+    assert run is None
+
+
+def test_try_verdict_none_when_outcome_disallowed():
+    run = try_verdict(
+        _final('```json\n{"outcome": "request_changes"}\n```'),
+        allowed=(Outcome.DONE,),
+        raw="RAW",
+    )
+
+    assert run is None
+
+
+def test_try_verdict_none_when_outcome_unknown_value():
+    run = try_verdict(
+        _final('```json\n{"outcome": "nonsense"}\n```'),
+        allowed=(Outcome.DONE, Outcome.REQUEST_CHANGES),
+        raw="RAW",
+    )
+
+    assert run is None
+
+
+def test_try_verdict_raises_on_is_error():
+    # An envelope-level defect is a real failure, never a recoverable miss.
+    with pytest.raises(VerdictError):
+        try_verdict(_final("x", is_error=True), allowed=(Outcome.DONE,), raw="RAW")
+
+
+def test_try_verdict_raises_on_missing_result_field():
+    with pytest.raises(VerdictError):
+        try_verdict(
+            {"type": "result", "is_error": False},
+            allowed=(Outcome.DONE,),
+            raw="RAW",
+        )
+
+
+# --- fallback_verdict (single-outcome rescue, fix A) -------------------------
+
+
+def test_fallback_single_outcome_synthesizes_the_only_outcome():
+    run = fallback_verdict(
+        "  Implementation complete. Summary: prose.  ",
+        allowed=(Outcome.DONE,),
+        raw="RAW",
+    )
+
+    assert run is not None
+    assert run.outcome is Outcome.DONE
+    assert run.summary == "Implementation complete. Summary: prose."
+    assert run.raw == "RAW"
+
+
+def test_fallback_multi_outcome_is_ambiguous_returns_none():
+    run = fallback_verdict(
+        "prose",
+        allowed=(Outcome.DONE, Outcome.REQUEST_CHANGES),
+        raw="RAW",
+    )
+
+    assert run is None
+
+
+# --- build_argv --resume (fix C) ---------------------------------------------
+
+
+def test_build_argv_resume_adds_resume_and_omits_persona():
+    spec = AgentSpec(name="dev", prompt="PERSONA")
+
+    argv = build_argv(prompt="give me the verdict", spec=spec, resume="sess-123")
+
+    idx = argv.index("--resume")
+    assert argv[idx + 1] == "sess-123"
+    # the persona already lives in the resumed session
+    assert "--append-system-prompt" not in argv
+
+
+def test_build_argv_without_resume_keeps_persona():
+    spec = AgentSpec(name="dev", prompt="PERSONA")
+
+    argv = build_argv(prompt="x", spec=spec)
+
+    assert "--resume" not in argv
+    assert "--append-system-prompt" in argv
 
 
 # --- _iter_lines / _drain (the subprocess shell, with a fake process) --------

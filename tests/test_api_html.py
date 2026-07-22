@@ -4,7 +4,7 @@ from fastapi.testclient import TestClient
 from harness.api.app import create_app
 from harness.drivers.memory import FakeClock
 from harness.models import HistoryEntry, Task
-from harness.ports.board import Board, BoardColumn
+from harness.ports.board import Board, BoardColumn, BoardTab
 from tests.fakes import FakeBoardView, FakeTaskControl
 
 WORKING = Task(
@@ -44,6 +44,15 @@ TITLED = Task(
 )
 
 
+WORKFLOW_LESS = Task(
+    id="tsk_4",
+    workflow_template=None,
+    step="development",
+    created="2026-07-19T10:00:04Z",
+    status="development",
+)
+
+
 BROKEN = Task(
     id="tsk_9",
     workflow_template="default",
@@ -65,16 +74,23 @@ BROKEN = Task(
 def client() -> TestClient:
     board = Board(
         revision=9,
-        columns=(
-            BoardColumn(name="todo", tasks=()),
-            BoardColumn(name="development", tasks=(WORKING, WAITING, TITLED)),
-            BoardColumn(name="done", tasks=()),
-            BoardColumn(name="failed", tasks=()),
+        workflows=(
+            BoardTab(
+                name="default",
+                columns=(
+                    BoardColumn(name="todo", tasks=()),
+                    BoardColumn(name="development", tasks=(WORKING, WAITING, TITLED)),
+                    BoardColumn(name="done", tasks=()),
+                    BoardColumn(name="failed", tasks=()),
+                ),
+            ),
         ),
     )
     # BROKEN is retrievable via get() (for the detail fragment) without cluttering
     # the rendered columns, so the board-rendering tests stay undisturbed.
-    view = FakeBoardView(board, {"tsk_1": WORKING, "tsk_9": BROKEN})
+    view = FakeBoardView(
+        board, {"tsk_1": WORKING, "tsk_4": WORKFLOW_LESS, "tsk_9": BROKEN}
+    )
     return TestClient(create_app(view=view, clock=FakeClock()))
 
 
@@ -87,6 +103,8 @@ def test_index_renders_board_shell(client):
     assert "/static/sse.js" in body
     assert "/api/events" in body
     assert "https://" not in body
+    assert 'name="viewport"' in body
+    assert "width=device-width" in body
 
 
 def test_index_contains_columns(client):
@@ -159,6 +177,24 @@ def test_fragment_task_shows_metadata_and_history(client):
     assert "dispatcher" in body
 
 
+def test_fragment_task_shows_pipeline_workflow_and_dash_step(client):
+    """FR-9: a pipeline task (workflow set, step unset) shows its workflow
+    name and a dash — never a literal 'None' — in the step cell."""
+    body = client.get("/fragment/task/tsk_1").text
+
+    assert "default" in body
+    assert ">None<" not in body
+
+
+def test_fragment_task_shows_dash_workflow_and_real_step_when_workflow_less(client):
+    """FR-9: a workflow-less task (workflow unset, step set) shows a dash —
+    never a literal 'None' — in the workflow cell, and its real step."""
+    body = client.get("/fragment/task/tsk_4").text
+
+    assert ">None<" not in body
+    assert "development" in body
+
+
 def test_fragment_task_unknown_returns_404(client):
     assert client.get("/fragment/task/neznamy").status_code == 404
 
@@ -178,10 +214,15 @@ def test_no_endpoint_mutates(client):
 def _board_with_broken() -> Board:
     return Board(
         revision=9,
-        columns=(
-            BoardColumn(name="todo", tasks=()),
-            BoardColumn(name="development", tasks=(WORKING,)),
-            BoardColumn(name="failed", tasks=(BROKEN,)),
+        workflows=(
+            BoardTab(
+                name="default",
+                columns=(
+                    BoardColumn(name="todo", tasks=()),
+                    BoardColumn(name="development", tasks=(WORKING,)),
+                    BoardColumn(name="failed", tasks=(BROKEN,)),
+                ),
+            ),
         ),
     )
 
@@ -221,3 +262,45 @@ def test_restart_returns_404_when_control_reports_nothing():
 def test_restart_without_control_reports_nothing(client):
     # The default board is wired with the null control (create_app default).
     assert client.post("/tasks/tsk_9/restart").status_code == 404
+
+
+# --- Multi-workflow tab strip (FR-5, FR-6) ----------------------------------
+
+
+def _two_tab_board() -> Board:
+    return Board(
+        revision=1,
+        workflows=(
+            BoardTab(name="default", columns=(BoardColumn(name="plan", tasks=(WORKING,)),)),
+            BoardTab(name="hotfix", columns=(BoardColumn(name="patch", tasks=()),)),
+        ),
+    )
+
+
+def test_single_workflow_renders_no_tab_strip(client):
+    # `client`'s fixture board has only one tab ("default").
+    body = client.get("/fragment/board").text
+
+    assert "tab-strip" not in body
+
+
+def test_multiple_workflows_render_a_tab_per_workflow():
+    view = FakeBoardView(_two_tab_board(), {"tsk_1": WORKING})
+    api = TestClient(create_app(view=view, clock=FakeClock()))
+
+    body = api.get("/fragment/board").text
+
+    assert 'data-workflow="default"' in body
+    assert 'data-workflow="hotfix"' in body
+    assert body.index('class="tab" data-workflow="default"') < body.index(
+        'class="tab" data-workflow="hotfix"'
+    )
+
+
+def test_index_marks_default_tab_active_via_data_attribute():
+    view = FakeBoardView(_two_tab_board(), {"tsk_1": WORKING})
+    api = TestClient(create_app(view=view, clock=FakeClock()))
+
+    body = api.get("/").text
+
+    assert 'data-active-workflow="default"' in body

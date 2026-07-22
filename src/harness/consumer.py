@@ -47,6 +47,10 @@ class Consumer:
         self._clock = clock
 
     @property
+    def step(self) -> str:
+        return self._step
+
+    @property
     def actor(self) -> str:
         return f"consumer:{self._step}"
 
@@ -92,8 +96,12 @@ class Consumer:
             outcome=result.outcome.value,
             summary=result.summary or None,
         )
+        merged_data = {**task.data, **(result.data or {})}
         updated = append_history(
-            replace(task, last_outcome=result.outcome.value, lock_id=None), entry
+            replace(
+                task, data=merged_data, last_outcome=result.outcome.value, lock_id=None
+            ),
+            entry,
         )
         self._queue.transfer(updated, self._inbox)
         self._events.emit(
