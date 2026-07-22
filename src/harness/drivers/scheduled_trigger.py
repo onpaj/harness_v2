@@ -74,7 +74,7 @@ class ScheduledTrigger(Trigger):
             created=now,
             workflow_template=self._workflow,
             step=self._step,
-            repository=self._repository,
+            repository=obs.repository or self._repository,
             worktree=(f"{self._worktree_root}/{task_id}" if self._worktree_root else None),
             dedup_key=self._dedup_key(bucket, obs),
             data={**obs.data},
