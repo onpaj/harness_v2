@@ -109,7 +109,9 @@ def _new_step_warnings(view: BoardView, raw_json: str) -> list[str]:
     see architecture-01.md). Computed here, not inside WorkflowAdmin, because
     a filesystem driver has no idea what the running process's queues are."""
     known_steps = {
-        column.name for column in view.snapshot().columns
+        column.name
+        for tab in view.snapshot().workflows
+        for column in tab.columns
     } - {TODO_COLUMN, DONE_COLUMN, FAILED_COLUMN}
     parsed = json.loads(raw_json)
     referenced = {parsed.get("start")}

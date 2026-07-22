@@ -7,7 +7,7 @@ from fastapi.testclient import TestClient
 from harness.api.app import create_app
 from harness.drivers.fs_workflows import FilesystemWorkflowAdmin
 from harness.drivers.memory import FakeClock
-from harness.ports.board import Board, BoardColumn
+from harness.ports.board import Board, BoardColumn, BoardTab
 from tests.fakes import FakeBoardView
 
 DEFINITION = json.dumps(
@@ -22,7 +22,8 @@ def admin(tmp_path):
 
 
 def _board_with_columns(*names: str) -> Board:
-    return Board(revision=1, columns=tuple(BoardColumn(name=n, tasks=()) for n in names))
+    columns = tuple(BoardColumn(name=n, tasks=()) for n in names)
+    return Board(revision=1, workflows=(BoardTab(name="default", columns=columns),))
 
 
 @pytest.fixture
