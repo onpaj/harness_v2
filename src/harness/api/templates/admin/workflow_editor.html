@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>harness board — workflow {{ name }}</title>
+  <style>
+    body { font: 14px system-ui, sans-serif; margin: 0; padding: 16px; background: #f4f5f7; }
+    .nav { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; font-size: 13px; }
+    .nav .brand { font-weight: 600; color: #172b4d; }
+    .nav a { color: #0747a6; text-decoration: none; }
+    .nav a:hover { text-decoration: underline; }
+    .back { display: block; margin-bottom: 12px; font-size: 13px; color: #0747a6; text-decoration: none; }
+    h1 { font-size: 16px; margin: 0 0 16px; }
+    .card { background: #fff; border-radius: 4px; box-shadow: 0 1px 1px rgba(9,30,66,.25); padding: 16px; max-width: 720px; }
+    .field { margin-bottom: 14px; }
+    .field label { display: block; font-weight: 500; margin-bottom: 4px; }
+    .field input[type=text] { width: 100%; box-sizing: border-box; padding: 6px 8px; border: 1px solid #dfe1e6; border-radius: 3px; }
+    textarea.editor { width: 100%; box-sizing: border-box; padding: 8px; border: 1px solid #dfe1e6; border-radius: 3px; font-family: ui-monospace, monospace; font-size: 13px; }
+    .actions { margin-top: 16px; display: flex; gap: 8px; }
+    button { font: inherit; padding: 6px 14px; border-radius: 3px; border: 1px solid #dfe1e6; background: #fff; cursor: pointer; }
+    button.primary { background: #0052cc; color: #fff; border-color: #0052cc; }
+    button.danger { background: #fff; color: #de350b; border-color: #de350b; }
+    .banner { padding: 8px 12px; border-radius: 4px; margin-top: 16px; font-size: 13px; max-width: 720px; }
+    .banner.success { background: #e3fcef; color: #006644; }
+    .banner.error { background: #ffebe6; color: #bf2600; white-space: pre-wrap; }
+    .banner.warning { background: #fffae6; color: #974f0c; }
+  </style>
+</head>
+<body>
+  {% include "_nav.html" %}
+  <a class="back" href="/admin/workflows">&larr; back to workflows</a>
+  {% if is_new %}
+  <h1>New workflow</h1>
+  {% else %}
+  <h1>Workflow: {{ name }}</h1>
+  {% endif %}
+  <div class="card">
+    <form method="post" action="{{ '/admin/workflows' if is_new else '/admin/workflows/' + name }}">
+      {% if is_new %}
+      <div class="field">
+        <label for="name">Name</label>
+        <input type="text" id="name" name="name" value="{{ name }}" autofocus>
+      </div>
+      {% endif %}
+
+      <div class="field">
+        <label for="text">Definition (raw JSON)</label>
+        <textarea class="editor" id="text" name="text" rows="20">{{ text }}</textarea>
+      </div>
+
+      <div class="actions">
+        <button class="primary" type="submit">Save</button>
+      </div>
+    </form>
+    {% if not is_new %}
+    <form method="post" action="/admin/workflows/{{ name }}/delete"
+          onsubmit="return confirm('Delete workflow {{ name }}?');" style="margin-top: 8px;">
+      <button class="danger" type="submit">Delete</button>
+    </form>
+    {% endif %}
+  </div>
+  {% if error %}
+  <div class="banner error">{{ error }}</div>
+  {% endif %}
+  {% if saved %}
+  <div class="banner success">saved</div>
+  {% endif %}
+  {% for warning in warnings %}
+  <div class="banner warning">{{ warning }}</div>
+  {% endfor %}
+</body>
+</html>

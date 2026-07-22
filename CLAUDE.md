@@ -68,6 +68,7 @@ swapped out later.
 29. **Conflict resolution is always a merge, never a rebase.** `WorkspaceHandle.merge()` produces a two-parent merge commit, deliberately — a rebase would rewrite history on a branch that may already be pushed, breaking the no-force-push invariant `GitWorkspaceHandle.push()` relies on (a plain `push -u`, no `--force`).
 30. **No task's worktree directory is ever removed.** Nothing under `src/harness` calls `git worktree remove`/`prune`. Consequence: a harness-authored branch is always still checked out in its original task's own worktree, so `GitWorkspace.attach`'s branch-override path force-checks it out into a *second* worktree (`git worktree add --force <path> <branch>`, reusing the existing local branch — not `-B`, which git refuses to force-reset on a branch checked out elsewhere no matter how many times `--force` is passed). Safe because the original worktree is permanently inert once its task reaches a terminal state. Deliberate — don't "fix" the `--force` away, and don't add worktree cleanup without re-checking this invariant.
 31. **The branch-override's reused local ref is untrusted until reconciled with `origin`.** The shared `refs/heads/<branch>` only tracks `origin/<branch>` while every advance of the branch goes through a local commit+push in *some* worktree — `GithubMergeabilityWatcher.update_branch` breaks that by advancing the branch server-side with no local git touch at all. So immediately after the `--force`d `worktree add` in the reuse path, `GitWorkspace.attach` hard-resets the *new* worktree to `origin/<branch>`'s fetched tip before returning the handle. That reset targets the branch as checked out in the new worktree, not "elsewhere," so it isn't blocked by the guard invariant 30 relies on. Don't drop this reset — without it, a `behind`→`update_branch`→`dirty`→resolver sequence on the same PR leaves the resolver's worktree stale and its final `push` fails as non-fast-forward.
+32. **`AgentAdmin`/`WorkflowAdmin` are unknown to the dispatcher and consumer.** They are UI-facing admin ports, not orchestration ports — like `BoardView`/`TaskControl`, not like `AgentCatalog`/`WorkflowRepository`. `api/` touches only the two admin ports; the filesystem drivers (`FilesystemAgentAdmin`, `FilesystemWorkflowAdmin`) are wired exclusively in `cli.py`'s `serve()`. Guarded by `test_architecture.py`'s existing glob-based checks (no dedicated test needed).
 
 ## Working here
 
@@ -147,6 +148,12 @@ Dependencies flow strictly downward, no cycles.
 - `drivers/launchd.py` — the background service on macOS: pure `wrapper_script`/
   `plist_bytes` builders (unit-tested) plus a thin `launchctl` shell; driven by
   `harness service install|uninstall|status`
+- `ports/agent_admin.py` — `AgentAdmin` (write-side counterpart of `AgentCatalog`,
+  for the admin UI): `list`/`read`/`write`/`delete`, plus `AgentFields`
+  (raw strings in) and `AgentValidationError`
+- `ports/workflow_admin.py` — `WorkflowAdmin` (write-side counterpart of
+  `WorkflowRepository`, for the admin UI): `list`/`read_raw`/`write_raw`/`delete`
+  over the file's exact text, plus `WorkflowValidationError`
 - `drivers/mergeability_watcher.py` — `GithubMergeabilityWatcher(TaskSource)`,
   `kind="mergeability"`: `poll()` auto-updates a "behind" harness-owned PR
   (side effect, no task) and queues a "dirty" one as a resolver task on the
@@ -154,7 +161,8 @@ Dependencies flow strictly downward, no cycles.
 - `behaviors/resolve_conflict.py` — `ResolveConflictBehavior`: merges the base
   into the attached branch; a clean merge commits without spending an agent
   call, a real conflict runs the `resolve` persona then the worker commits
-- `api/` — FastAPI board; sees only `BoardView` and `ArtifactView`, never a driver or `ArtifactStore`
+- `api/` — FastAPI board and admin UI; sees only `BoardView`, `ArtifactView`,
+  `TaskControl`, `AgentAdmin` and `WorkflowAdmin` — never a driver or `ArtifactStore`
 
 ## What is responsible for what
 

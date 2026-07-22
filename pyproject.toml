@@ -7,6 +7,7 @@ dependencies = [
     "fastapi>=0.115",
     "uvicorn>=0.30",
     "jinja2>=3.1",
+    "python-multipart>=0.0.9",
 ]
 
 [project.optional-dependencies]
@@ -24,7 +25,7 @@ where = ["src"]
 exclude = ["harness_docs_site*"]
 
 [tool.setuptools.package-data]
-"harness.api" = ["templates/*.html", "static/*"]
+"harness.api" = ["templates/*.html", "templates/admin/*.html", "static/*"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
