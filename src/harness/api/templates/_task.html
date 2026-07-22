@@ -21,7 +21,8 @@
       <table>
         <tr><th>repository</th><td>{{ task.repository or "—" }}</td></tr>
         <tr><th>worktree</th><td>{{ task.worktree or "—" }}</td></tr>
-        <tr><th>workflow</th><td>{{ task.workflow_template }}</td></tr>
+        <tr><th>workflow</th><td>{{ task.workflow_template or "—" }}</td></tr>
+        <tr><th>step</th><td>{{ task.step or "—" }}</td></tr>
         <tr><th>status</th><td>{{ task.status or "—" }}</td></tr>
         <tr><th>lastOutcome</th><td>{{ task.last_outcome or "—" }}</td></tr>
         <tr><th>lockId</th><td>{{ task.lock_id or "—" }}</td></tr>

@@ -305,7 +305,7 @@ class Harness:
 
 def build(
     root: Path,
-    workflows: str | Sequence[str],
+    workflows: str | Sequence[str] | None = None,
     *,
     events: EventSink | None = None,
     clock: Clock | None = None,
@@ -339,10 +339,19 @@ def build(
     artifacts = artifacts or MemoryArtifactStore()
     forge = forge or MemoryForge()
 
-    names = (workflows,) if isinstance(workflows, str) else tuple(workflows)
+    # The served set: the workflow(s) this harness actually routes. `None`
+    # means workflow-less (FR-6) — the harness runs its catalog agents with no
+    # workflow at all. A named-but-unserved workflow still fails fast at
+    # dispatch via ServedWorkflowRepository, so no dispatcher change is needed.
+    if workflows is None:
+        names: tuple[str, ...] = ()
+    elif isinstance(workflows, str):
+        names = (workflows,)
+    else:
+        names = tuple(workflows)
 
     raw_workflows = FilesystemWorkflowRepository(layout.workflows)
-    resolved = {name: raw_workflows.get(name) for name in names}
+    resolved = {name: raw_workflows.get(name) for name in names}  # WorkflowNotFound => fail fast
     served_workflows = ServedWorkflowRepository(raw_workflows, tuple(resolved))
 
     # One tab per discovered workflow definition (read side only — dispatch below
@@ -356,10 +365,25 @@ def build(
         try:
             discovered[name] = raw_workflows.get(name)
         except WorkflowNotFound:
-            continue
+            continue  # unreadable file during discovery: skipped, not fatal
+
+    # FR-6/FR-7: the live queue set is the union of every step reachable in the
+    # served workflow(s) plus every agent declared under agents/ — so a
+    # workflow-less catalog agent still gets a queue, a consumer and a column.
+    # Unserved (but on-disk) workflows contribute a read-only board tab (above)
+    # but no live queue: dispatch stays keyed to the served `resolved` set.
+    known_steps: set[str] = set()
+    for workflow in resolved.values():
+        known_steps |= set(workflow.steps())
+    if catalog is not None:
+        known_steps |= set(catalog.names())
+
+    steps = tuple(sorted(known_steps))
 
     projection = BoardProjection(
-        list(discovered.values()), include_healed=heal is not None
+        steps=steps,
+        workflows=list(discovered.values()),
+        include_healed=heal is not None,
     )
     stage_output = StageOutputProjection()
     # The reflector comes after ProjectionSink: the outward projection must not
@@ -387,8 +411,7 @@ def build(
         step: FilesystemTaskQueue(
             name=step, root=layout.queues / step, events=events, quarantine=failed
         )
-        for workflow in resolved.values()
-        for step in workflow.steps()
+        for step in steps
     }
 
     # The archived queue and reconciler only exist when a merge_checker is

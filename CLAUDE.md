@@ -44,7 +44,7 @@ swapped out later.
 5. **Neither `api/` nor `projection.py` imports `drivers/`.** The UI must not know what the harness runs on. See ADR-0005.
 6. **In `Harness.run()`, `recover()` comes before `hydrate()`.** The other way round loses tasks from `.processing/`. See ADR-0003.
 7. **A task-movement event carries both `task` and `queue`.** Without it the projection won't see tasks created after startup.
-8. **`repository`/`worktree` is read only by the behavior.** The router and dispatcher still decide solely on `(status, lastOutcome)`.
+8. **`repository`/`worktree` is read only by the behavior.** The router and dispatcher decide solely on `(status, lastOutcome)`, and — since workflows became optional — whether a workflow is present at all; never on `repository`/`worktree`, `step`, or `data`.
 9. **The commit is done by the behavior driver, not the consumer and not the LLM.** The consumer knows no git. See ADR-0006.
 10. **Artifacts are attempt-indexed** (`<task>/<step>/<attempt>/`). A step re-run never overwrites the previous attempt — otherwise the `request_changes` loop would vanish from the audit trail. See ADR-0006.
 11. **`Workspace`/`Forge`/`ArtifactStore` are unknown to the dispatcher and consumer.** Only the behavior touches them; wiring in `app.py`. `api/` touches only `ArtifactView`. Guarded by `test_architecture.py`.

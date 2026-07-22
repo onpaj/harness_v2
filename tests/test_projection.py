@@ -41,7 +41,7 @@ def make_task(
 
 
 def test_column_order_follows_reachability_and_ignores_back_edges():
-    assert column_order([WORKFLOW]) == (
+    assert column_order(WORKFLOW.steps(), (WORKFLOW,)) == (
         TODO_COLUMN,
         "plan",
         "design",
@@ -64,7 +64,7 @@ def test_column_order_unions_multiple_workflows_no_duplicates():
         ),
     )
 
-    assert column_order([WORKFLOW, other]) == (
+    assert column_order((*WORKFLOW.steps(), *other.steps()), (WORKFLOW, other)) == (
         TODO_COLUMN,
         "plan",
         "design",
@@ -85,8 +85,21 @@ RESOLVER_WORKFLOW = Workflow(
 )
 
 
+def test_column_order_falls_back_to_declaration_order_for_workflow_less_steps():
+    assert column_order((*WORKFLOW.steps(), "triage"), (WORKFLOW,)) == (
+        TODO_COLUMN,
+        "plan",
+        "design",
+        "development",
+        "review",
+        "triage",
+        DONE_COLUMN,
+        FAILED_COLUMN,
+    )
+
+
 def test_column_order_folds_in_extra_workflow_steps():
-    assert column_order([WORKFLOW, RESOLVER_WORKFLOW]) == (
+    assert column_order((), (WORKFLOW, RESOLVER_WORKFLOW)) == (
         TODO_COLUMN,
         "plan",
         "design",
@@ -99,36 +112,54 @@ def test_column_order_folds_in_extra_workflow_steps():
     )
 
 
+def test_column_order_with_no_workflow_uses_declaration_order():
+    assert column_order(("triage",)) == (
+        TODO_COLUMN,
+        "triage",
+        DONE_COLUMN,
+        FAILED_COLUMN,
+    )
+
+
 def test_snapshot_with_extra_workflow_includes_its_columns():
-    projection = BoardProjection([WORKFLOW, RESOLVER_WORKFLOW])
+    projection = BoardProjection((), (WORKFLOW, RESOLVER_WORKFLOW))
 
     board = projection.snapshot()
 
-    assert [column.name for column in board.columns] == list(
-        column_order([WORKFLOW, RESOLVER_WORKFLOW])
+    # Each served workflow is its own tab; the resolver tab carries its columns.
+    tab = board.workflow("resolver")
+    assert [column.name for column in tab.columns] == list(
+        column_order((), (RESOLVER_WORKFLOW,))
     )
 
 
 def test_apply_places_resolver_task_in_resolve_column():
-    projection = BoardProjection([WORKFLOW, RESOLVER_WORKFLOW])
+    projection = BoardProjection((), (WORKFLOW, RESOLVER_WORKFLOW))
 
-    projection.apply("resolve", make_task(status="resolve"))
+    projection.apply(
+        "resolve", make_task(status="resolve", workflow_template="resolver")
+    )
 
-    assert projection.snapshot().column("resolve").tasks[0].id == "tsk_1"
+    assert (
+        projection.snapshot().workflow("resolver").column("resolve").tasks[0].id
+        == "tsk_1"
+    )
 
 
 def test_snapshot_has_every_column_even_when_empty():
-    projection = BoardProjection([WORKFLOW])
+    projection = BoardProjection(WORKFLOW.steps(), (WORKFLOW,))
 
     board = projection.snapshot()
 
     tab = board.workflow("default")
-    assert [column.name for column in tab.columns] == list(column_order([WORKFLOW]))
+    assert [column.name for column in tab.columns] == list(
+        column_order((), (WORKFLOW,))
+    )
     assert all(column.tasks == () for column in tab.columns)
 
 
 def test_apply_places_task_in_column():
-    projection = BoardProjection([WORKFLOW])
+    projection = BoardProjection(WORKFLOW.steps(), (WORKFLOW,))
 
     projection.apply("design", make_task(status="design"))
 
@@ -136,7 +167,7 @@ def test_apply_places_task_in_column():
 
 
 def test_apply_moves_task_between_columns():
-    projection = BoardProjection([WORKFLOW])
+    projection = BoardProjection(WORKFLOW.steps(), (WORKFLOW,))
     projection.apply("design", make_task(status="design"))
 
     projection.apply("development", make_task(status="development"))
@@ -147,7 +178,7 @@ def test_apply_moves_task_between_columns():
 
 
 def test_apply_handles_backward_edge():
-    projection = BoardProjection([WORKFLOW])
+    projection = BoardProjection(WORKFLOW.steps(), (WORKFLOW,))
     projection.apply("review", make_task(status="review"))
 
     projection.apply("development", make_task(status="development"))
@@ -157,7 +188,7 @@ def test_apply_handles_backward_edge():
 
 
 def test_apply_to_terminal_columns():
-    projection = BoardProjection([WORKFLOW])
+    projection = BoardProjection(WORKFLOW.steps(), (WORKFLOW,))
 
     projection.apply(DONE_COLUMN, make_task(status="end"))
     projection.apply(FAILED_COLUMN, make_task(task_id="tsk_2"))
@@ -168,7 +199,7 @@ def test_apply_to_terminal_columns():
 
 
 def test_unknown_column_is_ignored():
-    projection = BoardProjection([WORKFLOW])
+    projection = BoardProjection(WORKFLOW.steps(), (WORKFLOW,))
 
     projection.apply("nonsense", make_task(status="nonsense"))
 
@@ -176,7 +207,7 @@ def test_unknown_column_is_ignored():
 
 
 def test_tasks_are_ordered_by_created():
-    projection = BoardProjection([WORKFLOW])
+    projection = BoardProjection(WORKFLOW.steps(), (WORKFLOW,))
     projection.apply("plan", make_task("tsk_2", "plan", created="2026-07-19T10:00:05Z"))
     projection.apply("plan", make_task("tsk_1", "plan", created="2026-07-19T10:00:00Z"))
 
@@ -186,7 +217,7 @@ def test_tasks_are_ordered_by_created():
 
 
 def test_get_returns_full_task():
-    projection = BoardProjection([WORKFLOW])
+    projection = BoardProjection(WORKFLOW.steps(), (WORKFLOW,))
     projection.apply("plan", make_task(status="plan", last_outcome="done"))
 
     assert projection.get("tsk_1").last_outcome == "done"
@@ -194,7 +225,7 @@ def test_get_returns_full_task():
 
 
 def test_revision_grows_monotonically():
-    projection = BoardProjection([WORKFLOW])
+    projection = BoardProjection(WORKFLOW.steps(), (WORKFLOW,))
     first = projection.snapshot().revision
 
     projection.apply("plan", make_task(status="plan"))
@@ -206,7 +237,7 @@ def test_revision_grows_monotonically():
 
 
 def test_hydrate_reads_every_source():
-    projection = BoardProjection([WORKFLOW])
+    projection = BoardProjection(WORKFLOW.steps(), (WORKFLOW,))
     inbox = MemoryTaskQueue("tasks")
     plan = MemoryTaskQueue("plan")
     review = MemoryTaskQueue("review")
@@ -234,7 +265,7 @@ def test_hydrate_reads_every_source():
 
 
 def test_hydrate_places_statusless_inbox_task_in_todo():
-    projection = BoardProjection([WORKFLOW])
+    projection = BoardProjection(WORKFLOW.steps(), (WORKFLOW,))
     inbox = MemoryTaskQueue("tasks")
     inbox.put(make_task("tsk_1"))
 
@@ -249,7 +280,7 @@ def test_hydrate_places_statusless_inbox_task_in_todo():
 
 
 def test_apply_moves_task_from_failed_to_todo():
-    projection = BoardProjection([WORKFLOW])
+    projection = BoardProjection(WORKFLOW.steps(), (WORKFLOW,))
     projection.apply(FAILED_COLUMN, make_task(status="failed"))
 
     projection.apply(TODO_COLUMN, make_task(status=None))
@@ -313,7 +344,7 @@ def test_hydrate_without_archived_queue_is_backward_compatible():
 
 
 async def test_subscribe_yields_current_revision_first():
-    projection = BoardProjection([WORKFLOW])
+    projection = BoardProjection(WORKFLOW.steps(), (WORKFLOW,))
     projection.apply("plan", make_task(status="plan"))
 
     stream = projection.subscribe()
@@ -324,7 +355,7 @@ async def test_subscribe_yields_current_revision_first():
 
 
 async def test_subscribe_wakes_on_change():
-    projection = BoardProjection([WORKFLOW])
+    projection = BoardProjection(WORKFLOW.steps(), (WORKFLOW,))
     stream = projection.subscribe()
     await anext(stream)
 
@@ -336,7 +367,7 @@ async def test_subscribe_wakes_on_change():
 
 
 async def test_subscriber_that_falls_behind_does_not_block_applying():
-    projection = BoardProjection([WORKFLOW])
+    projection = BoardProjection(WORKFLOW.steps(), (WORKFLOW,))
     stream = projection.subscribe()
     await anext(stream)
 
@@ -352,7 +383,7 @@ async def test_subscriber_that_falls_behind_does_not_block_applying():
 
 
 def test_tasks_land_in_the_tab_matching_their_own_template():
-    projection = BoardProjection([WORKFLOW, HOTFIX])
+    projection = BoardProjection((), [WORKFLOW, HOTFIX])
 
     projection.apply("plan", make_task("tsk_1", "plan", workflow_template="default"))
     projection.apply("patch", make_task("tsk_2", "patch", workflow_template="hotfix"))
@@ -370,7 +401,7 @@ def test_same_step_name_in_two_workflows_stays_isolated():
         start="plan",
         transitions=(Transition(from_step="plan", on="done", to_step=END),),
     )
-    projection = BoardProjection([WORKFLOW, other])
+    projection = BoardProjection((), [WORKFLOW, other])
 
     projection.apply("plan", make_task("tsk_1", "plan", workflow_template="default"))
     projection.apply("plan", make_task("tsk_2", "plan", workflow_template="hotfix"))
@@ -381,7 +412,7 @@ def test_same_step_name_in_two_workflows_stays_isolated():
 
 
 def test_unrecognized_template_falls_back_to_unknown_tab():
-    projection = BoardProjection([WORKFLOW])
+    projection = BoardProjection((), [WORKFLOW])
 
     projection.apply(FAILED_COLUMN, make_task("tsk_1", "failed", workflow_template="ghost"))
 
@@ -391,7 +422,7 @@ def test_unrecognized_template_falls_back_to_unknown_tab():
 
 
 def test_unknown_tab_is_omitted_when_empty():
-    projection = BoardProjection([WORKFLOW])
+    projection = BoardProjection((), [WORKFLOW])
 
     board = projection.snapshot()
 
@@ -403,7 +434,7 @@ def test_hydrate_puts_unrecognized_template_inbox_task_in_unknown_todo():
     """A task with a typo'd workflow_template sitting in the inbox before the
     dispatcher's first tick must still be visible — not silently dropped —
     which requires TODO_COLUMN in the unknown tab's column set (FR-4)."""
-    projection = BoardProjection([WORKFLOW])
+    projection = BoardProjection((), [WORKFLOW])
     inbox = MemoryTaskQueue("tasks")
     inbox.put(make_task("tsk_1", workflow_template="ghost"))
 
@@ -419,7 +450,7 @@ def test_hydrate_puts_unrecognized_template_inbox_task_in_unknown_todo():
 
 
 def test_snapshot_tabs_are_sorted_alphabetically():
-    projection = BoardProjection([HOTFIX, WORKFLOW])
+    projection = BoardProjection((), [HOTFIX, WORKFLOW])
 
     board = projection.snapshot()
 

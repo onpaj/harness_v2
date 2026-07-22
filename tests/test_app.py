@@ -6,6 +6,7 @@ from harness.drivers.memory import FakeMergeChecker, MemoryAgentCatalog, MemoryE
 from harness.models import BehaviorResult, Outcome, Task
 from harness.ports.agent import AgentRun, AgentSpec
 from harness.ports.behavior import ConsumerBehavior
+from harness.ports.board import UNKNOWN_WORKFLOW
 from harness.ports.source import TaskSource
 
 
@@ -221,6 +222,61 @@ async def test_run_drives_a_task_all_the_way_to_done(tmp_path):
     finished = Task.from_dict(json.loads((tmp_path / "done" / "tsk_1.json").read_text()))
     visited = [entry.to_step for entry in finished.history if entry.actor == "dispatcher"]
     assert visited == ["plan", "review", "plan", "review", "end"]
+
+
+def test_build_without_a_workflow_name_has_no_workflow(tmp_path):
+    """FR-6/FR-7: a --no-workflow harness (no workflow name given) still
+    builds — queue discovery no longer depends on a mandatory workflow."""
+    layout = HarnessLayout(tmp_path)
+    layout.agents.mkdir(parents=True, exist_ok=True)
+    (layout.agents / "triage.json").write_text(json.dumps({"prompt": "x"}))
+    catalog = MemoryAgentCatalog({"triage": AgentSpec(name="triage", prompt="x")})
+
+    harness = build(tmp_path, catalog=catalog, events=MemoryEventSink())
+
+    assert harness.workflows == {}
+    # A workflow-less harness has no workflow tab, so its catalog agents render
+    # as columns under the sole UNKNOWN tab (which is kept even while empty
+    # because it is the whole board).
+    board = harness.projection.snapshot()
+    assert board.workflow(UNKNOWN_WORKFLOW).column("triage") is not None
+    assert (tmp_path / "queues" / "triage").is_dir()
+
+
+def test_build_discovers_queues_as_union_of_workflows_and_catalog(tmp_path):
+    """FR-7: with two workflow files and a catalog with an extra standalone
+    agent, the queue set is the union of all three sources, with no
+    duplicates."""
+    layout = seed(tmp_path)
+    hotfix = {
+        "name": "hotfix",
+        "start": "patch",
+        "transitions": [{"from": "patch", "on": "done", "to": "end"}],
+    }
+    (layout.workflows / "hotfix.json").write_text(json.dumps(hotfix))
+    # A catalog with a spec for every discovered step: when a catalog is
+    # wired, every step resolves through it (fail fast on a missing spec),
+    # so this must cover the union, not just the standalone extra agent.
+    catalog = MemoryAgentCatalog(
+        {
+            name: AgentSpec(name=name, prompt="x")
+            for name in ("plan", "review", "patch", "triage")
+        }
+    )
+
+    harness = build(tmp_path, "default", catalog=catalog, events=MemoryEventSink())
+
+    assert set(harness._step_queues) == {"plan", "review", "patch", "triage"}
+
+
+def test_build_with_one_workflow_and_no_catalog_is_unchanged(tmp_path):
+    """FR-7: the union degenerates to exactly today's shape when there is one
+    workflow and no catalog — a strict backward-compatible generalization."""
+    seed(tmp_path)
+
+    harness = build(tmp_path, "default", events=MemoryEventSink())
+
+    assert set(harness._step_queues) == {"plan", "review"}
 
 
 def test_behavior_for_uses_spec_timeout_override_else_agent_timeout(tmp_path):

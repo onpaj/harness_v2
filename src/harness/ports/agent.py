@@ -67,6 +67,10 @@ class AgentCatalog(ABC):
     def get(self, name: str) -> AgentSpec:
         """Return the spec for the name, or raise `AgentNotFound`."""
 
+    @abstractmethod
+    def names(self) -> tuple[str, ...]:
+        """Every agent name discoverable without raising."""
+
 
 class AgentNotFound(Exception):
     """The catalog has no agent by that name."""

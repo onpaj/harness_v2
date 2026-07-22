@@ -371,6 +371,9 @@ class MemoryAgentCatalog(AgentCatalog):
         except KeyError:
             raise AgentNotFound(f"agent {name!r} does not exist") from None
 
+    def names(self) -> list[str]:
+        return list(self._specs)
+
 
 class FakeAgentRunner(AgentRunner):
     """Scripted runner without a subprocess.

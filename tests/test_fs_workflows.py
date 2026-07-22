@@ -5,8 +5,10 @@ import pytest
 from harness.drivers.fs_workflows import (
     FilesystemWorkflowRepository,
     ServedWorkflowRepository,
+    invalid_step_name,
 )
-from harness.models import END, Transition
+from harness.models import END, FAILED, Transition
+from harness.ports.board import DONE_COLUMN, TODO_COLUMN
 from harness.ports.workflows import WorkflowNotFound
 
 DEFINITION = {
@@ -184,7 +186,7 @@ def test_path_separator_is_rejected_even_when_escape_target_exists(tmp_path):
 
 def test_names_lists_definition_stems_sorted(tmp_path):
     (tmp_path / "default.json").write_text(json.dumps(DEFINITION))
-    (tmp_path / "hotfix.json").write_text(json.dumps(DEFINITION))
+    (tmp_path / "hotfix.json").write_text(json.dumps({**DEFINITION, "name": "hotfix"}))
 
     repository = FilesystemWorkflowRepository(tmp_path)
 
@@ -195,6 +197,19 @@ def test_names_on_missing_root_is_empty(tmp_path):
     repository = FilesystemWorkflowRepository(tmp_path / "does-not-exist")
 
     assert repository.names() == ()
+
+
+@pytest.mark.parametrize("reserved", [END, FAILED, DONE_COLUMN, TODO_COLUMN])
+def test_invalid_step_name_rejects_reserved_board_names(reserved):
+    assert invalid_step_name(reserved) is True
+
+
+def test_invalid_step_name_accepts_an_ordinary_name():
+    assert invalid_step_name("development") is False
+
+
+def test_invalid_step_name_rejects_path_separators():
+    assert invalid_step_name("../secret") is True
 
 
 def test_names_does_not_validate_broken_definitions(tmp_path):

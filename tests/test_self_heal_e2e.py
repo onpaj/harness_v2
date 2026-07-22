@@ -1,9 +1,9 @@
 """End-to-end self-healing on in-memory drivers.
 
-A task fails (its workflow has no edge for the agent's outcome) → it lands in
-`failed/` → the healer claims it, runs the `healer` persona, files an issue on
-the harness repo, and settles the task onto `healed/`. No disk except the queues,
-no real waiting.
+A task fails (it carries a status that the served workflow doesn't contain, so
+the router can't place it) → it lands in `failed/` → the healer claims it, runs
+the `healer` persona, files an issue on the harness repo, and settles the task
+onto `healed/`. No disk except the queues, no real waiting.
 """
 
 import json
@@ -21,8 +21,9 @@ from harness.drivers.memory import (
 from harness.models import FAILED, HEALED, Outcome, Task
 from harness.ports.agent import AgentRun, AgentSpec
 
-# `work` has only a request_changes edge, so the agent's `done` cannot be routed
-# → the task fails. That is the induced failure the healer then picks up.
+# A minimal workflow whose only step is `work`. The induced failure (below) is a
+# task carrying a status the workflow doesn't contain, which the router can't
+# place — that is what the healer then picks up.
 DEFINITION = {
     "name": "default",
     "start": "work",
@@ -80,10 +81,15 @@ def build_harness(tmp_path, runner) -> Harness:
 
 
 def submit(tmp_path, task_id="tsk_e2e") -> None:
+    # Induce a failure the healer picks up: the task carries a status the served
+    # workflow doesn't contain (with an outcome already set), so the router
+    # can't place it and the dispatcher moves it to failed/.
     task = Task(
         id=task_id,
         workflow_template="default",
         created="2026-07-21T10:00:00Z",
+        status="obsolete-step",
+        last_outcome="done",
         repository="app",
         data={"request": "Do the thing"},
     )

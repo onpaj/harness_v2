@@ -27,6 +27,7 @@ from harness.drivers.fs_repos import FilesystemRepositoryRegistry
 from harness.drivers.fs_workflows import (
     FilesystemWorkflowAdmin,
     FilesystemWorkflowRepository,
+    invalid_step_name,
     invalid_workflow_name,
 )
 from harness.drivers.git_remote import github_slug
@@ -125,6 +126,14 @@ def _init(args: argparse.Namespace) -> int:
     root = _root(args.root)
     layout = HarnessLayout(root)
 
+    layout.agents.mkdir(parents=True, exist_ok=True)
+    _write_default_repos(layout)
+
+    if args.no_workflow:
+        layout.tasks.mkdir(parents=True, exist_ok=True)
+        print(f"harness ready at {root} (no workflow — add steps under {layout.agents})")
+        return 0
+
     if invalid_workflow_name(args.workflow):
         print(f"error: invalid workflow name: {args.workflow!r}", file=sys.stderr)
         return 2
@@ -158,7 +167,6 @@ def _init(args: argparse.Namespace) -> int:
     _write_default_agents(layout, workflow)
     _write_default_agents(layout, resolver_workflow)
     _write_healer_agent(layout)
-    _write_default_repos(layout)
 
     print(f"harness ready at {root}")
     print(f"steps: {', '.join(workflow.steps())}")
@@ -459,9 +467,18 @@ def _submit(args: argparse.Namespace) -> int:
         print(f"error: --data is not valid JSON: {error}", file=sys.stderr)
         return 2
 
+    workflow_name = args.workflow
+    step = args.step
+    if workflow_name is None and step is None:
+        workflow_name = DEFAULT_WORKFLOW
+    if step is not None and invalid_step_name(step):
+        print(f"error: invalid step name: {step!r}", file=sys.stderr)
+        return 2
+
     task = Task(
         id=new_task_id(),
-        workflow_template=args.workflow,
+        workflow_template=workflow_name,
+        step=step,
         created=SystemClock().now(),
         repository=args.repo,
         worktree=args.worktree,
@@ -495,6 +512,10 @@ def _github_sources(
         client = HttpGithubClient(token)
 
     worktree_root = args.worktree_root or str(root / "worktrees")
+    workflow = args.github_workflow
+    step = args.github_step
+    if workflow is None and step is None:
+        workflow = DEFAULT_WORKFLOW
     sources: list[TaskSource] = []
     for name in registry.names():
         slug = slug_of(registry.resolve(name))
@@ -506,7 +527,8 @@ def _github_sources(
                 client=client,
                 clock=SystemClock(),
                 repo=slug,
-                workflow=args.github_workflow,
+                workflow=workflow,
+                step=step,
                 repository=name,
                 worktree_root=worktree_root,
                 select_label=args.github_label,
@@ -954,7 +976,15 @@ def _resolve_served_workflows(
             )
             return None
         return names
-    return tuple(args.workflows) if args.workflows else (DEFAULT_WORKFLOW,)
+    if args.workflows:
+        return tuple(args.workflows)
+    # Neither --workflow nor --all-workflows: probe for the default workflow.
+    # Present (a normal `harness init`) → serve it, the unchanged default.
+    # Absent → workflow-less (FR-6): serve no workflow and run the catalog
+    # agents directly, rather than failing on a missing `default.json`.
+    if (layout.workflows / f"{DEFAULT_WORKFLOW}.json").is_file():
+        return (DEFAULT_WORKFLOW,)
+    return ()
 
 
 def _parse_hours(raw: str) -> list[int]:
@@ -1192,14 +1222,15 @@ def _run(args: argparse.Namespace) -> int:
     # ingestion. Validating the *default* against the served set would reject
     # e.g. `run --workflow hotfix` with no GitHub flags at all -- a regression
     # against FR-6, since no GithubTaskSource is ever built in that case.
+    # `--github-step` (workflow-less GitHub ingestion) skips the check: it names
+    # a step, not a workflow, and `_github_sources` applies its own defaulting.
     if args.github_workflow is not None and args.github_workflow not in served_names:
         print(
             f"error: --github-workflow {args.github_workflow!r} is not served "
-            f"by this harness (served: {', '.join(served_names)})",
+            f"by this harness (served: {', '.join(served_names) or '(none)'})",
             file=sys.stderr,
         )
         return 2
-    args.github_workflow = args.github_workflow or DEFAULT_WORKFLOW
 
     # The real run: agent behind `claude -p`, git worktree under a shared root,
     # repo name→path from `repos.json`, personas from `agents/`, artifacts
@@ -1344,11 +1375,26 @@ def main(argv: list[str] | None = None) -> int:
     init = subparsers.add_parser("init", help="create the directory tree")
     init.add_argument("--root", default=None)
     init.add_argument("--workflow", default=DEFAULT_WORKFLOW)
+    init.add_argument(
+        "--no-workflow",
+        action="store_true",
+        help="skip writing a default workflow; add steps under agents/ directly",
+    )
     init.set_defaults(handler=_init)
 
     submit = subparsers.add_parser("submit", help="submit a new task")
     submit.add_argument("--root", default=None)
-    submit.add_argument("--workflow", default=DEFAULT_WORKFLOW)
+    submit_target = submit.add_mutually_exclusive_group()
+    submit_target.add_argument(
+        "--workflow",
+        default=None,
+        help="run the named workflow (mutually exclusive with --step)",
+    )
+    submit_target.add_argument(
+        "--step",
+        default=None,
+        help="run this one step and finish (mutually exclusive with --workflow)",
+    )
     submit.add_argument("--repo", default=None)
     submit.add_argument("--worktree", default=None, help="path to the task's worktree")
     submit.add_argument("--data", default=None, help="JSON payload")
@@ -1361,7 +1407,8 @@ def main(argv: list[str] | None = None) -> int:
         action="append",
         dest="workflows",
         default=None,
-        help="workflow to serve (repeatable); unset serves just 'default'",
+        help="workflow to serve (repeatable); unset serves 'default' when it "
+        "exists, otherwise runs workflow-less on the catalog agents",
     )
     run.add_argument(
         "--all-workflows",
@@ -1395,11 +1442,19 @@ def main(argv: list[str] | None = None) -> int:
         default="harness:todo",
         help="label that selects issues to ingest",
     )
-    run.add_argument(
+    github_target = run.add_mutually_exclusive_group()
+    github_target.add_argument(
         "--github-workflow",
         default=None,
         help="workflow assigned to GitHub-sourced tasks (default: 'default'); "
         "an explicit value must be in the served set",
+    )
+    github_target.add_argument(
+        "--github-step",
+        default=None,
+        dest="github_step",
+        help="single step assigned to GitHub-sourced tasks (workflow-less; "
+        "mutually exclusive with --github-workflow)",
     )
     run.add_argument("--worktree-root", default=None, help="root of the task worktrees")
     run.add_argument(

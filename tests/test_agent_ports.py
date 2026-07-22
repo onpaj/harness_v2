@@ -58,6 +58,14 @@ def test_memory_catalog_unknown_raises_not_found():
         catalog.get("nope")
 
 
+def test_memory_catalog_names_lists_every_spec():
+    catalog = MemoryAgentCatalog(
+        {"plan": AgentSpec(name="plan", prompt="p"), "review": AgentSpec(name="review", prompt="r")}
+    )
+
+    assert catalog.names() == ["plan", "review"]
+
+
 async def test_fake_runner_returns_scripted_run_and_records_call(tmp_path):
     spec = AgentSpec(name="planner", prompt="p")
     scripted = AgentRun(Outcome.DONE, "done", raw="{}")
