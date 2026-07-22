@@ -336,6 +336,81 @@ td.wrap, th.wrap { white-space: normal; }
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 
+/* --- Admin: forms & lists -------------------------------------------------
+ * The agent/workflow editors and their index pages share the board's shell
+ * (appbar + tab bar) and its theme tokens — no page ships its own colours.
+ * These classes give the forms the same rounded, light/dark surfaces the
+ * board uses. */
+
+.back-link { display: inline-block; margin: 0 2px 14px; font-size: 14px; font-weight: 500; }
+.page-header .btn { margin-left: auto; }
+
+.form-card {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius); box-shadow: var(--shadow);
+  padding: 18px; max-width: 720px;
+}
+
+.field { margin-bottom: 16px; }
+.field:last-child { margin-bottom: 0; }
+.field > label { display: block; font-weight: 600; font-size: 14px; margin-bottom: 6px; }
+.field input[type=text],
+.field textarea {
+  width: 100%; box-sizing: border-box; font: inherit; font-size: 15px;
+  padding: 10px 12px; color: var(--text); background: var(--surface-2);
+  border: 1px solid var(--border-strong); border-radius: var(--radius-sm);
+  -webkit-appearance: none; appearance: none;
+}
+.field textarea {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 13px; line-height: 1.5; resize: vertical; min-height: 120px;
+}
+.field input[type=text]:focus,
+.field textarea:focus {
+  outline: none; border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-weak);
+}
+.field.error input[type=text],
+.field.error textarea { border-color: var(--failed-fg); }
+.field-error { color: var(--failed-fg); font-size: 13px; margin-top: 6px; }
+
+.checks { display: flex; flex-wrap: wrap; gap: 8px; }
+.checks label {
+  display: inline-flex; align-items: center; gap: 8px; min-height: 44px;
+  padding: 8px 14px; font-size: 14px; font-weight: 500; cursor: pointer;
+  background: var(--surface-2); border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+}
+.checks input { width: 17px; height: 17px; accent-color: var(--accent); }
+
+.form-actions { display: flex; gap: 8px; margin-top: 20px; }
+.btn.danger { color: var(--failed-fg); border-color: var(--failed-fg); background: var(--surface); }
+
+.banner {
+  max-width: 720px; margin-top: 16px; padding: 12px 16px;
+  border-radius: var(--radius-sm); font-size: 14px;
+  border: 1px solid transparent;
+}
+.banner.success { background: var(--done-bg); color: var(--done-fg); }
+.banner.error { background: var(--failed-bg); color: var(--failed-fg); white-space: pre-wrap; }
+.banner.warning { background: var(--changes-bg); color: var(--changes-fg); }
+
+.list-card {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius); box-shadow: var(--shadow); overflow: hidden;
+}
+.list-card .row {
+  display: flex; align-items: center; padding: 14px 16px; min-height: 44px;
+  border-bottom: 1px solid var(--border); color: var(--text); font-weight: 500;
+}
+.list-card .row:last-child { border-bottom: none; }
+.list-card .row:active { background: var(--surface-2); }
+.list-card .row::after {
+  content: "\203A"; margin-left: auto; color: var(--text-3);
+  font-size: 20px; line-height: 1;
+}
+.list-empty { color: var(--text-3); padding: 16px; font-size: 14px; }
+
 /* --- Desktop -------------------------------------------------------------- */
 
 @media (min-width: 768px) {
