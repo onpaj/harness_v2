@@ -1,0 +1,3 @@
+{#- Swapped into #update-result by the nav's Update button. Colour keyed by
+    outcome: ok = version moved, muted = already current, error = it failed. -#}
+<span style="font-size: 12px; {% if kind == 'error' %}color: #bf2600;{% elif kind == 'ok' %}color: #006644;{% else %}color: #5e6c84;{% endif %}">{{ message }}</span>

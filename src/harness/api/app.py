@@ -16,6 +16,7 @@ from harness.ports.board import BoardView
 from harness.ports.clock import Clock
 from harness.ports.control import TaskControl
 from harness.ports.logs import StageOutputView
+from harness.ports.updater import Updater, UpdateError
 from harness.ports.workflow_admin import WorkflowAdmin, WorkflowValidationError
 from harness.ports.workflows import WorkflowNotFound
 
@@ -89,6 +90,16 @@ class _EmptyWorkflowAdmin(WorkflowAdmin):
         return False
 
 
+class _NullUpdater(Updater):
+    """No-op updater for a board wired without one (tests, or a from-source
+    board that cannot upgrade itself). The button exists on every page but
+    reports that self-update is unavailable here. Behind the port, so api/ still
+    knows no driver."""
+
+    def update(self) -> None:
+        raise UpdateError("self-update is not available in this deployment")
+
+
 def create_app(
     *,
     view: BoardView,
@@ -99,6 +110,7 @@ def create_app(
     coalesce_seconds: float = 0.25,
     agent_admin: AgentAdmin | None = None,
     workflow_admin: WorkflowAdmin | None = None,
+    updater: Updater | None = None,
     version: str = "unknown",
     build_time: str | None = None,
 ) -> FastAPI:
@@ -107,6 +119,7 @@ def create_app(
     control = control or _NullTaskControl()
     agent_admin = agent_admin or _EmptyAgentAdmin()
     workflow_admin = workflow_admin or _EmptyWorkflowAdmin()
+    updater = updater or _NullUpdater()
     app = FastAPI(title="harness board", docs_url=None, redoc_url=None)
     app.state.view = view
     app.state.artifacts = artifacts
@@ -132,6 +145,7 @@ def create_app(
             coalesce_seconds,
             agent_admin,
             workflow_admin,
+            updater,
             version,
             build_time,
         )
