@@ -9,6 +9,7 @@ from pathlib import Path
 
 from harness.behaviors.agent import ClaudeCliBehavior
 from harness.behaviors.landing import LandingBehavior
+from harness.behaviors.resolve_conflict import ResolveConflictBehavior
 from harness.consumer import Consumer
 from harness.dispatcher import Dispatcher
 from harness.drivers.composite_events import CompositeEventSink
@@ -51,6 +52,10 @@ from harness.task_control import TaskControlService
 
 LANDING_STEP = "land"
 """The step to which the wiring assigns LandingBehavior instead of DummyBehavior."""
+
+RESOLVE_STEP = "resolve"
+"""The step to which the wiring assigns ResolveConflictBehavior, when a catalog
+is configured — the resolver workflow's first step."""
 
 
 @dataclass(frozen=True)
@@ -316,21 +321,27 @@ def build(
     resolved = {name: raw_workflows.get(name) for name in names}  # WorkflowNotFound => fail fast
     served_workflows = ServedWorkflowRepository(raw_workflows, tuple(resolved))
 
-    # FR-7: the live queue set is the union of every step reachable in every
-    # loadable workflow file plus every agent declared under agents/ — not just
-    # the served workflow(s). So a step belonging only to an unserved (but
-    # on-disk) workflow, or a workflow-less catalog agent, still gets a queue.
-    # With one served workflow and no catalog this degenerates to exactly that
-    # workflow's steps.
-    known_steps: set[str] = set()
-    loadable_workflows: list[Workflow] = []
+    # One tab per discovered workflow definition (read side only — dispatch below
+    # stays keyed to the served `resolved` set). names() may include a broken
+    # definition (it fails loud only from get()), so skip those defensively; the
+    # served workflows always get a tab even if a rename made them undiscoverable.
+    discovered: dict[str, Workflow] = dict(resolved)
     for name in raw_workflows.names():
+        if name in discovered:
+            continue
         try:
-            loaded = raw_workflows.get(name)
+            discovered[name] = raw_workflows.get(name)
         except WorkflowNotFound:
             continue  # unreadable file during discovery: skipped, not fatal
-        loadable_workflows.append(loaded)
-        known_steps |= set(loaded.steps())
+
+    # FR-6/FR-7: the live queue set is the union of every step reachable in the
+    # served workflow(s) plus every agent declared under agents/ — so a
+    # workflow-less catalog agent still gets a queue, a consumer and a column.
+    # Unserved (but on-disk) workflows contribute a read-only board tab (above)
+    # but no live queue: dispatch stays keyed to the served `resolved` set.
+    known_steps: set[str] = set()
+    for workflow in resolved.values():
+        known_steps |= set(workflow.steps())
     if catalog is not None:
         known_steps |= set(catalog.names())
 
@@ -338,7 +349,7 @@ def build(
 
     projection = BoardProjection(
         steps=steps,
-        workflows=loadable_workflows,
+        workflows=list(discovered.values()),
         include_healed=heal is not None,
     )
     stage_output = StageOutputProjection()
@@ -358,6 +369,11 @@ def build(
     inbox = FilesystemTaskQueue(
         name="tasks", root=layout.tasks, events=events, quarantine=failed
     )
+    # Step queues, consumers and board columns are unioned across every served
+    # workflow (e.g. the primary and the resolver workflow) so a task carrying a
+    # different `workflow_template` still gets a working queue — the dispatcher
+    # already resolves the workflow per task, this is the only piece that
+    # otherwise assumed a single workflow.
     step_queues = {
         step: FilesystemTaskQueue(
             name=step, root=layout.queues / step, events=events, quarantine=failed
@@ -390,6 +406,15 @@ def build(
     def behavior_for(step: str) -> ConsumerBehavior:
         if step == landing_step:
             return landing
+        if step == RESOLVE_STEP and catalog is not None:
+            return ResolveConflictBehavior(
+                clock=clock,
+                workspace=workspace,
+                runner=runner,
+                spec=catalog.get(step),
+                events=events,
+                timeout=agent_timeout,
+            )
         if catalog is not None:
             # Missing spec → AgentNotFound surfaces already at build time (fail fast).
             spec = catalog.get(step)

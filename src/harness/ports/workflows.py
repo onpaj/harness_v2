@@ -16,5 +16,9 @@ class WorkflowRepository(ABC):
 
     @abstractmethod
     def names(self) -> tuple[str, ...]:
-        """Every workflow name discoverable without raising. Best-effort: a
-        name whose file fails to parse is simply absent from the result."""
+        """All workflow names discoverable here, sorted alphabetically.
+
+        Lenient on enumeration: an unreadable or invalid definition is simply
+        skipped here, not raised — it still fails loud from get() if actually
+        requested.
+        """

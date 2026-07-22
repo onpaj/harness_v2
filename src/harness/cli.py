@@ -7,6 +7,7 @@ import asyncio
 import importlib.metadata as metadata
 import json
 import os
+import plistlib
 import shutil
 import subprocess
 import sys
@@ -33,12 +34,17 @@ from harness.drivers.git_workspace import GitWorkspace
 from harness.drivers.github_client import GithubClient, HttpGithubClient
 from harness.drivers.github_forge import GithubForge
 from harness.drivers.github_source import GithubTaskSource
+from harness.drivers.mergeability_watcher import GithubMergeabilityWatcher
 from harness.drivers.launchd import (
     DEFAULT_LABEL,
     ServiceError,
     autoupdate_plist_bytes,
+    autoupdate_wrapper_script,
+    format_interval,
     kickstart,
     load,
+    parse_interval_minutes,
+    periodic_plist_bytes,
     plist_bytes,
     plist_path,
     status,
@@ -95,6 +101,17 @@ DEFAULT_DEFINITION = {
     ],
 }
 
+DEFAULT_RESOLVER_WORKFLOW = "resolver"
+
+RESOLVER_DEFINITION = {
+    "name": "resolver",
+    "start": "resolve",
+    "transitions": [
+        {"from": "resolve", "on": "done", "to": "land"},
+        {"from": "land", "on": "done", "to": "end"},
+    ],
+}
+
 
 def _root(value: str | None) -> Path:
     if value:
@@ -127,14 +144,25 @@ def _init(args: argparse.Namespace) -> int:
             encoding="utf-8",
         )
 
+    resolver_definition_path = layout.workflows / f"{DEFAULT_RESOLVER_WORKFLOW}.json"
+    if not resolver_definition_path.exists():
+        resolver_definition_path.write_text(
+            json.dumps(RESOLVER_DEFINITION, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+
     try:
         harness = build(root, args.workflow)
+        resolver_workflow = FilesystemWorkflowRepository(layout.workflows).get(
+            DEFAULT_RESOLVER_WORKFLOW
+        )
     except WorkflowNotFound as error:
         print(f"error: {error}", file=sys.stderr)
         return 2
 
     workflow = harness.workflows[args.workflow]
     _write_default_agents(layout, workflow)
+    _write_default_agents(layout, resolver_workflow)
     _write_healer_agent(layout)
 
     print(f"harness ready at {root}")
@@ -272,6 +300,19 @@ _REVIEW_PERSONA = (
     "cleanup suggestions)."
 )
 
+_RESOLVE_PERSONA = (
+    "You are a senior developer whose only job right now is to resolve a git "
+    "merge conflict. The working directory already contains a real conflict "
+    "from merging the base branch into this PR's branch — files with "
+    "<<<<<<<, =======, >>>>>>> markers. Read each conflicted file, understand "
+    "both sides using the surrounding code and tests, and produce a correct "
+    "resolution: remove every marker, preserve the combined intent of both "
+    "changes, and leave a tree that would pass the project's existing "
+    "tests.\n\n"
+    "Do not commit, create a branch, or open a worktree — the harness handles "
+    "all of that."
+)
+
 _HEALER_PERSONA = (
     "You are the harness healer. A task in the orchestration harness has failed "
     "and landed in the `failed/` queue; your job is to read the failure report "
@@ -306,6 +347,7 @@ AGENT_PERSONAS: dict[str, tuple[str, list[str]]] = {
         ["Read", "Write", "Edit", "Bash", "Grep", "Glob", "Task"],
     ),
     "review": (_REVIEW_PERSONA, ["Read", "Grep", "Glob", "Bash"]),
+    "resolve": (_RESOLVE_PERSONA, ["Read", "Edit", "Bash", "Grep", "Glob"]),
 }
 
 
@@ -471,6 +513,42 @@ def _github_sources(
     return sources
 
 
+def _mergeability_sources(
+    args: argparse.Namespace,
+    root: Path,
+    registry: RepositoryRegistry,
+    *,
+    slug_of=github_slug,
+    client: GithubClient | None = None,
+) -> list[TaskSource]:
+    """One `GithubMergeabilityWatcher` per repo in `repos.json` with a GitHub
+    origin — mirrors `_github_sources` exactly: no token (and no injected
+    client) → no sources, a repo with no GitHub origin is skipped."""
+    if client is None:
+        token = os.environ.get("GITHUB_TOKEN")
+        if not token:
+            return []
+        client = HttpGithubClient(token)
+
+    worktree_root = args.worktree_root or str(root / "worktrees")
+    sources: list[TaskSource] = []
+    for name in registry.names():
+        slug = slug_of(registry.resolve(name))
+        if slug is None:
+            continue  # already warned about by _github_sources for the same repo
+        sources.append(
+            GithubMergeabilityWatcher(
+                client=client,
+                clock=SystemClock(),
+                repo=slug,
+                repository=name,
+                worktree_root=worktree_root,
+                resolver_workflow=args.resolver_workflow,
+            )
+        )
+    return sources
+
+
 def service_path_entries(harness: Path) -> list[str]:
     """`PATH` for the service: the venv's bin first, then the usual locations.
 
@@ -602,7 +680,15 @@ def installed_version_report() -> str:
 
 
 def _update(args: argparse.Namespace) -> int:
-    """Upgrade the installed harness in place via `uv tool upgrade`."""
+    """Upgrade the installed harness in place via `uv tool upgrade`.
+
+    With `--restart-service LABEL` (the scheduled-autoupdate path), also
+    kickstarts that LaunchAgent, but only when the version actually changed —
+    both the "before" and "after" snapshots go through
+    `installed_version_report()` so they are byte-comparable; comparing it
+    against `version_string()` (a different string shape) would report
+    "changed" on every run and restart the service even on a no-op upgrade.
+    """
     uv = uv_executable()
     if uv is None:
         print(
@@ -611,6 +697,9 @@ def _update(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 2
+
+    restart_service = getattr(args, "restart_service", None)
+    before = installed_version_report() if restart_service else None
 
     result = subprocess.run(
         [str(uv), "tool", "upgrade", PACKAGE_NAME],
@@ -626,8 +715,29 @@ def _update(args: argparse.Namespace) -> int:
 
     # This process is still the *old* code, so version_string() here would
     # report the version we just replaced. Ask the freshly installed script.
-    print(f"\nnow: {installed_version_report()}")
+    after = installed_version_report()
+    print(f"\nnow: {after}")
 
+    # PR #49's autoupdate wrapper drives this path: `harness update
+    # --restart-service <label>`. Restart only when the version actually
+    # changed, so a no-op poll doesn't kill a healthy service.
+    if restart_service:
+        if before != after:
+            try:
+                kickstart(os.getuid(), restart_service)
+            except ServiceError as error:
+                print(
+                    f"error: update succeeded but restart failed: {error}",
+                    file=sys.stderr,
+                )
+                return 1
+            print(f"restarted service {restart_service} (version changed)")
+        else:
+            print(f"service {restart_service} left running (no version change)")
+        return 0
+
+    # main's autoupdate schedule drives this path: `harness update --restart
+    # [--only-if-idle] [--label L]`. Idle-gated so a firing mid-stage defers.
     if not getattr(args, "restart", False):
         print(
             "the running service still has the previous version — restart it with\n"
@@ -791,15 +901,13 @@ def _service_uninstall(args: argparse.Namespace) -> int:
     return 0
 
 
-def _service_status(args: argparse.Namespace) -> int:
-    problem = _require_macos()
-    if problem:
-        print(f"error: {problem}", file=sys.stderr)
-        return 2
+def _print_service_report(label: str, target: Path, report: str | None) -> int:
+    """The shared "label / plist / launchctl state" block for `status` output.
 
-    target = plist_path(Path.home(), args.label)
-    report = status(os.getuid(), args.label)
-    print(f"label:  {args.label}")
+    Shared by `_service_status` and `_service_autoupdate_status`, which only
+    differ in an extra `interval:` line the caller prints around this call.
+    """
+    print(f"label:  {label}")
     print(f"plist:  {target} ({'present' if target.exists() else 'missing'})")
     if report is None:
         print("state:  not loaded")
@@ -810,6 +918,17 @@ def _service_status(args: argparse.Namespace) -> int:
             print(f"        {stripped}")
     print("state:  loaded")
     return 0
+
+
+def _service_status(args: argparse.Namespace) -> int:
+    problem = _require_macos()
+    if problem:
+        print(f"error: {problem}", file=sys.stderr)
+        return 2
+
+    target = plist_path(Path.home(), args.label)
+    report = status(os.getuid(), args.label)
+    return _print_service_report(args.label, target, report)
 
 
 def _resolve_served_workflows(
@@ -858,7 +977,131 @@ def _parse_hours(raw: str) -> list[int]:
     return sorted(set(hours))
 
 
-def _service_autoupdate(args: argparse.Namespace) -> int:
+# --- harness service autoupdate --------------------------------------------
+
+
+def _service_autoupdate_install(args: argparse.Namespace) -> int:
+    problem = _require_macos()
+    if problem:
+        print(f"error: {problem}", file=sys.stderr)
+        return 2
+
+    try:
+        interval_seconds = parse_interval_minutes(args.every)
+    except ServiceError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
+
+    root = _root(args.root)
+    layout = HarnessLayout(root)
+    if not layout.tasks.is_dir():
+        print(f"error: {root} is not initialized, run `harness init`", file=sys.stderr)
+        return 2
+
+    harness = service_entry_point()
+    if not harness.is_file():
+        print(
+            f"error: cannot locate the harness entry point at {harness} — "
+            "install the package into this environment first",
+            file=sys.stderr,
+        )
+        return 2
+
+    home = Path.home()
+    log_dir = root / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+
+    wrapper = root / "harness-autoupdate.sh"
+    wrapper.write_text(
+        autoupdate_wrapper_script(
+            harness=harness,
+            service_label=args.service_label,
+            path_entries=service_path_entries(harness),
+        ),
+        encoding="utf-8",
+    )
+    wrapper.chmod(0o755)
+
+    target = plist_path(home, args.label)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(
+        periodic_plist_bytes(
+            label=args.label,
+            wrapper=wrapper,
+            working_dir=root,
+            log_dir=log_dir,
+            home=home,
+            start_interval_seconds=interval_seconds,
+        )
+    )
+
+    try:
+        load(os.getuid(), target, args.label)
+    except ServiceError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+
+    print(f"service {args.label} installed and started")
+    print(f"  wrapper:  {wrapper}")
+    print(f"  plist:    {target}")
+    print(
+        f"  logs:     {log_dir}/harness-autoupdate.log, "
+        f"{log_dir}/harness-autoupdate.error.log"
+    )
+    print(f"  interval: {format_interval(interval_seconds)}")
+    print(
+        "  note: install also runs it once immediately "
+        "(RunAtLoad + the initial kickstart)"
+    )
+    return 0
+
+
+def _service_autoupdate_uninstall(args: argparse.Namespace) -> int:
+    problem = _require_macos()
+    if problem:
+        print(f"error: {problem}", file=sys.stderr)
+        return 2
+
+    was_loaded = unload(os.getuid(), args.label)
+    target = plist_path(Path.home(), args.label)
+    existed = target.exists()
+    target.unlink(missing_ok=True)
+
+    if not was_loaded and not existed:
+        print(f"service {args.label} was not installed")
+        return 0
+    print(f"service {args.label} removed")
+    return 0
+
+
+def _service_autoupdate_status(args: argparse.Namespace) -> int:
+    problem = _require_macos()
+    if problem:
+        print(f"error: {problem}", file=sys.stderr)
+        return 2
+
+    target = plist_path(Path.home(), args.label)
+    report = status(os.getuid(), args.label)
+
+    interval = None
+    if target.exists():
+        try:
+            with target.open("rb") as handle:
+                definition = plistlib.load(handle)
+            interval = definition.get("StartInterval")
+        except (plistlib.InvalidFileException, OSError):
+            interval = None
+
+    code = _print_service_report(args.label, target, report)
+    print(f"interval: {format_interval(interval) if interval else 'unknown'}")
+    return code
+
+
+def _service_autoupdate_schedule(args: argparse.Namespace) -> int:
+    """Calendar-based autoupdate (main's design): schedule `harness update
+    --restart --only-if-idle` at a handful of fixed hours. A sibling to the
+    interval-based `install`/`uninstall`/`status` trio, kept so the shipped
+    calendar scheduler stays reachable from the CLI."""
     problem = _require_macos()
     if problem:
         print(f"error: {problem}", file=sys.stderr)
@@ -968,7 +1211,12 @@ def _run(args: argparse.Namespace) -> int:
     workspace = GitWorkspace(registry, layout.worktrees)
     artifact_view = WorktreeArtifactView(layout.worktrees)
     forge = _build_forge(args.forge, root, registry)
-    sources = _github_sources(args, root, registry)
+    mergeability = _mergeability_sources(args, root, registry) if args.watch_mergeability else []
+    sources = _github_sources(args, root, registry) + mergeability
+    # The resolver workflow rides alongside the primary one so its tasks (queued
+    # by the mergeability watcher) get their own step queues and board columns.
+    if mergeability and args.resolver_workflow not in served_names:
+        served_names = [*served_names, args.resolver_workflow]
 
     # Self-healing: an agent assigned to the `failed/` queue. Enabled by
     # `--heal-repo <owner/repo>` (where the healer opens issues). It reuses the
@@ -1170,6 +1418,20 @@ def main(argv: list[str] | None = None) -> int:
         default="github",
         help="where landing proposes the change (default: real GitHub)",
     )
+    run.add_argument(
+        "--watch-mergeability",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        dest="watch_mergeability",
+        help="auto-update 'behind' PRs and queue 'dirty' ones to the resolver "
+        "workflow (no GITHUB_TOKEN → no-op, same as GitHub issue ingestion)",
+    )
+    run.add_argument(
+        "--resolver-workflow",
+        default=DEFAULT_RESOLVER_WORKFLOW,
+        dest="resolver_workflow",
+        help="workflow template used for tasks the mergeability watcher queues",
+    )
     run.set_defaults(handler=_run)
 
     service = subparsers.add_parser(
@@ -1202,25 +1464,70 @@ def main(argv: list[str] | None = None) -> int:
 
     service_autoupdate = service_actions.add_parser(
         "autoupdate",
+        help="periodically run `harness update` and restart the service",
+    )
+    autoupdate_actions = service_autoupdate.add_subparsers(
+        dest="autoupdate_action", required=True
+    )
+
+    autoupdate_install = autoupdate_actions.add_parser(
+        "install", help="write the autoupdate LaunchAgent and start it"
+    )
+    autoupdate_install.add_argument("--root", default=None)
+    autoupdate_install.add_argument(
+        "--every", required=True, help="e.g. 15m, 2h, 1d (minutes/hours/days)"
+    )
+    autoupdate_install.add_argument(
+        "--label", default=f"{DEFAULT_LABEL}.autoupdate"
+    )
+    autoupdate_install.add_argument(
+        "--service-label",
+        default=DEFAULT_LABEL,
+        dest="service_label",
+        help="LaunchAgent label to restart after a version change",
+    )
+    autoupdate_install.set_defaults(handler=_service_autoupdate_install)
+
+    autoupdate_uninstall = autoupdate_actions.add_parser(
+        "uninstall", help="stop the autoupdate service and remove its LaunchAgent"
+    )
+    autoupdate_uninstall.add_argument("--label", default=f"{DEFAULT_LABEL}.autoupdate")
+    autoupdate_uninstall.set_defaults(handler=_service_autoupdate_uninstall)
+
+    autoupdate_status = autoupdate_actions.add_parser(
+        "status", help="report whether the autoupdate service is loaded"
+    )
+    autoupdate_status.add_argument("--label", default=f"{DEFAULT_LABEL}.autoupdate")
+    autoupdate_status.set_defaults(handler=_service_autoupdate_status)
+
+    autoupdate_schedule = autoupdate_actions.add_parser(
+        "schedule",
         help="schedule `harness update --restart --only-if-idle` a few times a day",
     )
-    service_autoupdate.add_argument("--label", default=DEFAULT_LABEL)
-    service_autoupdate.add_argument("--root", default=None)
-    service_autoupdate.add_argument(
+    autoupdate_schedule.add_argument("--label", default=DEFAULT_LABEL)
+    autoupdate_schedule.add_argument("--root", default=None)
+    autoupdate_schedule.add_argument(
         "--hours",
         default="2,8,14,20",
         help="comma-separated hours (0-23) to run the update (default: 2,8,14,20)",
     )
-    service_autoupdate.add_argument(
+    autoupdate_schedule.add_argument(
         "--remove", action="store_true", help="remove the autoupdate schedule"
     )
-    service_autoupdate.set_defaults(handler=_service_autoupdate)
+    autoupdate_schedule.set_defaults(handler=_service_autoupdate_schedule)
 
     update = subparsers.add_parser(
         "update", help="upgrade the installed harness via uv"
     )
     update.add_argument("--root", default=None)
     update.add_argument("--label", default=DEFAULT_LABEL)
+    update.add_argument(
+        "--restart-service",
+        default=None,
+        dest="restart_service",
+        metavar="LABEL",
+        help="kickstart the given LaunchAgent label after a version change",
+    )
     update.add_argument(
         "--restart",
         action="store_true",
