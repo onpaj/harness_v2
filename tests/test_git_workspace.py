@@ -19,7 +19,10 @@ def _git(args, cwd):
 
 def _make_repo(path):
     path.mkdir(parents=True, exist_ok=True)
-    _git(["init"], path)
+    # `-b main` pins the initial branch regardless of the machine's
+    # `init.defaultBranch` (older git / CI defaults to `master`), so the tests
+    # that push and merge `main` don't depend on ambient git config.
+    _git(["init", "-b", "main"], path)
     _git(["config", "user.name", "seed"], path)
     _git(["config", "user.email", "seed@local"], path)
     (path / "README.md").write_text("seed\n", encoding="utf-8")
@@ -288,6 +291,73 @@ def test_attach_with_branch_override_reconciles_stale_local_ref_with_origin(tmp_
     handle.push()
 
 
+def test_attach_reattach_with_override_reconciles_with_origin_after_server_side_advance(tmp_path):
+    """A resolver task that fails once and is re-run reattaches an existing
+    worktree. If its overridden branch advanced server-side (`update_branch`)
+    between attempts, the reattach must reconcile with `origin/<branch>` — not
+    reset to the stale local `HEAD` — or the resolver's eventual push is
+    rejected as non-fast-forward. Mirrors invariant 31 on the reattach path."""
+    workspace = _workspace_with_remote(tmp_path)
+    repo = tmp_path / "repo"
+    remote = tmp_path / "remote.git"
+
+    original = workspace.attach(_make_task("tsk_original"))
+    original.write("feature.txt", "hi\n")
+    original.commit("[development] work")
+    original.push()
+
+    resolver_task = Task(
+        id="tsk_resolver",
+        workflow_template="resolver",
+        created="2026-07-20T10:00:00Z",
+        repository="app",
+        data={"branch": "harness/tsk_original"},
+    )
+
+    # First attach creates the resolver's worktree (reconciled with origin).
+    workspace.attach(resolver_task)
+
+    # Now the branch advances server-side, independently of any local ref —
+    # as `GithubMergeabilityWatcher.update_branch` does via the GitHub API.
+    other_clone = tmp_path / "other_clone"
+    _git(["clone", str(remote), str(other_clone)], tmp_path)
+    _git(["checkout", "harness/tsk_original"], other_clone)
+    (other_clone / "server_side.txt").write_text("from update_branch\n", encoding="utf-8")
+    _git(["add", "-A"], other_clone)
+    _git(["commit", "-m", "server-side update-branch merge"], other_clone)
+    _git(["push", "origin", "harness/tsk_original"], other_clone)
+
+    # Re-run: the worktree already exists, so this exercises the reattach path.
+    handle = workspace.attach(resolver_task)
+
+    assert (handle.path / "server_side.txt").read_text(encoding="utf-8") == "from update_branch\n"
+    head = _git(["rev-parse", "HEAD"], handle.path).strip()
+    origin_head = _git(["rev-parse", "origin/harness/tsk_original"], repo).strip()
+    assert head == origin_head
+
+    # And a subsequent commit + push must stay fast-forward.
+    handle.write("resolved.txt", "resolved\n")
+    handle.commit("[resolve] merge conflict resolution")
+    handle.push()
+
+
+def test_reattach_without_override_still_resets_to_local_head(tmp_path):
+    """A non-override reattach is unchanged: it resets to local `HEAD`, keeping
+    the committed work of the same task (nobody else advances that branch)."""
+    workspace = _workspace(tmp_path)
+    task = _make_task()
+
+    first = workspace.attach(task)
+    first.write("feature.txt", "hi\n")
+    first.commit("[design] work")
+    (first.path / "scratch.txt").write_text("wip\n", encoding="utf-8")
+
+    second = workspace.attach(task)
+
+    assert (second.path / "feature.txt").read_text(encoding="utf-8") == "hi\n"
+    assert not (second.path / "scratch.txt").exists()
+
+
 def test_attach_without_override_is_unchanged(tmp_path):
     """The absent-key path (every non-resolver task) is byte-for-byte unchanged."""
     workspace = _workspace(tmp_path)
@@ -311,6 +381,54 @@ def test_merge_clean_stages_result_and_returns_false(tmp_path):
     assert conflicted is False
     log = _git(["log", "--oneline"], handle.path)
     assert "[development] work" in log
+
+
+def test_merge_without_git_identity_configured_still_succeeds(tmp_path, monkeypatch):
+    """`git merge` validates the committer identity up front — even with
+    `--no-commit`, which only defers the commit itself. On a machine with no
+    identity configured the merge fails `exit 128` ("Committer identity
+    unknown") before merging anything, which would land in the `raise GitError`
+    branch and fail the task. The driver must supply its own identity to the
+    merge exactly as it does to `commit()`."""
+    # Neutralize any ambient global/system git identity for this process so the
+    # only identity available to the merge is the one the driver injects.
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", "/dev/null")
+    monkeypatch.setenv("GIT_CONFIG_SYSTEM", "/dev/null")
+
+    repo = tmp_path / "repo"
+    repo.mkdir(parents=True)
+    _git(["init", "-b", "main"], repo)
+    _git(["config", "user.name", "seed"], repo)
+    _git(["config", "user.email", "seed@local"], repo)
+    (repo / "README.md").write_text("seed\n", encoding="utf-8")
+    _git(["add", "-A"], repo)
+    _git(["commit", "-m", "initial"], repo)
+    remote = tmp_path / "remote.git"
+    _make_bare_remote(remote)
+    _git(["remote", "add", "origin", str(remote)], repo)
+    _git(["push", "origin", "main"], repo)
+
+    registry = MemoryRepositoryRegistry({"app": repo})
+    workspace = GitWorkspace(registry, worktrees_root=tmp_path / "wt")
+
+    handle = workspace.attach(_make_task())
+    handle.write("feature.txt", "hi\n")
+    handle.commit("[development] work")
+
+    # main advances with a non-conflicting change, pushed to origin.
+    (repo / "CHANGES.md").write_text("more\n", encoding="utf-8")
+    _git(["add", "-A"], repo)
+    _git(["commit", "-m", "more"], repo)
+    _git(["push", "origin", "main"], repo)
+
+    # Now the machine has no git identity at all.
+    _git(["config", "--unset", "user.name"], repo)
+    _git(["config", "--unset", "user.email"], repo)
+
+    # Must not raise "Committer identity unknown".
+    conflicted = handle.merge("main")
+
+    assert conflicted is False
 
 
 def test_merge_conflict_leaves_markers_and_returns_true(tmp_path):

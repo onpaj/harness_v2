@@ -25,6 +25,15 @@ last advanced server-side (`GithubMergeabilityWatcher.update_branch`, which
 never touches any local ref) rather than through a harness-driven commit+push
 here — so once the reused worktree exists, it is immediately hard-reset to
 `origin/<branch>`'s actual tip before the caller does anything else with it.
+The same reconciliation runs on **reattach** of an override task (the worktree
+already exists from a prior attempt): reset to `origin/<branch>`, not local
+`HEAD`, since the branch may have advanced server-side between attempts. A
+non-override reattach still resets to local `HEAD` — nobody else moves a
+`harness/<task.id>` branch.
+
+Every `git` invocation that may create a commit (`commit`, and the up-front
+identity check `merge` makes) carries the harness's own identity in the
+environment, so the driver works on a machine with no git identity configured.
 
 Calls the system `git` via subprocess — no new production dependency.
 """
@@ -131,10 +140,21 @@ class GitWorkspaceHandle(WorkspaceHandle):
 
     def merge(self, base: str) -> bool:
         _git(["-C", str(self._path), "fetch", "origin", base])
+        # `git merge` validates the committer identity up front — even with
+        # `--no-commit`, which only defers the *commit*, not the identity check
+        # git makes before touching the working tree. On a machine with no git
+        # identity configured this fails `exit 128` ("Committer identity
+        # unknown") before any merge happens, which would otherwise land in the
+        # `raise GitError` branch below and fail the task. So the harness's own
+        # identity travels with the merge exactly as it does with `commit()`.
+        import os
+
+        env = {**os.environ, **_IDENTITY}
         result = subprocess.run(
             ["git", "-C", str(self._path), "merge", "--no-commit", "--no-ff", f"origin/{base}"],
             capture_output=True,
             text=True,
+            env=env,
         )
         if result.returncode == 0:
             return False
@@ -221,6 +241,21 @@ class GitWorkspace(Workspace):
                 _git(
                     ["-C", str(base), "worktree", "add", str(worktree), "-b", branch]
                 )
+        elif override:
+            # Reset-on-reattach for a resolver task's shared branch. Unlike a
+            # `harness/<task.id>` branch — which only ever advances through this
+            # worktree — a resolver's overridden branch can have moved forward
+            # *server-side* (`GithubMergeabilityWatcher.update_branch`) between
+            # this task's attempts, touching no local ref. Resetting to local
+            # `HEAD` here would leave the worktree stale and the resolver's
+            # eventual push rejected as non-fast-forward, so reconcile with
+            # `origin/<branch>`'s actual tip — the same reconciliation the
+            # create path does (invariant 31), extended to the reattach path.
+            # The reset targets the branch as checked out *in this worktree*, so
+            # the "checked out elsewhere" guard (invariant 30) doesn't apply.
+            _git(["-C", str(base), "fetch", "origin", branch])
+            _git(["-C", str(worktree), "reset", "--hard", f"origin/{branch}"])
+            _git(["-C", str(worktree), "clean", "-fd"])
         else:
             # Reset-on-reattach: both a backward edge and a restart after a
             # crash must start from a clean slate. `reset --hard` discards
