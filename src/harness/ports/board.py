@@ -27,6 +27,11 @@ HEALED_COLUMN = "healed"
 """Column for tasks the healer has settled — the never-consumed terminal that
 takes over that role from `failed` once a healer is wired."""
 
+UNKNOWN_WORKFLOW = "unknown"
+"""Reserved tab for tasks whose workflow_template names no discovered
+definition. Never a real workflow's name (workflow names come from filenames,
+and "unknown" collides with nothing in practice)."""
+
 
 @dataclass(frozen=True)
 class BoardColumn:
@@ -38,8 +43,8 @@ class BoardColumn:
 
 
 @dataclass(frozen=True)
-class Board:
-    revision: int
+class BoardTab:
+    name: str
     columns: tuple[BoardColumn, ...]
 
     def column(self, name: str) -> BoardColumn | None:
@@ -49,9 +54,32 @@ class Board:
         return None
 
     def to_dict(self) -> dict[str, Any]:
+        return {"name": self.name, "columns": [column.to_dict() for column in self.columns]}
+
+
+@dataclass(frozen=True)
+class Board:
+    revision: int
+    workflows: tuple[BoardTab, ...]
+
+    def workflow(self, name: str) -> BoardTab | None:
+        for tab in self.workflows:
+            if tab.name == name:
+                return tab
+        return None
+
+    def default_tab(self) -> str | None:
+        """"default" if present, else the first tab alphabetically, else None
+        (an empty board — no workflow definitions and no orphaned tasks)."""
+        names = [tab.name for tab in self.workflows]
+        if "default" in names:
+            return "default"
+        return names[0] if names else None
+
+    def to_dict(self) -> dict[str, Any]:
         return {
             "revision": self.revision,
-            "columns": [column.to_dict() for column in self.columns],
+            "workflows": [tab.to_dict() for tab in self.workflows],
         }
 
 

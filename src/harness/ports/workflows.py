@@ -16,7 +16,7 @@ class WorkflowRepository(ABC):
 
     @abstractmethod
     def names(self) -> tuple[str, ...]:
-        """All workflow names discoverable here.
+        """All workflow names discoverable here, sorted alphabetically.
 
         Lenient on enumeration: an unreadable or invalid definition is simply
         skipped here, not raised — it still fails loud from get() if actually

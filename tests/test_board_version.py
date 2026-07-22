@@ -8,7 +8,7 @@ from harness.ports.board import Board
 
 
 def make_client(*, version: str, build_time: str | None) -> TestClient:
-    board = Board(revision=1, columns=())
+    board = Board(revision=1, workflows=())
     view = FakeBoardView(board, {})
     return TestClient(
         create_app(view=view, clock=FakeClock(), version=version, build_time=build_time)
@@ -68,7 +68,7 @@ def test_version_endpoint_returns_null_build_time_when_absent():
 def test_create_app_defaults_version_when_not_supplied():
     """Every existing call site (14 across tests/) doesn't pass version info —
     create_app must keep compiling and rendering without it."""
-    board = Board(revision=1, columns=())
+    board = Board(revision=1, workflows=())
     view = FakeBoardView(board, {})
     client = TestClient(create_app(view=view, clock=FakeClock()))
 

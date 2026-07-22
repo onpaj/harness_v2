@@ -246,6 +246,7 @@ async def test_task_lands_as_pull_request_on_real_git(tmp_path):
     assert watcher_harness.projection.get(task_id) is not None
     assert all(
         task.id != task_id
-        for column in watcher_harness.projection.snapshot().columns
+        for tab in watcher_harness.projection.snapshot().workflows
+        for column in tab.columns
         for task in column.tasks
     )

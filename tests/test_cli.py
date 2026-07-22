@@ -712,6 +712,211 @@ def test_service_path_entries_lead_with_the_venv_bin():
     assert "/usr/bin" in entries
 
 
+def test_service_autoupdate_requires_an_action():
+    with pytest.raises(SystemExit):
+        main(["service", "autoupdate"])
+
+
+def test_service_autoupdate_install_requires_every():
+    with pytest.raises(SystemExit):
+        main(["service", "autoupdate", "install"])
+
+
+def test_service_autoupdate_install_refuses_a_non_macos_host(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr("harness.cli.sys.platform", "linux")
+
+    code = main(
+        ["service", "autoupdate", "install", "--root", str(tmp_path), "--every", "15m"]
+    )
+
+    assert code == 2
+    err = capsys.readouterr().err
+    assert "launchd" in err and "linux" in err
+
+
+def test_service_autoupdate_install_rejects_a_bad_interval(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr("harness.cli.sys.platform", "darwin")
+
+    code = main(
+        ["service", "autoupdate", "install", "--root", str(tmp_path), "--every", "90s"]
+    )
+
+    assert code == 2
+    assert "expected <N>m, <N>h or <N>d" in capsys.readouterr().err
+
+
+def test_service_autoupdate_install_refuses_an_uninitialized_root(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr("harness.cli.sys.platform", "darwin")
+
+    code = main(
+        [
+            "service",
+            "autoupdate",
+            "install",
+            "--root",
+            str(tmp_path / "nope"),
+            "--every",
+            "15m",
+        ]
+    )
+
+    assert code == 2
+    assert "not initialized" in capsys.readouterr().err
+
+
+def test_service_autoupdate_status_refuses_a_non_macos_host(monkeypatch, capsys):
+    monkeypatch.setattr("harness.cli.sys.platform", "linux")
+
+    assert main(["service", "autoupdate", "status"]) == 2
+    assert "launchd" in capsys.readouterr().err
+
+
+def test_service_autoupdate_uninstall_refuses_a_non_macos_host(monkeypatch, capsys):
+    monkeypatch.setattr("harness.cli.sys.platform", "linux")
+
+    assert main(["service", "autoupdate", "uninstall"]) == 2
+    assert "launchd" in capsys.readouterr().err
+
+
+def test_service_autoupdate_install_writes_wrapper_and_plist_and_loads(
+    tmp_path, monkeypatch, capsys
+):
+    from harness import cli
+
+    monkeypatch.setattr(cli.sys, "platform", "darwin")
+    main(["init", "--root", str(tmp_path)])
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(cli.Path, "home", staticmethod(lambda: home))
+
+    entry = tmp_path / "harness"
+    entry.write_text("#!/bin/sh\n", encoding="utf-8")
+    monkeypatch.setattr(cli, "service_entry_point", lambda: entry)
+
+    loaded = []
+    monkeypatch.setattr(cli, "load", lambda uid, path, label: loaded.append((path, label)))
+
+    code = main(
+        [
+            "service",
+            "autoupdate",
+            "install",
+            "--root",
+            str(tmp_path),
+            "--every",
+            "15m",
+            "--service-label",
+            "com.harness",
+        ]
+    )
+
+    assert code == 0
+    wrapper = tmp_path / "harness-autoupdate.sh"
+    assert wrapper.exists()
+    assert "update --restart-service" in wrapper.read_text()
+
+    plist = home / "Library" / "LaunchAgents" / "com.harness.autoupdate.plist"
+    assert loaded == [(plist, "com.harness.autoupdate")]
+
+    out = capsys.readouterr().out
+    assert "every 15m" in out
+
+
+def test_service_autoupdate_install_is_idempotent(tmp_path, monkeypatch):
+    """Re-running install with a different --every must not error — it must
+    converge to the new interval via load()'s bootout/bootstrap dance."""
+    from harness import cli
+
+    monkeypatch.setattr(cli.sys, "platform", "darwin")
+    main(["init", "--root", str(tmp_path)])
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(cli.Path, "home", staticmethod(lambda: home))
+
+    entry = tmp_path / "harness"
+    entry.write_text("#!/bin/sh\n", encoding="utf-8")
+    monkeypatch.setattr(cli, "service_entry_point", lambda: entry)
+    monkeypatch.setattr(cli, "load", lambda uid, path, label: None)
+
+    assert main(
+        ["service", "autoupdate", "install", "--root", str(tmp_path), "--every", "15m"]
+    ) == 0
+    assert main(
+        ["service", "autoupdate", "install", "--root", str(tmp_path), "--every", "1h"]
+    ) == 0
+
+    import plistlib
+
+    plist = home / "Library" / "LaunchAgents" / "com.harness.autoupdate.plist"
+    assert plistlib.loads(plist.read_bytes())["StartInterval"] == 3600
+
+
+def test_service_autoupdate_uninstall_removes_the_plist(tmp_path, monkeypatch, capsys):
+    from harness import cli
+
+    monkeypatch.setattr(cli.sys, "platform", "darwin")
+    home = tmp_path / "home"
+    (home / "Library" / "LaunchAgents").mkdir(parents=True)
+    monkeypatch.setattr(cli.Path, "home", staticmethod(lambda: home))
+
+    plist = home / "Library" / "LaunchAgents" / "com.harness.autoupdate.plist"
+    plist.write_bytes(b"<plist></plist>")
+
+    monkeypatch.setattr(cli, "unload", lambda uid, label: True)
+
+    assert main(["service", "autoupdate", "uninstall"]) == 0
+    assert not plist.exists()
+    assert "removed" in capsys.readouterr().out
+
+
+def test_service_autoupdate_uninstall_when_nothing_installed_is_a_noop(
+    tmp_path, monkeypatch, capsys
+):
+    from harness import cli
+
+    monkeypatch.setattr(cli.sys, "platform", "darwin")
+    monkeypatch.setattr(cli.Path, "home", staticmethod(lambda: tmp_path / "home"))
+    monkeypatch.setattr(cli, "unload", lambda uid, label: False)
+
+    assert main(["service", "autoupdate", "uninstall"]) == 0
+    assert "was not installed" in capsys.readouterr().out
+
+
+def test_service_autoupdate_status_reports_the_configured_interval(
+    tmp_path, monkeypatch, capsys
+):
+    import plistlib
+
+    from harness import cli
+
+    monkeypatch.setattr(cli.sys, "platform", "darwin")
+    home = tmp_path / "home"
+    (home / "Library" / "LaunchAgents").mkdir(parents=True)
+    monkeypatch.setattr(cli.Path, "home", staticmethod(lambda: home))
+
+    plist = home / "Library" / "LaunchAgents" / "com.harness.autoupdate.plist"
+    plist.write_bytes(
+        plistlib.dumps({"Label": "com.harness.autoupdate", "StartInterval": 900})
+    )
+    monkeypatch.setattr(cli, "status", lambda uid, label: "state = running\n")
+
+    assert main(["service", "autoupdate", "status"]) == 0
+    assert "every 15m" in capsys.readouterr().out
+
+
+def test_service_autoupdate_status_not_loaded(tmp_path, monkeypatch, capsys):
+    from harness import cli
+
+    monkeypatch.setattr(cli.sys, "platform", "darwin")
+    monkeypatch.setattr(cli.Path, "home", staticmethod(lambda: tmp_path / "home"))
+    monkeypatch.setattr(cli, "status", lambda uid, label: None)
+
+    assert main(["service", "autoupdate", "status"]) == 1
+    assert "not loaded" in capsys.readouterr().out
+
+
 def test_service_entry_point_is_a_real_script():
     """Regression: resolving sys.executable follows the venv symlink out to the
     base interpreter (uv-managed CPython), where no `harness` script exists —
@@ -838,6 +1043,107 @@ def test_update_reports_a_failed_upgrade(monkeypatch, capsys):
 
     assert main(["update"]) == 1
     assert "uv tool upgrade failed" in capsys.readouterr().err
+
+
+# --- update --restart-service ----------------------------------------------
+
+
+def test_update_restart_service_kickstarts_on_a_real_version_change(monkeypatch, capsys):
+    from harness import cli
+
+    class Result:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    monkeypatch.setattr(cli, "uv_executable", lambda: Path("/uv"))
+    monkeypatch.setattr(cli.subprocess, "run", lambda cmd, **kw: Result())
+
+    reports = iter(["harness 0.2.0 (git aaaaaaa)", "harness 0.3.0 (git bbbbbbb)"])
+    monkeypatch.setattr(cli, "installed_version_report", lambda: next(reports))
+
+    kicked = []
+    monkeypatch.setattr(cli, "kickstart", lambda uid, label: kicked.append((uid, label)))
+
+    assert main(["update", "--restart-service", "com.harness"]) == 0
+    assert kicked == [(cli.os.getuid(), "com.harness")]
+    assert "restarted service com.harness" in capsys.readouterr().out
+
+
+def test_update_restart_service_does_not_kickstart_on_a_noop_upgrade(monkeypatch, capsys):
+    """The one test that would have caught comparing two different string
+    shapes (version_string() vs installed_version_report()) — both snapshots
+    must be the same function so a true no-op is recognized as unchanged."""
+    from harness import cli
+
+    class Result:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    monkeypatch.setattr(cli, "uv_executable", lambda: Path("/uv"))
+    monkeypatch.setattr(cli.subprocess, "run", lambda cmd, **kw: Result())
+    monkeypatch.setattr(
+        cli, "installed_version_report", lambda: "harness 0.2.0 (git aaaaaaa)"
+    )
+
+    kicked = []
+    monkeypatch.setattr(cli, "kickstart", lambda uid, label: kicked.append((uid, label)))
+
+    assert main(["update", "--restart-service", "com.harness"]) == 0
+    assert kicked == []
+    assert "left running (no version change)" in capsys.readouterr().out
+
+
+def test_update_restart_service_reports_a_failed_kickstart(monkeypatch, capsys):
+    from harness import cli
+
+    class Result:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    monkeypatch.setattr(cli, "uv_executable", lambda: Path("/uv"))
+    monkeypatch.setattr(cli.subprocess, "run", lambda cmd, **kw: Result())
+
+    reports = iter(["harness 0.2.0", "harness 0.3.0"])
+    monkeypatch.setattr(cli, "installed_version_report", lambda: next(reports))
+
+    def failing_kickstart(uid, label):
+        raise cli.ServiceError("launchd is busy")
+
+    monkeypatch.setattr(cli, "kickstart", failing_kickstart)
+
+    assert main(["update", "--restart-service", "com.harness"]) == 1
+    assert "restart failed" in capsys.readouterr().err
+
+
+def test_update_without_restart_service_keeps_the_manual_hint(monkeypatch, capsys):
+    """Regression: the flag's absence must reproduce today's output exactly —
+    only one subprocess call (no extra "before" snapshot)."""
+    from harness import cli
+
+    class Result:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    calls = []
+    monkeypatch.setattr(cli, "uv_executable", lambda: Path("/uv"))
+    monkeypatch.setattr(cli.subprocess, "run", lambda cmd, **kw: Result())
+
+    report_calls = []
+
+    def fake_report():
+        report_calls.append(1)
+        return "harness 0.2.0"
+
+    monkeypatch.setattr(cli, "installed_version_report", fake_report)
+
+    assert main(["update"]) == 0
+    assert len(report_calls) == 1
+    out = capsys.readouterr().out
+    assert "launchctl kickstart -k gui/$(id -u)/com.harness" in out
 
 
 def test_version_string_includes_the_source_commit(monkeypatch):

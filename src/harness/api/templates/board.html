@@ -9,6 +9,9 @@
   <style>
     body { font: 14px system-ui, sans-serif; margin: 0; padding: 16px; background: #f4f5f7; }
     h1 { font-size: 16px; margin: 0 0 16px; }
+    .tab-strip { display: flex; gap: 4px; margin-bottom: 12px; }
+    .tab { font: inherit; background: none; border: none; border-radius: 4px 4px 0 0; padding: 6px 12px; cursor: pointer; color: #5e6c84; }
+    .tab.active { background: #fff; color: #172b4d; font-weight: 500; }
     .board { display: flex; gap: 12px; align-items: flex-start; overflow-x: auto; }
     .column { background: #ebecf0; border-radius: 6px; padding: 8px; min-width: 220px; flex: 1; }
     .column h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .04em; margin: 4px 4px 8px; color: #5e6c84; }
@@ -54,13 +57,35 @@
 </head>
 <body hx-ext="sse" sse-connect="/api/events">
   <h1>harness board</h1>
-  <div id="board" data-revision="{{ board.revision }}" hx-get="/fragment/board" hx-trigger="sse:board" hx-swap="innerHTML">
+  <div id="board"
+       data-revision="{{ board.revision }}"
+       data-active-workflow="{{ board.default_tab() or '' }}"
+       hx-get="/fragment/board" hx-trigger="sse:board" hx-swap="innerHTML">
     {% include "_columns.html" %}
   </div>
   <dialog id="detail"></dialog>
   <footer class="status-bar">harness {{ version }} · built {{ build_time or "unknown" }}</footer>
   <script>
+    function applyActiveTab(boardEl) {
+      var active = boardEl.getAttribute('data-active-workflow');
+      boardEl.querySelectorAll('.tab').forEach(function (el) {
+        el.classList.toggle('active', el.dataset.workflow === active);
+      });
+      boardEl.querySelectorAll('.workflow-panel').forEach(function (el) {
+        el.style.display = (el.dataset.workflow === active) ? '' : 'none';
+      });
+    }
+    document.getElementById('board').addEventListener('click', function (event) {
+      var tab = event.target.closest('.tab');
+      if (!tab) { return; }
+      var boardEl = document.getElementById('board');
+      boardEl.setAttribute('data-active-workflow', tab.dataset.workflow);
+      applyActiveTab(boardEl);
+    });
+    applyActiveTab(document.getElementById('board'));
+
     document.body.addEventListener('htmx:afterSwap', function (event) {
+      if (event.detail.target.id === 'board') { applyActiveTab(event.detail.target); }
       if (event.detail.target.id === 'detail') { document.getElementById('detail').showModal(); }
     });
     document.getElementById('detail').addEventListener('click', function (event) {
