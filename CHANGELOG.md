@@ -1,6 +1,15 @@
 # CHANGELOG
 
 
+## v0.9.1 (2026-07-22)
+
+### Bug Fixes
+
+- Give the resolver's git merge an identity and reconcile its branch on reattach
+  ([#61](https://github.com/onpaj/harness_v2/pull/61),
+  [`fd700ae`](https://github.com/onpaj/harness_v2/commit/fd700ae1ea2809ceaf144e0ddc0d933e350fe39c))
+
+
 ## v0.9.0 (2026-07-22)
 
 ### Bug Fixes
