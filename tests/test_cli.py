@@ -8,6 +8,7 @@ import pytest
 
 from harness.app import HarnessLayout
 from harness.cli import (
+    AGENT_PERSONAS,
     DEFAULT_DEFINITION,
     DEFAULT_WORKFLOW,
     _REVIEW_PERSONA,
@@ -217,6 +218,34 @@ def test_review_allowed_outcomes_unaffected_by_sync_instructions():
         ),
     )
     assert _allowed_outcomes_for(workflow, "review") == ["done", "request_changes"]
+
+
+def test_review_persona_checks_plan_and_adr_conformance():
+    check_index = _REVIEW_PERSONA.index("Check:")
+    verdict_index = _REVIEW_PERSONA.index("Return the verdict")
+    in_time_index = _REVIEW_PERSONA.index("In that case")
+
+    check_section = _REVIEW_PERSONA[check_index:verdict_index]
+    assert "docs/adr" in check_section
+    assert "docs/superpowers/plans" in check_section
+
+    request_changes_section = _REVIEW_PERSONA[verdict_index:in_time_index]
+    assert "deviates from the plan" in request_changes_section
+    assert "violates an ADR" in request_changes_section
+
+    assert "naming the concrete artifact" in _REVIEW_PERSONA[in_time_index:]
+
+
+def test_review_persona_tool_list_and_outcomes_unchanged_by_plan_adr_instructions():
+    workflow = Workflow(
+        name=DEFAULT_DEFINITION["name"],
+        start=DEFAULT_DEFINITION["start"],
+        transitions=tuple(
+            Transition(from_step=t["from"], on=t["on"], to_step=t["to"]) for t in DEFAULT_DEFINITION["transitions"]
+        ),
+    )
+    assert _allowed_outcomes_for(workflow, "review") == ["done", "request_changes"]
+    assert AGENT_PERSONAS["review"][1] == ["Read", "Grep", "Glob", "Bash"]
 
 
 def test_submit_writes_a_task(tmp_path, capsys):
