@@ -80,3 +80,26 @@ class TaskSource(ABC):
     @abstractmethod
     def finish(self, task: Task, result: FinishResult) -> None:
         """Project the terminal state outward. No-op for a foreign task."""
+
+
+class Trigger(TaskSource):
+    """A `TaskSource` that produces tasks but reflects nothing back outward.
+
+    A schedule- or condition-trigger has an inbound side only: it implements
+    `poll()` and nothing else. `report_progress`/`finish` are concrete no-ops
+    here, so a subclass supplying just `poll()` becomes fully concrete (`poll`
+    stays abstract, so `Trigger` itself cannot be instantiated).
+
+    It is still a `TaskSource`, wired the same way: `SourcePoller` ingests it,
+    and `SourceReflectorSink` lists it among the sinks and simply skips it — a
+    `Trigger` stamps no matching `data.source`, so no projection is ever routed
+    back to it.
+    """
+
+    def report_progress(self, task: Task, progress: Progress) -> None:
+        """A trigger reflects nothing outward: a no-op."""
+        return None
+
+    def finish(self, task: Task, result: FinishResult) -> None:
+        """A trigger reflects nothing outward: a no-op."""
+        return None
