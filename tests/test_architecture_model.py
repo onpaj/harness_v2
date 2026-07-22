@@ -113,3 +113,18 @@ def test_model_to_dict_is_json_shaped(tmp_path: Path):
     assert data["parts"][0]["adrs"] == ["0001-ports-and-adapters"]
     assert data["flow"][0] == {"part_id": "a", "caption": "s"}
     assert isinstance(data["parts"][0]["x"], float)
+
+
+def test_shipped_model_is_coherent_with_the_repo():
+    from harness_docs_site.architecture import MODEL
+
+    repo_root = Path(__file__).resolve().parents[1]
+    validate(MODEL, repo_root)  # must not raise against the real tree
+
+
+def test_shipped_model_flow_starts_at_the_task_source():
+    from harness_docs_site.architecture import MODEL
+
+    assert MODEL.flow[0].part_id == "task-source"
+    part_ids = {p.id for p in MODEL.parts}
+    assert {"router", "agent-runner", "landing", "board"} <= part_ids
