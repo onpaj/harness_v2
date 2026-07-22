@@ -359,6 +359,68 @@ def test_http_create_pull_request_falls_back_to_argument_when_head_missing():
     assert created.head == "o:harness/tsk_1"
 
 
+# --- get_pull_request, fake -------------------------------------------------
+
+
+def test_fake_get_pull_request_reports_merged_state():
+    client = FakeGithubClient()
+    created = client.create_pull_request(
+        "o/r", head="o:harness/tsk_1", base="main", title="T", body="B"
+    )
+
+    assert client.get_pull_request("o/r", created.number).merged is False
+
+    client.merge_pull_request(created.number)
+
+    assert client.get_pull_request("o/r", created.number).merged is True
+
+
+def test_fake_get_pull_request_unknown_number_raises():
+    client = FakeGithubClient()
+
+    with pytest.raises(KeyError):
+        client.get_pull_request("o/r", 999)
+
+
+# --- get_pull_request, http --------------------------------------------------
+
+
+def test_http_get_pull_request_reads_merged_field():
+    payload = {"number": 7, "html_url": "https://github.com/o/r/pull/7", "merged": True}
+    opener = FakeOpener(payload)
+    client = HttpGithubClient("tok", opener=opener)
+
+    detail = client.get_pull_request("o/r", 7)
+
+    assert detail.number == 7
+    assert detail.url == "https://github.com/o/r/pull/7"
+    assert detail.merged is True
+
+    req = opener.requests[0]
+    assert req.get_method() == "GET"
+    assert req.full_url == "https://api.github.com/repos/o/r/pulls/7"
+
+
+def test_http_get_pull_request_open_pr_is_not_merged():
+    payload = {"number": 7, "html_url": "https://github.com/o/r/pull/7", "merged": False}
+    client = HttpGithubClient("tok", opener=FakeOpener(payload))
+
+    assert client.get_pull_request("o/r", 7).merged is False
+
+
+def test_http_get_pull_request_error_propagates():
+    class ServerErrorOpener:
+        def open(self, request):
+            raise urllib.error.HTTPError(
+                request.full_url, 500, "Server Error", {}, io.BytesIO(b"")
+            )
+
+    client = HttpGithubClient("tok", opener=ServerErrorOpener())
+
+    with pytest.raises(urllib.error.HTTPError):
+        client.get_pull_request("o/r", 7)
+
+
 # --- mergeability watcher support: PullRequestInfo, list_pull_requests, update_branch ---
 
 

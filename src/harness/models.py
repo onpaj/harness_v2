@@ -35,10 +35,15 @@ class BehaviorResult:
 
     `outcome` is the control signal the dispatcher routes on. `summary` is a short
     terminal statement about the run — commit message, history line, PR body, board.
+    `data`, when present, is shallow-merged into `task.data` by the consumer — a way
+    for a behavior to attach structured facts about what it produced (e.g. landing's
+    PR identity). Not a general escape hatch: it exists for a behavior's own output,
+    not for reaching into unrelated keys.
     """
 
     outcome: Outcome
     summary: str = ""
+    data: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)

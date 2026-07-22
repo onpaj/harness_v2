@@ -34,6 +34,15 @@ class PullRequestRef:
 
 
 @dataclass(frozen=True)
+class PullRequestDetail:
+    """A pull request's merge state, as read back by `get_pull_request`."""
+
+    number: int
+    url: str
+    merged: bool
+
+
+@dataclass(frozen=True)
 class PullRequestInfo:
     """A pull request as the mergeability watcher sees it — distinct from
     `PullRequestRef` (owned by the forge's find/create pair, which has no
@@ -76,6 +85,10 @@ class GithubClient(ABC):
         self, repo: str, *, head: str, base: str, title: str, body: str
     ) -> PullRequestRef:
         """Open a PR from `head` into `base`."""
+
+    @abstractmethod
+    def get_pull_request(self, repo: str, number: int) -> PullRequestDetail:
+        """The PR's current state, including whether it has been merged."""
 
     @abstractmethod
     def list_pull_requests(
@@ -121,6 +134,7 @@ class FakeGithubClient(GithubClient):
         self._default_branch = default_branch
         self.pulls: list[PullRequestRef] = []
         self.created: list[dict] = []
+        self.merged: set[int] = set()
         # Separate store from `pulls`: `PullRequestInfo` answers "is this PR
         # ours, does it need action" (mergeable_state), a different question
         # from `pulls`' "does a PR already exist for this branch".
@@ -169,6 +183,18 @@ class FakeGithubClient(GithubClient):
             {"repo": repo, "head": head, "base": base, "title": title, "body": body}
         )
         return pull
+
+    def merge_pull_request(self, number: int) -> None:
+        """Test helper: mark a PR as merged."""
+        self.merged.add(number)
+
+    def get_pull_request(self, repo: str, number: int) -> PullRequestDetail:
+        for pull in self.pulls:
+            if pull.number == number:
+                return PullRequestDetail(
+                    number=pull.number, url=pull.url, merged=number in self.merged
+                )
+        raise KeyError(f"no such pull request: {repo}#{number}")
 
     def add_pull_request(self, info: PullRequestInfo) -> None:
         """Test helper: register a PR the watcher will see via `list_pull_requests`."""
@@ -331,6 +357,17 @@ class HttpGithubClient(GithubClient):
             number=item["number"],
             url=item.get("html_url", ""),
             head=self._pr_head(item, head),
+        )
+
+    def get_pull_request(self, repo: str, number: int) -> PullRequestDetail:
+        url = f"{self._api}/repos/{repo}/pulls/{number}"
+        request = urllib.request.Request(url, headers=self._headers(), method="GET")
+        with self._opener.open(request) as response:
+            item = json.loads(response.read())
+        return PullRequestDetail(
+            number=item["number"],
+            url=item.get("html_url", ""),
+            merged=bool(item.get("merged")),
         )
 
     def list_pull_requests(

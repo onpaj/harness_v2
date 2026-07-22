@@ -38,6 +38,7 @@ def test_opens_a_pull_request_against_the_default_branch():
     assert pull.branch == "harness/tsk_1"
     assert pull.title == "T"
     assert pull.url == "https://github.com/onpaj/harness_v2/pull/1"
+    assert pull.repo == "onpaj/harness_v2"
     assert client.created[0]["head"] == "onpaj:harness/tsk_1"
     assert client.created[0]["base"] == "trunk"
 
@@ -50,6 +51,7 @@ def test_second_call_returns_the_existing_pull_request():
     second = forge.open_pull_request(task, branch="harness/tsk_1", title="T", body="B")
 
     assert first.number == second.number
+    assert second.repo == "onpaj/harness_v2"
     assert len(client.created) == 1
 
 

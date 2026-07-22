@@ -1,3 +1,5 @@
+from dataclasses import replace
+
 from harness.consumer import Consumer
 from harness.drivers.memory import (
     FakeClock,
@@ -5,7 +7,7 @@ from harness.drivers.memory import (
     MemoryTaskQueue,
     ScriptedBehavior,
 )
-from harness.models import FAILED, Outcome, Task
+from harness.models import FAILED, BehaviorResult, Outcome, Task
 from harness.ports.behavior import ConsumerBehavior
 from harness.ports.strategy import EnqueueStrategy
 
@@ -23,6 +25,14 @@ class ExplodingBehavior(ConsumerBehavior):
 class BogusBehavior(ConsumerBehavior):
     async def run(self, task):
         return "something else"
+
+
+class DataBehavior(ConsumerBehavior):
+    def __init__(self, data: dict) -> None:
+        self._data = data
+
+    async def run(self, task):
+        return BehaviorResult(Outcome.DONE, "done with data", data=self._data)
 
 
 def build(behavior, task: Task | None = None):
@@ -180,6 +190,35 @@ async def test_consumed_event_carries_task_snapshot_and_queue():
     assert fields["queue"] == "design"
     assert fields["task"]["lastOutcome"] == "done"
     assert fields["task"]["lockId"] is None
+
+
+async def test_behavior_result_data_is_merged_into_task_data():
+    consumer, _, inbox, _, _ = build(DataBehavior({"pr": {"number": 45}}), make_task())
+
+    await consumer.tick()
+
+    assert inbox.list()[0].data == {"pr": {"number": 45}}
+
+
+async def test_behavior_result_data_merge_preserves_existing_keys():
+    task = replace(make_task(), data={"source": {"kind": "github"}})
+    consumer, _, inbox, _, _ = build(DataBehavior({"pr": {"number": 45}}), task)
+
+    await consumer.tick()
+
+    assert inbox.list()[0].data == {
+        "source": {"kind": "github"},
+        "pr": {"number": 45},
+    }
+
+
+async def test_behavior_result_without_data_leaves_task_data_untouched():
+    task = replace(make_task(), data={"source": {"kind": "github"}})
+    consumer, _, inbox, _, _ = build(ScriptedBehavior(), task)
+
+    await consumer.tick()
+
+    assert inbox.list()[0].data == {"source": {"kind": "github"}}
 
 
 async def test_consumer_failure_event_carries_failed_queue():

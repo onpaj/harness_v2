@@ -41,12 +41,14 @@ from harness.ports.events import EventSink
 from harness.ports.forge import Forge
 from harness.ports.issues import IssueTracker
 from harness.ports.logs import StageOutputView
+from harness.ports.merge import MergeChecker
 from harness.ports.queue import TaskQueue
 from harness.ports.source import TaskSource
 from harness.ports.workflows import WorkflowNotFound
 from harness.ports.workspace import Workspace
 from harness.projection import BoardProjection
 from harness.ports.control import TaskControl
+from harness.merge_reconciler import MergeReconciler
 from harness.source_poller import SourcePoller
 from harness.task_control import TaskControlService
 
@@ -98,6 +100,10 @@ class HarnessLayout:
         return self.root / "failed"
 
     @property
+    def archived(self) -> Path:
+        return self.root / "archived"
+
+    @property
     def healed(self) -> Path:
         return self.root / "healed"
 
@@ -137,6 +143,8 @@ class Harness:
         events: EventSink,
         clock: Clock,
         pollers: list[SourcePoller] | None = None,
+        archived: TaskQueue | None = None,
+        reconciler: MergeReconciler | None = None,
         healer: Healer | None = None,
         healed: TaskQueue | None = None,
     ) -> None:
@@ -157,9 +165,16 @@ class Harness:
         self._healed = healed
         self._events = events
         self._clock = clock
+        self.archived = archived
+        self.reconciler = reconciler
 
     def recover(self) -> int:
-        queues = [self._inbox, *self._step_queues.values()]
+        # `done` is always recovered, whether or not a reconciler is wired this
+        # run: a `.processing/` file there can only have been left by a
+        # MergeReconciler claim, but it may outlive the run that created it (the
+        # operator could disable reconciliation between restarts). Recovering an
+        # idle queue is a no-op, so this is free when reconciliation is off.
+        queues = [self._inbox, *self._step_queues.values(), self._done]
         # With a healer wired, `failed/` is a consumed queue too — a crash mid-heal
         # leaves the task in `failed/.processing/`, so it must be recovered like any
         # other. Without a healer, `failed/` is never claimed and this is a no-op.
@@ -193,12 +208,16 @@ class Harness:
         self,
         poll_interval: float = 0.2,
         source_interval: float = 30.0,
+        reconcile_interval: float = 300.0,
         stop: asyncio.Event | None = None,
     ) -> None:
         # The internal loops (dispatcher, consumers) poll local queues off disk,
         # so a tight `poll_interval` keeps the board responsive. A `TaskSource`,
         # by contrast, is a remote API with rate limits (GitHub), so its loop
-        # gets its own, much slower `source_interval`.
+        # gets its own, much slower `source_interval`. The reconciler is also a
+        # remote API call, but a housekeeping sweep rather than a latency-
+        # sensitive "pick up new work" path, so it gets its own, longer
+        # `reconcile_interval` still — distinct from `source_interval`.
         stop = stop or asyncio.Event()
         self.recover()
         self.projection.hydrate(
@@ -206,6 +225,7 @@ class Harness:
             step_queues=self._step_queues,
             done=self._done,
             failed=self._failed,
+            archived=self.archived,
             healed=self._healed,
         )
         self._seed_pollers()
@@ -218,6 +238,11 @@ class Harness:
                 for _ in range(self._max_parallel_for(consumer.step))
             ),
             *(self._source_loop(poller, source_interval, stop) for poller in self.pollers),
+            *(
+                [self._reconcile_loop(self.reconciler, reconcile_interval, stop)]
+                if self.reconciler is not None
+                else []
+            ),
             *([self._heal_loop(poll_interval, stop)] if self.healer is not None else []),
         )
         self._events.emit("stopped")
@@ -262,6 +287,13 @@ class Harness:
             else:
                 await asyncio.sleep(0)
 
+    async def _reconcile_loop(
+        self, reconciler: MergeReconciler, reconcile_interval: float, stop: asyncio.Event
+    ) -> None:
+        while not stop.is_set():
+            if not reconciler.tick():
+                await asyncio.sleep(reconcile_interval)
+
     async def _heal_loop(self, poll_interval: float, stop: asyncio.Event) -> None:
         assert self.healer is not None
         while not stop.is_set():
@@ -286,6 +318,7 @@ def build(
     agent_timeout: float = 1800.0,
     artifact_view: ArtifactView | None = None,
     sources: list[TaskSource] | None = None,
+    merge_checker: MergeChecker | None = None,
     landing_step: str = LANDING_STEP,
     delay: float = 5.0,
     request_changes_once_at: str | None = None,
@@ -357,6 +390,22 @@ def build(
         for workflow in resolved.values()
         for step in workflow.steps()
     }
+
+    # The archived queue and reconciler only exist when a merge_checker is
+    # supplied — a run without GitHub wiring pays nothing for this feature.
+    archived: TaskQueue | None = None
+    reconciler: MergeReconciler | None = None
+    if merge_checker is not None:
+        archived = FilesystemTaskQueue(
+            name="archived", root=layout.archived, events=events
+        )
+        reconciler = MergeReconciler(
+            done=done,
+            archived=archived,
+            checker=merge_checker,
+            events=events,
+            clock=clock,
+        )
 
     # Read side of artifacts: when passed in (phase 3: `WorktreeArtifactView`),
     # both landing and `api/` get it; otherwise the write store (also an
@@ -488,6 +537,8 @@ def build(
         events=events,
         clock=clock,
         pollers=pollers,
+        archived=archived,
+        reconciler=reconciler,
         healer=healer,
         healed=healed_queue,
     )

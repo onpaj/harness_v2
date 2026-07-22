@@ -103,6 +103,7 @@ class BoardProjection(BoardView):
         step_queues: dict[str, TaskQueue],
         done: TaskQueue,
         failed: TaskQueue,
+        archived: TaskQueue | None = None,
         healed: TaskQueue | None = None,
     ) -> None:
         """Build the initial state from the queues.
@@ -124,11 +125,22 @@ class BoardProjection(BoardView):
             # A fresh task (never dispatched) shows in `todo`; one transiting the
             # inbox between steps keeps the column of the step it just left.
             self._store(task.status if task.status is not None else TODO_COLUMN, task)
+        if archived is not None:
+            # Fetchable by id, but never rendered in a column — `archived/` is
+            # deliberately not part of `self._order`.
+            for task in archived.list():
+                self._tasks[task.id] = task
         self._bump()
 
     def apply(self, column: str, task: Task) -> None:
         """Record that the task is now in the given column."""
         self._store(column, task)
+        self._bump()
+
+    def archive(self, task: Task) -> None:
+        """Keep the task fetchable by id; drop it out of every rendered column."""
+        self._tasks[task.id] = task
+        self._locations.pop(task.id, None)
         self._bump()
 
     def snapshot(self) -> Board:
@@ -146,7 +158,10 @@ class BoardProjection(BoardView):
                             (
                                 task
                                 for task_id, task in self._tasks.items()
-                                if self._locations[task_id] == (tab_name, column_name)
+                                # .get(): an archived task lives in _tasks with no
+                                # _locations entry — it must fall out of every column,
+                                # not raise KeyError.
+                                if self._locations.get(task_id) == (tab_name, column_name)
                             ),
                             key=lambda task: (task.created, task.id),
                         )

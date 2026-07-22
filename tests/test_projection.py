@@ -259,6 +259,59 @@ def test_apply_moves_task_from_failed_to_todo():
     assert tab.column(TODO_COLUMN).tasks[0].id == "tsk_1"
 
 
+def test_archive_removes_task_from_its_column_but_keeps_it_fetchable():
+    projection = BoardProjection([WORKFLOW])
+    projection.apply(DONE_COLUMN, make_task(status="end"))
+
+    projection.archive(make_task(status="end", last_outcome="done"))
+
+    assert projection.snapshot().workflow("default").column(DONE_COLUMN).tasks == ()
+    assert projection.get("tsk_1") is not None
+    assert projection.get("tsk_1").last_outcome == "done"
+
+
+def test_archive_bumps_the_revision():
+    projection = BoardProjection([WORKFLOW])
+    projection.apply(DONE_COLUMN, make_task(status="end"))
+    before = projection.snapshot().revision
+
+    projection.archive(make_task(status="end"))
+
+    assert projection.snapshot().revision > before
+
+
+def test_hydrate_with_archived_queue_keeps_tasks_fetchable_but_off_the_board():
+    projection = BoardProjection([WORKFLOW])
+    archived = MemoryTaskQueue("archived")
+    archived.put(make_task("tsk_9", "end"))
+
+    projection.hydrate(
+        inbox=MemoryTaskQueue("tasks"),
+        step_queues={},
+        done=MemoryTaskQueue("done"),
+        failed=MemoryTaskQueue("failed"),
+        archived=archived,
+    )
+
+    assert projection.get("tsk_9") is not None
+    for tab in projection.snapshot().workflows:
+        for column in tab.columns:
+            assert all(task.id != "tsk_9" for task in column.tasks)
+
+
+def test_hydrate_without_archived_queue_is_backward_compatible():
+    projection = BoardProjection([WORKFLOW])
+
+    projection.hydrate(
+        inbox=MemoryTaskQueue("tasks"),
+        step_queues={},
+        done=MemoryTaskQueue("done"),
+        failed=MemoryTaskQueue("failed"),
+    )
+
+    assert projection.snapshot().revision == 1
+
+
 async def test_subscribe_yields_current_revision_first():
     projection = BoardProjection([WORKFLOW])
     projection.apply("plan", make_task(status="plan"))
