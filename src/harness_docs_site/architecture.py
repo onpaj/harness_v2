@@ -9,7 +9,7 @@ runs in the test suite so a rename that breaks the mapping fails CI.
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 _KINDS = {"port", "driver", "core", "ui", "store"}
@@ -149,7 +149,7 @@ MODEL = ArchitectureModel(
             kind="store",
             tagline="Maps a repo name to a path on this machine.",
             description=(
-                "A task carries a repo *name*, never a filesystem path. The registry "
+                "A task carries a repo name, never a filesystem path. The registry "
                 "resolves the name to a clone on disk, so the same task definition is "
                 "portable across machines and the core stays free of absolute paths."
             ),
@@ -203,8 +203,8 @@ MODEL = ArchitectureModel(
             tagline="Runs a step's agent; splits decide / act / persist.",
             description=(
                 "The consumer/dispatcher that runs a step: it invokes the step's "
-                "agent behavior, keeps the LLM's *decision* separate from the *act* "
-                "that applies it and the *persist* that records it, and reports the "
+                "agent behavior, keeps the LLM's decision separate from the act "
+                "that applies it and the persist that records it, and reports the "
                 "outcome back to the router."
             ),
             adrs=(
@@ -335,6 +335,7 @@ MODEL = ArchitectureModel(
         Edge("agent-runner", "worktree"),
         Edge("agent-runner", "artifact-folder"),
         Edge("agent-runner", "landing"),
+        Edge("worktree", "landing"),
         Edge("landing", "github-source"),
         Edge("queues", "board"),
     ),

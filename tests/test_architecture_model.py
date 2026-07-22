@@ -128,3 +128,16 @@ def test_shipped_model_flow_starts_at_the_task_source():
     assert MODEL.flow[0].part_id == "task-source"
     part_ids = {p.id for p in MODEL.parts}
     assert {"router", "agent-runner", "landing", "board"} <= part_ids
+
+
+def test_shipped_model_flow_legs_all_have_a_backing_edge():
+    from harness_docs_site.architecture import MODEL
+
+    edge_pairs = set()
+    for e in MODEL.edges:
+        edge_pairs.add((e.src, e.dst))
+        edge_pairs.add((e.dst, e.src))
+    for a, b in zip(MODEL.flow, MODEL.flow[1:]):
+        assert (a.part_id, b.part_id) in edge_pairs, (
+            f"flow leg {a.part_id} -> {b.part_id} has no backing edge"
+        )

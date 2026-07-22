@@ -129,9 +129,6 @@
     part.adrs.forEach(function (slug) {
       h.push('<li><a href="adr/' + esc(slug) + '.html">ADR ' + esc(slug) + "</a></li>");
     });
-    (part.related_docs || []).forEach(function (slug) {
-      h.push('<li><a href="spec/' + esc(slug) + '.html">' + esc(slug) + "</a></li>");
-    });
     h.push("</ul></div>");
     part.adrs.forEach(function (slug) {
       if (adrHtml[slug]) h.push('<div class="adr">' + adrHtml[slug] + "</div>");
