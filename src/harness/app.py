@@ -43,6 +43,7 @@ from harness.ports.issues import IssueTracker
 from harness.ports.logs import StageOutputView
 from harness.ports.queue import TaskQueue
 from harness.ports.source import TaskSource
+from harness.ports.workflows import WorkflowNotFound
 from harness.ports.workspace import Workspace
 from harness.projection import BoardProjection
 from harness.ports.control import TaskControl
@@ -311,7 +312,22 @@ def build(
     resolved = {name: raw_workflows.get(name) for name in names}
     served_workflows = ServedWorkflowRepository(raw_workflows, tuple(resolved))
 
-    projection = BoardProjection(list(resolved.values()), include_healed=heal is not None)
+    # One tab per discovered workflow definition (read side only — dispatch below
+    # stays keyed to the served `resolved` set). names() may include a broken
+    # definition (it fails loud only from get()), so skip those defensively; the
+    # served workflows always get a tab even if a rename made them undiscoverable.
+    discovered: dict[str, Workflow] = dict(resolved)
+    for name in raw_workflows.names():
+        if name in discovered:
+            continue
+        try:
+            discovered[name] = raw_workflows.get(name)
+        except WorkflowNotFound:
+            continue
+
+    projection = BoardProjection(
+        list(discovered.values()), include_healed=heal is not None
+    )
     stage_output = StageOutputProjection()
     # The reflector comes after ProjectionSink: the outward projection must not
     # get ahead of the board. The stage-output projection sits alongside the

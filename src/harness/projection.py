@@ -16,8 +16,10 @@ from harness.ports.board import (
     FAILED_COLUMN,
     HEALED_COLUMN,
     TODO_COLUMN,
+    UNKNOWN_WORKFLOW,
     Board,
     BoardColumn,
+    BoardTab,
     BoardView,
 )
 from harness.ports.queue import TaskQueue
@@ -72,9 +74,25 @@ class BoardProjection(BoardView):
     def __init__(
         self, workflows: Sequence[Workflow], *, include_healed: bool = False
     ) -> None:
-        self._order = column_order(workflows, healed=include_healed)
+        # One tab per served workflow, each carrying that workflow's own column
+        # order. `include_healed` appends the `healed` terminal column — only
+        # when a healer is wired, so a plain harness keeps its exact column set.
+        self._orders: dict[str, tuple[str, ...]] = {
+            workflow.name: column_order([workflow], healed=include_healed)
+            for workflow in workflows
+        }
+        # A task can only end up under an unrecognized template via a dispatch
+        # failure or historical done/failed data from a removed definition —
+        # never legitimately mid-flight — except for the narrow window before
+        # the dispatcher's first tick, where hydrate() sees it still sitting
+        # in `todo`. TODO_COLUMN must stay in this tuple or such a task is
+        # silently dropped from the board until the dispatcher fails it.
+        unknown_tail = (DONE_COLUMN, FAILED_COLUMN) + (
+            (HEALED_COLUMN,) if include_healed else ()
+        )
+        self._orders[UNKNOWN_WORKFLOW] = (TODO_COLUMN,) + unknown_tail
         self._tasks: dict[str, Task] = {}
-        self._columns: dict[str, str] = {}
+        self._locations: dict[str, tuple[str, str]] = {}
         self._revision = 0
         self._subscribers: set[asyncio.Queue[int]] = set()
 
@@ -114,20 +132,31 @@ class BoardProjection(BoardView):
         self._bump()
 
     def snapshot(self) -> Board:
-        columns = []
-        for name in self._order:
-            tasks = tuple(
-                sorted(
-                    (
-                        task
-                        for task_id, task in self._tasks.items()
-                        if self._columns[task_id] == name
+        tabs = []
+        for tab_name, order in self._orders.items():
+            if tab_name == UNKNOWN_WORKFLOW and not any(
+                location[0] == UNKNOWN_WORKFLOW for location in self._locations.values()
+            ):
+                continue  # FR-4: omit the unknown tab from the strip when empty
+            columns = tuple(
+                BoardColumn(
+                    name=column_name,
+                    tasks=tuple(
+                        sorted(
+                            (
+                                task
+                                for task_id, task in self._tasks.items()
+                                if self._locations[task_id] == (tab_name, column_name)
+                            ),
+                            key=lambda task: (task.created, task.id),
+                        )
                     ),
-                    key=lambda task: (task.created, task.id),
                 )
+                for column_name in order
             )
-            columns.append(BoardColumn(name=name, tasks=tasks))
-        return Board(revision=self._revision, columns=tuple(columns))
+            tabs.append(BoardTab(name=tab_name, columns=columns))
+        tabs.sort(key=lambda tab: tab.name)
+        return Board(revision=self._revision, workflows=tuple(tabs))
 
     def get(self, task_id: str) -> Task | None:
         return self._tasks.get(task_id)
@@ -144,10 +173,12 @@ class BoardProjection(BoardView):
             self._subscribers.discard(inbox)
 
     def _store(self, column: str, task: Task) -> None:
-        if column not in self._order:
+        tab = task.workflow_template if task.workflow_template in self._orders else UNKNOWN_WORKFLOW
+        order = self._orders[tab]
+        if column not in order:
             return
         self._tasks[task.id] = task
-        self._columns[task.id] = column
+        self._locations[task.id] = (tab, column)
 
     def _bump(self) -> None:
         self._revision += 1
