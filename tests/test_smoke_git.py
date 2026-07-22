@@ -169,7 +169,9 @@ def _make_repo(path):
     # needs somewhere to push to. A bare sibling repo stands in for the remote —
     # this keeps the smoke honest: a repo with no remote genuinely cannot land.
     remote = path.parent / (path.name + "-remote.git")
-    _git(remote.parent, "init", "--bare", "-q", str(remote))
+    # `-b main` for the same reason as the working repo above: a clone of this
+    # bare remote must land on `main`, not the host's `init.defaultBranch`.
+    _git(remote.parent, "init", "--bare", "-q", "-b", "main", str(remote))
     _git(path, "remote", "add", "origin", str(remote))
 
 
