@@ -1,3 +1,5 @@
+import json
+import re
 from pathlib import Path
 
 from harness_docs_site.corpus import discover_docs
@@ -116,3 +118,66 @@ def test_markdown_render_keeps_fenced_content_literal():
     html = render(text)
     assert "<pre><code" in html
     assert "<table>" not in html
+
+
+def test_build_site_embeds_model_and_adr_html(tmp_path: Path):
+    _write_fixture_tree(tmp_path)
+    entries = discover_docs(tmp_path)
+    out_dir = tmp_path / "site"
+    build_site(entries, tmp_path, out_dir)
+
+    index = (out_dir / "index.html").read_text(encoding="utf-8")
+    assert 'id="model-data"' in index
+    assert 'id="adr-html"' in index
+    assert 'id="hexmap"' in index
+    # Every part in the model renders a clickable node.
+    from harness_docs_site.architecture import MODEL
+
+    for part in MODEL.parts:
+        assert f'data-part-id="{part.id}"' in index
+
+
+def test_build_site_copies_assets_and_links_them(tmp_path: Path):
+    _write_fixture_tree(tmp_path)
+    entries = discover_docs(tmp_path)
+    out_dir = tmp_path / "site"
+    build_site(entries, tmp_path, out_dir)
+
+    assert (out_dir / "assets" / "app.css").is_file()
+    assert (out_dir / "assets" / "app.js").is_file()
+    index = (out_dir / "index.html").read_text(encoding="utf-8")
+    assert 'href="assets/app.css"' in index
+    assert 'src="assets/app.js"' in index
+    # Doc pages reference the asset one level up.
+    adr_entry = next(e for e in entries if e.category == "adr")
+    page = (out_dir / "adr" / adr_entry.output_name).read_text(encoding="utf-8")
+    assert 'href="../assets/app.css"' in page
+
+
+def test_build_site_output_has_no_external_urls(tmp_path: Path):
+    _write_fixture_tree(tmp_path)
+    entries = discover_docs(tmp_path)
+    out_dir = tmp_path / "site"
+    build_site(entries, tmp_path, out_dir)
+
+    for path in out_dir.rglob("*"):
+        if path.suffix in {".html", ".css", ".js"}:
+            text = path.read_text(encoding="utf-8")
+            assert "http://" not in text, f"external URL in {path}"
+            assert "https://" not in text, f"external URL in {path}"
+
+
+def test_embedded_model_json_parses_and_matches_model(tmp_path: Path):
+    _write_fixture_tree(tmp_path)
+    build_site(discover_docs(tmp_path), tmp_path, tmp_path / "site")
+    index = (tmp_path / "site" / "index.html").read_text(encoding="utf-8")
+    match = re.search(
+        r'<script type="application/json" id="model-data">(.*?)</script>',
+        index,
+        re.DOTALL,
+    )
+    assert match
+    data = json.loads(match.group(1))
+    from harness_docs_site.architecture import MODEL
+
+    assert [p["id"] for p in data["parts"]] == [p.id for p in MODEL.parts]
