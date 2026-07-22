@@ -120,7 +120,7 @@ Dependencies flow strictly downward, no cycles.
 | Logic | `router` (knows only `models`) |
 | Base (package-free) | `models`, `ids`, `artifacts_layout` (the `.artifacts/<id>/<step>-NN` convention) |
 | Ports | `ports/{queue,workflows,strategy,behavior,events,clock,workspace,artifacts,forge,board,agent,repos,source,control,logs,issues,merge}` |
-| Orchestration | `dispatcher`, `consumer`, `source_poller`, `task_control`, `healer`, `merge_reconciler` — know only ports (and, for `merge_reconciler`, the base `ids` module — not `workspace`/`forge`/`artifacts`/`agent`/`repos`/`drivers`) |
+| Orchestration | `dispatcher`, `consumer`, `source_poller`, `task_control`, `healer`, `pr_watcher`, `merge_reconciler` — know only ports (and, for `pr_watcher`/`merge_reconciler`, the base `ids` module — not `workspace`/`forge`/`artifacts`/`agent`/`repos`/`drivers`) |
 | Behaviors | `behaviors/{landing,agent,resolve_conflict}` — touch ports, not drivers |
 | Drivers | `drivers/{fs_queue,fs_workflows,fifo_strategy,dummy_behavior,stdout_events,system_clock,memory,fs_artifacts,git_workspace,fake_forge,claude_cli,fs_agents,fs_repos,worktree_artifacts,source_reflector,github_client,github_source,github_forge,github_issues,github_merge_checker,mergeability_watcher,launchd,composite_events,git_remote,projection_events,stage_output}` |
 | UI | `api/{app,routes}` — reads through `BoardView`/`ArtifactView`/`StageOutputView`, writes through `TaskControl`; never a driver |
@@ -137,6 +137,7 @@ Dependencies flow strictly downward, no cycles.
 - `behaviors/agent.py` — `ClaudeCliBehavior`: attach worktree → allocate attempt → run the agent → the worker commits
 - `ports/source.py` — the `TaskSource` port (`poll`/`report_progress`/`finish`) + `Progress`/`FinishResult`
 - `source_poller.py` — `SourcePoller`: the core that fills the inbox from the source (knows only ports)
+- `pr_watcher.py` — `PrWatcher`: the core loop that claims a landed task out of `done/` once its PR has resolved (merged or closed unmerged) and archives it into `archived/`, dropping it from the board while keeping it gettable by id (knows only ports/models/ids)
 - `healer.py` — `Healer`: the core loop assigned to the `failed/` queue (knows only ports/models/ids). Claims a failed task, runs the `healer` persona over a failure report, opens an issue via `IssueTracker`, and settles the task onto `healed/`
 - `ports/issues.py` — `IssueTracker.open_issue(...)` (opens a fresh advisory issue, idempotent by marker) + `IssueRef`/`IssueError`
 - `drivers/github_issues.py` — `GithubIssueTracker`: opens the healer's issue on GitHub over `GithubClient`, dedup by an embedded `<!-- harness-heal:<id> -->` marker

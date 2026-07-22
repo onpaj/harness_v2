@@ -21,6 +21,11 @@ queue. This is the never-consumed terminal that `failed/` used to be — the
 healer reads `failed/` and moves a task here once, success or failure, so a
 failure can never be healed twice (invariant 25)."""
 
+ARCHIVED = "archived"
+"""Reserved terminal status of a task whose PR resolved and was moved out of
+`done/` into `archived/`. Purely informational — nothing routes on it, since an
+archived task is never reintroduced to the inbox."""
+
 
 class Outcome(str, Enum):
     """The only values a ConsumerBehavior may return."""
@@ -44,6 +49,8 @@ class BehaviorResult:
     outcome: Outcome
     summary: str = ""
     data: dict[str, Any] | None = None
+    """Extra fields the consumer merges into task.data on delivery. None (the
+    default) merges nothing — every existing behavior is unaffected."""
 
 
 @dataclass(frozen=True)

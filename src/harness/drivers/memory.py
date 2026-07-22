@@ -24,7 +24,7 @@ from harness.ports.artifacts import (
 from harness.ports.behavior import ConsumerBehavior
 from harness.ports.clock import Clock
 from harness.ports.events import EventSink
-from harness.ports.forge import Forge, PullRequest
+from harness.ports.forge import Forge, PullRequest, PullRequestState
 from harness.ports.issues import IssueRef, IssueTracker
 from harness.ports.merge import MergeChecker
 from harness.ports.queue import TaskQueue
@@ -289,6 +289,9 @@ class MemoryForge(Forge):
     def __init__(self) -> None:
         self.opened: list[PullRequest] = []
         self.bodies: dict[str, str] = {}
+        # (state, merged) per branch. A branch with no recorded state change
+        # defaults to OPEN.
+        self._states: dict[str, tuple[PullRequestState, bool]] = {}
 
     def open_pull_request(
         self, task: Task, *, branch: str, title: str, body: str
@@ -306,6 +309,18 @@ class MemoryForge(Forge):
         self.opened.append(pull)
         self.bodies[branch] = body
         return pull
+
+    def pull_request_state(self, task: Task) -> PullRequestState:
+        pr = task.data.get("pr")
+        if not isinstance(pr, dict):
+            raise RuntimeError(f"task {task.id}: carries no PR reference to check")
+        state, _ = self._states.get(pr.get("branch"), (PullRequestState.OPEN, False))
+        return state
+
+    def close(self, branch: str, *, merged: bool) -> None:
+        """Test helper: simulate the PR for `branch` resolving."""
+        state = PullRequestState.MERGED if merged else PullRequestState.CLOSED
+        self._states[branch] = (state, merged)
 
 
 class FakeMergeChecker(MergeChecker):

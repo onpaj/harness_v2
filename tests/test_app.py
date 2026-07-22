@@ -2,8 +2,13 @@ import asyncio
 import json
 
 from harness.app import HarnessLayout, build
-from harness.drivers.memory import FakeMergeChecker, MemoryAgentCatalog, MemoryEventSink
-from harness.models import BehaviorResult, Outcome, Task
+from harness.drivers.fake_forge import FakeForge
+from harness.drivers.memory import (
+    FakeMergeChecker,
+    MemoryAgentCatalog,
+    MemoryEventSink,
+)
+from harness.models import ARCHIVED, BehaviorResult, Outcome, Task
 from harness.ports.agent import AgentRun, AgentSpec
 from harness.ports.behavior import ConsumerBehavior
 from harness.ports.board import UNKNOWN_WORKFLOW
@@ -106,6 +111,15 @@ def test_build_creates_inbox_done_and_failed(tmp_path):
     assert (tmp_path / "tasks").is_dir()
     assert (tmp_path / "done").is_dir()
     assert (tmp_path / "failed").is_dir()
+    assert (tmp_path / "archived").is_dir()
+
+
+def test_build_always_constructs_a_pr_watcher(tmp_path):
+    seed(tmp_path)
+
+    harness = build(tmp_path, "default", events=MemoryEventSink())
+
+    assert harness.pr_watcher is not None
 
 
 def test_build_with_extra_workflow_unions_step_queues(tmp_path):
@@ -396,6 +410,111 @@ def test_recover_returns_stranded_tasks(tmp_path):
     assert revived.lock_id is None
 
 
+def test_recover_returns_a_task_stranded_between_pr_watcher_claim_and_transfer(tmp_path):
+    """PrWatcher claims out of done/ before transferring to archived/ — a crash
+    between those two calls must not silently lose the task. Before the fix,
+    recover() only walked [inbox, *step_queues.values()], leaving done/.processing/
+    unrecovered and the task invisible to both done.list() and hydrate()."""
+    seed(tmp_path)
+    harness = build(tmp_path, "default", events=MemoryEventSink())
+    stranded = Task(
+        id="tsk_1",
+        workflow_template="default",
+        created="2026-07-19T10:00:00Z",
+        status="end",
+        lock_id="lck_1",
+        data={"pr": {"number": 1, "url": "u", "branch": "harness/tsk_1"}},
+    )
+    (tmp_path / "done" / ".processing" / "tsk_1.json").write_text(
+        json.dumps(stranded.to_dict())
+    )
+
+    assert harness.recover() == 1
+    assert (tmp_path / "done" / "tsk_1.json").exists()
+    revived = Task.from_dict(json.loads((tmp_path / "done" / "tsk_1.json").read_text()))
+    assert revived.lock_id is None
+
+
+async def test_pr_watcher_archives_a_resolved_task_end_to_end(tmp_path):
+    seed(tmp_path)
+    forge = FakeForge(tmp_path / "forge")
+    events = MemoryEventSink()
+    harness = build(tmp_path, "default", events=events, forge=forge, delay=0.0)
+    landed = Task(
+        id="tsk_1",
+        workflow_template="default",
+        created="2026-07-19T10:00:00Z",
+        status="end",
+    )
+    pull = forge.open_pull_request(
+        landed, branch="harness/tsk_1", title="T", body="B"
+    )
+    landed = Task(
+        id="tsk_1",
+        workflow_template="default",
+        created="2026-07-19T10:00:00Z",
+        status="end",
+        data={"pr": {"number": pull.number, "url": pull.url, "branch": pull.branch}},
+    )
+    (tmp_path / "done" / "tsk_1.json").write_text(json.dumps(landed.to_dict()))
+    forge.close_pull_request("harness/tsk_1", merged=True)
+
+    stop = asyncio.Event()
+    runner = asyncio.create_task(
+        harness.run(poll_interval=0.01, pr_poll_interval=0.01, stop=stop)
+    )
+    for _ in range(400):
+        await asyncio.sleep(0.01)
+        if (tmp_path / "archived" / "tsk_1.json").exists():
+            break
+    stop.set()
+    await asyncio.wait_for(runner, timeout=RUNNER_TIMEOUT)
+
+    assert (tmp_path / "archived" / "tsk_1.json").exists()
+    assert not (tmp_path / "done" / "tsk_1.json").exists()
+    archived = Task.from_dict(json.loads((tmp_path / "archived" / "tsk_1.json").read_text()))
+    assert archived.status == ARCHIVED
+    assert harness.projection.get("tsk_1") is not None
+    assert all(
+        task.id != "tsk_1"
+        for tab in harness.projection.snapshot().workflows
+        for column in tab.columns
+        for task in column.tasks
+    )
+
+
+async def test_pr_watcher_loop_does_not_run_when_interval_is_zero(tmp_path):
+    seed(tmp_path)
+    forge = FakeForge(tmp_path / "forge")
+    harness = build(tmp_path, "default", events=MemoryEventSink(), forge=forge, delay=0.0)
+    landed = Task(
+        id="tsk_1",
+        workflow_template="default",
+        created="2026-07-19T10:00:00Z",
+        status="end",
+    )
+    pull = forge.open_pull_request(landed, branch="harness/tsk_1", title="T", body="B")
+    landed = Task(
+        id="tsk_1",
+        workflow_template="default",
+        created="2026-07-19T10:00:00Z",
+        status="end",
+        data={"pr": {"number": pull.number, "url": pull.url, "branch": pull.branch}},
+    )
+    (tmp_path / "done" / "tsk_1.json").write_text(json.dumps(landed.to_dict()))
+    forge.close_pull_request("harness/tsk_1", merged=True)
+
+    stop = asyncio.Event()
+    runner = asyncio.create_task(harness.run(poll_interval=0.01, stop=stop))
+    await asyncio.sleep(0.2)
+    stop.set()
+    await asyncio.wait_for(runner, timeout=RUNNER_TIMEOUT)
+
+    # pr_poll_interval defaults to 0.0 (disabled) — the task stays in done/.
+    assert (tmp_path / "done" / "tsk_1.json").exists()
+    assert not (tmp_path / "archived" / "tsk_1.json").exists()
+
+
 async def test_projection_is_hydrated_from_queues_at_start(tmp_path):
     seed(tmp_path)
     harness = build(tmp_path, "default", delay=0.0)
@@ -439,15 +558,16 @@ def test_seed_pollers_collects_from_every_queue(tmp_path):
     assert list((tmp_path / "tasks").glob("tsk_*.json")) == []
 
 
-def test_build_without_merge_checker_has_no_archived_queue_or_reconciler(tmp_path):
-    """Backward compatibility: default merge_checker=None → current behavior unchanged."""
+def test_build_without_merge_checker_has_no_reconciler(tmp_path):
+    """Without a merge_checker there is no MergeReconciler. The `archived/` queue
+    still exists — it is shared with the always-built PrWatcher (#44), which is
+    what drops resolved tasks off the board when its poll loop is enabled."""
     seed(tmp_path)
 
     harness = build(tmp_path, "default", events=MemoryEventSink())
 
-    assert harness.archived is None
     assert harness.reconciler is None
-    assert not (tmp_path / "archived").exists()
+    assert harness.archived is not None
 
 
 def test_build_with_merge_checker_wires_archived_queue_and_reconciler(tmp_path):

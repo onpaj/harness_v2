@@ -137,10 +137,10 @@ class BoardProjection(BoardView):
             # inbox between steps keeps the column of the step it just left.
             self._store(task.status if task.status is not None else TODO_COLUMN, task)
         if archived is not None:
-            # Fetchable by id, but never rendered in a column — `archived/` is
-            # deliberately not part of `self._order`.
             for task in archived.list():
-                self._tasks[task.id] = task
+                # Archived in a previous run: queryable by id, in no column —
+                # a restart must not lose get()-ability for it.
+                self._register(task)
         self._bump()
 
     def apply(self, column: str, task: Task) -> None:
@@ -149,9 +149,8 @@ class BoardProjection(BoardView):
         self._bump()
 
     def archive(self, task: Task) -> None:
-        """Keep the task fetchable by id; drop it out of every rendered column."""
-        self._tasks[task.id] = task
-        self._locations.pop(task.id, None)
+        """Task resolved (PR merged/closed): drop from every column, keep gettable by id."""
+        self._register(task)
         self._bump()
 
     def snapshot(self) -> Board:
@@ -210,6 +209,11 @@ class BoardProjection(BoardView):
             return
         self._tasks[task.id] = task
         self._locations[task.id] = (tab, column)
+
+    def _register(self, task: Task) -> None:
+        """Keep the task queryable by id, with no column — never listed."""
+        self._tasks[task.id] = task
+        self._locations.pop(task.id, None)
 
     def _bump(self) -> None:
         self._revision += 1

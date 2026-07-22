@@ -100,6 +100,21 @@ def test_source_poller_imports_only_ports_and_models():
     ), f"source_poller.py imports outside ports/models: {imports}"
 
 
+def test_pr_watcher_imports_only_ports_and_models():
+    """PrWatcher is core: it knows only ports, models and the base `ids` module
+    (needed for the same reason dispatcher.py/consumer.py need it — claiming a
+    task requires a lock id) — never a driver."""
+    imports = {
+        module
+        for module in imported_modules(SOURCE / "pr_watcher.py")
+        if module.startswith("harness")
+    }
+    assert all(
+        module in ("harness.models", "harness.ids") or module.startswith("harness.ports")
+        for module in imports
+    ), f"pr_watcher.py imports outside ports/models/ids: {imports}"
+
+
 def test_reconciler_imports_only_ports_and_models():
     """MergeReconciler is core: it knows only ports, models and the base `ids`
     module (the same base layer dispatcher/consumer draw lock ids from), no

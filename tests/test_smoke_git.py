@@ -277,6 +277,48 @@ async def test_task_lands_as_pull_request_on_real_git(tmp_path):
     assert len(prs) == 1
     assert prs[0]["branch"] == f"harness/{task_id}"
 
+    # the task carries its PR reference (FR-2), for the PrWatcher to pick up later
+    assert finished.data["pr"]["branch"] == f"harness/{task_id}"
+
+    # PrWatcher: once GitHub resolves the PR, the task drops off the board (real
+    # git + a real FilesystemTaskQueue transfer from done/ to archived/) while
+    # staying fetchable by id.
+    forge = FakeForge(root / "forge")
+    forge.close_pull_request(f"harness/{task_id}", merged=True)
+
+    watcher_harness = build(
+        root,
+        "default",
+        clock=SystemClock(),
+        workspace=GitWorkspace(registry, worktrees_root),
+        catalog=_catalog(),
+        runner=EchoRunner(),
+        artifact_view=WorktreeArtifactView(worktrees_root),
+        forge=forge,
+        delay=0.0,
+    )
+    stop2 = asyncio.Event()
+    runner2 = asyncio.create_task(
+        watcher_harness.run(poll_interval=0.01, pr_poll_interval=0.01, stop=stop2)
+    )
+    for _ in range(600):
+        await asyncio.sleep(0.01)
+        if (root / "archived" / f"{task_id}.json").exists():
+            break
+    stop2.set()
+    await asyncio.wait_for(runner2, timeout=RUNNER_TIMEOUT)
+
+    assert (root / "archived" / f"{task_id}.json").exists()
+    assert not (root / "done" / f"{task_id}.json").exists()
+    assert watcher_harness.projection.get(task_id) is not None
+    assert all(
+        task.id != task_id
+        for tab in watcher_harness.projection.snapshot().workflows
+        for column in tab.columns
+        for task in column.tasks
+    )
+
+
 
 def _find_task_file(root: Path, task_id: str) -> Path:
     matches = list(root.rglob(f"{task_id}.json"))

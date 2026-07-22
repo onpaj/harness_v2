@@ -1304,6 +1304,7 @@ def _run(args: argparse.Namespace) -> int:
                 args.api_port,
                 args.poll,
                 args.source_poll,
+                args.pr_poll,
                 args.reconcile_poll,
             )
         )
@@ -1317,6 +1318,7 @@ async def serve(
     port: int,
     poll_interval: float,
     source_interval: float = 30.0,
+    pr_poll_interval: float = 0.0,
     reconcile_interval: float = 300.0,
 ) -> None:
     """The loop and the board in a single event loop."""
@@ -1325,6 +1327,7 @@ async def serve(
         harness.run(
             poll_interval=poll_interval,
             source_interval=source_interval,
+            pr_poll_interval=pr_poll_interval,
             reconcile_interval=reconcile_interval,
             stop=stop,
         )
@@ -1425,6 +1428,14 @@ def main(argv: list[str] | None = None) -> int:
         dest="source_poll",
         help="interval (s) for polling the task source (e.g. GitHub); kept "
         "well above --poll to respect remote API rate limits",
+    )
+    run.add_argument(
+        "--pr-poll",
+        type=float,
+        default=0.0,
+        dest="pr_poll",
+        help="interval (s) for archiving landed tasks whose PR has resolved "
+        "(merged or closed unmerged); 0 disables it (default)",
     )
     run.add_argument(
         "--reconcile-poll",

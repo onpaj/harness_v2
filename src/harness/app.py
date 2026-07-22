@@ -49,6 +49,7 @@ from harness.ports.workspace import Workspace
 from harness.projection import BoardProjection
 from harness.ports.control import TaskControl
 from harness.merge_reconciler import MergeReconciler
+from harness.pr_watcher import PrWatcher
 from harness.source_poller import SourcePoller
 from harness.task_control import TaskControlService
 
@@ -136,6 +137,7 @@ class Harness:
         step_queues: dict[str, TaskQueue],
         done: TaskQueue,
         failed: TaskQueue,
+        archived: TaskQueue,
         projection: BoardProjection,
         artifacts: ArtifactView,
         stage_output: StageOutputView,
@@ -143,7 +145,7 @@ class Harness:
         events: EventSink,
         clock: Clock,
         pollers: list[SourcePoller] | None = None,
-        archived: TaskQueue | None = None,
+        pr_watcher: PrWatcher | None = None,
         reconciler: MergeReconciler | None = None,
         healer: Healer | None = None,
         healed: TaskQueue | None = None,
@@ -153,6 +155,7 @@ class Harness:
         self.dispatcher = dispatcher
         self.consumers = consumers
         self.pollers = pollers or []
+        self.pr_watcher = pr_watcher
         self.healer = healer
         self.projection = projection
         self.artifacts = artifacts
@@ -162,6 +165,7 @@ class Harness:
         self._step_queues = step_queues
         self._done = done
         self._failed = failed
+        self._archived = archived
         self._healed = healed
         self._events = events
         self._clock = clock
@@ -169,11 +173,12 @@ class Harness:
         self.reconciler = reconciler
 
     def recover(self) -> int:
-        # `done` is always recovered, whether or not a reconciler is wired this
-        # run: a `.processing/` file there can only have been left by a
-        # MergeReconciler claim, but it may outlive the run that created it (the
-        # operator could disable reconciliation between restarts). Recovering an
-        # idle queue is a no-op, so this is free when reconciliation is off.
+        # `done` is included because it is the one write-into queue that also
+        # gets claimed out of — by PrWatcher (#44) and/or the MergeReconciler
+        # (#50). A crash between a claim and its transfer would otherwise strand
+        # a task in done/.processing/, invisible to both done.list() and
+        # hydrate(). Recovering an idle queue is a no-op, so this is free when
+        # neither claimer is wired.
         queues = [self._inbox, *self._step_queues.values(), self._done]
         # With a healer wired, `failed/` is a consumed queue too — a crash mid-heal
         # leaves the task in `failed/.processing/`, so it must be recovered like any
@@ -208,16 +213,17 @@ class Harness:
         self,
         poll_interval: float = 0.2,
         source_interval: float = 30.0,
+        pr_poll_interval: float = 0.0,
         reconcile_interval: float = 300.0,
         stop: asyncio.Event | None = None,
     ) -> None:
         # The internal loops (dispatcher, consumers) poll local queues off disk,
         # so a tight `poll_interval` keeps the board responsive. A `TaskSource`,
         # by contrast, is a remote API with rate limits (GitHub), so its loop
-        # gets its own, much slower `source_interval`. The reconciler is also a
-        # remote API call, but a housekeeping sweep rather than a latency-
-        # sensitive "pick up new work" path, so it gets its own, longer
-        # `reconcile_interval` still — distinct from `source_interval`.
+        # gets its own, much slower `source_interval`. The PR watcher's
+        # `pr_poll_interval` (0 disables its loop entirely) and the reconciler's
+        # `reconcile_interval` are likewise separate housekeeping sweeps rather
+        # than latency-sensitive "pick up new work" paths — distinct intervals.
         stop = stop or asyncio.Event()
         self.recover()
         self.projection.hydrate(
@@ -225,12 +231,12 @@ class Harness:
             step_queues=self._step_queues,
             done=self._done,
             failed=self._failed,
-            archived=self.archived,
+            archived=self._archived,
             healed=self._healed,
         )
         self._seed_pollers()
         self._events.emit("started", workflows=sorted(self.workflows))
-        await asyncio.gather(
+        loops = [
             self._dispatcher_loop(poll_interval, stop),
             *(
                 self._consumer_loop(consumer, poll_interval, stop)
@@ -244,7 +250,10 @@ class Harness:
                 else []
             ),
             *([self._heal_loop(poll_interval, stop)] if self.healer is not None else []),
-        )
+        ]
+        if pr_poll_interval > 0 and self.pr_watcher is not None:
+            loops.append(self._pr_watcher_loop(pr_poll_interval, stop))
+        await asyncio.gather(*loops)
         self._events.emit("stopped")
 
     def _max_parallel_for(self, step: str) -> int:
@@ -287,12 +296,21 @@ class Harness:
             else:
                 await asyncio.sleep(0)
 
+    async def _pr_watcher_loop(self, interval: float, stop: asyncio.Event) -> None:
+        while not stop.is_set():
+            if not self.pr_watcher.tick():
+                await asyncio.sleep(interval)
+            else:
+                await asyncio.sleep(0)
+
     async def _reconcile_loop(
         self, reconciler: MergeReconciler, reconcile_interval: float, stop: asyncio.Event
     ) -> None:
         while not stop.is_set():
             if not reconciler.tick():
                 await asyncio.sleep(reconcile_interval)
+            else:
+                await asyncio.sleep(0)
 
     async def _heal_loop(self, poll_interval: float, stop: asyncio.Event) -> None:
         assert self.healer is not None
@@ -399,6 +417,7 @@ def build(
 
     failed = FilesystemTaskQueue(name="failed", root=layout.failed, events=events)
     done = FilesystemTaskQueue(name="done", root=layout.done, events=events)
+    archived = FilesystemTaskQueue(name="archived", root=layout.archived, events=events)
     inbox = FilesystemTaskQueue(
         name="tasks", root=layout.tasks, events=events, quarantine=failed
     )
@@ -414,14 +433,16 @@ def build(
         for step in steps
     }
 
-    # The archived queue and reconciler only exist when a merge_checker is
-    # supplied — a run without GitHub wiring pays nothing for this feature.
-    archived: TaskQueue | None = None
+    # The archived queue is shared infrastructure for the two "drop a resolved
+    # task off the board" paths — PrWatcher (always built, below) and the
+    # MergeReconciler — so it always exists. The reconciler itself only exists
+    # when a merge_checker is supplied; a run without GitHub wiring pays nothing
+    # for that path.
+    archived = FilesystemTaskQueue(
+        name="archived", root=layout.archived, events=events
+    )
     reconciler: MergeReconciler | None = None
     if merge_checker is not None:
-        archived = FilesystemTaskQueue(
-            name="archived", root=layout.archived, events=events
-        )
         reconciler = MergeReconciler(
             done=done,
             archived=archived,
@@ -509,6 +530,13 @@ def build(
         SourcePoller(source=source, inbox=inbox, events=events) for source in sources
     ]
 
+    # Cheap and side-effect-free until ticked (nothing starts its loop unless
+    # `--pr-poll`/`pr_poll_interval` is non-zero) — always built, same posture
+    # as `landing` always being built even when the workflow's last step isn't `land`.
+    pr_watcher = PrWatcher(
+        done=done, archived=archived, forge=forge, events=events, clock=clock
+    )
+
     control = TaskControlService(
         inbox=inbox, failed=failed, events=events, clock=clock
     )
@@ -553,6 +581,7 @@ def build(
         step_queues=step_queues,
         done=done,
         failed=failed,
+        archived=archived,
         projection=projection,
         artifacts=view,
         stage_output=stage_output,
@@ -560,7 +589,7 @@ def build(
         events=events,
         clock=clock,
         pollers=pollers,
-        archived=archived,
+        pr_watcher=pr_watcher,
         reconciler=reconciler,
         healer=healer,
         healed=healed_queue,

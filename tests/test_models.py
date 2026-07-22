@@ -24,6 +24,16 @@ def test_behavior_result_summary_defaults_empty():
     assert BehaviorResult(Outcome.REQUEST_CHANGES).summary == ""
 
 
+def test_behavior_result_data_defaults_none():
+    assert BehaviorResult(Outcome.DONE).data is None
+
+
+def test_behavior_result_carries_data():
+    result = BehaviorResult(Outcome.DONE, data={"pr": {"number": 1}})
+
+    assert result.data == {"pr": {"number": 1}}
+
+
 def test_history_entry_roundtrips_summary():
     entry = HistoryEntry(
         at="t",

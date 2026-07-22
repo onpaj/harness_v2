@@ -120,4 +120,7 @@ async def test_task_without_a_merge_checker_stays_in_done_forever(tmp_path):
     await drive_until_quiet(harness)
 
     assert (tmp_path / "done" / "tsk_1.json").exists()
-    assert not (tmp_path / "archived").exists()
+    # The `archived/` queue exists (it is shared with the always-built PrWatcher),
+    # but with no reconciler — and no PR poll driving PrWatcher — the task is
+    # never moved there.
+    assert not (tmp_path / "archived" / "tsk_1.json").exists()

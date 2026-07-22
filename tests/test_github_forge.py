@@ -8,6 +8,7 @@ import pytest
 from harness.drivers.github_client import FakeGithubClient
 from harness.drivers.github_forge import ForgeError, GithubForge
 from harness.models import Task
+from harness.ports.forge import PullRequestState
 
 
 def make_task(**data) -> Task:
@@ -249,3 +250,71 @@ def test_api_error_without_a_body_still_reports_the_status():
 
     with pytest.raises(ForgeError, match="connection reset"):
         forge.open_pull_request(make_task(), branch="harness/tsk_1", title="T", body="B")
+
+
+# --- pull_request_state ------------------------------------------------------
+
+
+def _land(forge, client, task):
+    """Open a PR through the forge and return the task carrying its reference,
+    the way LandingBehavior would after a successful `open_pull_request`."""
+    pull = forge.open_pull_request(task, branch="harness/tsk_1", title="T", body="B")
+    from dataclasses import replace
+
+    return replace(
+        task,
+        data={
+            **task.data,
+            "pr": {"number": pull.number, "url": pull.url, "branch": pull.branch},
+        },
+    )
+
+
+def test_pull_request_state_open():
+    forge, client = build()
+    landed = _land(forge, client, make_task())
+
+    assert forge.pull_request_state(landed) is PullRequestState.OPEN
+
+
+def test_pull_request_state_merged():
+    forge, client = build()
+    landed = _land(forge, client, make_task())
+    client.close_pull_request(landed.data["pr"]["number"], merged=True)
+
+    assert forge.pull_request_state(landed) is PullRequestState.MERGED
+
+
+def test_pull_request_state_closed_unmerged():
+    forge, client = build()
+    landed = _land(forge, client, make_task())
+    client.close_pull_request(landed.data["pr"]["number"], merged=False)
+
+    assert forge.pull_request_state(landed) is PullRequestState.CLOSED
+
+
+def test_pull_request_state_missing_token_fails_loudly():
+    forge = GithubForge(None, slug_of=lambda path: "onpaj/harness_v2")
+    task = make_task(pr={"number": 1, "url": "u", "branch": "harness/tsk_1"})
+
+    with pytest.raises(ForgeError, match="GITHUB_TOKEN"):
+        forge.pull_request_state(task)
+
+
+def test_pull_request_state_no_pr_reference_fails_loudly():
+    forge, _ = build()
+
+    with pytest.raises(ForgeError, match="carries no PR reference"):
+        forge.pull_request_state(make_task())
+
+
+def test_pull_request_state_api_error_becomes_forge_error():
+    class BrokenClient(FakeGithubClient):
+        def get_pull_request(self, repo, *, number):
+            raise RuntimeError("network down")
+
+    forge, client = build(BrokenClient())
+    landed = _land(forge, client, make_task())
+
+    with pytest.raises(ForgeError, match="network down"):
+        forge.pull_request_state(landed)

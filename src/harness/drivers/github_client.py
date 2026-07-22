@@ -35,11 +35,14 @@ class PullRequestRef:
 
 @dataclass(frozen=True)
 class PullRequestDetail:
-    """A pull request's merge state, as read back by `get_pull_request`."""
+    """A pull request fetched by number: whether it has merged, plus its
+    open/closed state and head ref where available."""
 
     number: int
     url: str
-    merged: bool
+    merged: bool  # true only when GitHub merged it
+    head: str = ""
+    state: str = "open"  # "open" | "closed", exactly as GitHub's API reports it
 
 
 @dataclass(frozen=True)
@@ -88,7 +91,7 @@ class GithubClient(ABC):
 
     @abstractmethod
     def get_pull_request(self, repo: str, number: int) -> PullRequestDetail:
-        """The PR's current state, including whether it has been merged."""
+        """Fetch a PR by number: its open/closed state and whether it has merged."""
 
     @abstractmethod
     def list_pull_requests(
@@ -134,6 +137,12 @@ class FakeGithubClient(GithubClient):
         self._default_branch = default_branch
         self.pulls: list[PullRequestRef] = []
         self.created: list[dict] = []
+        # (state, merged) per PR number. A freshly created pull defaults to
+        # ("open", False); close_pull_request flips it for tests that simulate
+        # GitHub resolving the PR.
+        self._pr_state: dict[int, tuple[str, bool]] = {}
+        # `merge_pull_request` (the merge-reconciler's test helper) records
+        # merged PR numbers here; `get_pull_request` unions it with `_pr_state`.
         self.merged: set[int] = set()
         # Separate store from `pulls`: `PullRequestInfo` answers "is this PR
         # ours, does it need action" (mergeable_state), a different question
@@ -182,19 +191,31 @@ class FakeGithubClient(GithubClient):
         self.created.append(
             {"repo": repo, "head": head, "base": base, "title": title, "body": body}
         )
+        self._pr_state[number] = ("open", False)
         return pull
 
-    def merge_pull_request(self, number: int) -> None:
-        """Test helper: mark a PR as merged."""
-        self.merged.add(number)
-
     def get_pull_request(self, repo: str, number: int) -> PullRequestDetail:
-        for pull in self.pulls:
-            if pull.number == number:
-                return PullRequestDetail(
-                    number=pull.number, url=pull.url, merged=number in self.merged
-                )
-        raise KeyError(f"no such pull request: {repo}#{number}")
+        pull = next((p for p in self.pulls if p.number == number), None)
+        if pull is None:
+            raise KeyError(f"no such pull request: {repo}#{number}")
+        state, merged = self._pr_state.get(number, ("open", False))
+        merged = merged or number in self.merged
+        if merged:
+            state = "closed"
+        return PullRequestDetail(
+            number=pull.number, url=pull.url, head=pull.head, state=state, merged=merged
+        )
+
+    def close_pull_request(self, number: int, *, merged: bool) -> None:
+        """Test helper: simulate GitHub resolving the PR (merged or closed unmerged)."""
+        self._pr_state[number] = ("closed", merged)
+        if merged:
+            self.merged.add(number)
+
+    def merge_pull_request(self, number: int) -> None:
+        """Test helper: mark a PR as merged (the merge-reconciler's simulation)."""
+        self.merged.add(number)
+        self._pr_state[number] = ("closed", True)
 
     def add_pull_request(self, info: PullRequestInfo) -> None:
         """Test helper: register a PR the watcher will see via `list_pull_requests`."""
@@ -367,7 +388,9 @@ class HttpGithubClient(GithubClient):
         return PullRequestDetail(
             number=item["number"],
             url=item.get("html_url", ""),
-            merged=bool(item.get("merged")),
+            merged=bool(item.get("merged", False)),
+            head=self._pr_head(item, f"?:{number}"),
+            state=item.get("state", "open"),
         )
 
     def list_pull_requests(
