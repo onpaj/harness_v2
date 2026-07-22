@@ -77,6 +77,32 @@ def test_orchestration_does_not_import_source_port():
         )
 
 
+def test_orchestration_does_not_import_triggers_port():
+    """The triggers port (Check/Observation) is not orchestration. A trigger is a
+    TaskSource behind SourcePoller — only the scheduled-trigger driver and the
+    wiring reach for it, never the dispatcher or consumer."""
+    for name in ("dispatcher.py", "consumer.py"):
+        assert "harness.ports.triggers" not in imported_modules(SOURCE / name), (
+            f"{name} imports ports.triggers"
+        )
+
+
+def test_scheduled_trigger_imports_only_ports_models_and_ids():
+    """ScheduledTrigger is a driver, but by design it binds to no sibling driver:
+    it composes only ports (source/clock/triggers), models and the base `ids`
+    module — like SourcePoller, wired in app.py/cli.py."""
+    imports = {
+        module
+        for module in imported_modules(SOURCE / "drivers" / "scheduled_trigger.py")
+        if module.startswith("harness")
+    }
+    assert all(
+        module in ("harness.models", "harness.ids")
+        or module.startswith("harness.ports")
+        for module in imports
+    ), f"scheduled_trigger.py imports outside ports/models/ids: {imports}"
+
+
 def test_orchestration_does_not_import_control():
     """The operator-control port (TaskControl) is not orchestration. Only the
     task-control service, the API and the wiring reach for it — never the
