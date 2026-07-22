@@ -28,10 +28,19 @@ archived task is never reintroduced to the inbox."""
 
 
 class Outcome(str, Enum):
-    """The only values a ConsumerBehavior may return."""
+    """The only values a ConsumerBehavior may return.
+
+    `DONE`/`REQUEST_CHANGES` are the two universal verdicts. `BACKEND_ONLY` is a
+    *routing* verdict: the `plan` step emits it to tell the workflow the feature
+    needs no design pass, and the default workflow has an edge that skips `design`
+    on it. It is still just a label the router looks up in the workflow's edges
+    (invariants #4/#8 — the router branches on the string, it does not know what
+    `backend_only` means); a workflow without a matching edge simply never sees it,
+    because a step's allowed outcomes are derived from its own outgoing edges."""
 
     DONE = "done"
     REQUEST_CHANGES = "request_changes"
+    BACKEND_ONLY = "backend_only"
 
 
 @dataclass(frozen=True)

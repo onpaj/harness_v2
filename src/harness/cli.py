@@ -99,6 +99,7 @@ DEFAULT_DEFINITION = {
     "start": "plan",
     "transitions": [
         {"from": "plan", "on": "done", "to": "design"},
+        {"from": "plan", "on": "backend_only", "to": "architecture"},
         {"from": "design", "on": "done", "to": "architecture"},
         {"from": "architecture", "on": "done", "to": "development"},
         {"from": "development", "on": "done", "to": "review"},
@@ -212,7 +213,17 @@ _PLAN_PERSONA = (
     "- Rough plan — the implementation steps at a high level.\n"
     "- Open questions — what's unclear; where the request is ambiguous, pick a "
     "sensible default and note it here.\n\n"
-    "Be specific and complete. Vague requirements lead to bad implementation."
+    "Be specific and complete. Vague requirements lead to bad implementation.\n\n"
+    "Routing decision — you also decide whether the design step is needed. A "
+    "dedicated design pass is worth its cost only when the change has real "
+    "user-facing or product-shape design work: a UI/UX surface, a new public "
+    "API contract, a non-trivial data model, or several interacting components. "
+    "A change that is purely backend/internal — a bug fix, a refactor, a new "
+    "endpoint over an existing model, a config or infrastructure tweak, a "
+    "small self-contained addition — does not. When the design step would add "
+    "nothing, finish with the 'backend_only' outcome so the pipeline skips "
+    "straight to architecture; otherwise finish with 'done'. When in doubt, "
+    "prefer 'done' (keep design) — skipping is the exception, not the default."
 )
 
 _DESIGN_PERSONA = (

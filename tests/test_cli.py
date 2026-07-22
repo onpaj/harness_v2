@@ -219,6 +219,29 @@ def test_review_allowed_outcomes_unaffected_by_sync_instructions():
     assert _allowed_outcomes_for(workflow, "review") == ["done", "request_changes"]
 
 
+def test_default_workflow_lets_plan_skip_design():
+    # Option A: the plan step branches to `architecture` on `backend_only`,
+    # skipping `design`. The skip lives entirely in the workflow's edges, and the
+    # plan agent's allowed outcomes are derived from them.
+    workflow = Workflow(
+        name=DEFAULT_DEFINITION["name"],
+        start=DEFAULT_DEFINITION["start"],
+        transitions=tuple(
+            Transition(from_step=t["from"], on=t["on"], to_step=t["to"]) for t in DEFAULT_DEFINITION["transitions"]
+        ),
+    )
+    assert {"from": "plan", "on": "backend_only", "to": "architecture"} in DEFAULT_DEFINITION["transitions"]
+    assert workflow.target("plan", "backend_only") == "architecture"
+    assert workflow.target("plan", "done") == "design"
+    assert _allowed_outcomes_for(workflow, "plan") == ["done", "backend_only"]
+
+
+def test_plan_persona_explains_the_skip_decision():
+    from harness.cli import _PLAN_PERSONA
+
+    assert "backend_only" in _PLAN_PERSONA
+
+
 def test_submit_writes_a_task(tmp_path, capsys):
     main(["init", "--root", str(tmp_path)])
 

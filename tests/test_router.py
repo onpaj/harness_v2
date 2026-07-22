@@ -58,6 +58,30 @@ def test_backward_edge():
     assert route(task("review", "request_changes"), WORKFLOW) == MoveTo("development")
 
 
+# A step that branches on the outcome (Option A: the planner picks the path).
+# The same `from_step` routes to two different targets purely by the outcome the
+# behavior emitted — the router branches on the string, knowing nothing of what
+# `backend_only` means.
+SKIP_WORKFLOW = Workflow(
+    name="default",
+    start="plan",
+    transitions=(
+        Transition(from_step="plan", on="done", to_step="design"),
+        Transition(from_step="plan", on="backend_only", to_step="architecture"),
+        Transition(from_step="design", on="done", to_step="architecture"),
+        Transition(from_step="architecture", on="done", to_step=END),
+    ),
+)
+
+
+def test_plan_default_outcome_keeps_design():
+    assert route(task("plan", "done"), SKIP_WORKFLOW) == MoveTo("design")
+
+
+def test_plan_backend_only_skips_design():
+    assert route(task("plan", "backend_only"), SKIP_WORKFLOW) == MoveTo("architecture")
+
+
 def test_end_node_finishes():
     assert route(task("review", "done"), WORKFLOW) == Finished()
 
