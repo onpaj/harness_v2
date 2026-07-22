@@ -43,7 +43,7 @@ class GithubIssuesCheck(Check):
         # swap gives at-most-once across restarts, but `list_issues` reads with
         # read-after-write lag, so a fast re-evaluate can still see the issue
         # under the select label. This cuts that off within the process.
-        self._claimed: set[int] = set()
+        self._claimed: set[tuple[str, int]] = set()
 
     def evaluate(self) -> list[Observation]:
         observations: list[Observation] = []
@@ -52,9 +52,10 @@ class GithubIssuesCheck(Check):
             if slug is None:
                 continue  # not a GitHub repo — nothing to scan
             for issue in self._client.list_issues(slug, label=self._label):
-                if issue.number in self._claimed:
+                key = (slug, issue.number)
+                if key in self._claimed:
                     continue
-                self._claimed.add(issue.number)
+                self._claimed.add(key)
                 # Claim: swap the label before the task heads to the inbox.
                 self._client.remove_label(slug, issue.number, self._label)
                 self._client.add_label(slug, issue.number, self._claimed_label)

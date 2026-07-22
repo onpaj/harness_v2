@@ -68,7 +68,10 @@ def test_claimed_ledger_suppresses_a_relisted_issue_within_the_process():
             return None
 
     client = LaggyClient([Issue(7, "t", "b", "u", ("harness:todo",))])
-    registry, slugs = _registry_and_slugs()
+    registry = MemoryRepositoryRegistry(
+        {"heblo": Path("/repos/heblo")}
+    )
+    slugs = {Path("/repos/heblo"): "onpaj/Anela.Heblo"}
     check = GithubIssuesCheck(client=client, registry=registry, slug_of=slugs.get)
 
     first = check.evaluate()
@@ -97,3 +100,44 @@ def test_no_labelled_issues_yields_no_observations():
     check = GithubIssuesCheck(client=client, registry=registry, slug_of=slugs.get)
 
     assert check.evaluate() == []
+
+
+def test_two_repos_sharing_an_issue_number_both_emit():
+    # A per-number ledger would drop the second repo's issue #7; the ledger is
+    # keyed by (slug, number), so both legitimate issues surface.
+    from harness.drivers.github_client import FakeGithubClient, Issue
+    from harness.drivers.memory import MemoryRepositoryRegistry
+
+    heblo_client = FakeGithubClient([Issue(7, "H", "b", "uh", ("harness:todo",))])
+    hv2_client = FakeGithubClient([Issue(7, "V", "b", "uv", ("harness:todo",))])
+
+    class TwoRepoClient:
+        # Route calls to the right per-repo FakeGithubClient by slug.
+        def __init__(self):
+            self._by_repo = {
+                "onpaj/Anela.Heblo": heblo_client,
+                "onpaj/harness_v2": hv2_client,
+            }
+
+        def list_issues(self, repo, *, label):
+            return self._by_repo[repo].list_issues(repo, label=label)
+
+        def add_label(self, repo, number, label):
+            self._by_repo[repo].add_label(repo, number, label)
+
+        def remove_label(self, repo, number, label):
+            self._by_repo[repo].remove_label(repo, number, label)
+
+    registry = MemoryRepositoryRegistry(
+        {"heblo": Path("/repos/heblo"), "harness_v2": Path("/repos/harness_v2")}
+    )
+    slugs = {
+        Path("/repos/heblo"): "onpaj/Anela.Heblo",
+        Path("/repos/harness_v2"): "onpaj/harness_v2",
+    }
+    check = GithubIssuesCheck(client=TwoRepoClient(), registry=registry, slug_of=slugs.get)
+
+    obs = check.evaluate()
+
+    assert sorted(o.repository for o in obs) == ["harness_v2", "heblo"]
+    assert {o.data["source"]["repo"] for o in obs} == {"onpaj/Anela.Heblo", "onpaj/harness_v2"}
