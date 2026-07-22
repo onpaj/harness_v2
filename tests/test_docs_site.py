@@ -191,3 +191,12 @@ def test_app_css_defines_theme_and_kind_colours(tmp_path: Path):
     assert "prefers-reduced-motion" in css
     for kind in ("port", "driver", "core", "ui", "store"):
         assert f"--kind-{kind}" in css
+
+
+def test_app_js_reads_embedded_data_and_has_no_external_calls(tmp_path: Path):
+    _write_fixture_tree(tmp_path)
+    build_site(discover_docs(tmp_path), tmp_path, tmp_path / "site")
+    js = (tmp_path / "site" / "assets" / "app.js").read_text(encoding="utf-8")
+    assert "model-data" in js
+    assert "adr-html" in js
+    assert "fetch(" not in js  # fully client-side, no network
