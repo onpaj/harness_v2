@@ -29,37 +29,45 @@ swapped out later.
 1. **You may swap a driver, never its surroundings.** Every moving part sits behind
    a port in `ports/`. Neither `dispatcher.py` nor `consumer.py` may import anything
    from `drivers/` — wiring belongs exclusively in `app.py`. This is guarded by
-   `tests/test_architecture.py`.
+   `tests/test_architecture.py`. See ADR-0001.
 2. **Decision-making has three separate roles.** `ConsumerBehavior` says *what
    happened*, the dispatcher *where it goes next*, the consumer decides nothing.
    `consumer.py` must not contain a branch that depends on the outcome value; a test
-   checks this by reading the source.
+   checks this by reading the source. See ADR-0002.
 3. **The dispatcher changes status — with one exception.** The decision *where the
    task goes next* (step, `end`) belongs exclusively to the dispatcher. The one
    exception: when the consumer itself cannot deliver the task (the behavior raises
    an exception, or returns an invalid outcome), it writes the terminal status
    `failed` itself — symmetrically to how `Dispatcher._fail` does the same when
    routing fails. `lastOutcome` is written exclusively by the consumer.
-4. **The router is a pure function.** `route()` must not touch I/O, time or state.
-5. **Neither `api/` nor `projection.py` imports `drivers/`.** The UI must not know what the harness runs on.
-6. **In `Harness.run()`, `recover()` comes before `hydrate()`.** The other way round loses tasks from `.processing/`.
+4. **The router is a pure function.** `route()` must not touch I/O, time or state. See ADR-0004.
+5. **Neither `api/` nor `projection.py` imports `drivers/`.** The UI must not know what the harness runs on. See ADR-0005.
+6. **In `Harness.run()`, `recover()` comes before `hydrate()`.** The other way round loses tasks from `.processing/`. See ADR-0003.
 7. **A task-movement event carries both `task` and `queue`.** Without it the projection won't see tasks created after startup.
 8. **`repository`/`worktree` is read only by the behavior.** The router and dispatcher still decide solely on `(status, lastOutcome)`.
-9. **The commit is done by the behavior driver, not the consumer and not the LLM.** The consumer knows no git.
-10. **Artifacts are attempt-indexed** (`<task>/<step>/<attempt>/`). A step re-run never overwrites the previous attempt — otherwise the `request_changes` loop would vanish from the audit trail.
+9. **The commit is done by the behavior driver, not the consumer and not the LLM.** The consumer knows no git. See ADR-0006.
+10. **Artifacts are attempt-indexed** (`<task>/<step>/<attempt>/`). A step re-run never overwrites the previous attempt — otherwise the `request_changes` loop would vanish from the audit trail. See ADR-0006.
 11. **`Workspace`/`Forge`/`ArtifactStore` are unknown to the dispatcher and consumer.** Only the behavior touches them; wiring in `app.py`. `api/` touches only `ArtifactView`. Guarded by `test_architecture.py`.
-12. **Landing is a step, not magic.** It lands the artifacts into the worktree and opens a PR; it may fail into `failed/`. `end` stays a clean terminal. Phase 3: the artifacts are already in the worktree, landing doesn't copy them — it just opens a PR.
-13. **The agent lives behind `AgentRunner`.** `ClaudeCliBehavior` knows nothing of subprocesses or CLI flags; a test drives it with `FakeAgentRunner`, the way phase 1 drove time with `FakeClock`.
-14. **The persona is data, not code.** `behaviors/agent.py` has no branch on the agent's name — the difference between personas is the content of the `AgentSpec` supplied at construction.
-15. **`task.repository` is a name, not a path.** Paths are resolved by `RepositoryRegistry` — machine-specific config (`repos.json`), outside the task. The worktree path is derived by the harness (`<worktrees_root>/<task_id>`).
-16. **Artifacts live in the worktree under `.artifacts/<id>/`, versioned.** The agent writes them, the worker commits them. Attempt numbering (`<step>-NN`) is gapless across reset-on-reattach.
+12. **Landing is a step, not magic.** It lands the artifacts into the worktree and opens a PR; it may fail into `failed/`. `end` stays a clean terminal. Phase 3: the artifacts are already in the worktree, landing doesn't copy them — it just opens a PR. See ADR-0009.
+13. **The agent lives behind `AgentRunner`.** `ClaudeCliBehavior` knows nothing of subprocesses or CLI flags; a test drives it with `FakeAgentRunner`, the way phase 1 drove time with `FakeClock`. See ADR-0007.
+14. **The persona is data, not code.** `behaviors/agent.py` has no branch on the agent's name — the difference between personas is the content of the `AgentSpec` supplied at construction. See ADR-0007.
+15. **`task.repository` is a name, not a path.** Paths are resolved by `RepositoryRegistry` — machine-specific config (`repos.json`), outside the task. The worktree path is derived by the harness (`<worktrees_root>/<task_id>`). See ADR-0008.
+16. **Artifacts live in the worktree under `.artifacts/<id>/`, versioned.** The agent writes them, the worker commits them. Attempt numbering (`<step>-NN`) is gapless across reset-on-reattach. See ADR-0006.
 17. **`AgentRunner`/`AgentCatalog`/`RepositoryRegistry` are unknown to the dispatcher and consumer.** Only the behavior / wiring touches them. Guarded by `test_architecture.py`.
-18. **The outside world of tasks is a single port `TaskSource` (`poll`/`report_progress`/`finish`).** GitHub is a driver; how the state is rendered (a label) is known only to the driver.
-19. **A task's origin lives in `task.data.source`** (`{kind, repo, issue, url}`). The outward projection reads it from there, not from side state. Neither router nor dispatcher reads `data.source`.
-20. **`TaskSource` is touched only by `SourcePoller` (core) and `SourceReflectorSink` (driver)**, wired in `app.py`. `dispatcher.py`/`consumer.py` don't import the port — guarded by `test_architecture.py`.
+18. **The outside world of tasks is a single port `TaskSource` (`poll`/`report_progress`/`finish`).** GitHub is a driver; how the state is rendered (a label) is known only to the driver. See ADR-0010.
+19. **A task's origin lives in `task.data.source`** (`{kind, repo, issue, url}`). The outward projection reads it from there, not from side state. Neither router nor dispatcher reads `data.source`. See ADR-0010.
+20. **`TaskSource` is touched only by `SourcePoller` (core) and `SourceReflectorSink` (driver)**, wired in `app.py`. `dispatcher.py`/`consumer.py` don't import the port — guarded by `test_architecture.py`. See ADR-0010.
 21. **The outward projection is idempotent and doesn't block decision-making.** `report_progress` twice is a no-op; a source failure is isolated by `CompositeEventSink` (and `SourcePoller.tick` catches the exception from `poll()`).
 22. **`todo` is the board's name for the inbox's fresh tasks** (`status is None`) — the first column. It is a view concern only: the router and dispatcher never see a `todo` queue, and auto-flow is unchanged (a fresh task passes through `todo` into `start`).
-23. **Operator control is a write-side port `TaskControl`, mirroring the read-side `BoardView`.** `restart` is a reset, not a routing decision: it clears `status`/`lastOutcome` and re-inboxes a `failed` task, then the dispatcher decides where next (invariant #3 holds). `TaskControl` is touched only by `TaskControlService` (core), `api/` and wiring — `dispatcher.py`/`consumer.py` don't import it; guarded by `test_architecture.py`.
+23. **Operator control is a write-side port `TaskControl`, mirroring the read-side `BoardView`.** `restart` is a reset, not a routing decision: it clears `status`/`lastOutcome` and re-inboxes a `failed` task, then the dispatcher decides where next (invariant #3 holds). `TaskControl` is touched only by `TaskControlService` (core), `api/` and wiring — `dispatcher.py`/`consumer.py` don't import it; guarded by `test_architecture.py`. See ADR-0011 and ADR-0012.
+24. **`failed/` has one reader — the healer; `healed/` is the never-consumed terminal.** This refines "terminal states are queues nobody consumes": `done`/`end`/`healed` are terminal, while `failed/` is drained by the `Healer` loop (an agent assigned to it) and by nothing else. The router and dispatcher never learn about `failed`/`healed` as steps. The healer is opt-in (`HealConfig`); with no healer wired, `failed/` stays a dead end exactly as before.
+25. **The healer produces an issue, never a task, and never writes back to `failed/`.** A heal claims a task out of `failed/` exactly once and settles it to `healed/` — success *or* failure (agent error / `IssueError` become a `heal-failed` note, not a re-queue). So no failure is healed twice and nothing can loop; there is no recursion to guard.
+26. **The healer's deliverable is opened by the worker loop, not the LLM.** The `healer` agent (persona as data) only drafts `issue.md` and returns a verdict; the `Healer` loop reads the draft and calls `IssueTracker.open_issue` (invariant 9). `IssueTracker` is a third port distinct from `Forge` (opens PRs) and `TaskSource.finish` (relabels), idempotent by a per-task marker.
+27. **`IssueTracker` and the `Healer` loop are unknown to the dispatcher and consumer.** The healer is a core loop that imports only ports/models/ids (like `SourcePoller`); wiring lives in `app.py`. Guarded by `test_architecture.py`.
+28. **A task's workspace branch is `harness/<task.id>` unless `task.data["branch"]` overrides it.** The override exists for exactly one case (the resolver workflow fixing an existing PR): `GitWorkspace.attach` checks out that *existing* branch instead of creating a fresh one from HEAD. Absent the key, every path is unchanged.
+29. **Conflict resolution is always a merge, never a rebase.** `WorkspaceHandle.merge()` produces a two-parent merge commit, deliberately — a rebase would rewrite history on a branch that may already be pushed, breaking the no-force-push invariant `GitWorkspaceHandle.push()` relies on (a plain `push -u`, no `--force`).
+30. **No task's worktree directory is ever removed.** Nothing under `src/harness` calls `git worktree remove`/`prune`. Consequence: a harness-authored branch is always still checked out in its original task's own worktree, so `GitWorkspace.attach`'s branch-override path force-checks it out into a *second* worktree (`git worktree add --force <path> <branch>`, reusing the existing local branch — not `-B`, which git refuses to force-reset on a branch checked out elsewhere no matter how many times `--force` is passed). Safe because the original worktree is permanently inert once its task reaches a terminal state. Deliberate — don't "fix" the `--force` away, and don't add worktree cleanup without re-checking this invariant.
+31. **The branch-override's reused local ref is untrusted until reconciled with `origin`.** The shared `refs/heads/<branch>` only tracks `origin/<branch>` while every advance of the branch goes through a local commit+push in *some* worktree — `GithubMergeabilityWatcher.update_branch` breaks that by advancing the branch server-side with no local git touch at all. So immediately after the `--force`d `worktree add` in the reuse path, `GitWorkspace.attach` hard-resets the *new* worktree to `origin/<branch>`'s fetched tip before returning the handle. That reset targets the branch as checked out in the new worktree, not "elsewhere," so it isn't blocked by the guard invariant 30 relies on. Don't drop this reset — without it, a `behind`→`update_branch`→`dirty`→resolver sequence on the same PR leaves the resolver's worktree stale and its final `push` fails as non-fast-forward.
 
 ## Working here
 
@@ -109,10 +117,11 @@ Dependencies flow strictly downward, no cycles.
 | Base | `models` (imports nothing from the package), `ids` |
 | Logic | `router` (knows only `models`) |
 | Base (package-free) | `models`, `ids`, `artifacts_layout` (the `.artifacts/<id>/<step>-NN` convention) |
-| Ports | `ports/{queue,workflows,strategy,behavior,events,clock,workspace,artifacts,forge,board,agent,repos,source}` |
-| Orchestration | `dispatcher`, `consumer`, `source_poller` — know only ports (and not `workspace`/`forge`/`artifacts`/`agent`/`repos`/`drivers`) |
-| Behaviors | `behaviors/{landing,agent}` — touch ports, not drivers |
-| Drivers | `drivers/{fs_queue,fs_workflows,fifo_strategy,dummy_behavior,stdout_events,system_clock,memory,fs_artifacts,git_workspace,fake_forge,claude_cli,fs_agents,fs_repos,worktree_artifacts,source_reflector,github_client,github_source,github_forge,launchd}` |
+| Ports | `ports/{queue,workflows,strategy,behavior,events,clock,workspace,artifacts,forge,board,agent,repos,source,control,logs,issues}` |
+| Orchestration | `dispatcher`, `consumer`, `source_poller`, `task_control`, `healer` — know only ports (and not `workspace`/`forge`/`artifacts`/`agent`/`repos`/`drivers`) |
+| Behaviors | `behaviors/{landing,agent,resolve_conflict}` — touch ports, not drivers |
+| Drivers | `drivers/{fs_queue,fs_workflows,fifo_strategy,dummy_behavior,stdout_events,system_clock,memory,fs_artifacts,git_workspace,fake_forge,claude_cli,fs_agents,fs_repos,worktree_artifacts,source_reflector,github_client,github_source,github_forge,github_issues,mergeability_watcher,launchd,composite_events,git_remote,projection_events,stage_output}` |
+| UI | `api/{app,routes}` — reads through `BoardView`/`ArtifactView`/`StageOutputView`, writes through `TaskControl`; never a driver |
 | Edges | `app` (wiring), `cli` |
 
 - `projection.py` — in-memory read model of the board; hydration from queues + event stream
@@ -126,6 +135,9 @@ Dependencies flow strictly downward, no cycles.
 - `behaviors/agent.py` — `ClaudeCliBehavior`: attach worktree → allocate attempt → run the agent → the worker commits
 - `ports/source.py` — the `TaskSource` port (`poll`/`report_progress`/`finish`) + `Progress`/`FinishResult`
 - `source_poller.py` — `SourcePoller`: the core that fills the inbox from the source (knows only ports)
+- `healer.py` — `Healer`: the core loop assigned to the `failed/` queue (knows only ports/models/ids). Claims a failed task, runs the `healer` persona over a failure report, opens an issue via `IssueTracker`, and settles the task onto `healed/`
+- `ports/issues.py` — `IssueTracker.open_issue(...)` (opens a fresh advisory issue, idempotent by marker) + `IssueRef`/`IssueError`
+- `drivers/github_issues.py` — `GithubIssueTracker`: opens the healer's issue on GitHub over `GithubClient`, dedup by an embedded `<!-- harness-heal:<id> -->` marker
 - `drivers/source_reflector.py` — `SourceReflectorSink(EventSink)`: event stream → projection into the source
 - `drivers/github_client.py` — `GithubClient` (ABC), `Issue`, `FakeGithubClient`, `HttpGithubClient` (stdlib `urllib`)
 - `drivers/github_source.py` — `GithubTaskSource`: issue → task, state → label
@@ -135,14 +147,40 @@ Dependencies flow strictly downward, no cycles.
 - `drivers/launchd.py` — the background service on macOS: pure `wrapper_script`/
   `plist_bytes` builders (unit-tested) plus a thin `launchctl` shell; driven by
   `harness service install|uninstall|status`
+- `drivers/mergeability_watcher.py` — `GithubMergeabilityWatcher(TaskSource)`,
+  `kind="mergeability"`: `poll()` auto-updates a "behind" harness-owned PR
+  (side effect, no task) and queues a "dirty" one as a resolver task on the
+  same branch, deduped by `repo:pr:head_sha`
+- `behaviors/resolve_conflict.py` — `ResolveConflictBehavior`: merges the base
+  into the attached branch; a clean merge commits without spending an agent
+  call, a real conflict runs the `resolve` persona then the worker commits
 - `api/` — FastAPI board; sees only `BoardView` and `ArtifactView`, never a driver or `ArtifactStore`
 
 ## What is responsible for what
 
-- **`TaskQueue`** — the inbox, the step queues, `done/` and `failed/` are all
-  instances of the same port. Terminal states are simply queues that nobody consumes.
+- **`TaskQueue`** — the inbox, the step queues, `done/`, `failed/` and `healed/` are
+  all instances of the same port. Terminal states are simply queues that nobody
+  consumes — with one exception: when a healer is wired, `failed/` gets exactly one
+  reader (the `Healer` loop), and `healed/` becomes the never-consumed terminal
+  (invariant 24).
+- **The healer** (opt-in) is an agent assigned to the `failed/` queue. When a task
+  fails, the `Healer` loop reads it, and if the `healer` persona judges it a fixable
+  harness bug it opens a diagnostic issue on the harness repo via `IssueTracker`,
+  then settles the task onto `healed/`. It works from the failure report (reason +
+  history), no worktree. `harness init` writes `agents/healer.json`; `harness run
+  --heal-repo <owner/repo>` enables it (needs `--agent claude`).
 - **`claim()`** is an atomic `rename` into `<queue>/.processing/`. A single operation
   handles the lease, idempotency and provenance after a crash.
+- **A step's concurrency is workflow config, not wiring.** `Workflow.max_parallel`
+  (parsed from the optional `maxParallel: {step: N}` key in the workflow JSON,
+  validated at load time by `FilesystemWorkflowRepository`) says how many tasks a
+  step may work on at once; `Workflow.max_parallel_for(step)` defaults an absent
+  entry to **1** — every workflow file written before this feature keeps behaving
+  exactly as before. `Harness.run()` reads it to decide how many `_consumer_loop`
+  coroutines to gather over the *same* `Consumer` for that step; `Consumer` and
+  `claim()`'s atomicity are what keep two of those loops from ever claiming the
+  same task, so `Consumer` itself needed no change beyond a read-only `step`
+  property.
 - **`END = "end"`** is a reserved node. It is not a "state with no outgoing edges" —
   a typo would then quietly pass for success.
 - **A task has two workspaces** (phase 2). The **worktree** (`repository`/`worktree`)
@@ -186,6 +224,11 @@ Dependencies flow strictly downward, no cycles.
   `list_issues` reads with read-after-write lag (unlike `rename`), so
   `GithubTaskSource` keeps an in-process ledger of claimed numbers (`_claimed`)
   so a fast poll won't claim the same issue twice.
+- **`StageOutputView`** is a third, read-only UI surface alongside `BoardView`
+  and `ArtifactView`: where `BoardView` shows *where* a task is and
+  `ArtifactView` shows *what it produced*, `StageOutputView` shows *what the
+  running stage is doing right now* — a bounded, in-memory, live-only tail
+  (`drivers/stage_output.py`), gone once the stage ends. See ADR-0012.
 
 ## Gotchas
 
@@ -214,6 +257,15 @@ Dependencies flow strictly downward, no cycles.
   `GITHUB_TOKEN`, a non-GitHub origin or an API error, and the task lands in
   `failed/`. Deliberate: before this, `land` reported success while only writing
   to `prs.json`. Offline or in tests, use `--forge fake`.
+- **The healer never writes back to `failed/`, so it cannot loop.** A heal claims a
+  task out of `failed/` once and settles it to `healed/` — even its own failures
+  (agent timeout, `IssueError`) become a `heal-failed` note there, never a re-queue.
+  So there is no "healing the healer" recursion to guard, and `failed/` drains
+  monotonically. `IssueTracker` is idempotent by the failed task id (an embedded
+  `<!-- harness-heal:<id> -->` marker), so a crash before the settle won't file a
+  second issue. Enabling the healer needs both a runner and a catalog (the persona
+  is data); offline the issue tracker falls back to the in-memory fake so the loop
+  still runs harmlessly.
 - **`ArtifactStore.begin(task, step)` allocates the next attempt.** Writing into one
   slot belongs to one run; the second pass (the loop) gets a new subdirectory.
 - **The service holds no secret.** launchd hands a process almost no environment, so

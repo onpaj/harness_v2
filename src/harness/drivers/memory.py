@@ -25,6 +25,7 @@ from harness.ports.behavior import ConsumerBehavior
 from harness.ports.clock import Clock
 from harness.ports.events import EventSink
 from harness.ports.forge import Forge, PullRequest
+from harness.ports.issues import IssueRef, IssueTracker
 from harness.ports.queue import TaskQueue
 from harness.ports.repos import RepositoryNotFound, RepositoryRegistry
 from harness.ports.source import FinishResult, Progress, TaskSource, dedup_key
@@ -73,6 +74,9 @@ class MemoryWorkflowRepository(WorkflowRepository):
             return self._workflows[name]
         except KeyError:
             raise WorkflowNotFound(f"workflow {name!r} does not exist") from None
+
+    def names(self) -> tuple[str, ...]:
+        return tuple(sorted(self._workflows))
 
 
 class MemoryEventSink(EventSink):
@@ -156,12 +160,16 @@ class MemoryArtifactStore(ArtifactStore):
 
 
 class MemoryWorkspaceHandle(WorkspaceHandle):
-    def __init__(self, task_id: str) -> None:
-        self._branch = f"harness/{task_id}"
+    def __init__(self, task_id: str, *, branch: str | None = None) -> None:
+        self._branch = branch or f"harness/{task_id}"
         self._path = Path("/memory/worktrees") / task_id
         self.writes: list[tuple[str, str]] = []
         self.commits: list[str] = []
         self.pushes: list[str] = []
+        # Test seam for ResolveConflictBehavior: preset whether the next
+        # merge() call should report a conflict.
+        self.conflicted: bool = False
+        self.merges: list[str] = []
 
     @property
     def path(self) -> Path:
@@ -181,6 +189,10 @@ class MemoryWorkspaceHandle(WorkspaceHandle):
     def push(self) -> None:
         self.pushes.append(self._branch)
 
+    def merge(self, base: str) -> bool:
+        self.merges.append(base)
+        return self.conflicted
+
 
 class MemoryWorkspace(Workspace):
     """Worktree in memory. Re-attaching the same task returns the same handle."""
@@ -191,7 +203,7 @@ class MemoryWorkspace(Workspace):
     def attach(self, task: Task) -> MemoryWorkspaceHandle:
         handle = self.handles.get(task.id)
         if handle is None:
-            handle = MemoryWorkspaceHandle(task.id)
+            handle = MemoryWorkspaceHandle(task.id, branch=task.data.get("branch"))
             self.handles[task.id] = handle
         return handle
 
@@ -292,6 +304,40 @@ class MemoryForge(Forge):
         self.opened.append(pull)
         self.bodies[branch] = body
         return pull
+
+
+class MemoryIssueTracker(IssueTracker):
+    """Records opened issues in a list. Idempotent by marker — the twin of
+    `MemoryForge`'s idempotency by branch. For unit/e2e/smoke, no network."""
+
+    def __init__(self) -> None:
+        self.opened: list[dict[str, Any]] = []
+
+    def open_issue(
+        self,
+        repo: str,
+        *,
+        title: str,
+        body: str,
+        labels: tuple[str, ...],
+        marker: str,
+    ) -> IssueRef:
+        for existing in self.opened:
+            if existing["repo"] == repo and existing["marker"] == marker:
+                return existing["ref"]
+        number = len(self.opened) + 1
+        ref = IssueRef(number=number, url=f"https://forge.local/{repo}/issues/{number}")
+        self.opened.append(
+            {
+                "repo": repo,
+                "title": title,
+                "body": body,
+                "labels": labels,
+                "marker": marker,
+                "ref": ref,
+            }
+        )
+        return ref
 
 
 class MemoryAgentCatalog(AgentCatalog):

@@ -24,7 +24,7 @@ def snapshot(status="plan", task_id="tsk_1", **kwargs) -> dict:
 
 
 def build():
-    projection = BoardProjection(WORKFLOW)
+    projection = BoardProjection([WORKFLOW])
     return projection, ProjectionSink(projection)
 
 
@@ -33,7 +33,7 @@ def test_event_with_task_and_queue_lands_on_board():
 
     sink.emit("dispatched", task_id="tsk_1", queue="plan", task=snapshot())
 
-    assert projection.snapshot().column("plan").tasks[0].id == "tsk_1"
+    assert projection.snapshot().workflow("default").column("plan").tasks[0].id == "tsk_1"
 
 
 def test_terminal_event_lands_in_done():
@@ -41,13 +41,13 @@ def test_terminal_event_lands_in_done():
 
     sink.emit("finished", task_id="tsk_1", queue="done", task=snapshot("end"))
 
-    assert projection.snapshot().column(DONE_COLUMN).tasks[0].id == "tsk_1"
+    assert projection.snapshot().workflow("default").column(DONE_COLUMN).tasks[0].id == "tsk_1"
 
 
 def test_event_without_task_is_ignored():
     projection, sink = build()
 
-    sink.emit("started", workflow="default")
+    sink.emit("started", workflows=["default"])
     sink.emit("recovered", count=3)
     sink.emit("corrupt", path="/tmp/x.json")
 
