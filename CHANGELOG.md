@@ -1,6 +1,31 @@
 # CHANGELOG
 
 
+## v0.11.0 (2026-07-22)
+
+### Features
+
+- **agents**: Default step models from v1 personas
+  ([#74](https://github.com/onpaj/harness_v2/pull/74),
+  [`f91fb05`](https://github.com/onpaj/harness_v2/commit/f91fb057c566a79efa427a530c6322bac45c0e88))
+
+The default agent personas were carried over from harness v1 but their model was left null, so every
+  step ran on the CLI's configured default. v1 assigned each persona a model tier; restore that
+  mapping per step, written as a CLI alias so it tracks the latest of the tier instead of pinning a
+  now-retired id:
+
+plan, architecture -> opus (v1 analyst/planner, architect) design, development -> sonnet (v1
+  designer, developer) review -> sonnet (v1 code-reviewer, the full-diff review) resolve -> sonnet
+  (developer-class conflict fix) healer -> opus (conservative diagnosis)
+
+A step with no mapping still gets model null. The operator can pin an exact id in agents/<step>.json
+  as before.
+
+Claude-Session: https://claude.ai/code/session_01XzKK1gNSuT8bYBStRkCJQL
+
+Co-authored-by: Claude <noreply@anthropic.com>
+
+
 ## v0.10.1 (2026-07-22)
 
 ### Bug Fixes
