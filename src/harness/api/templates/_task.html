@@ -1,51 +1,76 @@
-<h2>{{ task.id }}</h2>
-{% if task.status == "failed" %}
-<button hx-post="/tasks/{{ task.id }}/restart"
-        hx-target="#detail"
-        hx-swap="innerHTML">Restart</button>
-{% endif %}
-<table>
-  <tr><th>repository</th><td>{{ task.repository or "—" }}</td></tr>
-  <tr><th>worktree</th><td>{{ task.worktree or "—" }}</td></tr>
-  <tr><th>workflow</th><td>{{ task.workflow_template }}</td></tr>
-  <tr><th>status</th><td>{{ task.status or "—" }}</td></tr>
-  <tr><th>lastOutcome</th><td>{{ task.last_outcome or "—" }}</td></tr>
-  <tr><th>lockId</th><td>{{ task.lock_id or "—" }}</td></tr>
-  <tr><th>created</th><td>{{ task.created }}</td></tr>
-  <tr><th>data</th><td><pre>{{ task.data }}</pre></td></tr>
-</table>
+<div class="task-detail">
+  <header class="task-detail__header">
+    <h2>{{ task.data.title or task.id }}</h2>
+    {% if task.status == "failed" %}
+    <button class="btn small primary" hx-post="/tasks/{{ task.id }}/restart"
+            hx-target="#detail"
+            hx-swap="innerHTML">Restart</button>
+    {% endif %}
+    <button class="task-detail__close" aria-label="close">✕</button>
+  </header>
 
-<h3>history</h3>
-<table>
-  <tr><th>time</th><th>actor</th><th>from</th><th>to</th><th>outcome</th><th>reason</th></tr>
-  {% for entry in task.history %}
-  <tr>
-    <td>{{ entry.at }}</td>
-    <td>{{ entry.actor }}</td>
-    <td>{{ entry.from_step or "—" }}</td>
-    <td>{{ entry.to_step or "—" }}</td>
-    <td>{{ entry.outcome or "—" }}</td>
-    <td>{{ entry.reason or "—" }}</td>
-  </tr>
-  {% endfor %}
-</table>
+  <nav class="tabs" role="tablist">
+    <button class="tab active" data-tab="info">Info</button>
+    <button class="tab" data-tab="history">History</button>
+    <button class="tab" data-tab="output">Output</button>
+  </nav>
 
-<h3>artifacts</h3>
-<table>
-  <tr><th>step</th><th>attempt</th><th>name</th></tr>
-  {% for ref in artifacts %}
-  <tr>
-    <td>{{ ref.step }}</td>
-    <td>{{ ref.attempt }}</td>
-    <td><a href="/api/tasks/{{ task.id }}/artifacts/{{ ref.step }}/{{ ref.attempt }}/{{ ref.name }}">{{ ref.name }}</a></td>
-  </tr>
-  {% endfor %}
-</table>
+  <div class="tab-panels">
+    <section class="tab-panel active" data-panel="info">
+      <ul class="kv">
+        <li><span class="k">id</span><span class="v">{{ task.id }}</span></li>
+        <li><span class="k">repository</span><span class="v">{{ task.repository or "—" }}</span></li>
+        <li><span class="k">worktree</span><span class="v">{{ task.worktree or "—" }}</span></li>
+        <li><span class="k">workflow</span><span class="v">{{ task.workflow_template or "—" }}</span></li>
+        <li><span class="k">step</span><span class="v">{{ task.step or "—" }}</span></li>
+        <li><span class="k">status</span><span class="v">{{ task.status or "—" }}</span></li>
+        <li><span class="k">lastOutcome</span><span class="v">{{ task.last_outcome or "—" }}</span></li>
+        <li><span class="k">lockId</span><span class="v">{{ task.lock_id or "—" }}</span></li>
+        <li><span class="k">created</span><span class="v" title="{{ task.created }}">{{ task.created | shorttime }}</span></li>
+        <li><span class="k">data</span><span class="v"><pre>{{ task.data }}</pre></span></li>
+      </ul>
 
-<h3>live output</h3>
-<div hx-ext="sse" sse-connect="/api/tasks/{{ task.id }}/output/events" sse-close="end">
-  <div id="stage-output" sse-swap="line" hx-swap="beforeend scroll:bottom"
-       style="max-height: 240px; overflow: auto; background: #091e42; color: #c1c7d0;
-              padding: 8px; border-radius: 4px; white-space: pre-wrap;
-              font: 12px ui-monospace, monospace;"></div>
+      <h3>artifacts</h3>
+      {% if artifacts %}
+      <div class="table-scroll">
+      <table>
+        <tr><th>step</th><th>attempt</th><th>name</th></tr>
+        {% for ref in artifacts %}
+        <tr>
+          <td>{{ ref.step }}</td>
+          <td>{{ ref.attempt }}</td>
+          <td class="wrap"><a href="/api/tasks/{{ task.id }}/artifacts/{{ ref.step }}/{{ ref.attempt }}/{{ ref.name }}">{{ ref.name }}</a></td>
+        </tr>
+        {% endfor %}
+      </table>
+      </div>
+      {% else %}
+      <p class="hint">No artifacts yet.</p>
+      {% endif %}
+    </section>
+
+    <section class="tab-panel" data-panel="history">
+      <div class="table-scroll">
+      <table>
+        <tr><th>time</th><th>actor</th><th>from</th><th>to</th><th>outcome</th><th class="wrap">reason</th></tr>
+        {% for entry in task.history %}
+        <tr>
+          <td title="{{ entry.at }}">{{ entry.at | shorttime }}</td>
+          <td>{{ entry.actor }}</td>
+          <td>{{ entry.from_step or "—" }}</td>
+          <td>{{ entry.to_step or "—" }}</td>
+          <td>{{ entry.outcome or "—" }}</td>
+          <td class="wrap">{{ entry.reason or "—" }}</td>
+        </tr>
+        {% endfor %}
+      </table>
+      </div>
+    </section>
+
+    <section class="tab-panel" data-panel="output">
+      <div hx-ext="sse" sse-connect="/api/tasks/{{ task.id }}/output/events" sse-close="end" style="flex: 1; min-height: 0; display: flex; flex-direction: column;">
+        <div id="stage-output" class="terminal" sse-swap="line" hx-swap="beforeend scroll:bottom"></div>
+      </div>
+    </section>
+  </div>
 </div>

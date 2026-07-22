@@ -45,6 +45,18 @@ def test_poll_claims_issue_and_builds_task():
     assert task.worktree == f"/wt/{task.id}"
 
 
+def test_poll_with_step_builds_workflow_less_task():
+    client = FakeGithubClient(
+        [Issue(1, "Fix bug", "details", "https://gh/o/r/issues/1", ("harness:todo",))]
+    )
+    source = build_source(client, workflow=None, step="development")
+
+    [task] = source.poll()
+
+    assert task.workflow_template is None
+    assert task.step == "development"
+
+
 def test_second_poll_returns_empty():
     client = FakeGithubClient(
         [Issue(1, "Fix bug", "", "u1", ("harness:todo",))]
