@@ -13,13 +13,19 @@ from harness.cli import (
     DEFAULT_WORKFLOW,
     _REVIEW_PERSONA,
     _allowed_outcomes_for,
+    _data_sources,
     _github_sources,
     _mergeability_sources,
     main,
     serve,
 )
+from harness.drivers.fs_sources import FilesystemSourceRepository
 from harness.drivers.github_client import FakeGithubClient
-from harness.drivers.memory import MemoryArtifactStore, MemoryRepositoryRegistry
+from harness.drivers.memory import (
+    FakeClock,
+    MemoryArtifactStore,
+    MemoryRepositoryRegistry,
+)
 from harness.drivers.stage_output import StageOutputProjection
 from harness.models import END, Task, Transition, Workflow
 from harness.projection import BoardProjection
@@ -648,6 +654,79 @@ def test_github_sources_empty_without_token(monkeypatch, tmp_path):
     registry = MemoryRepositoryRegistry({"heblo": Path("/repos/heblo")})
 
     assert _github_sources(_github_args(), tmp_path, registry) == []
+
+
+def test_github_sources_excludes_data_declared_repos(monkeypatch, tmp_path):
+    """A repo declared as data in sources/*.json is skipped by the auto-scan, so
+    the two producers never double-scan the same repo (data wins)."""
+    monkeypatch.setenv("GITHUB_TOKEN", "t0ken")
+    registry = MemoryRepositoryRegistry(
+        {"heblo": Path("/repos/heblo"), "harness_v2": Path("/repos/harness_v2")}
+    )
+    slugs = {
+        Path("/repos/heblo"): "onpaj/Anela.Heblo",
+        Path("/repos/harness_v2"): "onpaj/harness_v2",
+    }
+
+    sources = _github_sources(
+        _github_args(),
+        tmp_path,
+        registry,
+        slug_of=slugs.get,
+        client=FakeGithubClient(),
+        exclude={"harness_v2"},
+    )
+
+    assert [s._repository for s in sources] == ["heblo"]
+
+
+def _write_source(root, name, body):
+    (root / "sources").mkdir(parents=True, exist_ok=True)
+    (root / "sources" / f"{name}.json").write_text(json.dumps(body), encoding="utf-8")
+
+
+def test_data_sources_builds_from_disk(monkeypatch, tmp_path):
+    """`sources/*.json` → a live GithubTaskSource, resolving repo name → slug."""
+    monkeypatch.setenv("GITHUB_TOKEN", "t0ken")
+    _write_source(
+        tmp_path,
+        "harness-issues",
+        {"kind": "github", "repository": "harness_v2", "target": {"workflow": "default"}},
+    )
+    registry = MemoryRepositoryRegistry({"harness_v2": Path("/repos/harness_v2")})
+    repo = FilesystemSourceRepository(tmp_path / "sources")
+
+    sources = _data_sources(
+        repo,
+        _github_args(),
+        tmp_path,
+        registry,
+        clock=FakeClock(),
+        known_targets={"default"},
+        client=FakeGithubClient(),
+        slug_of={Path("/repos/harness_v2"): "onpaj/harness_v2"}.get,
+    )
+
+    assert [s._repository for s in sources] == ["harness_v2"]
+    assert sources[0]._repo == "onpaj/harness_v2"
+
+
+def test_data_sources_empty_without_token(monkeypatch, tmp_path):
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    _write_source(
+        tmp_path, "s", {"kind": "github", "repository": "r", "target": {"workflow": "default"}}
+    )
+    repo = FilesystemSourceRepository(tmp_path / "sources")
+    registry = MemoryRepositoryRegistry({"r": Path("/repos/r")})
+
+    assert _data_sources(
+        repo, _github_args(), tmp_path, registry, clock=FakeClock(), known_targets=None
+    ) == []
+
+
+def test_init_creates_sources_directory(tmp_path):
+    assert main(["init", "--root", str(tmp_path)]) == 0
+    assert (tmp_path / "sources").is_dir()
 
 
 def test_run_resolves_default_workflow_when_omitted(tmp_path, monkeypatch):

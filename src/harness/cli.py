@@ -24,6 +24,10 @@ from harness.drivers.fs_agents import FilesystemAgentAdmin, FilesystemAgentCatal
 from harness.drivers.github_issues import GithubIssueTracker
 from harness.drivers.memory import MemoryIssueTracker
 from harness.drivers.fs_repos import FilesystemRepositoryRegistry
+from harness.drivers.fs_sources import (
+    FilesystemSourceAdmin,
+    FilesystemSourceRepository,
+)
 from harness.drivers.fs_workflows import (
     FilesystemWorkflowAdmin,
     FilesystemWorkflowRepository,
@@ -64,6 +68,7 @@ from harness.ports.issue_state import IssueChecker
 from harness.ports.merge import MergeChecker
 from harness.ports.repos import RepositoryRegistry
 from harness.ports.source import TaskSource
+from harness.ports.source_admin import SourceValidationError
 from harness.ports.workflows import WorkflowNotFound
 
 PACKAGE_NAME = "harness"
@@ -132,6 +137,7 @@ def _init(args: argparse.Namespace) -> int:
 
     layout.agents.mkdir(parents=True, exist_ok=True)
     (root / "triggers").mkdir(parents=True, exist_ok=True)
+    (root / "sources").mkdir(parents=True, exist_ok=True)
     _write_default_repos(layout)
 
     if args.no_workflow:
@@ -514,13 +520,15 @@ def _github_sources(
     *,
     slug_of=github_slug,
     client: GithubClient | None = None,
+    exclude: set[str] = frozenset(),
 ) -> list[TaskSource]:
     """One `GithubTaskSource` per repo in `repos.json` that has a GitHub origin.
 
     The slug is derived from each clone's git origin (`slug_of`); a repo with no
     GitHub origin is skipped with a warning. Without `GITHUB_TOKEN` (and no
     injected client) there are no sources and the harness runs on `harness
-    submit` alone."""
+    submit` alone. A repo named in `exclude` is left to a `sources/*.json`
+    declaration (data wins over the auto-scan), so the two never double-scan it."""
     if client is None:
         token = os.environ.get("GITHUB_TOKEN")
         if not token:
@@ -534,6 +542,8 @@ def _github_sources(
         workflow = DEFAULT_WORKFLOW
     sources: list[TaskSource] = []
     for name in registry.names():
+        if name in exclude:
+            continue  # declared as data in sources/*.json
         slug = slug_of(registry.resolve(name))
         if slug is None:
             print(f"warning: {name} has no GitHub origin, not scanned", file=sys.stderr)
@@ -615,6 +625,41 @@ def _scheduled_sources(
         repository=None,
         worktree_root=worktree_root,
         known_targets=known_targets,
+    )
+
+
+def _data_sources(
+    repo: FilesystemSourceRepository,
+    args: argparse.Namespace,
+    root: Path,
+    registry: RepositoryRegistry,
+    *,
+    clock: Clock,
+    known_targets: set[str] | None,
+    client: GithubClient | None = None,
+    slug_of=github_slug,
+) -> list[TaskSource]:
+    """GitHub task sources declared under `<root>/sources/*.json`.
+
+    Each becomes a `GithubTaskSource` — the same periodic issue ingestion the
+    `--github-*` flags wire, but declared as data and editable from the admin
+    UI. Like `_github_sources`, no `GITHUB_TOKEN` (and no injected client) yields
+    `[]`. `known_targets` (served workflows ∪ their steps ∪ catalog agents) lets
+    the repository reject a source naming an unknown target up front."""
+    if client is None:
+        token = os.environ.get("GITHUB_TOKEN")
+        if not token:
+            return []
+        client = HttpGithubClient(token)
+    worktree_root = args.worktree_root or str(root / "worktrees")
+    return repo.build(
+        clock=clock,
+        client=client,
+        registry=registry,
+        worktree_root=worktree_root,
+        known_targets=known_targets,
+        step_labels=DEFAULT_STEP_LABELS,
+        slug_of=slug_of,
     )
 
 
@@ -1303,7 +1348,11 @@ def _run(args: argparse.Namespace) -> int:
     artifact_view = WorktreeArtifactView(layout.worktrees)
     forge = _build_forge(args.forge, root, registry)
     mergeability = _mergeability_sources(args, root, registry) if args.watch_mergeability else []
-    sources = _github_sources(args, root, registry) + mergeability
+    # Sources declared as data (`sources/*.json`) win over the repos.json
+    # auto-scan for the repos they name, so the two never double-scan a repo.
+    data_source_repo = FilesystemSourceRepository(root / "sources")
+    data_covered = data_source_repo.repositories()
+    sources = _github_sources(args, root, registry, exclude=data_covered) + mergeability
     merge_checker = _build_merge_checker(args)
     issue_checker = _build_issue_checker(args)
     # The resolver workflow rides alongside the primary one so its tasks (queued
@@ -1328,6 +1377,21 @@ def _run(args: argparse.Namespace) -> int:
     sources = sources + _scheduled_sources(
         args, root, registry, clock=SystemClock(), known_targets=known_targets
     )
+    # GitHub sources declared as data ride the same `sources` list. Validation
+    # (unknown target, malformed file) fails fast here — like a missing agent
+    # spec — rather than silently at runtime.
+    try:
+        sources = sources + _data_sources(
+            data_source_repo,
+            args,
+            root,
+            registry,
+            clock=SystemClock(),
+            known_targets=known_targets,
+        )
+    except SourceValidationError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
 
     # Self-healing: an agent assigned to the `failed/` queue. Enabled by
     # `--heal-repo <owner/repo>` (where the healer opens issues). It reuses the
@@ -1428,6 +1492,7 @@ async def serve(
         clock=SystemClock(),
         agent_admin=FilesystemAgentAdmin(harness.layout.agents),
         workflow_admin=FilesystemWorkflowAdmin(harness.layout.workflows),
+        source_admin=FilesystemSourceAdmin(root / "sources"),
         updater=updater,
         version=version_string(),
         build_time=build_timestamp(),

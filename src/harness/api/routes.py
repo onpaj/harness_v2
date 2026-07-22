@@ -27,6 +27,11 @@ from harness.ports.board import DONE_COLUMN, FAILED_COLUMN, TODO_COLUMN, BoardVi
 from harness.ports.clock import Clock
 from harness.ports.control import TaskControl
 from harness.ports.logs import StageOutputView
+from harness.ports.source_admin import (
+    SourceAdmin,
+    SourceNotFound,
+    SourceValidationError,
+)
 from harness.ports.updater import Updater, UpdateError
 from harness.ports.workflow_admin import WorkflowAdmin, WorkflowValidationError
 from harness.ports.workflows import WorkflowNotFound
@@ -206,11 +211,60 @@ def _workflow_editor_context(
     }
 
 
+def _source_editor_context(
+    *,
+    name: str,
+    is_new: bool,
+    text: str,
+    error: str | None,
+    warnings: list[str],
+    saved: bool,
+) -> dict:
+    return {
+        "name": name,
+        "is_new": is_new,
+        "text": text,
+        "error": error,
+        "warnings": warnings,
+        "saved": saved,
+    }
+
+
+def _new_source_warnings(view: BoardView, raw_json: str) -> list[str]:
+    """Non-blocking warnings for a just-saved source whose target the *running*
+    harness can't route to yet (a workflow it doesn't serve, or a step with no
+    queue). Computed here from the board — the filesystem admin has no idea what
+    the running process serves. The repo name is not checked here (the UI can't
+    see which repos are cloned on the run host); the run warns/skips it at
+    startup instead."""
+    snapshot = view.snapshot()
+    known_workflows = {tab.name for tab in snapshot.workflows}
+    known_steps = {
+        column.name for tab in snapshot.workflows for column in tab.columns
+    } - {TODO_COLUMN, DONE_COLUMN, FAILED_COLUMN}
+    target = (json.loads(raw_json) or {}).get("target") or {}
+    warnings: list[str] = []
+    workflow = target.get("workflow")
+    step = target.get("step")
+    if workflow is not None and workflow not in known_workflows:
+        warnings.append(
+            f"workflow {workflow!r} is not served by the running harness — "
+            "it won't ingest until the harness is restarted with that workflow"
+        )
+    if step is not None and step not in known_steps:
+        warnings.append(
+            f"step {step!r} is not a known step of the running harness — "
+            "it won't ingest until the harness is restarted with that step"
+        )
+    return warnings
+
+
 def build_json_router(
     view: BoardView,
     artifacts: ArtifactView,
     agent_admin: AgentAdmin,
     workflow_admin: WorkflowAdmin,
+    source_admin: SourceAdmin,
     version: str,
     build_time: str | None,
 ) -> APIRouter:
@@ -304,6 +358,35 @@ def build_json_router(
             )
         return Response(status_code=204)
 
+    @router.get("/sources")
+    def list_sources() -> dict:
+        return {"sources": list(source_admin.list())}
+
+    @router.get("/sources/{name}")
+    def get_source(name: str) -> PlainTextResponse:
+        try:
+            raw = source_admin.read_raw(name)
+        except SourceNotFound as error:
+            raise HTTPException(status_code=404, detail=str(error)) from None
+        return PlainTextResponse(raw)
+
+    @router.put("/sources/{name}")
+    async def put_source(name: str, request: Request) -> JSONResponse:
+        raw_json = (await request.body()).decode("utf-8")
+        try:
+            source_admin.write_raw(name, raw_json)
+        except SourceValidationError as error:
+            return JSONResponse(status_code=422, content={"error": str(error)})
+        return JSONResponse(content={"warnings": _new_source_warnings(view, raw_json)})
+
+    @router.delete("/sources/{name}", status_code=204)
+    def delete_source(name: str) -> Response:
+        if not source_admin.delete(name):
+            raise HTTPException(
+                status_code=404, detail=f"source {name!r} does not exist"
+            )
+        return Response(status_code=204)
+
     return router
 
 
@@ -316,6 +399,7 @@ def build_html_router(
     coalesce_seconds: float,
     agent_admin: AgentAdmin,
     workflow_admin: WorkflowAdmin,
+    source_admin: SourceAdmin,
     updater: Updater,
     version: str,
     build_time: str | None,
@@ -652,5 +736,122 @@ def build_html_router(
     def delete_workflow_page(name: str) -> RedirectResponse:
         workflow_admin.delete(name)
         return RedirectResponse(url="/admin/workflows", status_code=303)
+
+    # --- Sources admin -------------------------------------------------------
+
+    @router.get("/admin/sources", response_class=HTMLResponse)
+    def list_sources_page(request: Request) -> HTMLResponse:
+        return TEMPLATES.TemplateResponse(
+            request=request,
+            name="admin/sources_list.html",
+            context={"names": source_admin.list()},
+        )
+
+    # Registered before /admin/sources/{name} — same reason as agents/new.
+    @router.get("/admin/sources/new", response_class=HTMLResponse)
+    def new_source_page(request: Request) -> HTMLResponse:
+        skeleton = json.dumps(
+            {
+                "kind": "github",
+                "repository": "",
+                "select_label": "harness:todo",
+                "target": {"workflow": "default"},
+            },
+            indent=2,
+        )
+        return TEMPLATES.TemplateResponse(
+            request=request,
+            name="admin/source_editor.html",
+            context=_source_editor_context(
+                name="", is_new=True, text=skeleton, error=None, warnings=[], saved=False
+            ),
+        )
+
+    @router.get("/admin/sources/{name}", response_class=HTMLResponse)
+    def edit_source_page(request: Request, name: str) -> HTMLResponse:
+        try:
+            text = source_admin.read_raw(name)
+        except SourceNotFound as error:
+            raise HTTPException(status_code=404, detail=str(error)) from None
+        return TEMPLATES.TemplateResponse(
+            request=request,
+            name="admin/source_editor.html",
+            context=_source_editor_context(
+                name=name, is_new=False, text=text, error=None, warnings=[], saved=False
+            ),
+        )
+
+    @router.post("/admin/sources", response_class=HTMLResponse)
+    async def create_source_page(request: Request) -> HTMLResponse:
+        form = await request.form()
+        name = (form.get("name") or "").strip()
+        text = form.get("text") or ""
+        error: str | None = None
+        if not name:
+            error = "name is required"
+        elif name in source_admin.list():
+            error = f"a source named {name!r} already exists"
+        if error is None:
+            try:
+                source_admin.write_raw(name, text)
+            except SourceValidationError as write_error:
+                error = str(write_error)
+        if error is not None:
+            return TEMPLATES.TemplateResponse(
+                request=request,
+                name="admin/source_editor.html",
+                context=_source_editor_context(
+                    name=name, is_new=True, text=text, error=error, warnings=[], saved=False
+                ),
+            )
+        return TEMPLATES.TemplateResponse(
+            request=request,
+            name="admin/source_editor.html",
+            context=_source_editor_context(
+                name=name,
+                is_new=False,
+                text=text,
+                error=None,
+                warnings=_new_source_warnings(view, text),
+                saved=True,
+            ),
+        )
+
+    @router.post("/admin/sources/{name}", response_class=HTMLResponse)
+    async def update_source_page(request: Request, name: str) -> HTMLResponse:
+        form = await request.form()
+        text = form.get("text") or ""
+        try:
+            source_admin.write_raw(name, text)
+        except SourceValidationError as error:
+            return TEMPLATES.TemplateResponse(
+                request=request,
+                name="admin/source_editor.html",
+                context=_source_editor_context(
+                    name=name,
+                    is_new=False,
+                    text=text,
+                    error=str(error),
+                    warnings=[],
+                    saved=False,
+                ),
+            )
+        return TEMPLATES.TemplateResponse(
+            request=request,
+            name="admin/source_editor.html",
+            context=_source_editor_context(
+                name=name,
+                is_new=False,
+                text=text,
+                error=None,
+                warnings=_new_source_warnings(view, text),
+                saved=True,
+            ),
+        )
+
+    @router.post("/admin/sources/{name}/delete")
+    def delete_source_page(name: str) -> RedirectResponse:
+        source_admin.delete(name)
+        return RedirectResponse(url="/admin/sources", status_code=303)
 
     return router
