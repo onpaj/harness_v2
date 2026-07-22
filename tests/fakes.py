@@ -1,5 +1,5 @@
 from harness.models import Task
-from harness.ports.board import Board, BoardView
+from harness.ports.board import AgentActivity, Board, BoardView
 from harness.ports.control import TaskControl
 
 
@@ -15,6 +15,27 @@ class FakeBoardView(BoardView):
 
     def get(self, task_id: str) -> Task | None:
         return self._tasks.get(task_id)
+
+    def agent_history(self, name: str) -> tuple[AgentActivity, ...]:
+        # Same derivation as BoardProjection.agent_history — a `consumer:<name>`
+        # entry per handling, newest first — so the API tests exercise the real
+        # shape without wiring a projection.
+        actor = f"consumer:{name}"
+        activities = [
+            AgentActivity(
+                task_id=task.id,
+                title=task.data.get("title") or task.id,
+                at=entry.at,
+                outcome=entry.outcome,
+                summary=entry.summary,
+                reason=entry.reason,
+            )
+            for task in self._tasks.values()
+            for entry in task.history
+            if entry.actor == actor
+        ]
+        activities.sort(key=lambda activity: (activity.at, activity.task_id), reverse=True)
+        return tuple(activities)
 
     async def subscribe(self):
         yield self._board.revision

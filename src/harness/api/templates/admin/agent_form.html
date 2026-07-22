@@ -27,6 +27,15 @@
     button.danger { background: #fff; color: #de350b; border-color: #de350b; }
     .banner { padding: 8px 12px; border-radius: 4px; margin-top: 16px; font-size: 13px; max-width: 640px; }
     .banner.success { background: #e3fcef; color: #006644; }
+    .history { margin-top: 24px; max-width: 960px; }
+    .history h2 { font-size: 14px; margin: 0 0 8px; }
+    .history .table-scroll { overflow-x: auto; background: #fff; border-radius: 4px; box-shadow: 0 1px 1px rgba(9,30,66,.25); }
+    .history table { border-collapse: collapse; width: 100%; font-size: 13px; }
+    .history th, .history td { text-align: left; padding: 6px 10px; border-bottom: 1px solid #f0f1f4; vertical-align: top; }
+    .history th { color: #5e6c84; font-weight: 500; white-space: nowrap; }
+    .history td.task { font-family: ui-monospace, monospace; white-space: nowrap; }
+    .history td.wrap { white-space: normal; word-break: break-word; }
+    .history .empty { color: #5e6c84; font-size: 13px; }
   </style>
 </head>
 <body>
@@ -90,6 +99,30 @@
   </div>
   {% if saved %}
   <div class="banner success">saved — picked up on the next run, no restart</div>
+  {% endif %}
+
+  {% if not is_new %}
+  <section class="history">
+    <h2>Tasks handled</h2>
+    {% if history %}
+    <div class="table-scroll">
+      <table>
+        <tr><th>time</th><th>task</th><th>outcome</th><th>summary</th><th>reason</th></tr>
+        {% for activity in history %}
+        <tr>
+          <td title="{{ activity.at }}">{{ activity.at | shorttime }}</td>
+          <td class="task" title="{{ activity.task_id }}">{{ activity.title }}</td>
+          <td>{{ activity.outcome or "—" }}</td>
+          <td class="wrap">{{ activity.summary or "—" }}</td>
+          <td class="wrap">{{ activity.reason or "—" }}</td>
+        </tr>
+        {% endfor %}
+      </table>
+    </div>
+    {% else %}
+    <p class="empty">This agent hasn't handled any tasks in the current run.</p>
+    {% endif %}
+  </section>
   {% endif %}
 </body>
 </html>

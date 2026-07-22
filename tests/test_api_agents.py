@@ -6,8 +6,32 @@ from fastapi.testclient import TestClient
 from harness.api.app import create_app
 from harness.drivers.fs_agents import FilesystemAgentAdmin
 from harness.drivers.memory import FakeClock
+from harness.models import HistoryEntry, Task
 from harness.ports.board import Board
 from tests.fakes import FakeBoardView
+
+
+def _task_handled_by(step, *, task_id="tsk_1", title=None, outcome="done", summary="did it"):
+    return Task(
+        id=task_id,
+        created="2026-07-19T10:00:00Z",
+        data={"title": title} if title else {},
+        history=(
+            HistoryEntry(
+                at="2026-07-19T10:00:00Z",
+                actor=f"consumer:{step}",
+                from_step=step,
+                to_step=None,
+                outcome=outcome,
+                summary=summary,
+            ),
+        ),
+    )
+
+
+def _client_with(admin, tasks):
+    view = FakeBoardView(Board(revision=1, workflows=()), tasks)
+    return TestClient(create_app(view=view, clock=FakeClock(), agent_admin=admin))
 
 
 @pytest.fixture
@@ -106,6 +130,21 @@ def test_delete_unknown_agent_returns_404(client):
     response = client.delete("/api/agents/missing")
 
     assert response.status_code == 404
+
+
+def test_agent_history_json_returns_the_handlings(admin):
+    client = _client_with(admin, {"tsk_1": _task_handled_by("planner", title="Fix bug")})
+
+    body = client.get("/api/agents/planner/history").json()
+
+    assert body["history"][0]["taskId"] == "tsk_1"
+    assert body["history"][0]["title"] == "Fix bug"
+    assert body["history"][0]["outcome"] == "done"
+    assert body["history"][0]["summary"] == "did it"
+
+
+def test_agent_history_json_of_unknown_agent_is_empty(client):
+    assert client.get("/api/agents/ghost/history").json() == {"history": []}
 
 
 # --- HTML admin ----------------------------------------------------------------
@@ -212,6 +251,31 @@ def test_update_agent_without_prompt_leaves_file_untouched(client, admin):
     assert response.status_code == 200
     assert "prompt is required" in response.text
     assert admin.read("planner").prompt == "v1"
+
+
+def test_agent_form_shows_tasks_handled(admin):
+    admin.write("planner", _fields(prompt="you plan"))
+    client = _client_with(admin, {"tsk_1": _task_handled_by("planner", title="Fix bug")})
+
+    body = client.get("/admin/agents/planner").text
+
+    assert "Tasks handled" in body
+    assert "Fix bug" in body
+
+
+def test_agent_form_shows_empty_state_when_agent_never_ran(client, admin):
+    admin.write("planner", _fields(prompt="x"))
+
+    body = client.get("/admin/agents/planner").text
+
+    assert "Tasks handled" in body
+    assert "hasn't handled any tasks" in body
+
+
+def test_new_agent_form_has_no_history_section(client):
+    body = client.get("/admin/agents/new").text
+
+    assert "Tasks handled" not in body
 
 
 def test_delete_agent_via_form_redirects_to_list(client, admin):
