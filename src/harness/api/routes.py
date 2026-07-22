@@ -5,6 +5,7 @@ from __future__ import annotations
 import html
 import json
 from collections.abc import AsyncIterator
+from datetime import datetime
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request
@@ -43,7 +44,22 @@ def _basename(value: str | None) -> str:
     return value.rstrip("/").rsplit("/", 1)[-1]
 
 
+def _shorttime(value: str | None) -> str:
+    """A compact, human-readable rendering of an ISO-8601 timestamp for the UI
+    (e.g. "Jul 19, 10:00"). The templates keep the full value in a `title`/
+    `datetime` attribute, so the exact timestamp is never lost — this only
+    shortens what the eye reads. An unparseable value passes through unchanged."""
+    if not value:
+        return "—"
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except (ValueError, AttributeError):
+        return value
+    return parsed.strftime("%b %d, %H:%M")
+
+
 TEMPLATES.env.filters["basename"] = _basename
+TEMPLATES.env.filters["shorttime"] = _shorttime
 
 
 async def board_event_stream(
