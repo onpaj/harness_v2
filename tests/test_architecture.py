@@ -103,6 +103,21 @@ def test_scheduled_trigger_imports_only_ports_models_and_ids():
     ), f"scheduled_trigger.py imports outside ports/models/ids: {imports}"
 
 
+def test_orchestration_does_not_import_admin_ports():
+    """The UI-facing admin ports (AgentAdmin/WorkflowAdmin/SourceAdmin) are not
+    orchestration — only api/ and the wiring reach for them, never the dispatcher
+    or consumer (invariant 33)."""
+    admin_ports = (
+        "harness.ports.agent_admin",
+        "harness.ports.workflow_admin",
+        "harness.ports.source_admin",
+    )
+    for name in ("dispatcher.py", "consumer.py"):
+        imports = imported_modules(SOURCE / name)
+        leaked = [module for module in admin_ports if module in imports]
+        assert not leaked, f"{name} imports {leaked}"
+
+
 def test_orchestration_does_not_import_control():
     """The operator-control port (TaskControl) is not orchestration. Only the
     task-control service, the API and the wiring reach for it — never the

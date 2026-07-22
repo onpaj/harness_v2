@@ -71,12 +71,13 @@ swapped out later.
 30. **No task's worktree directory is ever removed.** Nothing under `src/harness` calls `git worktree remove`/`prune`. Consequence: a harness-authored branch is always still checked out in its original task's own worktree, so `GitWorkspace.attach`'s branch-override path force-checks it out into a *second* worktree (`git worktree add --force <path> <branch>`, reusing the existing local branch — not `-B`, which git refuses to force-reset on a branch checked out elsewhere no matter how many times `--force` is passed). Safe because the original worktree is permanently inert once its task reaches a terminal state. Deliberate — don't "fix" the `--force` away, and don't add worktree cleanup without re-checking this invariant.
 31. **The branch-override's reused local ref is untrusted until reconciled with `origin`.** The shared `refs/heads/<branch>` only tracks `origin/<branch>` while every advance of the branch goes through a local commit+push in *some* worktree — `GithubMergeabilityWatcher.update_branch` breaks that by advancing the branch server-side with no local git touch at all. So immediately after the `--force`d `worktree add` in the reuse path, `GitWorkspace.attach` hard-resets the *new* worktree to `origin/<branch>`'s fetched tip before returning the handle. That reset targets the branch as checked out in the new worktree, not "elsewhere," so it isn't blocked by the guard invariant 30 relies on. Don't drop this reset — without it, a `behind`→`update_branch`→`dirty`→resolver sequence on the same PR leaves the resolver's worktree stale and its final `push` fails as non-fast-forward.
 32. **`MergeChecker` is touched only by `MergeReconciler` (core) and wiring.** `dispatcher.py`/`consumer.py` don't import `ports.merge` — guarded by `test_architecture.py`, mirroring invariant 20's shape for `TaskSource`.
-33. **`AgentAdmin`/`WorkflowAdmin` are unknown to the dispatcher and consumer.** They are UI-facing admin ports, not orchestration ports — like `BoardView`/`TaskControl`, not like `AgentCatalog`/`WorkflowRepository`. `api/` touches only the two admin ports; the filesystem drivers (`FilesystemAgentAdmin`, `FilesystemWorkflowAdmin`) are wired exclusively in `cli.py`'s `serve()`. Guarded by `test_architecture.py`'s existing glob-based checks (no dedicated test needed).
+33. **`AgentAdmin`/`WorkflowAdmin`/`SourceAdmin` are unknown to the dispatcher and consumer.** They are UI-facing admin ports, not orchestration ports — like `BoardView`/`TaskControl`, not like `AgentCatalog`/`WorkflowRepository`/`TaskSource`. `api/` touches only the three admin ports; the filesystem drivers (`FilesystemAgentAdmin`, `FilesystemWorkflowAdmin`, `FilesystemSourceAdmin`) are wired exclusively in `cli.py`'s `serve()`. Guarded by `test_architecture.py`'s existing glob-based checks plus `test_orchestration_does_not_import_admin_ports` (no per-driver test needed).
 34. **`IssueChecker` is touched only by `IssueReconciler` (core) and wiring.** `dispatcher.py`/`consumer.py` don't import `ports.issue_state` — guarded by `test_architecture.py`, mirroring invariant 32's shape for `MergeChecker`. The reconciler retires a stale task the same way merge/PR resolution already does — into `archived/` (invariant 24's terminal-queue shape, off every board column but gettable by id) — so "remove from the dashboard" adds no new board mechanism. See ADR-0013.
 35. **A trigger produces tasks, never queue placements.** A `Trigger` (schedule- or condition-driven) hands a fresh `Task` to the inbox with a `workflow_template` **or** a `step`; the dispatcher alone places it (`route()`, invariants #3/#8). No trigger writes into a step queue. The "target any queue" capability is a workflow-less task carrying `step`, not a producer reaching past the dispatcher. See ADR-0014.
 36. **A `Trigger` is a `TaskSource` that reflects nothing outward.** It implements only `poll()`; `report_progress`/`finish` are inherited no-ops. It stamps no `data.source`, so `SourceReflectorSink` lists it and ignores it — the same path that ignores a `harness submit` task. `TaskSource` stays whole (invariants #18–#20 unchanged); `Trigger` is a convenience base, not a new port.
 37. **A scheduled trigger owns its cadence via the `Clock`, not via a loop.** `poll()` gates on the interval bucket `floor(now / interval)` and returns `[]` cheaply between fires; the shared `source_interval` is only polling granularity. The gate reads solely `Clock`, so it is `FakeClock`-testable and survives the poller's `sleep(0)` fast-path without re-firing.
 38. **A scheduled trigger's `dedup_key` is bucket-keyed, giving at-most-once per interval across restarts.** The key includes `floor(now / interval)` (and, for `per-state` dedup, an observed `state_key` instead), so the existing `SourcePoller._seen` seeding makes one period yield one task even across a restart — the same exactly-once mechanism as GitHub ingestion (ADR-0010), with a non-constant key.
+39. **A GitHub `TaskSource` is declarable as data (`sources/*.json`), and data wins over the auto-scan.** `FilesystemSourceRepository` builds one `GithubTaskSource` per file (`kind`/`repository`/`select_label`/`target`) — the same periodic issue ingestion the `--github-*` flags wire, now editable from the board via `SourceAdmin`. A repo declared in `sources/` is excluded from the `repos.json` auto-scan (`_github_sources(..., exclude=...)`), so the two producers never double-scan it. A source is still a full `TaskSource` (it reflects state as labels — invariants #18–#20 unchanged), **not** a `Trigger` (which reflects nothing, #36); GitHub ingestion is a source, so it stays a source even as data. See ADR-0015.
 
 ## Working here
 
@@ -136,10 +137,10 @@ Dependencies flow strictly downward, no cycles.
 | Base | `models` (imports nothing from the package), `ids` |
 | Logic | `router` (knows only `models`) |
 | Base (package-free) | `models`, `ids`, `artifacts_layout` (the `.artifacts/<id>/<step>-NN` convention) |
-| Ports | `ports/{queue,workflows,strategy,behavior,events,clock,workspace,artifacts,forge,board,agent,repos,source,control,logs,issues,merge,issue_state,triggers,updater}` |
+| Ports | `ports/{queue,workflows,strategy,behavior,events,clock,workspace,artifacts,forge,board,agent,repos,source,source_admin,control,logs,issues,merge,issue_state,triggers,updater}` |
 | Orchestration | `dispatcher`, `consumer`, `source_poller`, `task_control`, `healer`, `pr_watcher`, `merge_reconciler`, `issue_reconciler` — know only ports (and, for `pr_watcher`/`merge_reconciler`/`issue_reconciler`, the base `ids` module — not `workspace`/`forge`/`artifacts`/`agent`/`repos`/`drivers`) |
 | Behaviors | `behaviors/{landing,agent,resolve_conflict}` — touch ports, not drivers |
-| Drivers | `drivers/{fs_queue,fs_workflows,fifo_strategy,dummy_behavior,stdout_events,system_clock,memory,fs_artifacts,git_workspace,fake_forge,claude_cli,fs_agents,fs_repos,worktree_artifacts,source_reflector,github_client,github_source,github_forge,github_issues,github_merge_checker,github_issue_checker,mergeability_watcher,launchd,composite_events,git_remote,projection_events,stage_output,scheduled_trigger,checks,fs_triggers,uv_updater}` |
+| Drivers | `drivers/{fs_queue,fs_workflows,fifo_strategy,dummy_behavior,stdout_events,system_clock,memory,fs_artifacts,git_workspace,fake_forge,claude_cli,fs_agents,fs_repos,worktree_artifacts,source_reflector,github_client,github_source,github_forge,github_issues,github_merge_checker,github_issue_checker,mergeability_watcher,launchd,composite_events,git_remote,projection_events,stage_output,scheduled_trigger,checks,fs_triggers,fs_sources,uv_updater}` |
 | UI | `api/{app,routes}` — reads through `BoardView`/`ArtifactView`/`StageOutputView`, writes through `TaskControl`; never a driver |
 | Edges | `app` (wiring), `cli` |
 
@@ -173,6 +174,19 @@ Dependencies flow strictly downward, no cycles.
 - `ports/workflow_admin.py` — `WorkflowAdmin` (write-side counterpart of
   `WorkflowRepository`, for the admin UI): `list`/`read_raw`/`write_raw`/`delete`
   over the file's exact text, plus `WorkflowValidationError`
+- `ports/source_admin.py` — `SourceAdmin` (the third admin port, for the admin
+  UI, alongside `AgentAdmin`/`WorkflowAdmin`): `list`/`read_raw`/`write_raw`/
+  `delete` over `sources/*.json`'s exact text, plus `SourceValidationError`/
+  `SourceNotFound`. It manages the data declaration of a `TaskSource` (today a
+  `GithubTaskSource`), not the source itself — a UI-facing port, unknown to the
+  dispatcher/consumer (invariant 33's shape, extended to sources)
+- `drivers/fs_sources.py` — `FilesystemSourceRepository` reads `sources/*.json`
+  and builds one live `GithubTaskSource` per file (resolving the repo *name* to a
+  slug via the registry — invariant #15 — skipping a repo with no GitHub origin,
+  like the CLI-flag path); `FilesystemSourceAdmin` is the write-side for the UI.
+  Structural validation (`parse_source`) is shared, so the run and the UI reject
+  the same malformed file the same way — exactly as `fs_triggers` mirrors
+  `fs_agents`
 - `drivers/mergeability_watcher.py` — `GithubMergeabilityWatcher(TaskSource)`,
   `kind="mergeability"`: `poll()` auto-updates a "behind" harness-owned PR
   (side effect, no task) and queues a "dirty" one as a resolver task on the
@@ -263,6 +277,19 @@ Dependencies flow strictly downward, no cycles.
   `list_issues` reads with read-after-write lag (unlike `rename`), so
   `GithubTaskSource` keeps an in-process ledger of claimed numbers (`_claimed`)
   so a fast poll won't claim the same issue twice.
+- **A GitHub source is declarable as data** (`sources/*.json`), the same way agents,
+  workflows and triggers are — the answer to "define GitHub-issue ingestion as data,
+  editable in the UI". Each file names `kind` (`github`), the `repository` to scan (a
+  repo *name*, resolved to a slug at build — invariant #15), a `select_label` and a
+  `target` (`{workflow}` **or** `{step}`). `FilesystemSourceRepository` builds the live
+  `GithubTaskSource`s for a run (it needs a `GithubClient` + the registry);
+  `FilesystemSourceAdmin` is the write-side for the board's Sources tab (needs neither).
+  A source is a full `TaskSource` (it reflects state as labels), **not** a `Trigger` —
+  GitHub ingestion is a source and stays one as data (invariant #39). The scheduling is
+  the existing poll loop (`SourcePoller` on `source_interval`), so "a scheduled periodic
+  task that loads GitHub issues" is just this source polled on that cadence — no new
+  loop, no cron. Data wins over the `repos.json` auto-scan for the repos it names, so
+  the two never double-scan.
 - **`MergeReconciler`** is `SourcePoller`'s structural twin, pulling the outcome of
   already-landed work back *in* instead of pulling new work in: on its own
   `reconcile_interval` (default 300s — much longer than `source_interval`, since this
