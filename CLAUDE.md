@@ -111,6 +111,16 @@ shows up in the notes. A sloppy subject line silently means no release. The
 release job pushes back a `chore(release): X.Y.Z` commit carrying `[skip ci]`;
 that commit has no feat/fix, so it cannot trigger a release of its own.
 
+**`main` requires the `test` status check to merge — a repo setting, not
+workflow code.** Branch protection on `main` (GitHub Settings → Branches, or
+`GET/PUT /repos/onpaj/harness_v2/branches/main/protection`) requires the
+`test` check produced by `.github/workflows/ci.yml`'s `test` job before a PR
+can merge. This is invisible in `git diff` — renaming or removing the `test`
+job in `ci.yml` silently breaks the protection rule (GitHub then waits
+forever on a check that never posts again, locking every merge button), so
+any rename must be paired with updating the required check in branch
+protection.
+
 ## Module map
 
 Dependencies flow strictly downward, no cycles.
