@@ -73,7 +73,7 @@ swapped out later.
 30. **No task's worktree directory is ever removed.** Nothing under `src/harness` calls `git worktree remove`/`prune`. Consequence: a harness-authored branch is always still checked out in its original task's own worktree, so `GitWorkspace.attach`'s branch-override path force-checks it out into a *second* worktree (`git worktree add --force <path> <branch>`, reusing the existing local branch — not `-B`, which git refuses to force-reset on a branch checked out elsewhere no matter how many times `--force` is passed). Safe because the original worktree is permanently inert once its task reaches a terminal state. Deliberate — don't "fix" the `--force` away, and don't add worktree cleanup without re-checking this invariant.
 31. **The branch-override's reused local ref is untrusted until reconciled with `origin`.** The shared `refs/heads/<branch>` only tracks `origin/<branch>` while every advance of the branch goes through a local commit+push in *some* worktree — `GithubMergeabilityWatcher.update_branch` breaks that by advancing the branch server-side with no local git touch at all. So immediately after the `--force`d `worktree add` in the reuse path, `GitWorkspace.attach` hard-resets the *new* worktree to `origin/<branch>`'s fetched tip before returning the handle. That reset targets the branch as checked out in the new worktree, not "elsewhere," so it isn't blocked by the guard invariant 30 relies on. Don't drop this reset — without it, a `behind`→`update_branch`→`dirty`→resolver sequence on the same PR leaves the resolver's worktree stale and its final `push` fails as non-fast-forward.
 32. **`MergeChecker` is touched only by `MergeReconciler` (core) and wiring.** `dispatcher.py`/`consumer.py` don't import `ports.merge` — guarded by `test_architecture.py`, mirroring invariant 20's shape for `TaskSource`.
-33. **`AgentAdmin`/`WorkflowAdmin` are unknown to the dispatcher and consumer.** They are UI-facing admin ports, not orchestration ports — like `BoardView`/`TaskControl`, not like `AgentCatalog`/`WorkflowRepository`. `api/` touches only the two admin ports; the filesystem drivers (`FilesystemAgentAdmin`, `FilesystemWorkflowAdmin`) are wired exclusively in `cli.py`'s `serve()`. Guarded by `test_architecture.py`'s existing glob-based checks (no dedicated test needed).
+33. **`AgentAdmin`/`WorkflowAdmin`/`ProcessAdmin` are unknown to the dispatcher and consumer.** They are UI-facing admin ports, not orchestration ports — like `BoardView`/`TaskControl`, not like `AgentCatalog`/`WorkflowRepository`. `api/` touches only these admin ports; the filesystem drivers (`FilesystemAgentAdmin`, `FilesystemWorkflowAdmin`, `FilesystemProcessAdmin`) are wired exclusively in `cli.py`'s `serve()`. Guarded by `test_architecture.py`'s existing glob-based checks (no dedicated test needed).
 34. **`IssueChecker` is touched only by `IssueReconciler` (core) and wiring.** `dispatcher.py`/`consumer.py` don't import `ports.issue_state` — guarded by `test_architecture.py`, mirroring invariant 32's shape for `MergeChecker`. The reconciler retires a stale task the same way merge/PR resolution already does — into `archived/` (invariant 24's terminal-queue shape, off every board column but gettable by id) — so "remove from the dashboard" adds no new board mechanism. See ADR-0013.
 35. **A trigger produces tasks, never queue placements.** A `Trigger` (schedule- or condition-driven) hands a fresh `Task` to the inbox with a `workflow_template` **or** a `step`; the dispatcher alone places it (`route()`, invariants #3/#8). No trigger writes into a step queue. The "target any queue" capability is a workflow-less task carrying `step`, not a producer reaching past the dispatcher. See ADR-0014.
 36. **A `Trigger` is a `TaskSource` that reflects nothing outward.** It implements only `poll()`; `report_progress`/`finish` are inherited no-ops. It stamps no `data.source`, so `SourceReflectorSink` lists it and ignores it — the same path that ignores a `harness submit` task. `TaskSource` stays whole (invariants #18–#20 unchanged); `Trigger` is a convenience base, not a new port.
@@ -140,7 +140,7 @@ Dependencies flow strictly downward, no cycles.
 | Base | `models` (imports nothing from the package), `ids` |
 | Logic | `router` (knows only `models`) |
 | Base (package-free) | `models`, `ids`, `artifacts_layout` (the `.artifacts/<id>/<step>-NN` convention) |
-| Ports | `ports/{queue,workflows,strategy,behavior,events,clock,workspace,artifacts,forge,board,agent,repos,source,control,logs,issues,merge,issue_state,triggers,updater}` |
+| Ports | `ports/{queue,workflows,strategy,behavior,events,clock,workspace,artifacts,forge,board,agent,repos,source,control,logs,issues,merge,issue_state,triggers,updater,process_admin}` |
 | Orchestration | `dispatcher`, `consumer`, `source_poller`, `task_control`, `healer`, `pr_watcher`, `merge_reconciler`, `issue_reconciler` — know only ports (and, for `pr_watcher`/`merge_reconciler`/`issue_reconciler`, the base `ids` module — not `workspace`/`forge`/`artifacts`/`agent`/`repos`/`drivers`) |
 | Behaviors | `behaviors/{landing,agent,resolve_conflict}` — touch ports, not drivers |
 | Drivers | `drivers/{fs_queue,fs_workflows,fifo_strategy,dummy_behavior,stdout_events,system_clock,memory,fs_artifacts,git_workspace,fake_forge,claude_cli,fs_agents,fs_repos,worktree_artifacts,source_reflector,github_client,github_source,github_forge,github_issues,github_merge_checker,github_issue_checker,mergeability_watcher,launchd,composite_events,git_remote,projection_events,stage_output,scheduled_trigger,checks,fs_triggers,fs_processes,uv_updater}` |
@@ -177,6 +177,11 @@ Dependencies flow strictly downward, no cycles.
 - `ports/workflow_admin.py` — `WorkflowAdmin` (write-side counterpart of
   `WorkflowRepository`, for the admin UI): `list`/`read_raw`/`write_raw`/`delete`
   over the file's exact text, plus `WorkflowValidationError`
+- `ports/process_admin.py` — `ProcessAdmin` (write-side counterpart of
+  `FilesystemProcessRepository`, for the admin UI): `list`/`read`/`write`/`delete`
+  over the structured `ProcessFields`, plus `check_names()`/`sink_kinds()` so the
+  form's dropdowns are populated through the port (`api/` imports no driver);
+  `ProcessNotFound`/`ProcessAdminValidationError` mirror the agent admin's
 - `drivers/mergeability_watcher.py` — `GithubMergeabilityWatcher(TaskSource)`,
   `kind="mergeability"`: `poll()` auto-updates a "behind" harness-owned PR
   (side effect, no task) and queues a "dirty" one as a resolver task on the
@@ -185,7 +190,7 @@ Dependencies flow strictly downward, no cycles.
   into the attached branch; a clean merge commits without spending an agent
   call, a real conflict runs the `resolve` persona then the worker commits
 - `api/` — FastAPI board and admin UI; sees only `BoardView`, `ArtifactView`,
-  `TaskControl`, `AgentAdmin` and `WorkflowAdmin` — never a driver or `ArtifactStore`
+  `TaskControl`, `AgentAdmin`, `WorkflowAdmin` and `ProcessAdmin` — never a driver or `ArtifactStore`
 - `ports/merge.py` — the `MergeChecker` port: `is_merged(task) -> bool | None` (`None`: no `data.pr`; raises on a transient failure — the caller must retry, never treat that as "not merged")
 - `merge_reconciler.py` — `MergeReconciler`: the core that checks a `done` task's PR and archives it once merged (knows only ports/models, mirrors `source_poller.py`)
 - `drivers/github_merge_checker.py` — `GithubMergeChecker`: reads `repo`/`number` straight off `task.data["pr"]` at check time, no per-repo construction
@@ -198,7 +203,7 @@ Dependencies flow strictly downward, no cycles.
 - `drivers/scheduled_trigger.py` — `ScheduledTrigger(Trigger)`: composes an `interval` (data) × a `Check` (code) × a `target` (workflow **or** step). Cadence is a clock-gate on the interval bucket; `dedup_key` is bucket-keyed (`per-interval`) or state-keyed (`per-state`), never constant
 - `drivers/checks.py` — the built-in `Check`s (`AlwaysCheck`, `DiskThresholdCheck`) and the `BUILTIN_CHECKS` registry mapping a check name → factory; a bespoke condition is a new factory registered by name
 - `drivers/fs_triggers.py` — `FilesystemTriggerRepository`: reads `triggers/*.json` and builds one `ScheduledTrigger` per file, validating fast at load (`TriggerValidationError` on a bad `interval`, an unknown `check`, or a `target` naming neither a served workflow nor a known step) — exactly as `FilesystemAgentCatalog` reads `agents/*.json`
-- `drivers/fs_processes.py` — `FilesystemProcessRepository`: reads `processes/*.json` (the top-level authoring aggregate — a nested `trigger`/`action`/`target`/`sink`) and **compiles each into a `ScheduledTrigger`**, validating fast (`ProcessValidationError`). A Process is a compile-time concept only; nothing under orchestration names it. The `sink` field is a forward-compat seam — parsed and validated but `none`-only in v1. See ADR-0015
+- `drivers/fs_processes.py` — `FilesystemProcessRepository`: reads `processes/*.json` (the top-level authoring aggregate — a nested `trigger`/`action`/`target`/`sink`) and **compiles each into a `ScheduledTrigger`**, validating fast (`ProcessValidationError`). A Process is a compile-time concept only; nothing under orchestration names it. The `sink` field is a forward-compat seam — parsed and validated but `none`-only in v1. The module-level `compile_process` is the single validator both the repository (startup) and `FilesystemProcessAdmin` (the write-side admin driver, on submit) run — `ProcessValidationError` carries an optional `field` so the admin maps a compile failure onto the right form field. See ADR-0015
 
 ## What is responsible for what
 
@@ -326,7 +331,9 @@ Dependencies flow strictly downward, no cycles.
   writes an empty `processes/`; the operator defines several, each an independent file.
   A Process compiles to the same `ScheduledTrigger` a bare `triggers/*.json` does, so
   both surfaces coexist — the Process is the richer primary surface, the trigger file
-  the low-level primitive. See ADR-0015.
+  the low-level primitive. A structured board editor exists (`ProcessAdmin`), wired in
+  `serve()` like the agent/workflow editors — the operator assembles a process in the
+  dashboard, validated by the same `compile_process`, picked up on the next run. See ADR-0015.
 
 ## Gotchas
 

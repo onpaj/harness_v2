@@ -16,6 +16,12 @@ from harness.ports.board import BoardView
 from harness.ports.clock import Clock
 from harness.ports.control import TaskControl
 from harness.ports.logs import StageOutputView
+from harness.ports.process_admin import (
+    ProcessAdmin,
+    ProcessAdminValidationError,
+    ProcessFields,
+    ProcessNotFound,
+)
 from harness.ports.updater import Updater, UpdateError
 from harness.ports.workflow_admin import WorkflowAdmin, WorkflowValidationError
 from harness.ports.workflows import WorkflowNotFound
@@ -90,6 +96,29 @@ class _EmptyWorkflowAdmin(WorkflowAdmin):
         return False
 
 
+class _EmptyProcessAdmin(ProcessAdmin):
+    """No-op process admin for a board wired without one. Same rationale as
+    `_EmptyAgentAdmin` — the routes exist but list nothing and refuse writes."""
+
+    def list(self) -> tuple[str, ...]:
+        return ()
+
+    def read(self, name: str) -> ProcessFields:
+        raise ProcessNotFound(f"process {name!r} does not exist")
+
+    def write(self, name: str, fields: ProcessFields) -> ProcessFields:
+        raise ProcessAdminValidationError({"name": "no process admin configured"})
+
+    def delete(self, name: str) -> bool:
+        return False
+
+    def check_names(self) -> tuple[str, ...]:
+        return ()
+
+    def sink_kinds(self) -> tuple[str, ...]:
+        return ("none",)
+
+
 class _NullUpdater(Updater):
     """No-op updater for a board wired without one (tests, or a from-source
     board that cannot upgrade itself). The button exists on every page but
@@ -110,6 +139,7 @@ def create_app(
     coalesce_seconds: float = 0.25,
     agent_admin: AgentAdmin | None = None,
     workflow_admin: WorkflowAdmin | None = None,
+    process_admin: ProcessAdmin | None = None,
     updater: Updater | None = None,
     version: str = "unknown",
     build_time: str | None = None,
@@ -119,6 +149,7 @@ def create_app(
     control = control or _NullTaskControl()
     agent_admin = agent_admin or _EmptyAgentAdmin()
     workflow_admin = workflow_admin or _EmptyWorkflowAdmin()
+    process_admin = process_admin or _EmptyProcessAdmin()
     updater = updater or _NullUpdater()
     app = FastAPI(title="harness board", docs_url=None, redoc_url=None)
     app.state.view = view
@@ -133,7 +164,9 @@ def create_app(
         name="static",
     )
     app.include_router(
-        build_json_router(view, artifacts, agent_admin, workflow_admin, version, build_time)
+        build_json_router(
+            view, artifacts, agent_admin, workflow_admin, process_admin, version, build_time
+        )
     )
     app.include_router(
         build_html_router(
@@ -145,6 +178,7 @@ def create_app(
             coalesce_seconds,
             agent_admin,
             workflow_admin,
+            process_admin,
             updater,
             version,
             build_time,

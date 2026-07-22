@@ -21,6 +21,7 @@ from harness.app import LANDING_STEP, HarnessLayout, HealConfig, build
 from harness.drivers.claude_cli import ClaudeCliRunner
 from harness.drivers.fake_forge import FakeForge
 from harness.drivers.fs_agents import FilesystemAgentAdmin, FilesystemAgentCatalog
+from harness.drivers.fs_processes import FilesystemProcessAdmin
 from harness.drivers.github_issues import GithubIssueTracker
 from harness.drivers.memory import MemoryIssueTracker
 from harness.drivers.fs_repos import FilesystemRepositoryRegistry
@@ -1493,6 +1494,7 @@ async def serve(
         clock=SystemClock(),
         agent_admin=FilesystemAgentAdmin(harness.layout.agents),
         workflow_admin=FilesystemWorkflowAdmin(harness.layout.workflows),
+        process_admin=FilesystemProcessAdmin(harness.layout.processes),
         updater=updater,
         version=version_string(),
         build_time=build_timestamp(),

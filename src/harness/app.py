@@ -123,6 +123,10 @@ class HarnessLayout:
         return self.root / "agents"
 
     @property
+    def processes(self) -> Path:
+        return self.root / "processes"
+
+    @property
     def repos(self) -> Path:
         return self.root / "repos.json"
 

@@ -911,6 +911,56 @@ async def test_serve_returns_when_uvicorn_stops_before_the_loop(monkeypatch, tmp
     assert harness.stop_seen.is_set()
 
 
+def test_layout_processes_property(tmp_path):
+    assert HarnessLayout(tmp_path).processes == tmp_path / "processes"
+
+
+async def test_serve_wires_the_filesystem_process_admin(monkeypatch, tmp_path):
+    """`serve()` passes a real `FilesystemProcessAdmin(layout.processes)` into
+    `create_app`, beside the agent/workflow admins — the driver is wired only
+    here (invariant #33)."""
+    from harness.drivers.fs_processes import FilesystemProcessAdmin
+
+    captured = {}
+
+    real_create_app = __import__("harness.api.app", fromlist=["create_app"]).create_app
+
+    def capturing_create_app(**kwargs):
+        captured.update(kwargs)
+        return real_create_app(**kwargs)
+
+    class FakeUvicornServer:
+        def __init__(self, config):
+            pass
+
+        async def serve(self):
+            return
+
+    monkeypatch.setattr("harness.cli.create_app", capturing_create_app)
+    monkeypatch.setattr("harness.cli.uvicorn.Server", FakeUvicornServer)
+
+    class FakeHarness:
+        def __init__(self):
+            self.layout = HarnessLayout(tmp_path)
+            self.projection = BoardProjection(
+                SERVE_TEST_WORKFLOW.steps(), (SERVE_TEST_WORKFLOW,)
+            )
+            self.artifacts = MemoryArtifactStore()
+            self.stage_output = StageOutputProjection()
+            self.control = FakeTaskControl()
+
+        async def run(
+            self, poll_interval, source_interval=30.0, pr_poll_interval=0.0, reconcile_interval=300.0, stop=None
+        ):
+            while not stop.is_set():
+                await asyncio.sleep(0.01)
+
+    await asyncio.wait_for(serve(FakeHarness(), 8000, 0.01), timeout=2.0)
+
+    admin = captured["process_admin"]
+    assert isinstance(admin, FilesystemProcessAdmin)
+
+
 # --- harness service -------------------------------------------------------
 
 

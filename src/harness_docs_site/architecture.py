@@ -293,6 +293,27 @@ MODEL = ArchitectureModel(
             y=12.0,
         ),
         Part(
+            id="process",
+            name="Process",
+            kind="driver",
+            tagline="A scheduled trigger, assembled as data.",
+            description=(
+                "A Process is the operator's authoring aggregate — a trigger "
+                "(cadence), an action (a named check + params), a target (a "
+                "workflow or a step) and a sink. It is a compile-time concept: the "
+                "repository compiles each processes/*.json into a scheduled "
+                "TaskSource that feeds the inbox, and the admin editor writes the "
+                "same files through the same validator."
+            ),
+            adrs=("0015-process-authoring-aggregate",),
+            sources=(
+                "src/harness/drivers/fs_processes.py",
+                "src/harness/drivers/scheduled_trigger.py",
+            ),
+            x=8.0,
+            y=72.0,
+        ),
+        Part(
             id="board",
             name="Board",
             kind="ui",
@@ -338,5 +359,6 @@ MODEL = ArchitectureModel(
         Edge("worktree", "landing"),
         Edge("landing", "github-source"),
         Edge("queues", "board"),
+        Edge("process", "task-source"),
     ),
 )
