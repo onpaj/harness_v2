@@ -132,6 +132,7 @@ def _init(args: argparse.Namespace) -> int:
 
     layout.agents.mkdir(parents=True, exist_ok=True)
     (root / "triggers").mkdir(parents=True, exist_ok=True)
+    (root / "processes").mkdir(parents=True, exist_ok=True)
     _write_default_repos(layout)
 
     if args.no_workflow:
@@ -638,6 +639,35 @@ def _scheduled_sources(
     from harness.drivers.fs_triggers import FilesystemTriggerRepository
 
     repo = FilesystemTriggerRepository(root / "triggers")
+    worktree_root = args.worktree_root or str(root / "worktrees")
+    return repo.build(
+        clock=clock,
+        repository=None,
+        worktree_root=worktree_root,
+        known_targets=known_targets,
+    )
+
+
+def _process_sources(
+    args: argparse.Namespace,
+    root: Path,
+    registry: RepositoryRegistry,
+    *,
+    clock: Clock,
+    known_targets: set[str] | None,
+) -> list[TaskSource]:
+    """Processes declared under `<root>/processes/*.json`.
+
+    A Process is the top-level authoring aggregate (trigger × action × target ×
+    sink); `FilesystemProcessRepository` compiles each into a `ScheduledTrigger`
+    — a `TaskSource` that produces tasks on a clock gate and reflects nothing
+    outward — appended to the run's existing `sources` list, exactly like a raw
+    `triggers/*.json` (`_scheduled_sources`). A missing/empty `processes/` yields
+    `[]`, so the harness runs exactly as before. `known_targets` (served workflow
+    names ∪ known steps) lets the repository reject an unknown target up front."""
+    from harness.drivers.fs_processes import FilesystemProcessRepository
+
+    repo = FilesystemProcessRepository(root / "processes")
     worktree_root = args.worktree_root or str(root / "worktrees")
     return repo.build(
         clock=clock,
@@ -1355,6 +1385,12 @@ def _run(args: argparse.Namespace) -> int:
     if catalog is not None:
         known_targets |= set(catalog.names())
     sources = sources + _scheduled_sources(
+        args, root, registry, clock=SystemClock(), known_targets=known_targets
+    )
+    # Processes (`processes/*.json`) are the top-level authoring aggregate; each
+    # compiles to a `ScheduledTrigger` that rides the same `sources` list —
+    # no new loop, no `build()` parameter (invariant #39).
+    sources = sources + _process_sources(
         args, root, registry, clock=SystemClock(), known_targets=known_targets
     )
 

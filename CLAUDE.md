@@ -16,6 +16,8 @@ Phase 3 spec: `docs/superpowers/specs/2026-07-20-orchestration-phase3-design.md`
 Phase 3 plan: `docs/superpowers/plans/2026-07-20-orchestration-phase3.md`
 Generic triggers spec: `docs/superpowers/specs/2026-07-22-generic-triggers-design.md`
 Generic triggers plan: `docs/superpowers/plans/2026-07-22-generic-triggers.md`
+Processes spec: `docs/superpowers/specs/2026-07-22-processes-design.md`
+Processes plan: `docs/superpowers/plans/2026-07-22-processes.md`
 
 The project is built **phase by phase**. Phase 1 is a POC of the orchestration loop.
 Phase 2 adds **worktrees, artifacts and landing**: each phase works in a worktree,
@@ -77,6 +79,8 @@ swapped out later.
 36. **A `Trigger` is a `TaskSource` that reflects nothing outward.** It implements only `poll()`; `report_progress`/`finish` are inherited no-ops. It stamps no `data.source`, so `SourceReflectorSink` lists it and ignores it — the same path that ignores a `harness submit` task. `TaskSource` stays whole (invariants #18–#20 unchanged); `Trigger` is a convenience base, not a new port.
 37. **A scheduled trigger owns its cadence via the `Clock`, not via a loop.** `poll()` gates on the interval bucket `floor(now / interval)` and returns `[]` cheaply between fires; the shared `source_interval` is only polling granularity. The gate reads solely `Clock`, so it is `FakeClock`-testable and survives the poller's `sleep(0)` fast-path without re-firing.
 38. **A scheduled trigger's `dedup_key` is bucket-keyed, giving at-most-once per interval across restarts.** The key includes `floor(now / interval)` (and, for `per-state` dedup, an observed `state_key` instead), so the existing `SourcePoller._seen` seeding makes one period yield one task even across a restart — the same exactly-once mechanism as GitHub ingestion (ADR-0010), with a non-constant key.
+39. **A Process is a compile-time authoring aggregate, never a runtime object.** `processes/*.json` bundles a trigger (cadence), an action (a named `Check`), a target (workflow **or** step) and a `sink`, and `FilesystemProcessRepository` **compiles each into a `ScheduledTrigger`** that joins the existing `sources` list. Nothing under orchestration (`dispatcher`/`consumer`/`router`/`source_poller`) imports or names "process"; it is `cli.py` wiring turned into data. `build()` gains no parameter, and `triggers/*.json` is unchanged — a Process compiles to the *same* `ScheduledTrigger` a bare trigger file does, so the two surfaces coexist. Guarded by `test_architecture.py`. See ADR-0015.
+40. **A Process's `sink` is a forward-compat seam: parsed, validated, `none`-only in v1.** The outbound reflection destination is a distinct field from the inbound origin so source ≠ destination stays open (GitHub in, Slack out) as a driver addition, never a schema change. v1 writes no `data.sink` and reflects nothing; a real sink would route via `SourceReflectorSink` on a destination identity that defaults to `source.kind`, and a stateful sink (create-then-update, e.g. a Slack message edited as progress advances) may return a persistable handle — refining invariant #21 from "no-op" to "convergent." No `Reflector` port is built until a real destination exists. See ADR-0015.
 
 ## Working here
 
@@ -139,7 +143,7 @@ Dependencies flow strictly downward, no cycles.
 | Ports | `ports/{queue,workflows,strategy,behavior,events,clock,workspace,artifacts,forge,board,agent,repos,source,control,logs,issues,merge,issue_state,triggers,updater}` |
 | Orchestration | `dispatcher`, `consumer`, `source_poller`, `task_control`, `healer`, `pr_watcher`, `merge_reconciler`, `issue_reconciler` — know only ports (and, for `pr_watcher`/`merge_reconciler`/`issue_reconciler`, the base `ids` module — not `workspace`/`forge`/`artifacts`/`agent`/`repos`/`drivers`) |
 | Behaviors | `behaviors/{landing,agent,resolve_conflict}` — touch ports, not drivers |
-| Drivers | `drivers/{fs_queue,fs_workflows,fifo_strategy,dummy_behavior,stdout_events,system_clock,memory,fs_artifacts,git_workspace,fake_forge,claude_cli,fs_agents,fs_repos,worktree_artifacts,source_reflector,github_client,github_source,github_forge,github_issues,github_merge_checker,github_issue_checker,mergeability_watcher,launchd,composite_events,git_remote,projection_events,stage_output,scheduled_trigger,checks,fs_triggers,uv_updater}` |
+| Drivers | `drivers/{fs_queue,fs_workflows,fifo_strategy,dummy_behavior,stdout_events,system_clock,memory,fs_artifacts,git_workspace,fake_forge,claude_cli,fs_agents,fs_repos,worktree_artifacts,source_reflector,github_client,github_source,github_forge,github_issues,github_merge_checker,github_issue_checker,mergeability_watcher,launchd,composite_events,git_remote,projection_events,stage_output,scheduled_trigger,checks,fs_triggers,fs_processes,uv_updater}` |
 | UI | `api/{app,routes}` — reads through `BoardView`/`ArtifactView`/`StageOutputView`, writes through `TaskControl`; never a driver |
 | Edges | `app` (wiring), `cli` |
 
@@ -194,6 +198,7 @@ Dependencies flow strictly downward, no cycles.
 - `drivers/scheduled_trigger.py` — `ScheduledTrigger(Trigger)`: composes an `interval` (data) × a `Check` (code) × a `target` (workflow **or** step). Cadence is a clock-gate on the interval bucket; `dedup_key` is bucket-keyed (`per-interval`) or state-keyed (`per-state`), never constant
 - `drivers/checks.py` — the built-in `Check`s (`AlwaysCheck`, `DiskThresholdCheck`) and the `BUILTIN_CHECKS` registry mapping a check name → factory; a bespoke condition is a new factory registered by name
 - `drivers/fs_triggers.py` — `FilesystemTriggerRepository`: reads `triggers/*.json` and builds one `ScheduledTrigger` per file, validating fast at load (`TriggerValidationError` on a bad `interval`, an unknown `check`, or a `target` naming neither a served workflow nor a known step) — exactly as `FilesystemAgentCatalog` reads `agents/*.json`
+- `drivers/fs_processes.py` — `FilesystemProcessRepository`: reads `processes/*.json` (the top-level authoring aggregate — a nested `trigger`/`action`/`target`/`sink`) and **compiles each into a `ScheduledTrigger`**, validating fast (`ProcessValidationError`). A Process is a compile-time concept only; nothing under orchestration names it. The `sink` field is a forward-compat seam — parsed and validated but `none`-only in v1. See ADR-0015
 
 ## What is responsible for what
 
@@ -308,6 +313,20 @@ Dependencies flow strictly downward, no cycles.
   from `BUILTIN_CHECKS` — with the schedule as data and the condition as code (the same
   split as personas). `FilesystemTriggerRepository` reads them and validates fast at
   build; `harness init` writes an empty `triggers/`.
+- **A Process** is the operator's top-level authoring aggregate — the "tie it all
+  together" surface. A `processes/*.json` file names four distinct roles: a
+  **trigger** (cadence), an **action** (a named `Check` + params — the inbound
+  producer), a **target** (a workflow **or** a step — the dispatcher still places
+  it), and a **sink** (the outbound reflection destination). It is a *compile-time*
+  concept: `FilesystemProcessRepository` compiles each file into a `ScheduledTrigger`
+  (a `TaskSource`), so the whole runtime — `SourcePoller`, the dispatcher, the router
+  — sees only the primitives it already knows, and every invariant holds unchanged.
+  The `sink` is a `none`-only forward-compat seam reserving the schema slot for a
+  later GitHub→Slack (source ≠ destination) split without a migration. `harness init`
+  writes an empty `processes/`; the operator defines several, each an independent file.
+  A Process compiles to the same `ScheduledTrigger` a bare `triggers/*.json` does, so
+  both surfaces coexist — the Process is the richer primary surface, the trigger file
+  the low-level primitive. See ADR-0015.
 
 ## Gotchas
 
@@ -384,6 +403,21 @@ Dependencies flow strictly downward, no cycles.
   remembers "ever ingested", not "currently open", so `per-state` re-fires if a state
   recurs after its task has terminated and `per-interval` can't coalesce an unresolved
   backlog — a live-task-consulting mode is a deliberate follow-up.
+- **A Process and a bare trigger can express the same fire-and-forget automation
+  two ways — this is deliberate, not a bug to dedupe away.** A `processes/*.json`
+  compiles to the identical `ScheduledTrigger` a `triggers/*.json` does; the
+  Process's payoff is its *nested roles* and its `sink` slot, the structure the
+  future increments hang on. Folding `triggers/` into `processes/` is a later
+  cleanup, not this increment's job.
+- **Two Process seams are recorded in the spec but NOT built — don't mistake them
+  for done.** (1) The **`sink`** accepts only `{"kind":"none"}`; there is no
+  reflector registry and no GitHub/Slack sink driver yet, so a Process reflects
+  nothing outward (its trigger stamps no `data.source`). (2) The **`github-issues`
+  action** (scan issues by label as a `Check`) is deferred because a source-bearing
+  check needs a `GithubClient` injected into a widened factory — the seam is
+  `FilesystemProcessRepository.build()` growing a dependency bag, exactly as
+  `_github_sources` obtains a client from `GITHUB_TOKEN`. Both are additive; see
+  the spec's "sink seam" / "action seam" sections.
 
 ## Operator
 

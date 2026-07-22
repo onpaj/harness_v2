@@ -356,6 +356,21 @@ def test_init_no_workflow_writes_no_default_workflow(tmp_path, capsys):
     assert (tmp_path / "repos.json").exists()
 
 
+def test_init_creates_processes_directory(tmp_path):
+    """`harness init` writes an empty processes/ next to agents/ and triggers/;
+    building over it yields no sources, so the harness runs exactly as today."""
+    from harness.drivers.fs_processes import FilesystemProcessRepository
+    from harness.drivers.system_clock import SystemClock
+
+    assert main(["init", "--root", str(tmp_path)]) == 0
+
+    assert (tmp_path / "processes").is_dir()
+    built = FilesystemProcessRepository(tmp_path / "processes").build(
+        clock=SystemClock()
+    )
+    assert built == []
+
+
 def test_run_with_unknown_workflow_fails_cleanly(tmp_path, capsys):
     """The third documented error path: unknown workflow (via `run`)."""
     main(["init", "--root", str(tmp_path)])
