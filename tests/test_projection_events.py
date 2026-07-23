@@ -70,6 +70,27 @@ def test_malformed_task_snapshot_does_not_raise():
     assert projection.snapshot().revision == 0
 
 
+def test_deleted_event_removes_task_from_board():
+    projection, sink = build()
+    sink.emit("dispatched", queue="plan", task=snapshot())
+
+    sink.emit("deleted", task_id="tsk_1")
+
+    assert projection.get("tsk_1") is None
+    assert projection.snapshot().workflow("default").column("plan").tasks == ()
+
+
+def test_deleted_event_without_task_id_is_ignored():
+    projection, sink = build()
+    sink.emit("dispatched", queue="plan", task=snapshot())
+    revision = projection.snapshot().revision
+
+    sink.emit("deleted", count=3)
+
+    assert projection.get("tsk_1") is not None
+    assert projection.snapshot().revision == revision
+
+
 def test_archived_event_removes_task_from_the_board():
     projection, sink = build()
     sink.emit("finished", task_id="tsk_1", queue="done", task=snapshot("end"))

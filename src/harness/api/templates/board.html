@@ -52,7 +52,15 @@
 
     document.body.addEventListener('htmx:afterSwap', function (event) {
       if (event.detail.target.id === 'board') { applyActiveTab(event.detail.target); }
-      if (event.detail.target.id === 'detail') { document.getElementById('detail').showModal(); }
+      if (event.detail.target.id !== 'detail') { return; }
+      var detail = document.getElementById('detail');
+      if (detail.innerHTML.trim() === '') {
+        // A successful delete swaps in nothing — close instead of showing a
+        // blank modal. The 'close' listener below clears innerHTML either way.
+        if (detail.open) { detail.close(); }
+      } else {
+        detail.showModal();
+      }
     });
     document.getElementById('detail').addEventListener('click', function (event) {
       if (event.target.id === 'detail') { event.target.close(); }

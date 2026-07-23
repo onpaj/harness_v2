@@ -264,6 +264,57 @@ def test_restart_without_control_reports_nothing(client):
     assert client.post("/tasks/tsk_9/restart").status_code == 404
 
 
+# --- Delete a task -----------------------------------------------------
+
+
+def test_delete_button_shown_unconditionally(client):
+    failed_body = client.get("/fragment/task/tsk_9").text
+    working_body = client.get("/fragment/task/tsk_1").text
+
+    assert "/tasks/tsk_9/delete" in failed_body
+    assert "/tasks/tsk_1/delete" in working_body
+    assert "hx-confirm" in failed_body
+
+
+def test_delete_invokes_control_and_returns_empty_body():
+    view = FakeBoardView(_board_with_broken(), {"tsk_9": BROKEN})
+    control = FakeTaskControl(delete_result=True)
+    api = TestClient(create_app(view=view, control=control, clock=FakeClock()))
+
+    response = api.post("/tasks/tsk_9/delete")
+
+    assert response.status_code == 200
+    assert response.text == ""
+    assert control.deleted == ["tsk_9"]
+
+
+def test_delete_returns_404_when_control_reports_nothing():
+    view = FakeBoardView(_board_with_broken(), {"tsk_9": BROKEN})
+    control = FakeTaskControl(delete_result=False)
+    api = TestClient(create_app(view=view, control=control, clock=FakeClock()))
+
+    response = api.post("/tasks/tsk_9/delete")
+
+    assert response.status_code == 404
+    assert control.deleted == ["tsk_9"]
+
+
+def test_delete_without_control_reports_nothing(client):
+    # The default board is wired with the null control (create_app default).
+    assert client.post("/tasks/tsk_9/delete").status_code == 404
+
+
+def test_delete_does_not_affect_restart_call_log():
+    view = FakeBoardView(_board_with_broken(), {"tsk_9": BROKEN})
+    control = FakeTaskControl(result=True, delete_result=True)
+    api = TestClient(create_app(view=view, control=control, clock=FakeClock()))
+
+    api.post("/tasks/tsk_9/delete")
+
+    assert control.deleted == ["tsk_9"]
+    assert control.restarted == []
+
+
 # --- Multi-workflow tab strip (FR-5, FR-6) ----------------------------------
 
 

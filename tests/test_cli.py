@@ -2,6 +2,7 @@ import argparse
 import asyncio
 import json
 import os
+import shutil
 from pathlib import Path
 
 import pytest
@@ -12,6 +13,7 @@ from harness.cli import (
     DEFAULT_DEFINITION,
     DEFAULT_WORKFLOW,
     _REVIEW_PERSONA,
+    _agent_definition_template,
     _allowed_outcomes_for,
     _github_reflectors,
     _github_sources,
@@ -21,10 +23,11 @@ from harness.cli import (
     main,
     serve,
 )
+from harness.drivers.fs_agents import FilesystemAgentCatalog
 from harness.drivers.github_client import FakeGithubClient
 from harness.drivers.memory import MemoryArtifactStore, MemoryRepositoryRegistry
 from harness.drivers.stage_output import StageOutputProjection
-from harness.models import END, Task, Transition, Workflow
+from harness.models import END, Outcome, Task, Transition, Workflow
 from harness.projection import BoardProjection
 from tests.fakes import FakeTaskControl
 
@@ -295,6 +298,180 @@ def test_submit_without_init_fails_cleanly(tmp_path, capsys):
     out, err = capsys.readouterr()
     assert out == ""
     assert "initialized" in err
+
+
+def test_agent_definition_template_known_step_uses_its_persona():
+    definition = _agent_definition_template("review", ["done", "request_changes"])
+
+    assert definition["prompt"] == _REVIEW_PERSONA
+    assert definition["allowed_tools"] == ["Read", "Grep", "Glob", "Bash"]
+    assert definition["allowed_outcomes"] == ["done", "request_changes"]
+    assert definition["model"] == "sonnet"
+    assert definition["fallback_model"] is None
+
+
+def test_agent_definition_template_unknown_step_gets_generic_fallback():
+    definition = _agent_definition_template("triage", ["escalate"])
+
+    assert "triage" in definition["prompt"]
+    assert definition["allowed_tools"] == []
+    assert definition["allowed_outcomes"] == ["escalate"]
+    assert definition["model"] is None
+
+
+def _write_custom_workflow_with_triage_step(tmp_path):
+    """A workflow whose only step is 'triage' — not one of AGENT_PERSONAS."""
+    (tmp_path / "workflows" / "custom.json").write_text(
+        json.dumps(
+            {
+                "name": "custom",
+                "start": "triage",
+                "transitions": [
+                    {"from": "triage", "on": "done", "to": "end"},
+                    {"from": "triage", "on": "request_changes", "to": "triage"},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_agent_init_creates_missing_file(tmp_path, capsys):
+    main(["init", "--root", str(tmp_path)])
+    _write_custom_workflow_with_triage_step(tmp_path)
+    capsys.readouterr()
+
+    assert main(
+        ["agent", "init", "triage", "--root", str(tmp_path), "--workflow", "custom"]
+    ) == 0
+
+    path = tmp_path / "agents" / "triage.json"
+    definition = json.loads(path.read_text())
+    assert "triage" in definition["prompt"]
+    assert definition["allowed_outcomes"] == ["done", "request_changes"]
+
+    out, err = capsys.readouterr()
+    assert err == ""
+    assert str(path) in out
+    assert definition["prompt"] in out
+
+
+def test_agent_init_leaves_existing_file_untouched_without_force(tmp_path, capsys):
+    main(["init", "--root", str(tmp_path)])
+    _write_custom_workflow_with_triage_step(tmp_path)
+    main(["agent", "init", "triage", "--root", str(tmp_path), "--workflow", "custom"])
+    path = tmp_path / "agents" / "triage.json"
+    path.write_text(json.dumps({"prompt": "hand-tuned", "allowed_outcomes": []}))
+    capsys.readouterr()
+
+    assert main(
+        ["agent", "init", "triage", "--root", str(tmp_path), "--workflow", "custom"]
+    ) == 0
+
+    assert json.loads(path.read_text()) == {"prompt": "hand-tuned", "allowed_outcomes": []}
+    out, err = capsys.readouterr()
+    assert err == ""
+    assert "already exists" in out
+
+
+def test_agent_init_force_overwrites_an_existing_file(tmp_path):
+    main(["init", "--root", str(tmp_path)])
+    _write_custom_workflow_with_triage_step(tmp_path)
+    main(["agent", "init", "triage", "--root", str(tmp_path), "--workflow", "custom"])
+    path = tmp_path / "agents" / "triage.json"
+    path.write_text(json.dumps({"prompt": "hand-tuned", "allowed_outcomes": []}))
+
+    assert main(
+        [
+            "agent",
+            "init",
+            "triage",
+            "--root",
+            str(tmp_path),
+            "--workflow",
+            "custom",
+            "--force",
+        ]
+    ) == 0
+
+    definition = json.loads(path.read_text())
+    assert "triage" in definition["prompt"]
+    assert definition["allowed_outcomes"] == ["done", "request_changes"]
+
+
+def test_agent_init_without_init_fails_cleanly(tmp_path, capsys):
+    assert main(
+        ["agent", "init", "development", "--root", str(tmp_path / "empty")]
+    ) == 2
+
+    out, err = capsys.readouterr()
+    assert out == ""
+    assert "initialized" in err
+
+
+def test_agent_init_unknown_workflow_fails_cleanly(tmp_path, capsys):
+    main(["init", "--root", str(tmp_path)])
+    capsys.readouterr()
+
+    assert main(
+        [
+            "agent",
+            "init",
+            "development",
+            "--root",
+            str(tmp_path),
+            "--workflow",
+            "nonexistent",
+        ]
+    ) == 2
+
+    out, err = capsys.readouterr()
+    assert out == ""
+    assert "nonexistent" in err
+
+
+def test_agent_init_rejects_the_landing_step(tmp_path, capsys):
+    main(["init", "--root", str(tmp_path)])
+    capsys.readouterr()
+
+    assert main(["agent", "init", "land", "--root", str(tmp_path)]) == 2
+
+    out, err = capsys.readouterr()
+    assert out == ""
+    assert "land" in err
+    assert not (tmp_path / "agents" / "land.json").exists()
+
+
+def test_agent_init_rejects_a_step_not_in_the_workflow(tmp_path, capsys):
+    main(["init", "--root", str(tmp_path)])
+    capsys.readouterr()
+
+    assert main(["agent", "init", "bogus-step", "--root", str(tmp_path)]) == 2
+
+    out, err = capsys.readouterr()
+    assert out == ""
+    assert "bogus-step" in err
+
+
+def test_agent_init_rejected_call_does_not_create_an_empty_agents_dir(tmp_path):
+    """Regression guard: validation must run before `agents/` is created."""
+    main(["init", "--root", str(tmp_path)])
+    shutil.rmtree(tmp_path / "agents")
+
+    assert main(["agent", "init", "bogus-step", "--root", str(tmp_path)]) == 2
+    assert not (tmp_path / "agents").exists()
+
+
+def test_agent_init_round_trips_through_filesystem_agent_catalog(tmp_path):
+    main(["init", "--root", str(tmp_path)])
+    _write_custom_workflow_with_triage_step(tmp_path)
+
+    main(["agent", "init", "triage", "--root", str(tmp_path), "--workflow", "custom"])
+
+    catalog = FilesystemAgentCatalog(tmp_path / "agents")
+    spec = catalog.get("triage")
+    assert "triage" in spec.prompt
+    assert spec.allowed_outcomes == (Outcome.DONE, Outcome.REQUEST_CHANGES)
 
 
 def test_submit_step_writes_a_workflow_less_task(tmp_path, capsys):
