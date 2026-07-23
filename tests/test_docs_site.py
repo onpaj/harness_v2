@@ -1,4 +1,3 @@
-import json
 import re
 from pathlib import Path
 
@@ -120,21 +119,34 @@ def test_markdown_render_keeps_fenced_content_literal():
     assert "<table>" not in html
 
 
-def test_build_site_embeds_model_and_adr_html(tmp_path: Path):
+def test_build_site_renders_every_port_and_its_drivers(tmp_path: Path):
     _write_fixture_tree(tmp_path)
     entries = discover_docs(tmp_path)
     out_dir = tmp_path / "site"
     build_site(entries, tmp_path, out_dir)
 
     index = (out_dir / "index.html").read_text(encoding="utf-8")
-    assert 'id="model-data"' in index
-    assert 'id="adr-html"' in index
-    assert 'id="hexmap"' in index
-    # Every part in the model renders a clickable node.
     from harness_docs_site.architecture import MODEL
 
-    for part in MODEL.parts:
-        assert f'data-part-id="{part.id}"' in index
+    for port in MODEL.ports:
+        assert f'id="port-{port.id}"' in index
+        for driver in port.drivers:
+            assert f'id="driver-{driver.id}"' in index
+            assert driver.name in index
+
+
+def test_build_site_groups_ports_in_model_order(tmp_path: Path):
+    _write_fixture_tree(tmp_path)
+    build_site(discover_docs(tmp_path), tmp_path, tmp_path / "site")
+    index = (tmp_path / "site" / "index.html").read_text(encoding="utf-8")
+    from harness_docs_site.architecture import MODEL
+
+    import html as _html
+
+    positions = [
+        index.index(f'class="group-title">{_html.escape(g)}<') for g in MODEL.groups
+    ]
+    assert positions == sorted(positions)
 
 
 def test_build_site_copies_assets_and_links_them(tmp_path: Path):
@@ -167,38 +179,32 @@ def test_build_site_output_has_no_external_urls(tmp_path: Path):
             assert "https://" not in text, f"external URL in {path}"
 
 
-def test_embedded_model_json_parses_and_matches_model(tmp_path: Path):
+def test_index_links_only_existing_adr_pages(tmp_path: Path):
+    # The fixture tree has only ADR 0001; the shipped model cites others.
+    # A missing ADR must be silently skipped, never rendered as a dead link.
     _write_fixture_tree(tmp_path)
     build_site(discover_docs(tmp_path), tmp_path, tmp_path / "site")
     index = (tmp_path / "site" / "index.html").read_text(encoding="utf-8")
-    match = re.search(
-        r'<script type="application/json" id="model-data">(.*?)</script>',
-        index,
-        re.DOTALL,
-    )
-    assert match
-    data = json.loads(match.group(1))
-    from harness_docs_site.architecture import MODEL
-
-    assert [p["id"] for p in data["parts"]] == [p.id for p in MODEL.parts]
+    for href in re.findall(r'href="(adr/[^"]+)"', index):
+        assert (tmp_path / "site" / href).parent.name == "adr"
+        assert href == "adr/0001-example-decision.html", href
 
 
-def test_app_css_defines_theme_and_kind_colours(tmp_path: Path):
+def test_app_css_defines_theme_and_port_styles(tmp_path: Path):
     _write_fixture_tree(tmp_path)
     build_site(discover_docs(tmp_path), tmp_path, tmp_path / "site")
     css = (tmp_path / "site" / "assets" / "app.css").read_text(encoding="utf-8")
     assert '[data-theme="light"]' in css
     assert "prefers-reduced-motion" in css
-    for kind in ("port", "driver", "core", "ui", "store"):
-        assert f"--kind-{kind}" in css
+    for selector in ("details.port", "details.driver", ".port-grid", ".group-title"):
+        assert selector in css, selector
 
 
-def test_app_js_reads_embedded_data_and_has_no_external_calls(tmp_path: Path):
+def test_app_js_is_an_enhancement_with_no_external_calls(tmp_path: Path):
     _write_fixture_tree(tmp_path)
     build_site(discover_docs(tmp_path), tmp_path, tmp_path / "site")
     js = (tmp_path / "site" / "assets" / "app.js").read_text(encoding="utf-8")
-    assert "model-data" in js
-    assert "adr-html" in js
+    assert "details.port" in js  # binds to the server-rendered catalogue
     assert "fetch(" not in js  # fully client-side, no network
 
 
@@ -206,12 +212,11 @@ def test_explorer_index_structure_snapshot(tmp_path: Path):
     _write_fixture_tree(tmp_path)
     build_site(discover_docs(tmp_path), tmp_path, tmp_path / "site")
     index = (tmp_path / "site" / "index.html").read_text(encoding="utf-8")
-    # Controls and containers the JS binds to must all be present.
-    for needle in ('id="play"', 'id="step"', 'id="caption"', 'id="drawer"',
-                   'id="token"', 'id="theme-toggle"', 'class="legend"'):
+    # Containers the CSS/JS bind to must all be present.
+    for needle in ('id="theme-toggle"', 'class="ports"', 'class="ports-intro"',
+                   'class="port-grid"', "<details class=\"port\"",
+                   "<details class=\"driver\"", 'class="doc-index"'):
         assert needle in index, needle
-    # Flow order is preserved in the embedded model.
-    data = json.loads(re.search(
-        r'id="model-data">(.*?)</script>', index, re.DOTALL).group(1))
-    assert data["flow"][0]["part_id"] == "task-source"
-    assert data["flow"][-1]["part_id"] == "github-source"
+    # The catalogue renders ports only at the top level — no graph remnants.
+    for gone in ('id="hexmap"', 'id="token"', 'id="play"', 'id="drawer"'):
+        assert gone not in index, gone
