@@ -19,3 +19,10 @@ class TaskControl(ABC):
         dispatcher re-routes it from the start. True when a task by that id was
         found in `failed/` and requeued, False otherwise (unknown id / lost race).
         """
+
+    @abstractmethod
+    def delete(self, task_id: str) -> bool:
+        """Permanently remove a task, wherever it currently sits unclaimed.
+        True when a task by that id was found and removed, False otherwise
+        (unknown id, already deleted, or currently claimed/in-flight).
+        """

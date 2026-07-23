@@ -5,7 +5,7 @@ from fastapi.testclient import TestClient
 from harness.api.app import create_app
 from harness.drivers.memory import FakeClock
 from harness.models import HistoryEntry, Task
-from harness.ports.board import Board, BoardColumn
+from harness.ports.board import Board, BoardColumn, BoardTab
 
 
 def make_task(task_id="tsk_1", **kwargs) -> Task:
@@ -22,9 +22,14 @@ def client() -> TestClient:
     task = make_task(status="plan", repository="app-backend")
     board = Board(
         revision=4,
-        columns=(
-            BoardColumn(name="plan", tasks=(task,)),
-            BoardColumn(name="done", tasks=()),
+        workflows=(
+            BoardTab(
+                name="default",
+                columns=(
+                    BoardColumn(name="plan", tasks=(task,)),
+                    BoardColumn(name="done", tasks=()),
+                ),
+            ),
         ),
     )
     view = FakeBoardView(board, {"tsk_1": task})
@@ -37,8 +42,9 @@ def test_board_endpoint_returns_columns(client):
     assert response.status_code == 200
     payload = response.json()
     assert payload["revision"] == 4
-    assert [column["name"] for column in payload["columns"]] == ["plan", "done"]
-    assert payload["columns"][0]["tasks"][0]["id"] == "tsk_1"
+    columns = payload["workflows"][0]["columns"]
+    assert [column["name"] for column in columns] == ["plan", "done"]
+    assert columns[0]["tasks"][0]["id"] == "tsk_1"
 
 
 def test_task_endpoint_returns_camelcase_task(client):
@@ -68,7 +74,7 @@ def test_task_endpoint_includes_history():
             ),
         ),
     )
-    view = FakeBoardView(Board(revision=1, columns=()), {"tsk_1": task})
+    view = FakeBoardView(Board(revision=1, workflows=()), {"tsk_1": task})
     client = TestClient(create_app(view=view, clock=FakeClock()))
 
     entry = client.get("/api/tasks/tsk_1").json()["history"][0]
