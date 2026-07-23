@@ -220,9 +220,10 @@ def _workflow_editor_context(
     }
 
 
-def _known_targets(view: BoardView) -> list[str]:
-    """Every workflow and step the *running* board knows — the target dropdown's
-    options. Reuses the same `view.snapshot()` source `_new_step_warnings` reads
+def _target_option_groups(view: BoardView) -> tuple[list[str], list[str]]:
+    """The workflow and step names the *running* board knows — the target
+    picker's two suggestion groups (the form filters by the chosen target
+    kind). Reuses the same `view.snapshot()` source `_new_step_warnings` reads
     (invariant #22): the step columns (minus todo/done/failed) plus the workflow
     tab names. `api/` never imports a driver — options flow through BoardView."""
     snapshot = view.snapshot()
@@ -230,7 +231,7 @@ def _known_targets(view: BoardView) -> list[str]:
         column.name for tab in snapshot.workflows for column in tab.columns
     } - {TODO_COLUMN, DONE_COLUMN, FAILED_COLUMN}
     workflows = {tab.name for tab in snapshot.workflows}
-    return sorted(steps | workflows)
+    return sorted(workflows), sorted(steps)
 
 
 def _process_fields_dict(name: str, fields: ProcessFields) -> dict:
@@ -296,7 +297,8 @@ def _process_form_context(
     params_text: str | None,
     check_names: tuple[str, ...],
     sink_kinds: tuple[str, ...],
-    target_options: list[str],
+    workflow_options: list[str],
+    step_options: list[str],
     errors: dict[str, str],
     saved: bool,
 ) -> dict:
@@ -314,7 +316,8 @@ def _process_form_context(
         "dedup": fields.dedup,
         "check_names": list(check_names),
         "sink_kinds": list(sink_kinds),
-        "target_options": target_options,
+        "workflow_options": workflow_options,
+        "step_options": step_options,
         "dedup_options": ["per-interval", "per-state"],
         "errors": errors,
         "saved": saved,
@@ -836,6 +839,7 @@ def build_html_router(
         errors: dict[str, str],
         saved: bool,
     ) -> HTMLResponse:
+        workflow_options, step_options = _target_option_groups(view)
         return TEMPLATES.TemplateResponse(
             request=request,
             name="admin/process_form.html",
@@ -846,7 +850,8 @@ def build_html_router(
                 params_text=params_text,
                 check_names=process_admin.check_names(),
                 sink_kinds=process_admin.sink_kinds(),
-                target_options=_known_targets(view),
+                workflow_options=workflow_options,
+                step_options=step_options,
                 errors=errors,
                 saved=saved,
             ),
@@ -854,10 +859,20 @@ def build_html_router(
 
     @router.get("/admin/processes", response_class=HTMLResponse)
     def list_processes_page(request: Request) -> HTMLResponse:
+        # The list page shows a summary card per process, so it reads each
+        # definition — a file that fails to read (hand-edited into a broken
+        # shape) still gets a card, marked unreadable, instead of vanishing.
+        entries = []
+        for name in process_admin.list():
+            try:
+                fields = process_admin.read(name)
+            except ProcessNotFound:
+                fields = None
+            entries.append({"name": name, "fields": fields})
         return TEMPLATES.TemplateResponse(
             request=request,
             name="admin/processes_list.html",
-            context={"names": process_admin.list()},
+            context={"processes": entries},
         )
 
     # Registered before /admin/processes/{name} — same reason as agents/new.
