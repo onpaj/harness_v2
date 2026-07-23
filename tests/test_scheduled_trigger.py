@@ -167,3 +167,34 @@ def test_rejects_unknown_dedup() -> None:
             workflow="wf",
             dedup="bogus",
         )
+
+
+def test_observation_repository_overrides_trigger_repository() -> None:
+    clock = FakeClock(T0)
+    trigger = ScheduledTrigger(
+        name="multi",
+        clock=clock,
+        interval=3600,
+        check=FakeCheck([Observation(state_key="a", repository="heblo")]),
+        workflow="wf",
+        repository="fallback",
+        dedup="per-state",
+    )
+
+    task = trigger.poll()[0]
+    assert task.repository == "heblo"
+
+
+def test_task_repository_falls_back_to_trigger_when_observation_has_none() -> None:
+    clock = FakeClock(T0)
+    trigger = ScheduledTrigger(
+        name="single",
+        clock=clock,
+        interval=3600,
+        check=FakeCheck([Observation()]),
+        workflow="wf",
+        repository="fallback",
+    )
+
+    task = trigger.poll()[0]
+    assert task.repository == "fallback"

@@ -15,6 +15,7 @@ from harness.cli import (
     _allowed_outcomes_for,
     _github_sources,
     _mergeability_sources,
+    _process_sources,
     main,
     serve,
 )
@@ -663,6 +664,92 @@ def test_github_sources_empty_without_token(monkeypatch, tmp_path):
     registry = MemoryRepositoryRegistry({"heblo": Path("/repos/heblo")})
 
     assert _github_sources(_github_args(), tmp_path, registry) == []
+
+
+def _process_args(**overrides):
+    """Minimal namespace `_process_sources` reads (worktree_root + github_label)."""
+    base = dict(worktree_root=None, github_label="harness:todo")
+    base.update(overrides)
+    return argparse.Namespace(**base)
+
+
+def test_process_sources_builds_a_github_issues_process(tmp_path):
+    from harness.drivers.memory import FakeClock
+
+    (tmp_path / "processes").mkdir()
+    (tmp_path / "processes" / "harness-todo.json").write_text(
+        '{"trigger": {"interval": "30s"},'
+        ' "action": {"check": "github-issues", "params": {"label": "harness:todo"}},'
+        ' "target": {"workflow": "default"}, "dedup": "per-state",'
+        ' "sink": {"kind": "none"}}'
+    )
+    registry = MemoryRepositoryRegistry({"heblo": Path("/repos/heblo")})
+
+    sources = _process_sources(
+        _process_args(),
+        tmp_path,
+        registry,
+        clock=FakeClock("2026-07-22T10:00:00Z"),
+        known_targets={"default"},
+        client=FakeGithubClient(),
+    )
+
+    assert len(sources) == 1
+    assert sources[0].kind == "scheduled:harness-todo"
+
+
+def test_process_sources_github_issues_fails_fast_without_a_client(tmp_path, monkeypatch):
+    from harness.drivers.fs_processes import ProcessValidationError
+    from harness.drivers.memory import FakeClock
+
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    (tmp_path / "processes").mkdir()
+    (tmp_path / "processes" / "harness-todo.json").write_text(
+        '{"trigger": {"interval": "30s"},'
+        ' "action": {"check": "github-issues"},'
+        ' "target": {"workflow": "default"}}'
+    )
+    registry = MemoryRepositoryRegistry({"heblo": Path("/repos/heblo")})
+
+    with pytest.raises(ProcessValidationError) as exc:
+        _process_sources(
+            _process_args(),
+            tmp_path,
+            registry,
+            clock=FakeClock("2026-07-22T10:00:00Z"),
+            known_targets={"default"},
+            client=None,
+        )
+    assert "GITHUB_TOKEN" in str(exc.value)
+
+
+def test_run_has_a_no_github_source_flag_defaulting_off():
+    parser = _build_run_parser_namespace()
+    assert parser.no_github_source is False
+
+
+def _build_run_parser_namespace():
+    return _parse_run(["run"])
+
+
+def _parse_run(argv):
+    """Parse an argv through the real `main` parser and return the Namespace,
+    intercepting before the handler runs."""
+    import harness.cli as cli
+
+    captured = {}
+
+    def fake_run(args):
+        captured["args"] = args
+        return 0
+
+    orig = cli._run
+    cli._run = fake_run  # the run handler
+    try:
+        cli.main(argv)
+    finally:
+        cli._run = orig
+    return captured["args"]
 
 
 def test_run_resolves_default_workflow_when_omitted(tmp_path, monkeypatch):

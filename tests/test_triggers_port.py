@@ -32,3 +32,4 @@ def test_observation_defaults() -> None:
     obs = Observation()
     assert obs.state_key is None
     assert obs.data == {}
+    assert obs.repository is None
