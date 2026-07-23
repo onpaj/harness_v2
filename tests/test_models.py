@@ -216,6 +216,32 @@ def test_workflow_max_parallel_for_reads_configured_limit():
     assert workflow.max_parallel_for("plan") == 1
 
 
+def test_workflow_finisher_for_defaults_to_none():
+    workflow = Workflow(
+        name="default",
+        start="plan",
+        transitions=(Transition(from_step="plan", on="done", to_step=END),),
+    )
+
+    assert workflow.finisher_for("plan") is None
+    assert workflow.finisher_for("unknown") is None
+
+
+def test_workflow_finisher_for_reads_configured_kind():
+    workflow = Workflow(
+        name="default",
+        start="plan",
+        transitions=(
+            Transition(from_step="plan", on="done", to_step="publish"),
+            Transition(from_step="publish", on="done", to_step=END),
+        ),
+        finishers={"publish": "open-pr"},
+    )
+
+    assert workflow.finisher_for("publish") == "open-pr"
+    assert workflow.finisher_for("plan") is None
+
+
 def test_outcome_values():
     assert Outcome.DONE.value == "done"
     assert Outcome.REQUEST_CHANGES.value == "request_changes"

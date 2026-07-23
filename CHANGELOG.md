@@ -1,6 +1,114 @@
 # CHANGELOG
 
 
+## v0.14.0 (2026-07-23)
+
+### Documentation
+
+- Spec for the github-conflicts action (resolver as a Process)
+  ([`771bba4`](https://github.com/onpaj/harness_v2/commit/771bba453a49f0b5680eacba902921c7bc451c46))
+
+- Validate the composable-process vision against the code
+  ([#87](https://github.com/onpaj/harness_v2/pull/87),
+  [`9ce676c`](https://github.com/onpaj/harness_v2/commit/9ce676cd95ba35589e04c42c2531ee92c8a348c1))
+
+### Features
+
+- Github-conflicts action — conflict detection as a Process check
+  ([`10df67b`](https://github.com/onpaj/harness_v2/commit/10df67bc83c165cbf78e76bfc29bebf07ae4fac9))
+
+A `GithubConflictsCheck` (sibling of `GithubIssuesCheck`) lists harness-authored open PRs across the
+  registry, auto-updates `behind` ones server-side, and emits one resolver task per `dirty` PR
+  carrying `data.branch`/`data.source.base`. Registered as the `github-conflicts` action in
+  `cli._process_sources`, so the resolver's conflict detection becomes an authorable Process instead
+  of the bespoke `GithubMergeabilityWatcher`. Dedup is per-state on `slug:pr:head_sha`.
+
+- Serve the resolver workflow whenever its definition exists
+  ([`a5cd377`](https://github.com/onpaj/harness_v2/commit/a5cd3774f2f83ddf783f98097c87ca7c40d70012))
+
+Decouple serving `resolver` from the `--watch-mergeability` flag: it rides alongside the primary
+  workflow whenever `workflows/resolver.json` exists. A `github-conflicts` process targets the
+  resolver workflow, and a process whose target is not served fails to compile — so the
+  process-based detection path needs the resolver served independently of the watcher. Existing
+  served-set tests updated to the new contract (the scaffolded resolver is always served).
+
+
+## v0.13.0 (2026-07-23)
+
+### Features
+
+- Github-issues action — the harness:todo trigger as a Process
+  ([#79](https://github.com/onpaj/harness_v2/pull/79),
+  [`e181607`](https://github.com/onpaj/harness_v2/commit/e181607e4e89aa7300c60281041b987fca50b474))
+
+
+## v0.12.0 (2026-07-22)
+
+### Documentation
+
+- Spec, plan and ADR-0015 for the Process authoring aggregate
+  ([#77](https://github.com/onpaj/harness_v2/pull/77),
+  [`ebaa9b5`](https://github.com/onpaj/harness_v2/commit/ebaa9b500f54eee11df2059ce230070054e9acd4))
+
+### Features
+
+- Structured board editor for processes (ProcessAdmin UI)
+  ([#78](https://github.com/onpaj/harness_v2/pull/78),
+  [`a550521`](https://github.com/onpaj/harness_v2/commit/a5505212d049dc9eb9099748be2852ce93430dfa))
+
+
+## v0.11.0 (2026-07-22)
+
+### Features
+
+- **agents**: Default step models from v1 personas
+  ([#74](https://github.com/onpaj/harness_v2/pull/74),
+  [`f91fb05`](https://github.com/onpaj/harness_v2/commit/f91fb057c566a79efa427a530c6322bac45c0e88))
+
+The default agent personas were carried over from harness v1 but their model was left null, so every
+  step ran on the CLI's configured default. v1 assigned each persona a model tier; restore that
+  mapping per step, written as a CLI alias so it tracks the latest of the tier instead of pinning a
+  now-retired id:
+
+plan, architecture -> opus (v1 analyst/planner, architect) design, development -> sonnet (v1
+  designer, developer) review -> sonnet (v1 code-reviewer, the full-diff review) resolve -> sonnet
+  (developer-class conflict fix) healer -> opus (conservative diagnosis)
+
+A step with no mapping still gets model null. The operator can pin an exact id in agents/<step>.json
+  as before.
+
+Claude-Session: https://claude.ai/code/session_01XzKK1gNSuT8bYBStRkCJQL
+
+Co-authored-by: Claude <noreply@anthropic.com>
+
+
+## v0.10.1 (2026-07-22)
+
+### Bug Fixes
+
+- Correct black-on-dark task-detail text in dark mode
+  ([#72](https://github.com/onpaj/harness_v2/pull/72),
+  [`4195c5b`](https://github.com/onpaj/harness_v2/commit/4195c5b2fe9825d0967c98fe8198b9213e4ae116))
+
+The task-detail sheet renders inside a <dialog>, whose UA rule `color: CanvasText` overrides
+  inherited color. With no `color-scheme` declared, CanvasText resolved to its light value (black)
+  even in dark mode, so the .kv values rendered black-on-dark (the keys stayed visible because they
+  set an explicit color).
+
+Declare `color-scheme: light dark` on :root so system colors track the theme, and set an explicit
+  `color: var(--text)` on .task-detail so the detail content never depends on system colors.
+
+Claude-Session: https://claude.ai/code/session_0168J1hKcrtu7JKdNJ3Y3Jeb
+
+Co-authored-by: Claude <noreply@anthropic.com>
+
+### Documentation
+
+- Document self-healing (the healer on the failed queue) in the README
+  ([#68](https://github.com/onpaj/harness_v2/pull/68),
+  [`d76a170`](https://github.com/onpaj/harness_v2/commit/d76a17080dd92a1176ccdc3e06b264463613fae6))
+
+
 ## v0.10.0 (2026-07-22)
 
 ### Documentation

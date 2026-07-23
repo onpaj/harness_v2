@@ -33,6 +33,12 @@ from harness.ports.board import (
 from harness.ports.clock import Clock
 from harness.ports.control import TaskControl
 from harness.ports.logs import StageOutputView
+from harness.ports.process_admin import (
+    ProcessAdmin,
+    ProcessAdminValidationError,
+    ProcessFields,
+    ProcessNotFound,
+)
 from harness.ports.updater import Updater, UpdateError
 from harness.ports.workflow_admin import WorkflowAdmin, WorkflowValidationError
 from harness.ports.workflows import WorkflowNotFound
@@ -214,11 +220,118 @@ def _workflow_editor_context(
     }
 
 
+def _known_targets(view: BoardView) -> list[str]:
+    """Every workflow and step the *running* board knows — the target dropdown's
+    options. Reuses the same `view.snapshot()` source `_new_step_warnings` reads
+    (invariant #22): the step columns (minus todo/done/failed) plus the workflow
+    tab names. `api/` never imports a driver — options flow through BoardView."""
+    snapshot = view.snapshot()
+    steps = {
+        column.name for tab in snapshot.workflows for column in tab.columns
+    } - {TODO_COLUMN, DONE_COLUMN, FAILED_COLUMN}
+    workflows = {tab.name for tab in snapshot.workflows}
+    return sorted(steps | workflows)
+
+
+def _process_fields_dict(name: str, fields: ProcessFields) -> dict:
+    return {
+        "name": name,
+        "interval": fields.interval,
+        "check": fields.check,
+        "target_kind": fields.target_kind,
+        "target": fields.target,
+        "params": dict(fields.params),
+        "sink_kind": fields.sink_kind,
+        "dedup": fields.dedup,
+    }
+
+
+def _process_fields_from(payload: dict) -> ProcessFields:
+    return ProcessFields(
+        interval=(payload.get("interval") or "").strip(),
+        check=(payload.get("check") or "").strip(),
+        target_kind=(payload.get("target_kind") or "workflow").strip(),
+        target=(payload.get("target") or "").strip(),
+        params=payload.get("params") or {},
+        sink_kind=(payload.get("sink_kind") or "none").strip(),
+        dedup=(payload.get("dedup") or "per-interval").strip(),
+    )
+
+
+def _process_fields_from_form(form) -> ProcessFields:
+    """Build `ProcessFields` from the submitted form, parsing the `params` JSON
+    textarea (empty → `{}`). A syntactically invalid or non-object params box is
+    a `ProcessAdminValidationError({"params": ...})`, surfaced on the form the
+    same way a compile failure is."""
+    params_text = (form.get("params") or "").strip()
+    if not params_text:
+        params: dict = {}
+    else:
+        try:
+            params = json.loads(params_text)
+        except json.JSONDecodeError as error:
+            raise ProcessAdminValidationError(
+                {"params": f"params must be valid JSON: {error}"}
+            ) from None
+        if not isinstance(params, dict):
+            raise ProcessAdminValidationError(
+                {"params": "params must be a JSON object"}
+            )
+    return ProcessFields(
+        interval=(form.get("interval") or "").strip(),
+        check=(form.get("check") or "").strip(),
+        target_kind=(form.get("target_kind") or "workflow").strip(),
+        target=(form.get("target") or "").strip(),
+        params=params,
+        sink_kind=(form.get("sink_kind") or "none").strip(),
+        dedup=(form.get("dedup") or "per-interval").strip(),
+    )
+
+
+def _process_form_context(
+    *,
+    name: str,
+    is_new: bool,
+    fields: ProcessFields,
+    params_text: str | None,
+    check_names: tuple[str, ...],
+    sink_kinds: tuple[str, ...],
+    target_options: list[str],
+    errors: dict[str, str],
+    saved: bool,
+) -> dict:
+    if params_text is None:
+        params_text = json.dumps(fields.params, indent=2) if fields.params else ""
+    return {
+        "name": name,
+        "is_new": is_new,
+        "interval": fields.interval,
+        "check": fields.check,
+        "target_kind": fields.target_kind,
+        "target": fields.target,
+        "params": params_text,
+        "sink_kind": fields.sink_kind,
+        "dedup": fields.dedup,
+        "check_names": list(check_names),
+        "sink_kinds": list(sink_kinds),
+        "target_options": target_options,
+        "dedup_options": ["per-interval", "per-state"],
+        "errors": errors,
+        "saved": saved,
+    }
+
+
+_NEW_PROCESS_FIELDS = ProcessFields(
+    interval="", check="always", target_kind="workflow", target=""
+)
+
+
 def build_json_router(
     view: BoardView,
     artifacts: ArtifactView,
     agent_admin: AgentAdmin,
     workflow_admin: WorkflowAdmin,
+    process_admin: ProcessAdmin,
     version: str,
     build_time: str | None,
 ) -> APIRouter:
@@ -319,6 +432,36 @@ def build_json_router(
             )
         return Response(status_code=204)
 
+    @router.get("/processes")
+    def list_processes() -> dict:
+        return {"processes": list(process_admin.list())}
+
+    @router.get("/processes/{name}")
+    def get_process(name: str) -> dict:
+        try:
+            fields = process_admin.read(name)
+        except ProcessNotFound as error:
+            raise HTTPException(status_code=404, detail=str(error)) from None
+        return _process_fields_dict(name, fields)
+
+    @router.put("/processes/{name}")
+    async def put_process(name: str, request: Request) -> JSONResponse:
+        payload = await request.json()
+        fields = _process_fields_from(payload)
+        try:
+            written = process_admin.write(name, fields)
+        except ProcessAdminValidationError as error:
+            return JSONResponse(status_code=422, content={"errors": error.errors})
+        return JSONResponse(content=_process_fields_dict(name, written))
+
+    @router.delete("/processes/{name}", status_code=204)
+    def delete_process(name: str) -> Response:
+        if not process_admin.delete(name):
+            raise HTTPException(
+                status_code=404, detail=f"process {name!r} does not exist"
+            )
+        return Response(status_code=204)
+
     return router
 
 
@@ -331,6 +474,7 @@ def build_html_router(
     coalesce_seconds: float,
     agent_admin: AgentAdmin,
     workflow_admin: WorkflowAdmin,
+    process_admin: ProcessAdmin,
     updater: Updater,
     version: str,
     build_time: str | None,
@@ -670,5 +814,157 @@ def build_html_router(
     def delete_workflow_page(name: str) -> RedirectResponse:
         workflow_admin.delete(name)
         return RedirectResponse(url="/admin/workflows", status_code=303)
+
+    # --- Processes admin -----------------------------------------------------
+
+    def _process_form_response(
+        request: Request,
+        *,
+        name: str,
+        is_new: bool,
+        fields: ProcessFields,
+        params_text: str | None,
+        errors: dict[str, str],
+        saved: bool,
+    ) -> HTMLResponse:
+        return TEMPLATES.TemplateResponse(
+            request=request,
+            name="admin/process_form.html",
+            context=_process_form_context(
+                name=name,
+                is_new=is_new,
+                fields=fields,
+                params_text=params_text,
+                check_names=process_admin.check_names(),
+                sink_kinds=process_admin.sink_kinds(),
+                target_options=_known_targets(view),
+                errors=errors,
+                saved=saved,
+            ),
+        )
+
+    @router.get("/admin/processes", response_class=HTMLResponse)
+    def list_processes_page(request: Request) -> HTMLResponse:
+        return TEMPLATES.TemplateResponse(
+            request=request,
+            name="admin/processes_list.html",
+            context={"names": process_admin.list()},
+        )
+
+    # Registered before /admin/processes/{name} — same reason as agents/new.
+    @router.get("/admin/processes/new", response_class=HTMLResponse)
+    def new_process_page(request: Request) -> HTMLResponse:
+        return _process_form_response(
+            request,
+            name="",
+            is_new=True,
+            fields=_NEW_PROCESS_FIELDS,
+            params_text="",
+            errors={},
+            saved=False,
+        )
+
+    @router.get("/admin/processes/{name}", response_class=HTMLResponse)
+    def edit_process_page(request: Request, name: str) -> HTMLResponse:
+        try:
+            fields = process_admin.read(name)
+        except ProcessNotFound as error:
+            raise HTTPException(status_code=404, detail=str(error)) from None
+        return _process_form_response(
+            request,
+            name=name,
+            is_new=False,
+            fields=fields,
+            params_text=None,
+            errors={},
+            saved=False,
+        )
+
+    @router.post("/admin/processes", response_class=HTMLResponse)
+    async def create_process_page(request: Request) -> HTMLResponse:
+        form = await request.form()
+        name = (form.get("name") or "").strip()
+        errors: dict[str, str] = {}
+        try:
+            fields = _process_fields_from_form(form)
+        except ProcessAdminValidationError as error:
+            # An unparseable params box — keep the raw text the operator typed.
+            fields = _process_fields_from(
+                {key: form.get(key) for key in form.keys()}
+            )
+            if not name:
+                errors["name"] = "name is required"
+            errors.update(error.errors)
+            return _process_form_response(
+                request,
+                name=name,
+                is_new=True,
+                fields=fields,
+                params_text=(form.get("params") or ""),
+                errors=errors,
+                saved=False,
+            )
+        if not name:
+            errors["name"] = "name is required"
+        elif name in process_admin.list():
+            errors["name"] = f"a process named {name!r} already exists"
+        if not errors:
+            try:
+                written = process_admin.write(name, fields)
+            except ProcessAdminValidationError as error:
+                errors = error.errors
+        if errors:
+            return _process_form_response(
+                request,
+                name=name,
+                is_new=True,
+                fields=fields,
+                params_text=(form.get("params") or ""),
+                errors=errors,
+                saved=False,
+            )
+        return _process_form_response(
+            request,
+            name=name,
+            is_new=False,
+            fields=written,
+            params_text=None,
+            errors={},
+            saved=True,
+        )
+
+    @router.post("/admin/processes/{name}", response_class=HTMLResponse)
+    async def update_process_page(request: Request, name: str) -> HTMLResponse:
+        form = await request.form()
+        try:
+            fields = _process_fields_from_form(form)
+            written = process_admin.write(name, fields)
+        except ProcessAdminValidationError as error:
+            fields = _process_fields_from(
+                {key: form.get(key) for key in form.keys()}
+            )
+            return _process_form_response(
+                request,
+                name=name,
+                is_new=False,
+                fields=fields,
+                params_text=(form.get("params") or ""),
+                errors=error.errors,
+                saved=False,
+            )
+        return _process_form_response(
+            request,
+            name=name,
+            is_new=False,
+            fields=written,
+            params_text=None,
+            errors={},
+            saved=True,
+        )
+
+    @router.post("/admin/processes/{name}/delete")
+    def delete_process_page(name: str) -> RedirectResponse:
+        process_admin.delete(name)
+        return RedirectResponse(url="/admin/processes", status_code=303)
 
     return router

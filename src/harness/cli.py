@@ -21,6 +21,7 @@ from harness.app import LANDING_STEP, HarnessLayout, HealConfig, build
 from harness.drivers.claude_cli import ClaudeCliRunner
 from harness.drivers.fake_forge import FakeForge
 from harness.drivers.fs_agents import FilesystemAgentAdmin, FilesystemAgentCatalog
+from harness.drivers.fs_processes import FilesystemProcessAdmin
 from harness.drivers.github_issues import GithubIssueTracker
 from harness.drivers.memory import MemoryIssueTracker
 from harness.drivers.fs_repos import FilesystemRepositoryRegistry
@@ -36,8 +37,9 @@ from harness.drivers.github_client import GithubClient, HttpGithubClient
 from harness.drivers.github_forge import GithubForge
 from harness.drivers.github_issue_checker import GithubIssueChecker
 from harness.drivers.github_merge_checker import GithubMergeChecker
-from harness.drivers.github_source import GithubTaskSource
+from harness.drivers.github_source import GithubLabelReflector, GithubTaskSource
 from harness.drivers.mergeability_watcher import GithubMergeabilityWatcher
+from harness.drivers.slack_sink import SlackWebhookSink
 from harness.drivers.uv_updater import UvUpdater
 from harness.drivers.launchd import (
     DEFAULT_LABEL,
@@ -132,6 +134,7 @@ def _init(args: argparse.Namespace) -> int:
 
     layout.agents.mkdir(parents=True, exist_ok=True)
     (root / "triggers").mkdir(parents=True, exist_ok=True)
+    (root / "processes").mkdir(parents=True, exist_ok=True)
     _write_default_repos(layout)
 
     if args.no_workflow:
@@ -184,8 +187,10 @@ def _init(args: argparse.Namespace) -> int:
 # artifacts of previous steps, where to write output, and how to close with a
 # verdict block is supplied at runtime by `compose_prompt`, so we don't repeat
 # it here. The persona is data (invariant 14): a step → (prompt, tools) map, not
-# a branch in code. We leave the model at `null` — it's per queue (invariant),
-# and the operator tunes the default in `agents/<step>.json`.
+# a branch in code. The model is per queue (invariant): each step gets the tier
+# its v1 persona ran on (see `AGENT_MODELS`), written as an alias so it tracks
+# the latest of that tier; the operator can still pin an exact id in
+# `agents/<step>.json`.
 #
 #   plan          ← v1 analyst + planner (first step: brief → spec + rough plan)
 #   design        ← v1 designer
@@ -312,6 +317,12 @@ _REVIEW_PERSONA = (
     "requirements?\n"
     "- Adherence to the architecture — does it follow the proposed patterns "
     "and structure?\n"
+    "- Plan conformance — does the implementation follow the agreed plan "
+    "(`docs/superpowers/plans/…` or the task's own `plan-*.md` artifact) "
+    "without silently skipping or reinterpreting planned steps?\n"
+    "- ADR / invariant conformance — read the ADRs in `docs/adr/` relevant to "
+    "the files you're reviewing (and the matching entries in CLAUDE.md's "
+    "\"Invariants — do not break\" list) and verify none is violated.\n"
     "- Completeness — are the acceptance criteria met and the required tests "
     "written?\n"
     "- Correctness — obvious logic errors, missing error handling, security or "
@@ -320,10 +331,15 @@ _REVIEW_PERSONA = (
     "- a functional requirement from the spec is not met,\n"
     "- the implementation conflicts with the architecture,\n"
     "- tests that were explicitly required are missing,\n"
-    "- there is a clear correctness bug.\n"
-    "In that case, write in the summary — specifically and actionably — what's "
-    "wrong and what to fix; the development step will go into another round "
-    "based on it.\n\n"
+    "- there is a clear correctness bug,\n"
+    "- the implementation deviates from the plan without justification, or\n"
+    "- the implementation violates an ADR or a documented invariant from "
+    "CLAUDE.md.\n"
+    "In that case, write in the summary — specifically and actionably — "
+    "what's wrong and what to fix, naming the concrete artifact that's out "
+    "of alignment (the spec requirement, the plan step, or the ADR number / "
+    "invariant) rather than describing the symptom alone; the development "
+    "step will go into another round based on it.\n\n"
     "Don't return `request_changes` over stylistic nitpicks, subjective "
     "preferences, out-of-scope improvements, or missing documentation. When "
     "the implementation is sound, return `done` (optionally with non-binding "
@@ -381,6 +397,32 @@ AGENT_PERSONAS: dict[str, tuple[str, list[str]]] = {
 }
 
 
+# Step → model tier, carried over from the v1 personas (repo onpaj/harness,
+# agentharness/data/agents/). v1 pinned exact ids per persona; we keep the same
+# tier per step but write it as a CLI alias so it resolves to the latest of that
+# tier and doesn't rot to a retired version:
+#   plan          ← analyst + planner (opus)
+#   design        ← designer (sonnet)
+#   architecture  ← architect (opus)
+#   development    ← developer (sonnet)
+#   review        ← code-reviewer, the full-diff reviewer (sonnet)
+#   resolve       ← developer-class conflict fix (sonnet)
+# A step with no entry keeps `model = null` (the CLI's configured default).
+AGENT_MODELS: dict[str, str] = {
+    "plan": "opus",
+    "design": "sonnet",
+    "architecture": "opus",
+    "development": "sonnet",
+    "review": "sonnet",
+    "resolve": "sonnet",
+}
+
+
+def _agent_model(step: str) -> str | None:
+    """Default model tier for the step; an unknown step gets none (`null`)."""
+    return AGENT_MODELS.get(step)
+
+
 def _agent_persona(step: str) -> str:
     """Step persona. Known steps have a persona carried over from v1; an unknown
     step gets a generic instruction (the rest of the boilerplate is supplied by
@@ -420,7 +462,7 @@ def _write_default_agents(layout: HarnessLayout, workflow) -> None:
             continue
         definition = {
             "prompt": _agent_persona(step),
-            "model": None,
+            "model": _agent_model(step),
             "fallback_model": None,
             "allowed_tools": _agent_tools(step),
             "allowed_outcomes": _allowed_outcomes_for(workflow, step),
@@ -441,7 +483,8 @@ def _write_healer_agent(layout: HarnessLayout) -> None:
         return
     definition = {
         "prompt": _HEALER_PERSONA,
-        "model": None,
+        # Diagnosis is conservative-judgment work (v1's analyst/architect tier).
+        "model": "opus",
         "fallback_model": None,
         "allowed_tools": ["Read", "Write"],
         "allowed_outcomes": ["done", "request_changes"],
@@ -543,6 +586,42 @@ def _github_sources(
     return sources
 
 
+def _github_reflectors(
+    args: argparse.Namespace,
+    root: Path,
+    registry: RepositoryRegistry,
+    *,
+    slug_of=github_slug,
+    client: GithubClient | None = None,
+) -> list[TaskSource]:
+    """One `GithubLabelReflector` per repo in `repos.json` that has a GitHub
+    origin — the outbound half of GitHub reflection, registered whenever
+    classic ingestion (`GithubTaskSource`) is *not* also registered for that
+    repo (`_run` gates both on `--no-github-source`), so exactly one
+    reflecting source per repo ever exists — never doubled label calls.
+    Mirrors `_github_sources`'s enumeration exactly: no token (and no injected
+    client) → no sources, a repo with no GitHub origin is skipped."""
+    if client is None:
+        token = os.environ.get("GITHUB_TOKEN")
+        if not token:
+            return []
+        client = HttpGithubClient(token)
+
+    sources: list[TaskSource] = []
+    for name in registry.names():
+        slug = slug_of(registry.resolve(name))
+        if slug is None:
+            continue  # already warned about by _github_sources for the same repo
+        sources.append(
+            GithubLabelReflector(
+                client=client,
+                repo=slug,
+                step_labels=DEFAULT_STEP_LABELS,
+            )
+        )
+    return sources
+
+
 def _mergeability_sources(
     args: argparse.Namespace,
     root: Path,
@@ -605,6 +684,96 @@ def _scheduled_sources(
         worktree_root=worktree_root,
         known_targets=known_targets,
     )
+
+
+def _process_sources(
+    args: argparse.Namespace,
+    root: Path,
+    registry: RepositoryRegistry,
+    *,
+    clock: Clock,
+    known_targets: set[str] | None,
+    client: GithubClient | None = None,
+) -> list[TaskSource]:
+    """Processes declared under `<root>/processes/*.json`.
+
+    Compiles each into a `ScheduledTrigger` (see `_scheduled_sources`), and
+    additionally registers the `github-issues` action: a `GithubIssuesCheck`
+    closed over a `GithubClient` + the repo registry. The client comes from the
+    caller (tests) or `GITHUB_TOKEN`. `BUILTIN_CHECKS` stays client-free; the
+    github-issues factory is added only here at wiring time. A `github-issues`
+    process without a client fails fast at build (`ProcessValidationError`)."""
+    from harness.drivers.checks import BUILTIN_CHECKS
+    from harness.drivers.fs_processes import (
+        FilesystemProcessRepository,
+        ProcessValidationError,
+    )
+    from harness.drivers.github_conflicts_check import GithubConflictsCheck
+    from harness.drivers.github_issues_check import GithubIssuesCheck
+
+    if client is None:
+        token = os.environ.get("GITHUB_TOKEN")
+        client = HttpGithubClient(token) if token else None
+
+    def github_issues_factory(params: dict) -> GithubIssuesCheck:
+        if client is None:
+            raise ProcessValidationError(
+                "github-issues action requires GITHUB_TOKEN", field="check"
+            )
+        return GithubIssuesCheck(
+            client=client,
+            registry=registry,
+            label=params.get("label", args.github_label),
+        )
+
+    def github_conflicts_factory(params: dict) -> GithubConflictsCheck:
+        if client is None:
+            raise ProcessValidationError(
+                "github-conflicts action requires GITHUB_TOKEN", field="check"
+            )
+        return GithubConflictsCheck(
+            client=client,
+            registry=registry,
+            head_prefix=params.get("head_prefix", "harness/"),
+        )
+
+    checks = {
+        **BUILTIN_CHECKS,
+        "github-issues": github_issues_factory,
+        "github-conflicts": github_conflicts_factory,
+    }
+    repo = FilesystemProcessRepository(root / "processes")
+    worktree_root = args.worktree_root or str(root / "worktrees")
+    return repo.build(
+        clock=clock,
+        checks=checks,
+        repository=None,
+        worktree_root=worktree_root,
+        known_targets=known_targets,
+    )
+
+
+def _slack_sinks(process_sources: list[TaskSource]) -> list[TaskSource]:
+    """One `SlackWebhookSink` when `SLACK_WEBHOOK_URL` is set — the outbound
+    destination for any process-born task stamped `data.sink == {"kind":
+    "slack"}`. The webhook URL is a secret and comes only from the environment
+    (the service holds no secret — it never enters a JSON file). A process
+    declaring a slack sink with the variable missing gets a warning and the
+    sink is simply inert — never fatal: the harness keeps running, the
+    reflection is skipped."""
+    webhook_url = os.environ.get("SLACK_WEBHOOK_URL")
+    if webhook_url:
+        return [SlackWebhookSink(webhook_url=webhook_url)]
+    if any(
+        (getattr(source, "sink", None) or {}).get("kind") == "slack"
+        for source in process_sources
+    ):
+        print(
+            "warning: a process declares a slack sink but SLACK_WEBHOOK_URL "
+            "is not set, slack reflection is disabled",
+            file=sys.stderr,
+        )
+    return []
 
 
 def service_path_entries(harness: Path) -> list[str]:
@@ -1292,12 +1461,21 @@ def _run(args: argparse.Namespace) -> int:
     artifact_view = WorktreeArtifactView(layout.worktrees)
     forge = _build_forge(args.forge, root, registry)
     mergeability = _mergeability_sources(args, root, registry) if args.watch_mergeability else []
-    sources = _github_sources(args, root, registry) + mergeability
+    github = [] if args.no_github_source else _github_sources(args, root, registry)
+    # The outbound reflector is registered only when classic ingestion is off
+    # (`--no-github-source`) — never alongside `GithubTaskSource` for the same
+    # repo, which already reflects via its own composed reflector.
+    reflectors = _github_reflectors(args, root, registry) if args.no_github_source else []
+    sources = github + reflectors + mergeability
     merge_checker = _build_merge_checker(args)
     issue_checker = _build_issue_checker(args)
-    # The resolver workflow rides alongside the primary one so its tasks (queued
-    # by the mergeability watcher) get their own step queues and board columns.
-    if mergeability and args.resolver_workflow not in served_names:
+    # The resolver workflow rides alongside the primary one so its tasks — queued
+    # by the mergeability watcher *or* the `github-conflicts` process — get their
+    # own step queues and board columns. Served whenever its definition exists,
+    # decoupled from the watcher flag: a process-only detection path still needs a
+    # served target (a process targeting an unserved workflow fails to compile).
+    resolver_defined = (layout.workflows / f"{args.resolver_workflow}.json").is_file()
+    if resolver_defined and args.resolver_workflow not in served_names:
         served_names = [*served_names, args.resolver_workflow]
 
     # Scheduled triggers (`triggers/*.json`) are `TaskSource`s that ride the
@@ -1317,6 +1495,15 @@ def _run(args: argparse.Namespace) -> int:
     sources = sources + _scheduled_sources(
         args, root, registry, clock=SystemClock(), known_targets=known_targets
     )
+    # Processes (`processes/*.json`) are the top-level authoring aggregate; each
+    # compiles to a `ScheduledTrigger` that rides the same `sources` list —
+    # no new loop, no `build()` parameter (invariant #39). A slack sink rides
+    # alongside them when `SLACK_WEBHOOK_URL` is set — the outbound half of a
+    # process declaring `{"kind": "slack"}` (invariant #40).
+    process_sources = _process_sources(
+        args, root, registry, clock=SystemClock(), known_targets=known_targets
+    )
+    sources = sources + process_sources + _slack_sinks(process_sources)
 
     # Self-healing: an agent assigned to the `failed/` queue. Enabled by
     # `--heal-repo <owner/repo>` (where the healer opens issues). It reuses the
@@ -1417,6 +1604,7 @@ async def serve(
         clock=SystemClock(),
         agent_admin=FilesystemAgentAdmin(harness.layout.agents),
         workflow_admin=FilesystemWorkflowAdmin(harness.layout.workflows),
+        process_admin=FilesystemProcessAdmin(harness.layout.processes),
         updater=updater,
         version=version_string(),
         build_time=build_timestamp(),
@@ -1525,6 +1713,13 @@ def main(argv: list[str] | None = None) -> int:
         "--github-label",
         default="harness:todo",
         help="label that selects issues to ingest",
+    )
+    run.add_argument(
+        "--no-github-source",
+        action="store_true",
+        dest="no_github_source",
+        help="skip the built-in GithubTaskSource ingestion (use when a "
+        "github-issues process owns it) — avoids double-claiming the same issue",
     )
     github_target = run.add_mutually_exclusive_group()
     github_target.add_argument(

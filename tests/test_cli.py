@@ -8,12 +8,16 @@ import pytest
 
 from harness.app import HarnessLayout
 from harness.cli import (
+    AGENT_PERSONAS,
     DEFAULT_DEFINITION,
     DEFAULT_WORKFLOW,
     _REVIEW_PERSONA,
     _allowed_outcomes_for,
+    _github_reflectors,
     _github_sources,
     _mergeability_sources,
+    _process_sources,
+    _slack_sinks,
     main,
     serve,
 )
@@ -219,6 +223,34 @@ def test_review_allowed_outcomes_unaffected_by_sync_instructions():
     assert _allowed_outcomes_for(workflow, "review") == ["done", "request_changes"]
 
 
+def test_review_persona_checks_plan_and_adr_conformance():
+    check_index = _REVIEW_PERSONA.index("Check:")
+    verdict_index = _REVIEW_PERSONA.index("Return the verdict")
+    in_time_index = _REVIEW_PERSONA.index("In that case")
+
+    check_section = _REVIEW_PERSONA[check_index:verdict_index]
+    assert "docs/adr" in check_section
+    assert "docs/superpowers/plans" in check_section
+
+    request_changes_section = _REVIEW_PERSONA[verdict_index:in_time_index]
+    assert "deviates from the plan" in request_changes_section
+    assert "violates an ADR" in request_changes_section
+
+    assert "naming the concrete artifact" in _REVIEW_PERSONA[in_time_index:]
+
+
+def test_review_persona_tool_list_and_outcomes_unchanged_by_plan_adr_instructions():
+    workflow = Workflow(
+        name=DEFAULT_DEFINITION["name"],
+        start=DEFAULT_DEFINITION["start"],
+        transitions=tuple(
+            Transition(from_step=t["from"], on=t["on"], to_step=t["to"]) for t in DEFAULT_DEFINITION["transitions"]
+        ),
+    )
+    assert _allowed_outcomes_for(workflow, "review") == ["done", "request_changes"]
+    assert AGENT_PERSONAS["review"][1] == ["Read", "Grep", "Glob", "Bash"]
+
+
 def test_submit_writes_a_task(tmp_path, capsys):
     main(["init", "--root", str(tmp_path)])
 
@@ -327,6 +359,21 @@ def test_init_no_workflow_writes_no_default_workflow(tmp_path, capsys):
     assert (tmp_path / "repos.json").exists()
 
 
+def test_init_creates_processes_directory(tmp_path):
+    """`harness init` writes an empty processes/ next to agents/ and triggers/;
+    building over it yields no sources, so the harness runs exactly as today."""
+    from harness.drivers.fs_processes import FilesystemProcessRepository
+    from harness.drivers.system_clock import SystemClock
+
+    assert main(["init", "--root", str(tmp_path)]) == 0
+
+    assert (tmp_path / "processes").is_dir()
+    built = FilesystemProcessRepository(tmp_path / "processes").build(
+        clock=SystemClock()
+    )
+    assert built == []
+
+
 def test_run_with_unknown_workflow_fails_cleanly(tmp_path, capsys):
     """The third documented error path: unknown workflow (via `run`)."""
     main(["init", "--root", str(tmp_path)])
@@ -367,10 +414,11 @@ def test_run_serves_multiple_workflows_with_repeated_flag(monkeypatch, tmp_path)
             "hotfix",
         ]
     ) == 0
-    assert set(captured["harness"].workflows) == {"default", "hotfix"}
+    # The scaffolded resolver workflow is served whenever its file exists.
+    assert set(captured["harness"].workflows) == {"default", "hotfix", "resolver"}
 
 
-def test_run_with_no_workflow_flag_serves_only_default(monkeypatch, tmp_path):
+def test_run_with_no_workflow_flag_serves_default_and_resolver(monkeypatch, tmp_path):
     main(["init", "--root", str(tmp_path)])
     (tmp_path / "workflows" / "hotfix.json").write_text(json.dumps(HOTFIX_DEFINITION))
     captured = {}
@@ -381,7 +429,10 @@ def test_run_with_no_workflow_flag_serves_only_default(monkeypatch, tmp_path):
     monkeypatch.setattr("harness.cli.serve", fake_serve)
 
     assert main(["run", "--root", str(tmp_path)]) == 0
-    assert set(captured["harness"].workflows) == {"default"}
+    # `hotfix` isn't served (not selected), but the scaffolded `resolver` is —
+    # its definition exists, so it rides alongside the default (decoupled from
+    # the mergeability watcher flag).
+    assert set(captured["harness"].workflows) == {"default", "resolver"}
 
 
 def test_run_all_workflows_serves_every_definition_found(monkeypatch, tmp_path):
@@ -468,7 +519,9 @@ def test_run_single_custom_workflow_ignores_github_workflow_default(
 
     out, err = capsys.readouterr()
     assert err == ""
-    assert set(captured["harness"].workflows) == {"hotfix"}
+    # `hotfix` is the selected workflow; the scaffolded `resolver` rides along
+    # because its definition exists.
+    assert set(captured["harness"].workflows) == {"hotfix", "resolver"}
 
 
 def test_init_rejects_workflow_name_with_path_separator(tmp_path, capsys):
@@ -621,11 +674,284 @@ def test_github_sources_empty_without_token(monkeypatch, tmp_path):
     assert _github_sources(_github_args(), tmp_path, registry) == []
 
 
+def test_github_reflectors_builds_one_per_github_repo(monkeypatch, tmp_path):
+    """One reflector per repos.json repo with a GitHub origin, mirroring
+    `_github_sources`'s enumeration."""
+    monkeypatch.setenv("GITHUB_TOKEN", "t0ken")
+    registry = MemoryRepositoryRegistry(
+        {"heblo": Path("/repos/heblo"), "harness_v2": Path("/repos/harness_v2")}
+    )
+    slugs = {
+        Path("/repos/heblo"): "onpaj/Anela.Heblo",
+        Path("/repos/harness_v2"): "onpaj/harness_v2",
+    }
+
+    reflectors = _github_reflectors(
+        _github_args(),
+        tmp_path,
+        registry,
+        slug_of=slugs.get,
+        client=FakeGithubClient(),
+    )
+
+    assert {r._repo for r in reflectors} == {"onpaj/Anela.Heblo", "onpaj/harness_v2"}
+
+
+def test_github_reflectors_skips_repo_without_github_origin(monkeypatch, tmp_path):
+    monkeypatch.setenv("GITHUB_TOKEN", "t0ken")
+    registry = MemoryRepositoryRegistry(
+        {"heblo": Path("/repos/heblo"), "local": Path("/repos/local")}
+    )
+    slugs = {Path("/repos/heblo"): "onpaj/Anela.Heblo", Path("/repos/local"): None}
+
+    reflectors = _github_reflectors(
+        _github_args(), tmp_path, registry, slug_of=slugs.get, client=FakeGithubClient()
+    )
+
+    assert {r._repo for r in reflectors} == {"onpaj/Anela.Heblo"}
+
+
+def test_github_reflectors_empty_without_token(monkeypatch, tmp_path):
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    registry = MemoryRepositoryRegistry({"heblo": Path("/repos/heblo")})
+
+    assert _github_reflectors(_github_args(), tmp_path, registry) == []
+
+
+def test_run_gates_github_sources_and_reflectors_mutually_exclusively(monkeypatch, tmp_path):
+    """`_run`'s `sources` composition calls exactly one of `_github_sources` /
+    `_github_reflectors` per invocation, keyed by `--no-github-source` — never
+    both, so a repo is never covered by both a `GithubTaskSource` and a
+    `GithubLabelReflector` at once."""
+    main(["init", "--root", str(tmp_path)])
+    calls = {"sources": [], "reflectors": []}
+
+    def fake_github_sources(args, root, registry):
+        calls["sources"].append(args.no_github_source)
+        return []
+
+    def fake_github_reflectors(args, root, registry):
+        calls["reflectors"].append(args.no_github_source)
+        return []
+
+    monkeypatch.setattr("harness.cli._github_sources", fake_github_sources)
+    monkeypatch.setattr("harness.cli._github_reflectors", fake_github_reflectors)
+
+    async def fake_serve(
+        harness, port, poll_interval, source_interval=30.0,
+        pr_poll_interval=0.0, reconcile_interval=300.0,
+    ):
+        pass
+
+    monkeypatch.setattr("harness.cli.serve", fake_serve)
+
+    assert main(["run", "--root", str(tmp_path), "--no-github-source"]) == 0
+    assert calls == {"sources": [], "reflectors": [True]}
+
+    assert main(["run", "--root", str(tmp_path)]) == 0
+    assert calls == {"sources": [False], "reflectors": [True]}
+
+
+def _process_args(**overrides):
+    """Minimal namespace `_process_sources` reads (worktree_root + github_label)."""
+    base = dict(worktree_root=None, github_label="harness:todo")
+    base.update(overrides)
+    return argparse.Namespace(**base)
+
+
+def test_process_sources_builds_a_github_issues_process(tmp_path):
+    from harness.drivers.memory import FakeClock
+
+    (tmp_path / "processes").mkdir()
+    (tmp_path / "processes" / "harness-todo.json").write_text(
+        '{"trigger": {"interval": "30s"},'
+        ' "action": {"check": "github-issues", "params": {"label": "harness:todo"}},'
+        ' "target": {"workflow": "default"}, "dedup": "per-state",'
+        ' "sink": {"kind": "none"}}'
+    )
+    registry = MemoryRepositoryRegistry({"heblo": Path("/repos/heblo")})
+
+    sources = _process_sources(
+        _process_args(),
+        tmp_path,
+        registry,
+        clock=FakeClock("2026-07-22T10:00:00Z"),
+        known_targets={"default"},
+        client=FakeGithubClient(),
+    )
+
+    assert len(sources) == 1
+    assert sources[0].kind == "scheduled:harness-todo"
+
+
+def test_process_sources_github_issues_fails_fast_without_a_client(tmp_path, monkeypatch):
+    from harness.drivers.fs_processes import ProcessValidationError
+    from harness.drivers.memory import FakeClock
+
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    (tmp_path / "processes").mkdir()
+    (tmp_path / "processes" / "harness-todo.json").write_text(
+        '{"trigger": {"interval": "30s"},'
+        ' "action": {"check": "github-issues"},'
+        ' "target": {"workflow": "default"}}'
+    )
+    registry = MemoryRepositoryRegistry({"heblo": Path("/repos/heblo")})
+
+    with pytest.raises(ProcessValidationError) as exc:
+        _process_sources(
+            _process_args(),
+            tmp_path,
+            registry,
+            clock=FakeClock("2026-07-22T10:00:00Z"),
+            known_targets={"default"},
+            client=None,
+        )
+    assert "GITHUB_TOKEN" in str(exc.value)
+
+
+def test_process_sources_builds_a_resolve_conflicts_process(tmp_path):
+    from harness.drivers.memory import FakeClock
+
+    (tmp_path / "processes").mkdir()
+    (tmp_path / "processes" / "resolve-conflicts.json").write_text(
+        '{"trigger": {"interval": "60s"},'
+        ' "action": {"check": "github-conflicts", "params": {"head_prefix": "harness/"}},'
+        ' "target": {"workflow": "resolver"}, "dedup": "per-state",'
+        ' "sink": {"kind": "none"}}'
+    )
+    registry = MemoryRepositoryRegistry({"harness_v2": Path("/repos/harness_v2")})
+
+    sources = _process_sources(
+        _process_args(),
+        tmp_path,
+        registry,
+        clock=FakeClock("2026-07-23T10:00:00Z"),
+        known_targets={"resolver"},
+        client=FakeGithubClient(),
+    )
+
+    assert len(sources) == 1
+    assert sources[0].kind == "scheduled:resolve-conflicts"
+
+
+def test_process_sources_github_conflicts_fails_fast_without_a_client(tmp_path, monkeypatch):
+    from harness.drivers.fs_processes import ProcessValidationError
+    from harness.drivers.memory import FakeClock
+
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    (tmp_path / "processes").mkdir()
+    (tmp_path / "processes" / "resolve-conflicts.json").write_text(
+        '{"trigger": {"interval": "60s"},'
+        ' "action": {"check": "github-conflicts"},'
+        ' "target": {"workflow": "resolver"}}'
+    )
+    registry = MemoryRepositoryRegistry({"harness_v2": Path("/repos/harness_v2")})
+
+    with pytest.raises(ProcessValidationError) as exc:
+        _process_sources(
+            _process_args(),
+            tmp_path,
+            registry,
+            clock=FakeClock("2026-07-23T10:00:00Z"),
+            known_targets={"resolver"},
+            client=None,
+        )
+    assert "GITHUB_TOKEN" in str(exc.value)
+
+
+def _slack_process_sources(tmp_path, sink_kind="slack"):
+    """Compiled process sources with one process declaring the given sink."""
+    from harness.drivers.memory import FakeClock
+
+    (tmp_path / "processes").mkdir(exist_ok=True)
+    (tmp_path / "processes" / "notify.json").write_text(
+        json.dumps(
+            {
+                "trigger": {"interval": "1h"},
+                "action": {"check": "always"},
+                "target": {"workflow": "default"},
+                "sink": {"kind": sink_kind},
+            }
+        )
+    )
+    registry = MemoryRepositoryRegistry({})
+    return _process_sources(
+        _process_args(),
+        tmp_path,
+        registry,
+        clock=FakeClock("2026-07-23T10:00:00Z"),
+        known_targets={"default"},
+        client=None,
+    )
+
+
+def test_slack_sinks_registers_one_sink_when_url_is_set(monkeypatch, tmp_path):
+    from harness.drivers.slack_sink import SlackWebhookSink
+
+    monkeypatch.setenv("SLACK_WEBHOOK_URL", "https://hooks.slack.example/x")
+
+    sinks = _slack_sinks(_slack_process_sources(tmp_path))
+
+    assert len(sinks) == 1
+    assert isinstance(sinks[0], SlackWebhookSink)
+
+
+def test_slack_sinks_warns_when_a_process_declares_slack_but_url_is_missing(
+    monkeypatch, capsys, tmp_path
+):
+    monkeypatch.delenv("SLACK_WEBHOOK_URL", raising=False)
+
+    sinks = _slack_sinks(_slack_process_sources(tmp_path))
+
+    assert sinks == []
+    assert "SLACK_WEBHOOK_URL" in capsys.readouterr().err
+
+
+def test_slack_sinks_silent_when_no_process_declares_slack(
+    monkeypatch, capsys, tmp_path
+):
+    monkeypatch.delenv("SLACK_WEBHOOK_URL", raising=False)
+
+    sinks = _slack_sinks(_slack_process_sources(tmp_path, sink_kind="none"))
+
+    assert sinks == []
+    assert capsys.readouterr().err == ""
+
+
+def test_run_has_a_no_github_source_flag_defaulting_off():
+    parser = _build_run_parser_namespace()
+    assert parser.no_github_source is False
+
+
+def _build_run_parser_namespace():
+    return _parse_run(["run"])
+
+
+def _parse_run(argv):
+    """Parse an argv through the real `main` parser and return the Namespace,
+    intercepting before the handler runs."""
+    import harness.cli as cli
+
+    captured = {}
+
+    def fake_run(args):
+        captured["args"] = args
+        return 0
+
+    orig = cli._run
+    cli._run = fake_run  # the run handler
+    try:
+        cli.main(argv)
+    finally:
+        cli._run = orig
+    return captured["args"]
+
+
 def test_run_resolves_default_workflow_when_omitted(tmp_path, monkeypatch):
     """Plain `harness run` (no --workflow) against an ordinarily-initialized
-    harness must still serve `default` — the served set carried into build()
-    is `("default",)`, the same effective default as before --workflow's
-    argparse default became None to support --no-workflow harnesses."""
+    harness serves `default` — the same effective default as before --workflow's
+    argparse default became None to support --no-workflow harnesses. The
+    scaffolded `resolver` workflow is appended because its definition exists."""
     main(["init", "--root", str(tmp_path)])
     seen = {}
 
@@ -638,7 +964,7 @@ def test_run_resolves_default_workflow_when_omitted(tmp_path, monkeypatch):
     with pytest.raises(SystemExit):
         main(["run", "--root", str(tmp_path), "--api-port", "0"])
 
-    assert seen["served"] == ("default",)
+    assert list(seen["served"]) == ["default", "resolver"]
 
 
 def test_run_with_no_workflow_harness_defaults_to_none(tmp_path, monkeypatch):
@@ -754,6 +1080,25 @@ def test_run_watch_mergeability_defaults_on_and_can_be_disabled(monkeypatch, tmp
     assert "harness" in captured
 
 
+def test_run_serves_resolver_workflow_when_its_file_exists_without_watch_mergeability(
+    monkeypatch, tmp_path
+):
+    # The resolver workflow must be served (its own step queues + a valid target
+    # for a `github-conflicts` process) whenever `workflows/resolver.json`
+    # exists — not only when the mergeability watcher is on.
+    main(["init", "--root", str(tmp_path)])  # scaffolds resolver.json
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    captured = {}
+
+    async def fake_serve(harness, port, poll_interval, source_interval=30.0, pr_poll_interval=0.0, reconcile_interval=300.0):
+        captured["harness"] = harness
+
+    monkeypatch.setattr("harness.cli.serve", fake_serve)
+
+    assert main(["run", "--root", str(tmp_path), "--no-watch-mergeability"]) == 0
+    assert "resolver" in captured["harness"].workflows
+
+
 def test_run_accepts_api_port(monkeypatch, tmp_path):
     main(["init", "--root", str(tmp_path)])
     captured = {}
@@ -865,6 +1210,56 @@ async def test_serve_returns_when_uvicorn_stops_before_the_loop(monkeypatch, tmp
 
     assert harness.stop_seen is not None
     assert harness.stop_seen.is_set()
+
+
+def test_layout_processes_property(tmp_path):
+    assert HarnessLayout(tmp_path).processes == tmp_path / "processes"
+
+
+async def test_serve_wires_the_filesystem_process_admin(monkeypatch, tmp_path):
+    """`serve()` passes a real `FilesystemProcessAdmin(layout.processes)` into
+    `create_app`, beside the agent/workflow admins — the driver is wired only
+    here (invariant #33)."""
+    from harness.drivers.fs_processes import FilesystemProcessAdmin
+
+    captured = {}
+
+    real_create_app = __import__("harness.api.app", fromlist=["create_app"]).create_app
+
+    def capturing_create_app(**kwargs):
+        captured.update(kwargs)
+        return real_create_app(**kwargs)
+
+    class FakeUvicornServer:
+        def __init__(self, config):
+            pass
+
+        async def serve(self):
+            return
+
+    monkeypatch.setattr("harness.cli.create_app", capturing_create_app)
+    monkeypatch.setattr("harness.cli.uvicorn.Server", FakeUvicornServer)
+
+    class FakeHarness:
+        def __init__(self):
+            self.layout = HarnessLayout(tmp_path)
+            self.projection = BoardProjection(
+                SERVE_TEST_WORKFLOW.steps(), (SERVE_TEST_WORKFLOW,)
+            )
+            self.artifacts = MemoryArtifactStore()
+            self.stage_output = StageOutputProjection()
+            self.control = FakeTaskControl()
+
+        async def run(
+            self, poll_interval, source_interval=30.0, pr_poll_interval=0.0, reconcile_interval=300.0, stop=None
+        ):
+            while not stop.is_set():
+                await asyncio.sleep(0.01)
+
+    await asyncio.wait_for(serve(FakeHarness(), 8000, 0.01), timeout=2.0)
+
+    admin = captured["process_admin"]
+    assert isinstance(admin, FilesystemProcessAdmin)
 
 
 # --- harness service -------------------------------------------------------

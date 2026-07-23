@@ -55,7 +55,7 @@ def test_update_reports_a_version_change():
     assert response.status_code == 200
     assert updater.calls == 1
     assert "updated to harness 0.9.2" in response.text
-    assert "#006644" in response.text  # the "ok" (green) styling
+    assert 'class="update-result-ok"' in response.text
 
 
 def test_update_reports_no_change():
@@ -74,7 +74,7 @@ def test_update_reports_no_change():
 
     assert response.status_code == 200
     assert "already up to date" in response.text
-    assert "#006644" not in response.text  # muted, not the "ok" green
+    assert 'class="update-result-ok"' not in response.text  # muted, not the "ok" green
 
 
 def test_update_surfaces_an_error_as_a_swappable_fragment():
@@ -86,7 +86,7 @@ def test_update_surfaces_an_error_as_a_swappable_fragment():
     # 200 so htmx swaps the message in rather than dropping it on the floor.
     assert response.status_code == 200
     assert "uv is not installed" in response.text
-    assert "#bf2600" in response.text  # the error (red) styling
+    assert 'class="update-result-error"' in response.text
 
 
 def test_update_without_a_wired_updater_says_unavailable():

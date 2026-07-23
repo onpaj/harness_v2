@@ -56,7 +56,9 @@ from harness.source_poller import SourcePoller
 from harness.task_control import TaskControlService
 
 LANDING_STEP = "land"
-"""The step to which the wiring assigns LandingBehavior instead of DummyBehavior."""
+"""The step the finisher map defaults to the "open-pr" kind when no served
+workflow binds it — a workflow file written before `finishers` existed keeps
+landing exactly as it always did (ADR-0016)."""
 
 RESOLVE_STEP = "resolve"
 """The step to which the wiring assigns ResolveConflictBehavior, when a catalog
@@ -121,6 +123,10 @@ class HarnessLayout:
     @property
     def agents(self) -> Path:
         return self.root / "agents"
+
+    @property
+    def processes(self) -> Path:
+        return self.root / "processes"
 
     @property
     def repos(self) -> Path:
@@ -361,6 +367,7 @@ def build(
     merge_checker: MergeChecker | None = None,
     issue_checker: IssueChecker | None = None,
     landing_step: str = LANDING_STEP,
+    finishers: dict[str, ConsumerBehavior] | None = None,
     delay: float = 5.0,
     request_changes_once_at: str | None = None,
     issue_tracker: IssueTracker | None = None,
@@ -510,9 +517,46 @@ def build(
         copy_artifacts=artifact_view is None,
     )
 
+    # The finisher registry: kind → behavior (ADR-0016, mirroring the persona
+    # catalog of ADR-0007). The default binds "open-pr" to the LandingBehavior
+    # above — Forge is thereby the driver behind a *kind*, not behind a step
+    # name. A caller-supplied dict is merged over it, so a new finishing action
+    # is a registry entry, never a branch in behavior_for.
+    finisher_registry: dict[str, ConsumerBehavior] = {"open-pr": landing}
+    finisher_registry.update(finishers or {})
+
+    # The step → kind map is the union of every served workflow's `finishers`.
+    # The step queue is shared across served workflows, so two of them binding
+    # the same step to different kinds is a wiring contradiction — fail fast at
+    # build, not at consume time.
+    step_finishers: dict[str, str] = {}
+    for workflow in resolved.values():
+        for step, kind in workflow.finishers.items():
+            if step in step_finishers and step_finishers[step] != kind:
+                raise ValueError(
+                    f"step {step!r} is bound to conflicting finisher kinds "
+                    f"{step_finishers[step]!r} and {kind!r} across served workflows"
+                )
+            step_finishers[step] = kind
+    # Backward compatibility: a workflow file written before `finishers`
+    # existed still lands through its landing step — when nothing binds it,
+    # default it to "open-pr", preserving the pre-ADR-0016 behavior exactly.
+    if landing_step not in step_finishers:
+        step_finishers[landing_step] = "open-pr"
+    # An unknown kind fails the whole build here — the same posture as a
+    # missing agent spec surfacing at build via `catalog.get`, never lazily
+    # from inside behavior_for once tasks are already flowing.
+    for step, kind in step_finishers.items():
+        if kind not in finisher_registry:
+            raise ValueError(
+                f"step {step!r} names unknown finisher kind {kind!r} "
+                f"(known: {', '.join(sorted(finisher_registry))})"
+            )
+
     def behavior_for(step: str) -> ConsumerBehavior:
-        if step == landing_step:
-            return landing
+        kind = step_finishers.get(step)
+        if kind is not None:
+            return finisher_registry[kind]
         if step == RESOLVE_STEP and catalog is not None:
             return ResolveConflictBehavior(
                 clock=clock,

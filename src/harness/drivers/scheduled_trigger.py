@@ -11,6 +11,13 @@ suppress every fire after the first: `per-interval` keys on the bucket (one
 fire per period), `per-state` keys on the observation's `state_key` (re-fire
 when the observed state changes). No `data.source` is stamped — a trigger
 reflects nothing outward (see `Trigger` in `ports/source.py`).
+
+A Process's `sink` rides along as data: a non-`none` `sink` is stamped into the
+task as `data["sink"] = {"kind": ...}` — the *destination* identity an
+outbound-only sink driver (e.g. `SlackWebhookSink`) routes on, distinct from
+the origin `data.source` this trigger deliberately never writes (invariant
+#40). The stamp lands after the observation's data is merged, so a check can
+never clobber the operator's declared destination.
 """
 
 from __future__ import annotations
@@ -38,12 +45,16 @@ class ScheduledTrigger(Trigger):
         repository: str | None = None,
         worktree_root: str | None = None,
         dedup: str = "per-interval",
+        sink: dict | None = None,
     ) -> None:
         if (workflow is None) == (step is None):
             raise ValueError("exactly one of workflow/step must be set")
         if dedup not in ("per-interval", "per-state"):
             raise ValueError(f"unknown dedup strategy: {dedup!r}")
         self.kind = f"scheduled:{name}"
+        # Public on purpose: wiring (`cli._run`) reads it to warn when a
+        # process declares a slack sink but no `SLACK_WEBHOOK_URL` is set.
+        self.sink = sink
         self._clock = clock
         self._interval = interval
         self._check = check
@@ -69,15 +80,20 @@ class ScheduledTrigger(Trigger):
 
     def _task_for(self, obs: Observation, bucket: int, now: str) -> Task:
         task_id = new_task_id()
+        data = {**obs.data}
+        # Destination identity, after the merge — an observation's data must
+        # never overwrite the operator's declared sink.
+        if self.sink is not None and self.sink.get("kind") != "none":
+            data["sink"] = {"kind": self.sink["kind"]}
         return Task(
             id=task_id,
             created=now,
             workflow_template=self._workflow,
             step=self._step,
-            repository=self._repository,
+            repository=obs.repository or self._repository,
             worktree=(f"{self._worktree_root}/{task_id}" if self._worktree_root else None),
             dedup_key=self._dedup_key(bucket, obs),
-            data={**obs.data},
+            data=data,
         )
 
     @property
