@@ -1,6 +1,15 @@
 # CHANGELOG
 
 
+## v0.15.0 (2026-07-23)
+
+### Features
+
+- Show per-agent task history in the agent detail view
+  ([#75](https://github.com/onpaj/harness_v2/pull/75),
+  [`6a0ba5b`](https://github.com/onpaj/harness_v2/commit/6a0ba5be0850c9b14d5f5239b8631185528e5543))
+
+
 ## v0.14.0 (2026-07-23)
 
 ### Documentation
