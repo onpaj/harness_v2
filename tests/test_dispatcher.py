@@ -137,8 +137,21 @@ def test_unknown_workflow_template_task_carries_terminal_failed_status():
     assert failed.list()[0].status == FAILED
 
 
-def test_missing_edge_lands_in_failed():
-    dispatcher, _, _, _, failed, _ = build(make_task("plan", "request_changes"))
+def test_missing_edge_finishes_by_default():
+    """FR-3: a known step with no outgoing edge for the outcome finishes
+    rather than fails — the dispatcher's terminal-status handling still goes
+    through _finish, not _fail."""
+    dispatcher, _, _, done, _, _ = build(make_task("plan", "request_changes"))
+
+    dispatcher.tick()
+
+    assert done.list()[0].id == "tsk_1"
+
+
+def test_unknown_status_lands_in_failed():
+    """FR-4: a status the workflow doesn't recognize at all still fails
+    loudly — FR-3's new default only fires for a known step."""
+    dispatcher, _, _, _, failed, _ = build(make_task("nonsense", "done"))
 
     dispatcher.tick()
 
@@ -146,10 +159,10 @@ def test_missing_edge_lands_in_failed():
 
 
 def test_mid_workflow_failure_task_carries_terminal_failed_status():
-    """A task that fails mid-workflow (missing edge) must not stay in failed/
-    with the old step name ('plan') — status must be overwritten to terminal
+    """A task that fails mid-workflow (unknown status) must not stay in
+    failed/ with the old step name — status must be overwritten to terminal
     'failed', just as _finish overwrites it to 'end'."""
-    dispatcher, _, _, _, failed, _ = build(make_task("plan", "request_changes"))
+    dispatcher, _, _, _, failed, _ = build(make_task("nonsense", "done"))
 
     dispatcher.tick()
 
@@ -233,3 +246,51 @@ def test_failed_event_carries_failed_queue():
     _, fields = next(item for item in events.events if item[0] == "failed")
     assert fields["queue"] == "failed"
     assert fields["task"]["id"] == "tsk_1"
+
+
+# --- Workflow-less tasks (FR-1/FR-2) ----------------------------------------
+
+
+def make_workflow_less_task(status=None, last_outcome=None, step="triage") -> Task:
+    return Task(
+        id="tsk_1",
+        workflow_template=None,
+        step=step,
+        created="2026-07-19T10:00:00Z",
+        status=status,
+        last_outcome=last_outcome,
+    )
+
+
+def test_workflow_less_fresh_task_moves_to_its_step_queue():
+    inbox = MemoryTaskQueue("tasks")
+    step_queues = {**{step: MemoryTaskQueue(step) for step in WORKFLOW.steps()}, "triage": MemoryTaskQueue("triage")}
+    done = MemoryTaskQueue("done")
+    failed = MemoryTaskQueue("failed")
+    events = MemoryEventSink()
+    dispatcher = Dispatcher(
+        inbox=inbox,
+        step_queues=step_queues,
+        done=done,
+        failed=failed,
+        workflows=MemoryWorkflowRepository({"default": WORKFLOW}),
+        strategy=FirstStrategy(),
+        events=events,
+        clock=FakeClock(),
+    )
+    inbox.put(make_workflow_less_task())
+
+    dispatcher.tick()
+
+    assert step_queues["triage"].list()[0].status == "triage"
+
+
+def test_workflow_less_task_finishes_after_one_pass():
+    dispatcher, _, _, done, _, events = build(
+        make_workflow_less_task(status="triage", last_outcome="done")
+    )
+
+    dispatcher.tick()
+
+    assert done.list()[0].id == "tsk_1"
+    assert "finished" in events.names()

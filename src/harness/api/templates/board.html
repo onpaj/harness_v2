@@ -2,61 +2,86 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#f8f8fa" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#141416" media="(prefers-color-scheme: dark)">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
   <title>harness board</title>
+  <link rel="stylesheet" href="/static/app.css">
   <script src="/static/htmx.min.js"></script>
   <script src="/static/sse.js"></script>
-  <style>
-    body { font: 14px system-ui, sans-serif; margin: 0; padding: 16px; background: #f4f5f7; }
-    h1 { font-size: 16px; margin: 0 0 16px; }
-    .board { display: flex; gap: 12px; align-items: flex-start; overflow-x: auto; }
-    .column { background: #ebecf0; border-radius: 6px; padding: 8px; min-width: 220px; flex: 1; }
-    .column h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .04em; margin: 4px 4px 8px; color: #5e6c84; }
-    .count { color: #97a0af; font-weight: normal; }
-    .card { background: #fff; border-radius: 4px; box-shadow: 0 1px 1px rgba(9,30,66,.25); padding: 8px; margin-bottom: 8px; cursor: pointer; }
-    .card .title { font-size: 13px; font-weight: 500; }
-    .card .repo { color: #5e6c84; font-size: 12px; font-family: ui-monospace, monospace; }
-    .card .since { color: #97a0af; font-size: 11px; margin-top: 2px; }
-    .badge { display: inline-block; font-size: 11px; border-radius: 3px; padding: 1px 6px; margin-top: 6px; margin-right: 4px; }
-    .badge.done { background: #e3fcef; color: #006644; }
-    .badge.request_changes { background: #fffae6; color: #974f0c; }
-    .badge.working { background: #deebff; color: #0747a6; }
-    dialog { border: none; border-radius: 6px; padding: 16px; max-width: 640px; width: 90%; }
-    table { border-collapse: collapse; width: 100%; font-size: 13px; }
-    td, th { text-align: left; padding: 4px 8px; border-bottom: 1px solid #ebecf0; vertical-align: top; }
-    .task-id-row { display: flex; align-items: center; gap: 8px; }
-    .copy-id-btn {
-      font: inherit;
-      border: none;
-      border-radius: 4px;
-      padding: 2px 6px;
-      background: #ebecf0;
-      cursor: pointer;
-      line-height: 1.4;
-    }
-    .copy-id-btn:hover { background: #dfe1e6; }
-    .copy-id-btn:active { background: #c1c7d0; }
-    .copy-id-btn.copied { background: #e3fcef; }
-
-    @media (prefers-color-scheme: dark) {
-      .copy-id-btn { background: #3b3f45; color: #c1c7d0; }
-      .copy-id-btn:hover { background: #4a4f57; }
-      .copy-id-btn:active { background: #5a5f68; }
-      .copy-id-btn.copied { background: #1c3829; }
-    }
-  </style>
 </head>
 <body hx-ext="sse" sse-connect="/api/events">
-  <h1>harness board</h1>
-  <div id="board" data-revision="{{ board.revision }}" hx-get="/fragment/board" hx-trigger="sse:board" hx-swap="innerHTML">
-    {% include "_columns.html" %}
-  </div>
+  {% include "_nav.html" %}
+  <main class="page">
+    <div class="page-header">
+      <h1>Board</h1>
+    </div>
+    <div id="board"
+         data-revision="{{ board.revision }}"
+         data-active-workflow="{{ board.default_tab() or '' }}"
+         hx-get="/fragment/board" hx-trigger="sse:board" hx-swap="innerHTML">
+      {% include "_columns.html" %}
+    </div>
+    <footer class="status-bar">harness {{ version }} · built {{ build_time or "unknown" }}</footer>
+  </main>
   <dialog id="detail"></dialog>
   <script>
+    // Per-workflow tabs: the board renders one panel per workflow and a tab
+    // strip to switch between them. Switching is a data-attribute + CSS
+    // visibility toggle, so a swapped-in board fragment re-applies the active
+    // tab without losing it.
+    function applyActiveTab(boardEl) {
+      var active = boardEl.getAttribute('data-active-workflow');
+      boardEl.querySelectorAll('.tab-strip .tab').forEach(function (el) {
+        el.classList.toggle('active', el.dataset.workflow === active);
+      });
+      boardEl.querySelectorAll('.workflow-panel').forEach(function (el) {
+        el.style.display = (el.dataset.workflow === active) ? '' : 'none';
+      });
+    }
+    document.getElementById('board').addEventListener('click', function (event) {
+      var tab = event.target.closest('.tab-strip .tab');
+      if (!tab) { return; }
+      var boardEl = document.getElementById('board');
+      boardEl.setAttribute('data-active-workflow', tab.dataset.workflow);
+      applyActiveTab(boardEl);
+    });
+    applyActiveTab(document.getElementById('board'));
+
     document.body.addEventListener('htmx:afterSwap', function (event) {
-      if (event.detail.target.id === 'detail') { document.getElementById('detail').showModal(); }
+      if (event.detail.target.id === 'board') { applyActiveTab(event.detail.target); }
+      if (event.detail.target.id !== 'detail') { return; }
+      var detail = document.getElementById('detail');
+      if (detail.innerHTML.trim() === '') {
+        // A successful delete swaps in nothing — close instead of showing a
+        // blank modal. The 'close' listener below clears innerHTML either way.
+        if (detail.open) { detail.close(); }
+      } else {
+        detail.showModal();
+      }
     });
     document.getElementById('detail').addEventListener('click', function (event) {
       if (event.target.id === 'detail') { event.target.close(); }
+      if (event.target.classList.contains('task-detail__close')) { event.target.closest('dialog').close(); }
+    });
+    // Task-detail tab switching is pure CSS visibility toggling, never DOM
+    // removal, so the Output panel's SSE-connected div stays mounted (and its
+    // EventSource stays open) while the user is looking at another tab.
+    // Registered on #detail (delegated), not inside _task.html, since the
+    // fragment's own markup is wholesale-replaced on every hx-get/hx-post swap
+    // and a listener attached to it would be silently discarded.
+    document.getElementById('detail').addEventListener('click', function (event) {
+      var tab = event.target.closest('.tabs .tab');
+      if (!tab) { return; }
+      var name = tab.getAttribute('data-tab');
+      tab.parentElement.querySelectorAll('.tab').forEach(function (el) {
+        el.classList.toggle('active', el === tab);
+      });
+      tab.closest('.task-detail').querySelectorAll('.tab-panel').forEach(function (panel) {
+        panel.classList.toggle('active', panel.getAttribute('data-panel') === name);
+      });
     });
     // Clearing the modal on close removes the live-output element, which lets
     // the htmx SSE extension tear its EventSource down (htmx:beforeCleanupElement)

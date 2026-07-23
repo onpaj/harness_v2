@@ -31,7 +31,7 @@ class ClaudeCliBehavior(ConsumerBehavior):
         runner: AgentRunner,
         spec: AgentSpec,
         events: EventSink,
-        timeout: float = 600.0,
+        timeout: float = 1800.0,
     ) -> None:
         self._clock = clock
         self._workspace = workspace
@@ -91,6 +91,7 @@ def compose_prompt(
     the allowed set.
     """
     request = _request_of(task)
+    body = _body_of(task)
     allowed = ", ".join(outcome.value for outcome in spec.allowed_outcomes)
     artifacts_dir = f".artifacts/{task.id}/"
 
@@ -98,17 +99,25 @@ def compose_prompt(
         f"You are the agent for step '{step}' of task {task.id}.",
         f"Task: {request}" if request else "The task has no further description.",
         "",
-        f"You'll find the context from previous steps as files in the "
-        f"{artifacts_dir} directory in your working directory — read them "
-        f"before you start.",
-        f"Write your output for this step to the file {artifact_relpath}.",
-        "",
-        "When you're done, finish with exactly this machine-readable verdict "
-        "(and nothing after it):",
-        "```json",
-        '{"outcome": "<one of: ' + allowed + '>", "summary": "<short summary>"}',
-        "```",
     ]
+    if body and body != request:
+        lines.extend([body, ""])
+    lines.extend(
+        [
+            f"You'll find the context from previous steps as files in the "
+            f"{artifacts_dir} directory in your working directory — read them "
+            f"before you start.",
+            f"Write your output for this step to the file {artifact_relpath}.",
+            "",
+            "The harness reads your result by machine, not by eye. Your final "
+            "message MUST end with exactly this fenced verdict block and nothing "
+            "after it — not a prose summary, even once the artifact is written and "
+            "the tests pass. A missing block fails the task:",
+            "```json",
+            '{"outcome": "<one of: ' + allowed + '>", "summary": "<short summary>"}',
+            "```",
+        ]
+    )
     return "\n".join(lines)
 
 
@@ -117,4 +126,11 @@ def _request_of(task: Task) -> str:
         value = task.data.get(key)
         if isinstance(value, str) and value.strip():
             return value.strip()
+    return ""
+
+
+def _body_of(task: Task) -> str:
+    value = task.data.get("body")
+    if isinstance(value, str) and value.strip():
+        return value.strip()
     return ""

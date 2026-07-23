@@ -1,5 +1,5 @@
 from harness.models import Task
-from harness.ports.board import Board, BoardView
+from harness.ports.board import AgentActivity, Board, BoardView
 from harness.ports.control import TaskControl
 
 
@@ -16,18 +16,45 @@ class FakeBoardView(BoardView):
     def get(self, task_id: str) -> Task | None:
         return self._tasks.get(task_id)
 
+    def agent_history(self, name: str) -> tuple[AgentActivity, ...]:
+        # Same derivation as BoardProjection.agent_history — a `consumer:<name>`
+        # entry per handling, newest first — so the API tests exercise the real
+        # shape without wiring a projection.
+        actor = f"consumer:{name}"
+        activities = [
+            AgentActivity(
+                task_id=task.id,
+                title=task.data.get("title") or task.id,
+                at=entry.at,
+                outcome=entry.outcome,
+                summary=entry.summary,
+                reason=entry.reason,
+            )
+            for task in self._tasks.values()
+            for entry in task.history
+            if entry.actor == actor
+        ]
+        activities.sort(key=lambda activity: (activity.at, activity.task_id), reverse=True)
+        return tuple(activities)
+
     async def subscribe(self):
         yield self._board.revision
 
 
 class FakeTaskControl(TaskControl):
-    """Records restart calls; returns a configurable result. Lets the API be
-    tested without queues."""
+    """Records restart/delete calls; returns configurable results. Lets the
+    API be tested without queues."""
 
-    def __init__(self, result: bool = True) -> None:
+    def __init__(self, result: bool = True, delete_result: bool = True) -> None:
         self._result = result
+        self._delete_result = delete_result
         self.restarted: list[str] = []
+        self.deleted: list[str] = []
 
     def restart(self, task_id: str) -> bool:
         self.restarted.append(task_id)
         return self._result
+
+    def delete(self, task_id: str) -> bool:
+        self.deleted.append(task_id)
+        return self._delete_result
