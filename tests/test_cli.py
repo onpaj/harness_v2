@@ -414,10 +414,11 @@ def test_run_serves_multiple_workflows_with_repeated_flag(monkeypatch, tmp_path)
             "hotfix",
         ]
     ) == 0
-    assert set(captured["harness"].workflows) == {"default", "hotfix"}
+    # The scaffolded resolver workflow is served whenever its file exists.
+    assert set(captured["harness"].workflows) == {"default", "hotfix", "resolver"}
 
 
-def test_run_with_no_workflow_flag_serves_only_default(monkeypatch, tmp_path):
+def test_run_with_no_workflow_flag_serves_default_and_resolver(monkeypatch, tmp_path):
     main(["init", "--root", str(tmp_path)])
     (tmp_path / "workflows" / "hotfix.json").write_text(json.dumps(HOTFIX_DEFINITION))
     captured = {}
@@ -428,7 +429,10 @@ def test_run_with_no_workflow_flag_serves_only_default(monkeypatch, tmp_path):
     monkeypatch.setattr("harness.cli.serve", fake_serve)
 
     assert main(["run", "--root", str(tmp_path)]) == 0
-    assert set(captured["harness"].workflows) == {"default"}
+    # `hotfix` isn't served (not selected), but the scaffolded `resolver` is —
+    # its definition exists, so it rides alongside the default (decoupled from
+    # the mergeability watcher flag).
+    assert set(captured["harness"].workflows) == {"default", "resolver"}
 
 
 def test_run_all_workflows_serves_every_definition_found(monkeypatch, tmp_path):
@@ -515,7 +519,9 @@ def test_run_single_custom_workflow_ignores_github_workflow_default(
 
     out, err = capsys.readouterr()
     assert err == ""
-    assert set(captured["harness"].workflows) == {"hotfix"}
+    # `hotfix` is the selected workflow; the scaffolded `resolver` rides along
+    # because its definition exists.
+    assert set(captured["harness"].workflows) == {"hotfix", "resolver"}
 
 
 def test_init_rejects_workflow_name_with_path_separator(tmp_path, capsys):
@@ -943,9 +949,9 @@ def _parse_run(argv):
 
 def test_run_resolves_default_workflow_when_omitted(tmp_path, monkeypatch):
     """Plain `harness run` (no --workflow) against an ordinarily-initialized
-    harness must still serve `default` — the served set carried into build()
-    is `("default",)`, the same effective default as before --workflow's
-    argparse default became None to support --no-workflow harnesses."""
+    harness serves `default` — the same effective default as before --workflow's
+    argparse default became None to support --no-workflow harnesses. The
+    scaffolded `resolver` workflow is appended because its definition exists."""
     main(["init", "--root", str(tmp_path)])
     seen = {}
 
@@ -958,7 +964,7 @@ def test_run_resolves_default_workflow_when_omitted(tmp_path, monkeypatch):
     with pytest.raises(SystemExit):
         main(["run", "--root", str(tmp_path), "--api-port", "0"])
 
-    assert seen["served"] == ("default",)
+    assert list(seen["served"]) == ["default", "resolver"]
 
 
 def test_run_with_no_workflow_harness_defaults_to_none(tmp_path, monkeypatch):
@@ -1072,6 +1078,25 @@ def test_run_watch_mergeability_defaults_on_and_can_be_disabled(monkeypatch, tmp
     # No token either way, so no observable source either way — this just
     # exercises that the flag parses and the run completes.
     assert "harness" in captured
+
+
+def test_run_serves_resolver_workflow_when_its_file_exists_without_watch_mergeability(
+    monkeypatch, tmp_path
+):
+    # The resolver workflow must be served (its own step queues + a valid target
+    # for a `github-conflicts` process) whenever `workflows/resolver.json`
+    # exists — not only when the mergeability watcher is on.
+    main(["init", "--root", str(tmp_path)])  # scaffolds resolver.json
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    captured = {}
+
+    async def fake_serve(harness, port, poll_interval, source_interval=30.0, pr_poll_interval=0.0, reconcile_interval=300.0):
+        captured["harness"] = harness
+
+    monkeypatch.setattr("harness.cli.serve", fake_serve)
+
+    assert main(["run", "--root", str(tmp_path), "--no-watch-mergeability"]) == 0
+    assert "resolver" in captured["harness"].workflows
 
 
 def test_run_accepts_api_port(monkeypatch, tmp_path):

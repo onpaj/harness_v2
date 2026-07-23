@@ -1469,9 +1469,13 @@ def _run(args: argparse.Namespace) -> int:
     sources = github + reflectors + mergeability
     merge_checker = _build_merge_checker(args)
     issue_checker = _build_issue_checker(args)
-    # The resolver workflow rides alongside the primary one so its tasks (queued
-    # by the mergeability watcher) get their own step queues and board columns.
-    if mergeability and args.resolver_workflow not in served_names:
+    # The resolver workflow rides alongside the primary one so its tasks — queued
+    # by the mergeability watcher *or* the `github-conflicts` process — get their
+    # own step queues and board columns. Served whenever its definition exists,
+    # decoupled from the watcher flag: a process-only detection path still needs a
+    # served target (a process targeting an unserved workflow fails to compile).
+    resolver_defined = (layout.workflows / f"{args.resolver_workflow}.json").is_file()
+    if resolver_defined and args.resolver_workflow not in served_names:
         served_names = [*served_names, args.resolver_workflow]
 
     # Scheduled triggers (`triggers/*.json`) are `TaskSource`s that ride the
