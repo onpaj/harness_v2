@@ -6,9 +6,31 @@ import pytest
 from harness.behaviors.agent import ClaudeCliBehavior, compose_prompt
 from harness.drivers.claude_cli import AgentError
 from harness.drivers.memory import FakeAgentRunner, FakeClock, MemoryEventSink
-from harness.models import DONE, REQUEST_CHANGES, BehaviorResult, Task
+from harness.models import DONE, REQUEST_CHANGES, BehaviorResult, Task, Transition, Workflow
 from harness.ports.agent import AgentRun, AgentRunner, AgentSpec
+from harness.ports.workflows import WorkflowNotFound, WorkflowRepository
 from harness.ports.workspace import Workspace, WorkspaceHandle
+
+
+class FakeWorkflowRepository(WorkflowRepository):
+    """Minimal in-memory `WorkflowRepository` test double.
+
+    Serves exactly the workflows handed to it by name; anything else raises
+    `WorkflowNotFound`, mirroring `ServedWorkflowRepository`'s behavior for an
+    unserved/unresolvable name.
+    """
+
+    def __init__(self, workflows: dict[str, Workflow]) -> None:
+        self._workflows = workflows
+
+    def get(self, name: str) -> Workflow:
+        try:
+            return self._workflows[name]
+        except KeyError:
+            raise WorkflowNotFound(name) from None
+
+    def names(self) -> tuple[str, ...]:
+        return tuple(sorted(self._workflows))
 
 
 # --- Real-FS test double: a handle over a real tmp worktree, so `next_attempt`
@@ -87,6 +109,7 @@ def build(
     runner: AgentRunner,
     spec: AgentSpec | None = None,
     events: MemoryEventSink | None = None,
+    workflows: WorkflowRepository | None = None,
 ):
     spec = spec or AgentSpec(name="development", prompt="you are a developer")
     workspace = RealFsWorkspace(tmp_path)
@@ -96,6 +119,7 @@ def build(
         runner=runner,
         spec=spec,
         events=events or MemoryEventSink(),
+        workflows=workflows,
     )
     return behavior, workspace, spec
 
@@ -116,7 +140,11 @@ async def test_runs_agent_in_worktree_cwd_with_spec(tmp_path):
     assert len(runner.calls) == 1
     call = runner.calls[0]
     assert call["cwd"] == workspace.handles["tsk_1"].path == tmp_path
-    assert call["spec"] is spec
+    # Workflow-less path (`workflows=None`): the effective spec handed to the
+    # runner carries the same `allowed_outcomes` as `spec` — but it is always a
+    # freshly `replace()`d instance, not `spec` itself, since Package C.
+    assert call["spec"] == spec
+    assert call["spec"].allowed_outcomes == spec.allowed_outcomes
     assert call["timeout"] == 1800.0
 
 
@@ -198,16 +226,12 @@ async def test_runner_exception_propagates_and_skips_commit(tmp_path):
 
 
 def test_compose_prompt_mentions_task_artifacts_and_allowed_outcomes():
-    spec = AgentSpec(
-        name="reviewer",
-        prompt="you are a reviewer",
-        allowed_outcomes=(DONE, REQUEST_CHANGES),
-    )
     prompt = compose_prompt(
         make_task(status="review"),
         step="review",
         artifact_relpath=".artifacts/tsk_1/review-01.md",
-        spec=spec,
+        outcomes=(DONE, REQUEST_CHANGES),
+        hints={},
     )
 
     assert "review" in prompt
@@ -217,13 +241,36 @@ def test_compose_prompt_mentions_task_artifacts_and_allowed_outcomes():
     assert "done" in prompt and "request_changes" in prompt
 
 
-def _prompt_for(task: Task, *, spec: AgentSpec | None = None) -> str:
-    spec = spec or AgentSpec(name="development", prompt="you are a developer")
+def test_compose_prompt_renders_hint_and_description():
+    prompt = compose_prompt(
+        make_task(status="review"),
+        step="review",
+        artifact_relpath=".artifacts/tsk_1/review-01.md",
+        outcomes=(DONE, REQUEST_CHANGES),
+        hints={REQUEST_CHANGES: "send it back for another pass"},
+        description="Review the diff for correctness and style.",
+    )
+
+    assert "Review the diff for correctness and style." in prompt
+    assert '"request_changes": send it back for another pass' in prompt
+    # The concise machine-parseable format instruction survives unchanged.
+    assert "<one of: done, request_changes>" in prompt
+
+
+def _prompt_for(
+    task: Task,
+    *,
+    outcomes: tuple[str, ...] = (DONE,),
+    hints: dict[str, str] | None = None,
+    description: str | None = None,
+) -> str:
     return compose_prompt(
         task,
         step="development",
         artifact_relpath=ARTIFACT_01,
-        spec=spec,
+        outcomes=outcomes,
+        hints=hints or {},
+        description=description,
     )
 
 
@@ -250,6 +297,9 @@ def test_compose_prompt_unchanged_when_body_absent():
         ".artifacts/tsk_1/ directory in your working directory — read them "
         "before you start.\n"
         "Write your output for this step to the file .artifacts/tsk_1/development-01.md.\n"
+        "\n"
+        "Finish by choosing exactly one outcome:\n"
+        '  - "done"\n'
         "\n"
         "The harness reads your result by machine, not by eye. Your final "
         "message MUST end with exactly this fenced verdict block and nothing "
@@ -282,18 +332,143 @@ def test_compose_prompt_does_not_duplicate_body_equal_to_request():
 def test_compose_prompt_demands_the_verdict_block_as_the_last_thing():
     # Fix B: the closing verdict must be stated as mandatory (a forgotten block
     # is what fails a finished run), and it must be the final thing in the prompt.
-    spec = AgentSpec(
-        name="development",
-        prompt="you are dev",
-        allowed_outcomes=(DONE,),
-    )
     prompt = compose_prompt(
         make_task(status="development"),
         step="development",
         artifact_relpath=".artifacts/tsk_1/development-01.md",
-        spec=spec,
+        outcomes=(DONE,),
+        hints={},
     )
 
     assert "```json" in prompt
     assert "must" in prompt.lower()
     assert prompt.rstrip().endswith("```")
+
+
+# --- ClaudeCliBehavior sourcing the outcome set live from the workflow ------
+
+
+def make_workflow(
+    *,
+    name: str = "default",
+    transitions: tuple[Transition, ...] = (),
+    descriptions: dict[str, str] | None = None,
+) -> Workflow:
+    return Workflow(
+        name=name,
+        start="development",
+        transitions=transitions,
+        descriptions=descriptions or {},
+    )
+
+
+async def test_behavior_sources_outcomes_hints_description_from_workflow(tmp_path):
+    workflow = make_workflow(
+        transitions=(
+            Transition(
+                from_step="development",
+                on=DONE,
+                to_step="review",
+                hint="the code is ready for review",
+            ),
+            Transition(
+                from_step="development",
+                on=REQUEST_CHANGES,
+                to_step="development",
+                hint="keep iterating, not ready yet",
+            ),
+        ),
+        descriptions={"development": "Implement the requested change."},
+    )
+    workflows = FakeWorkflowRepository({"default": workflow})
+    runner = FakeAgentRunner(
+        runs={"development": AgentRun(DONE, "dev: done")},
+    )
+    spec = AgentSpec(
+        name="development", prompt="you are a developer", allowed_outcomes=(DONE,)
+    )
+    behavior, _, _ = build(tmp_path, runner=runner, spec=spec, workflows=workflows)
+
+    await behavior.run(make_task())
+
+    call = runner.calls[0]
+    # The runner's own enforcement (invariant #13) is fed the live,
+    # workflow-derived set — not the frozen `spec.allowed_outcomes`.
+    assert call["spec"].allowed_outcomes == workflow.outcomes_for("development")
+    assert call["spec"].allowed_outcomes == (DONE, REQUEST_CHANGES)
+    assert "Implement the requested change." in call["prompt"]
+    assert "the code is ready for review" in call["prompt"]
+    assert "keep iterating, not ready yet" in call["prompt"]
+
+
+async def test_behavior_falls_back_to_spec_when_workflow_template_absent(tmp_path):
+    workflow = make_workflow(
+        transitions=(
+            Transition(from_step="development", on=DONE, to_step="review"),
+        ),
+    )
+    workflows = FakeWorkflowRepository({"default": workflow})
+    runner = FakeAgentRunner(runs={"development": AgentRun(DONE, "dev: done")})
+    spec = AgentSpec(
+        name="development", prompt="you are a developer", allowed_outcomes=(DONE,)
+    )
+    behavior, _, _ = build(tmp_path, runner=runner, spec=spec, workflows=workflows)
+
+    task = replace(make_task(), workflow_template=None)
+    await behavior.run(task)
+
+    call = runner.calls[0]
+    assert call["spec"].allowed_outcomes == spec.allowed_outcomes
+
+
+async def test_behavior_falls_back_to_spec_when_workflows_is_none(tmp_path):
+    runner = FakeAgentRunner(runs={"development": AgentRun(DONE, "dev: done")})
+    spec = AgentSpec(
+        name="development", prompt="you are a developer", allowed_outcomes=(DONE,)
+    )
+    behavior, _, _ = build(tmp_path, runner=runner, spec=spec, workflows=None)
+
+    await behavior.run(make_task())
+
+    call = runner.calls[0]
+    assert call["spec"].allowed_outcomes == spec.allowed_outcomes
+
+
+async def test_behavior_falls_back_to_spec_when_step_has_no_outgoing_transitions(
+    tmp_path,
+):
+    # `development` has no outgoing edge in this workflow (e.g. it's a
+    # terminal step here) — an empty derived set must not reach the runner.
+    workflow = make_workflow(
+        transitions=(Transition(from_step="review", on=DONE, to_step="end"),),
+    )
+    workflows = FakeWorkflowRepository({"default": workflow})
+    runner = FakeAgentRunner(runs={"development": AgentRun(DONE, "dev: done")})
+    spec = AgentSpec(
+        name="development",
+        prompt="you are a developer",
+        allowed_outcomes=(DONE, REQUEST_CHANGES),
+    )
+    behavior, _, _ = build(tmp_path, runner=runner, spec=spec, workflows=workflows)
+
+    await behavior.run(make_task())
+
+    call = runner.calls[0]
+    assert call["spec"].allowed_outcomes == spec.allowed_outcomes
+
+
+async def test_behavior_falls_back_to_spec_when_workflow_not_found(tmp_path):
+    # `task.workflow_template` names a workflow the repository can't resolve
+    # (e.g. not served) — defend rather than raise, same as the plan's
+    # WorkflowNotFound guard.
+    workflows = FakeWorkflowRepository({})
+    runner = FakeAgentRunner(runs={"development": AgentRun(DONE, "dev: done")})
+    spec = AgentSpec(
+        name="development", prompt="you are a developer", allowed_outcomes=(DONE,)
+    )
+    behavior, _, _ = build(tmp_path, runner=runner, spec=spec, workflows=workflows)
+
+    await behavior.run(make_task())
+
+    call = runner.calls[0]
+    assert call["spec"].allowed_outcomes == spec.allowed_outcomes

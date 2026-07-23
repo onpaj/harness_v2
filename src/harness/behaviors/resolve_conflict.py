@@ -52,8 +52,17 @@ class ResolveConflictBehavior(ConsumerBehavior):
             return BehaviorResult(DONE, f"merged {base} cleanly, no conflicts")
 
         attempt, relpath = next_attempt(handle.path, task.id, step)
+        # Out of Package C's scope: the resolver keeps sourcing its outcomes
+        # from `spec.allowed_outcomes` unconditionally (no `WorkflowRepository`
+        # threaded in here) — only the shared `compose_prompt` rendering
+        # changed underneath it.
         prompt = compose_prompt(
-            task, step=step, artifact_relpath=relpath, spec=self._spec
+            task,
+            step=step,
+            artifact_relpath=relpath,
+            outcomes=self._spec.allowed_outcomes,
+            hints={},
+            description=None,
         )
 
         def on_output(line: str) -> None:
