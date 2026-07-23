@@ -84,6 +84,6 @@ class ProcessAdmin(ABC):
 
     @abstractmethod
     def sink_kinds(self) -> tuple[str, ...]:
-        """The sink kinds the form offers. v1: just `("none",)` — the
-        forward-compat seam is `none`-only until a reflector driver ships
-        (invariant #40)."""
+        """The sink kinds the form offers: `("none", "slack")` — the outbound
+        destinations a Process may declare (invariant #40). A new destination
+        is a new kind plus a sink driver, surfaced here."""

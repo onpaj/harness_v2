@@ -17,6 +17,7 @@ from harness.cli import (
     _github_sources,
     _mergeability_sources,
     _process_sources,
+    _slack_sinks,
     main,
     serve,
 )
@@ -800,6 +801,65 @@ def test_process_sources_github_issues_fails_fast_without_a_client(tmp_path, mon
             client=None,
         )
     assert "GITHUB_TOKEN" in str(exc.value)
+
+
+def _slack_process_sources(tmp_path, sink_kind="slack"):
+    """Compiled process sources with one process declaring the given sink."""
+    from harness.drivers.memory import FakeClock
+
+    (tmp_path / "processes").mkdir(exist_ok=True)
+    (tmp_path / "processes" / "notify.json").write_text(
+        json.dumps(
+            {
+                "trigger": {"interval": "1h"},
+                "action": {"check": "always"},
+                "target": {"workflow": "default"},
+                "sink": {"kind": sink_kind},
+            }
+        )
+    )
+    registry = MemoryRepositoryRegistry({})
+    return _process_sources(
+        _process_args(),
+        tmp_path,
+        registry,
+        clock=FakeClock("2026-07-23T10:00:00Z"),
+        known_targets={"default"},
+        client=None,
+    )
+
+
+def test_slack_sinks_registers_one_sink_when_url_is_set(monkeypatch, tmp_path):
+    from harness.drivers.slack_sink import SlackWebhookSink
+
+    monkeypatch.setenv("SLACK_WEBHOOK_URL", "https://hooks.slack.example/x")
+
+    sinks = _slack_sinks(_slack_process_sources(tmp_path))
+
+    assert len(sinks) == 1
+    assert isinstance(sinks[0], SlackWebhookSink)
+
+
+def test_slack_sinks_warns_when_a_process_declares_slack_but_url_is_missing(
+    monkeypatch, capsys, tmp_path
+):
+    monkeypatch.delenv("SLACK_WEBHOOK_URL", raising=False)
+
+    sinks = _slack_sinks(_slack_process_sources(tmp_path))
+
+    assert sinks == []
+    assert "SLACK_WEBHOOK_URL" in capsys.readouterr().err
+
+
+def test_slack_sinks_silent_when_no_process_declares_slack(
+    monkeypatch, capsys, tmp_path
+):
+    monkeypatch.delenv("SLACK_WEBHOOK_URL", raising=False)
+
+    sinks = _slack_sinks(_slack_process_sources(tmp_path, sink_kind="none"))
+
+    assert sinks == []
+    assert capsys.readouterr().err == ""
 
 
 def test_run_has_a_no_github_source_flag_defaulting_off():

@@ -39,6 +39,7 @@ from harness.drivers.github_issue_checker import GithubIssueChecker
 from harness.drivers.github_merge_checker import GithubMergeChecker
 from harness.drivers.github_source import GithubLabelReflector, GithubTaskSource
 from harness.drivers.mergeability_watcher import GithubMergeabilityWatcher
+from harness.drivers.slack_sink import SlackWebhookSink
 from harness.drivers.uv_updater import UvUpdater
 from harness.drivers.launchd import (
     DEFAULT_LABEL,
@@ -734,6 +735,29 @@ def _process_sources(
         worktree_root=worktree_root,
         known_targets=known_targets,
     )
+
+
+def _slack_sinks(process_sources: list[TaskSource]) -> list[TaskSource]:
+    """One `SlackWebhookSink` when `SLACK_WEBHOOK_URL` is set — the outbound
+    destination for any process-born task stamped `data.sink == {"kind":
+    "slack"}`. The webhook URL is a secret and comes only from the environment
+    (the service holds no secret — it never enters a JSON file). A process
+    declaring a slack sink with the variable missing gets a warning and the
+    sink is simply inert — never fatal: the harness keeps running, the
+    reflection is skipped."""
+    webhook_url = os.environ.get("SLACK_WEBHOOK_URL")
+    if webhook_url:
+        return [SlackWebhookSink(webhook_url=webhook_url)]
+    if any(
+        (getattr(source, "sink", None) or {}).get("kind") == "slack"
+        for source in process_sources
+    ):
+        print(
+            "warning: a process declares a slack sink but SLACK_WEBHOOK_URL "
+            "is not set, slack reflection is disabled",
+            file=sys.stderr,
+        )
+    return []
 
 
 def service_path_entries(harness: Path) -> list[str]:
@@ -1453,10 +1477,13 @@ def _run(args: argparse.Namespace) -> int:
     )
     # Processes (`processes/*.json`) are the top-level authoring aggregate; each
     # compiles to a `ScheduledTrigger` that rides the same `sources` list —
-    # no new loop, no `build()` parameter (invariant #39).
-    sources = sources + _process_sources(
+    # no new loop, no `build()` parameter (invariant #39). A slack sink rides
+    # alongside them when `SLACK_WEBHOOK_URL` is set — the outbound half of a
+    # process declaring `{"kind": "slack"}` (invariant #40).
+    process_sources = _process_sources(
         args, root, registry, clock=SystemClock(), known_targets=known_targets
     )
+    sources = sources + process_sources + _slack_sinks(process_sources)
 
     # Self-healing: an agent assigned to the `failed/` queue. Enabled by
     # `--heal-repo <owner/repo>` (where the healer opens issues). It reuses the

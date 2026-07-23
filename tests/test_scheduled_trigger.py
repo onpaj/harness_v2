@@ -136,6 +136,53 @@ def test_observation_data_merged_into_task() -> None:
     assert task.data["title"] == "x"
 
 
+def test_sink_is_stamped_into_task_data() -> None:
+    clock = FakeClock(T0)
+    trigger = ScheduledTrigger(
+        name="notify",
+        clock=clock,
+        interval=3600,
+        check=FakeCheck([Observation()]),
+        workflow="wf",
+        sink={"kind": "slack"},
+    )
+
+    task = trigger.poll()[0]
+    assert task.data["sink"] == {"kind": "slack"}
+    assert "source" not in task.data  # destination identity only, no origin
+
+
+def test_none_or_absent_sink_stamps_nothing() -> None:
+    for sink in (None, {"kind": "none"}):
+        clock = FakeClock(T0)
+        trigger = ScheduledTrigger(
+            name="quiet",
+            clock=clock,
+            interval=3600,
+            check=FakeCheck([Observation()]),
+            workflow="wf",
+            sink=sink,
+        )
+
+        task = trigger.poll()[0]
+        assert "sink" not in task.data
+
+
+def test_observation_data_cannot_overwrite_the_sink_stamp() -> None:
+    clock = FakeClock(T0)
+    trigger = ScheduledTrigger(
+        name="notify",
+        clock=clock,
+        interval=3600,
+        check=FakeCheck([Observation(data={"sink": {"kind": "github"}})]),
+        workflow="wf",
+        sink={"kind": "slack"},
+    )
+
+    task = trigger.poll()[0]
+    assert task.data["sink"] == {"kind": "slack"}  # the stamp lands after the merge
+
+
 def test_requires_exactly_one_target() -> None:
     clock = FakeClock(T0)
     with pytest.raises(ValueError):

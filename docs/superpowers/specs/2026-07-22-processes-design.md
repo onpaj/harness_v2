@@ -152,6 +152,16 @@ file), mirroring `FilesystemTriggerRepository`:
 
 ## The sink seam (forward-compat, not built)
 
+> **Update 2026-07-23 — partially realized.** The `slack` kind now ships:
+> `compile_process` accepts `{"kind": "slack"}`, the compiled `ScheduledTrigger`
+> stamps `data.sink = {"kind": "slack"}` into every task it fires (after the
+> observation merge, so a check cannot clobber it), and
+> `drivers/slack_sink.py`'s `SlackWebhookSink` — an outbound-only `TaskSource`
+> registered in `cli._run` when `SLACK_WEBHOOK_URL` is set — routes on that
+> destination identity, posting a stateless webhook message per report. Bullet
+> 3's stateful create-then-update handle (and the `Reflector` port) remains
+> open.
+
 The whole point of the `sink` field is to keep **source ≠ destination** open —
 today a Process's origin and its reflection target are the same medium (or, in
 v1, there is no reflection at all), but tomorrow a Process should ingest from
