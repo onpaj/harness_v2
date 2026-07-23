@@ -12,15 +12,16 @@ import json
 from pathlib import Path
 
 from harness.models import Task
-from harness.ports.forge import Forge, PullRequest
+from harness.ports.forge import Forge, PullRequest, PullRequestState
 
 
 class FakeForge(Forge):
     """Records PRs into `<root>/prs.json`. Idempotent by branch."""
 
-    def __init__(self, root: Path) -> None:
+    def __init__(self, root: Path, *, base: str = "main") -> None:
         self._root = Path(root)
         self._file = self._root / "prs.json"
+        self._base = base
 
     def open_pull_request(
         self, task: Task, *, branch: str, title: str, body: str
@@ -36,10 +37,45 @@ class FakeForge(Forge):
             "branch": branch,
             "title": title,
             "body": body,
+            "state": "open",
+            "merged": False,
+            "repo": f"local/{branch}",
         }
         records.append(record)
         self._store(records)
         return self._to_pr(record)
+
+    def base_branch(self, task: Task) -> str:
+        # A fake run controls its own fixture; the base is a fixed branch name
+        # (the smoke/e2e repos are created with `-b main`), configurable for a
+        # fixture that uses a different default.
+        return self._base
+
+    def pull_request_state(self, task: Task) -> PullRequestState:
+        pr = task.data.get("pr")
+        if not isinstance(pr, dict):
+            raise RuntimeError(f"task {task.id}: carries no PR reference to check")
+        branch = pr.get("branch")
+        for record in self._load():
+            if record["branch"] == branch:
+                # Missing state/merged means a prs.json written before this
+                # feature shipped — treat that as "still open", not an error.
+                state = record.get("state", "open")
+                merged = record.get("merged", False)
+                if state == "open":
+                    return PullRequestState.OPEN
+                return PullRequestState.MERGED if merged else PullRequestState.CLOSED
+        raise RuntimeError(f"task {task.id}: no PR found for branch {branch!r}")
+
+    def close_pull_request(self, branch: str, *, merged: bool) -> None:
+        """Test/smoke helper: simulate GitHub resolving the PR for `branch`."""
+        records = self._load()
+        for record in records:
+            if record["branch"] == branch:
+                record["state"] = "closed"
+                record["merged"] = merged
+                break
+        self._store(records)
 
     def _load(self) -> list[dict]:
         try:
@@ -60,4 +96,5 @@ class FakeForge(Forge):
             url=record["url"],
             branch=record["branch"],
             title=record["title"],
+            repo=record.get("repo") or f"local/{record['branch']}",
         )

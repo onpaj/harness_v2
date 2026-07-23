@@ -48,6 +48,27 @@ class WorkspaceHandle(ABC):
         branch is a no-op.
         """
 
+    @abstractmethod
+    def merge(self, base: str) -> bool:
+        """Merge `origin/<base>` into the current branch, without committing.
+
+        Returns True when the merge left conflict markers in the working tree
+        (dirty — nothing was staged for a clean commit); False when the merge
+        applied cleanly (already up to date, fast-forward, or an automatic
+        merge) — the result is staged and ready for `commit()`.
+        """
+
+    @abstractmethod
+    def abort_merge(self) -> None:
+        """Abandon an in-progress merge, restoring the pre-merge working tree.
+
+        Called only after `merge()` returned True (conflict markers present):
+        landing has no agent to resolve them, so it drops the merge and opens
+        the PR on the un-merged branch instead — the resolver workflow
+        reconciles the dirty PR downstream. Never called when no merge is in
+        progress.
+        """
+
 
 class Workspace(ABC):
     @abstractmethod

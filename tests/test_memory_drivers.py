@@ -66,6 +66,28 @@ def test_recover_returns_claimed_tasks_and_clears_lock():
     assert queue.list()[0].lock_id is None
 
 
+def test_discard_removes_claimed_task_permanently():
+    queue = MemoryTaskQueue("tasks")
+    queue.put(make_task())
+    claimed = queue.claim(queue.list()[0], "lck_1")
+
+    queue.discard(claimed)
+
+    assert queue.list() == []
+    assert queue.recover() == 0
+
+
+def test_discard_of_already_removed_task_is_a_no_op():
+    queue = MemoryTaskQueue("tasks")
+    queue.put(make_task())
+    claimed = queue.claim(queue.list()[0], "lck_1")
+
+    queue.discard(claimed)
+    queue.discard(claimed)  # does not raise
+
+    assert queue.list() == []
+
+
 def test_workflow_repository_get_and_miss():
     workflow = Workflow(
         name="default",
@@ -77,6 +99,13 @@ def test_workflow_repository_get_and_miss():
     assert repository.get("default") == workflow
     with pytest.raises(WorkflowNotFound):
         repository.get("missing")
+
+
+def test_workflow_repository_names_lists_keys_sorted():
+    workflow = Workflow(name="default", start="plan", transitions=())
+    repository = MemoryWorkflowRepository({"hotfix": workflow, "default": workflow})
+
+    assert repository.names() == ("default", "hotfix")
 
 
 def test_event_sink_records():
