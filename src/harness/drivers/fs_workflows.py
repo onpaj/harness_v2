@@ -78,11 +78,35 @@ def _parse_workflow(name: str, raw: dict) -> Workflow:
             )
         max_parallel[step] = limit
 
+    # `finishers` maps a step name to a finisher kind (ADR-0016) — validated
+    # here, exactly like `maxParallel`, so both the read path and the admin
+    # write path reject a bad binding through this one shared contract. The
+    # kind itself is resolved against the registry at build time (`app.build`),
+    # not here: the file doesn't know which kinds this harness wires.
+    raw_finishers = raw.get("finishers", {})
+    if not isinstance(raw_finishers, dict):
+        raise ValueError(
+            f"workflow {name!r} has an invalid finishers: expected object, "
+            f"got {type(raw_finishers).__name__}"
+        )
+    finishers: dict[str, str] = {}
+    for step, kind in raw_finishers.items():
+        if step not in known_steps:
+            raise ValueError(
+                f"workflow {name!r} has a finisher for unknown step {step!r}"
+            )
+        if not isinstance(kind, str) or not kind:
+            raise ValueError(
+                f"workflow {name!r} has an invalid finisher for step {step!r}: {kind!r}"
+            )
+        finishers[step] = kind
+
     return Workflow(
         name=raw.get("name", name),
         start=raw["start"],
         transitions=transitions,
         max_parallel=max_parallel,
+        finishers=finishers,
     )
 
 
