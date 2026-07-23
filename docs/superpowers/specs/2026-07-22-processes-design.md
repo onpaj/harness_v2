@@ -73,6 +73,16 @@ covered):**
 is the richer, primary authoring surface; a bare trigger file is the low-level
 primitive it is built from.
 
+## Terminology
+
+An action's outputs are **Observations** — each becomes a **task** in the
+inbox, placed by the dispatcher. The word **artifact** stays reserved for a
+step's work products versioned in the worktree (`.artifacts/<id>/`,
+ADR-0006). A Process therefore never "produces artifacts": it produces
+observations that become tasks, whose steps may then produce artifacts.
+Keeping the two words apart matters — both concepts flow through the same
+documents.
+
 ## The Process shape
 
 ```json
