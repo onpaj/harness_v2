@@ -1,6 +1,38 @@
 # CHANGELOG
 
 
+## v0.14.0 (2026-07-23)
+
+### Documentation
+
+- Spec for the github-conflicts action (resolver as a Process)
+  ([`771bba4`](https://github.com/onpaj/harness_v2/commit/771bba453a49f0b5680eacba902921c7bc451c46))
+
+- Validate the composable-process vision against the code
+  ([#87](https://github.com/onpaj/harness_v2/pull/87),
+  [`9ce676c`](https://github.com/onpaj/harness_v2/commit/9ce676cd95ba35589e04c42c2531ee92c8a348c1))
+
+### Features
+
+- Github-conflicts action — conflict detection as a Process check
+  ([`10df67b`](https://github.com/onpaj/harness_v2/commit/10df67bc83c165cbf78e76bfc29bebf07ae4fac9))
+
+A `GithubConflictsCheck` (sibling of `GithubIssuesCheck`) lists harness-authored open PRs across the
+  registry, auto-updates `behind` ones server-side, and emits one resolver task per `dirty` PR
+  carrying `data.branch`/`data.source.base`. Registered as the `github-conflicts` action in
+  `cli._process_sources`, so the resolver's conflict detection becomes an authorable Process instead
+  of the bespoke `GithubMergeabilityWatcher`. Dedup is per-state on `slug:pr:head_sha`.
+
+- Serve the resolver workflow whenever its definition exists
+  ([`a5cd377`](https://github.com/onpaj/harness_v2/commit/a5cd3774f2f83ddf783f98097c87ca7c40d70012))
+
+Decouple serving `resolver` from the `--watch-mergeability` flag: it rides alongside the primary
+  workflow whenever `workflows/resolver.json` exists. A `github-conflicts` process targets the
+  resolver workflow, and a process whose target is not served fails to compile — so the
+  process-based detection path needs the resolver served independently of the watcher. Existing
+  served-set tests updated to the new contract (the scaffolded resolver is always served).
+
+
 ## v0.13.0 (2026-07-23)
 
 ### Features
