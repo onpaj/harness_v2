@@ -24,7 +24,7 @@ class AgentFields:
     model: str | None = None
     fallback_model: str | None = None
     allowed_tools: tuple[str, ...] = ()
-    allowed_outcomes: tuple[str, ...] = ()  # raw strings; AgentAdmin parses Outcome(...)
+    allowed_outcomes: tuple[str, ...] = ()  # raw strings; AgentAdmin validates them
 
 
 class AgentValidationError(Exception):

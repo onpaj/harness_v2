@@ -6,7 +6,7 @@ import pytest
 from harness.behaviors.agent import ClaudeCliBehavior, compose_prompt
 from harness.drivers.claude_cli import AgentError
 from harness.drivers.memory import FakeAgentRunner, FakeClock, MemoryEventSink
-from harness.models import BehaviorResult, Outcome, Task
+from harness.models import DONE, REQUEST_CHANGES, BehaviorResult, Task
 from harness.ports.agent import AgentRun, AgentRunner, AgentSpec
 from harness.ports.workspace import Workspace, WorkspaceHandle
 
@@ -102,7 +102,7 @@ def build(
 
 def dev_runner() -> FakeAgentRunner:
     return FakeAgentRunner(
-        runs={"development": AgentRun(Outcome.DONE, "dev: done", raw="…")},
+        runs={"development": AgentRun(DONE, "dev: done", raw="…")},
         writes={"development": {ARTIFACT_01: "# development\n\ncode\n"}},
     )
 
@@ -145,12 +145,12 @@ async def test_returns_behavior_result_from_agent_run(tmp_path):
 
     result = await behavior.run(make_task())
 
-    assert result == BehaviorResult(Outcome.DONE, "dev: done")
+    assert result == BehaviorResult(DONE, "dev: done")
 
 
 async def test_emits_stage_output_events_tagged_with_identity(tmp_path):
     runner = FakeAgentRunner(
-        runs={"development": AgentRun(Outcome.DONE, "dev: done")},
+        runs={"development": AgentRun(DONE, "dev: done")},
         outputs={"development": ["⏵ Bash: pytest -q", "all green"]},
     )
     events = MemoryEventSink()
@@ -201,7 +201,7 @@ def test_compose_prompt_mentions_task_artifacts_and_allowed_outcomes():
     spec = AgentSpec(
         name="reviewer",
         prompt="you are a reviewer",
-        allowed_outcomes=(Outcome.DONE, Outcome.REQUEST_CHANGES),
+        allowed_outcomes=(DONE, REQUEST_CHANGES),
     )
     prompt = compose_prompt(
         make_task(status="review"),
@@ -285,7 +285,7 @@ def test_compose_prompt_demands_the_verdict_block_as_the_last_thing():
     spec = AgentSpec(
         name="development",
         prompt="you are dev",
-        allowed_outcomes=(Outcome.DONE,),
+        allowed_outcomes=(DONE,),
     )
     prompt = compose_prompt(
         make_task(status="development"),

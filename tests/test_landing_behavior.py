@@ -5,7 +5,7 @@ from harness.drivers.memory import (
     MemoryForge,
     MemoryWorkspace,
 )
-from harness.models import HistoryEntry, Outcome, Task
+from harness.models import DONE, HistoryEntry, Task
 
 
 def make_task() -> Task:
@@ -58,7 +58,7 @@ async def test_opens_pull_request_for_task_branch():
     assert len(forge.opened) == 1
     assert forge.opened[0].branch == "harness/tsk_1"
     assert forge.opened[0].title == "add rate limiting"
-    assert result.outcome is Outcome.DONE
+    assert result.outcome == DONE
     assert "PR" in result.summary
 
 
@@ -129,7 +129,7 @@ async def test_copy_artifacts_false_skips_copy_but_opens_pr():
     assert handle.writes == []
     assert "[land] task artifacts" not in handle.commits
     assert len(forge.opened) == 1
-    assert result.outcome is Outcome.DONE
+    assert result.outcome == DONE
 
 
 async def test_pushes_the_branch_before_opening_the_pull_request():
@@ -163,7 +163,7 @@ async def test_clean_merge_summary_is_not_flagged():
 
     result = await behavior.run(make_task())
 
-    assert result.outcome is Outcome.DONE
+    assert result.outcome == DONE
     assert "conflicts with" not in result.summary
 
 
@@ -184,7 +184,7 @@ async def test_conflict_aborts_the_merge_but_still_opens_a_flagged_pr():
     # The PR still opens, and the summary flags the conflict for the resolver.
     assert len(forge.opened) == 1
     assert handle.pushes == ["harness/tsk_1"]
-    assert result.outcome is Outcome.DONE
+    assert result.outcome == DONE
     assert "conflicts with main" in result.summary
 
 

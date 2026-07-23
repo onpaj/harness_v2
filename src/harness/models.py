@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
-from enum import Enum
 from typing import Any, Union
 
 END = "end"
@@ -26,12 +25,15 @@ ARCHIVED = "archived"
 `done/` into `archived/`. Purely informational — nothing routes on it, since an
 archived task is never reintroduced to the inbox."""
 
+DONE = "done"
+"""The outcome a step reports when its work is finished. Survives from the
+former closed `Outcome` enum as a plain string constant — the outcome type
+itself is now an open, validated string (any non-empty value), not a fixed
+pair; `DONE`/`REQUEST_CHANGES` are just the two names every behavior already
+used, kept so call sites refer to them by name rather than by literal."""
 
-class Outcome(str, Enum):
-    """The only values a ConsumerBehavior may return."""
-
-    DONE = "done"
-    REQUEST_CHANGES = "request_changes"
+REQUEST_CHANGES = "request_changes"
+"""The outcome a review-like step reports to send work back for another pass."""
 
 
 @dataclass(frozen=True)
@@ -46,7 +48,7 @@ class BehaviorResult:
     not for reaching into unrelated keys.
     """
 
-    outcome: Outcome
+    outcome: str
     summary: str = ""
     data: dict[str, Any] | None = None
     """Extra fields the consumer merges into task.data on delivery. None (the

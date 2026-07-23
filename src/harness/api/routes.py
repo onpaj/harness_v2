@@ -122,7 +122,7 @@ def _agent_spec_dict(spec: AgentSpec) -> dict:
         "model": spec.model,
         "fallback_model": spec.fallback_model,
         "allowed_tools": list(spec.allowed_tools),
-        "allowed_outcomes": [outcome.value for outcome in spec.allowed_outcomes],
+        "allowed_outcomes": list(spec.allowed_outcomes),
     }
 
 
@@ -619,7 +619,7 @@ def build_html_router(
                 model=spec.model,
                 fallback_model=spec.fallback_model,
                 allowed_tools=spec.allowed_tools,
-                allowed_outcomes=tuple(outcome.value for outcome in spec.allowed_outcomes),
+                allowed_outcomes=tuple(spec.allowed_outcomes),
                 errors={},
                 saved=False,
                 history=view.agent_history(spec.name),
@@ -667,7 +667,7 @@ def build_html_router(
                 model=spec.model,
                 fallback_model=spec.fallback_model,
                 allowed_tools=spec.allowed_tools,
-                allowed_outcomes=tuple(outcome.value for outcome in spec.allowed_outcomes),
+                allowed_outcomes=tuple(spec.allowed_outcomes),
                 errors={},
                 saved=True,
             ),
@@ -706,7 +706,7 @@ def build_html_router(
                 model=spec.model,
                 fallback_model=spec.fallback_model,
                 allowed_tools=spec.allowed_tools,
-                allowed_outcomes=tuple(outcome.value for outcome in spec.allowed_outcomes),
+                allowed_outcomes=tuple(spec.allowed_outcomes),
                 errors={},
                 saved=True,
                 history=view.agent_history(spec.name),

@@ -3,7 +3,7 @@ import json
 import pytest
 
 from harness.drivers.fs_agents import FilesystemAgentAdmin
-from harness.models import Outcome
+from harness.models import DONE, REQUEST_CHANGES
 from harness.ports.agent import AgentNotFound
 from harness.ports.agent_admin import AgentFields, AgentValidationError
 
@@ -38,7 +38,7 @@ def test_read_returns_the_spec(tmp_path):
 
     assert spec.prompt == "you are a reviewer"
     assert spec.model == "opus"
-    assert spec.allowed_outcomes == (Outcome.DONE, Outcome.REQUEST_CHANGES)
+    assert spec.allowed_outcomes == (DONE, REQUEST_CHANGES)
 
 
 def test_read_missing_agent_raises_not_found(tmp_path):

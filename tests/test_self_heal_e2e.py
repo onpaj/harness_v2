@@ -18,7 +18,7 @@ from harness.drivers.memory import (
     MemoryIssueTracker,
     MemoryWorkspace,
 )
-from harness.models import FAILED, HEALED, Outcome, Task
+from harness.models import DONE, FAILED, HEALED, REQUEST_CHANGES, Task
 from harness.ports.agent import AgentRun, AgentSpec
 
 # A minimal workflow whose only step is `work`. The induced failure (below) is a
@@ -34,11 +34,11 @@ DEFINITION = {
 
 MAX_STEPS = 1000
 
-WORK_SPEC = AgentSpec(name="work", prompt="p", allowed_outcomes=(Outcome.DONE,))
+WORK_SPEC = AgentSpec(name="work", prompt="p", allowed_outcomes=(DONE,))
 HEALER_SPEC = AgentSpec(
     name="healer",
     prompt="persona",
-    allowed_outcomes=(Outcome.DONE, Outcome.REQUEST_CHANGES),
+    allowed_outcomes=(DONE, REQUEST_CHANGES),
 )
 
 
@@ -98,9 +98,9 @@ def submit(tmp_path, task_id="tsk_e2e") -> None:
 
 async def test_failed_task_is_healed_into_an_issue(tmp_path):
     runner = FakeAgentRunner(
-        runs={"healer": AgentRun(Outcome.DONE, "Add the missing edge")},
+        runs={"healer": AgentRun(DONE, "Add the missing edge")},
         writes={"healer": {"issue.md": "# Add the missing edge\n\nrouting gap"}},
-        default=AgentRun(Outcome.DONE, "did the work"),
+        default=AgentRun(DONE, "did the work"),
     )
     harness = build_harness(tmp_path, runner)
     submit(tmp_path)
@@ -124,8 +124,8 @@ async def test_failed_task_is_healed_into_an_issue(tmp_path):
 
 async def test_healer_finds_nothing_actionable(tmp_path):
     runner = FakeAgentRunner(
-        runs={"healer": AgentRun(Outcome.REQUEST_CHANGES, "external flake")},
-        default=AgentRun(Outcome.DONE, "did the work"),
+        runs={"healer": AgentRun(REQUEST_CHANGES, "external flake")},
+        default=AgentRun(DONE, "did the work"),
     )
     harness = build_harness(tmp_path, runner)
     submit(tmp_path)
@@ -142,7 +142,7 @@ async def test_heal_time_error_does_not_loop_back_to_failed(tmp_path):
         async def run(self, *, prompt, spec, cwd, timeout, on_output=None):
             if spec.name == "healer":
                 raise RuntimeError("claude timed out")
-            return AgentRun(Outcome.DONE, "did the work")
+            return AgentRun(DONE, "did the work")
 
     harness = build_harness(tmp_path, BoomRunner())
     submit(tmp_path)
@@ -169,7 +169,7 @@ async def test_no_healer_leaves_the_task_in_failed(tmp_path):
         clock=FakeClock(),
         workspace=MemoryWorkspace(),
         artifacts=MemoryArtifactStore(),
-        runner=FakeAgentRunner(default=AgentRun(Outcome.DONE, "did the work")),
+        runner=FakeAgentRunner(default=AgentRun(DONE, "did the work")),
         catalog=MemoryAgentCatalog({"work": WORK_SPEC}),
         delay=0.0,
     )

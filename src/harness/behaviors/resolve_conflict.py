@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from harness.artifacts_layout import next_attempt
 from harness.behaviors.agent import compose_prompt
-from harness.models import BehaviorResult, Outcome, Task
+from harness.models import DONE, BehaviorResult, Task
 from harness.ports.agent import AgentRunner, AgentSpec
 from harness.ports.behavior import ConsumerBehavior
 from harness.ports.clock import Clock
@@ -49,7 +49,7 @@ class ResolveConflictBehavior(ConsumerBehavior):
             # race: the PR was updated by someone/something else in the
             # meantime) — commit the clean merge result, no agent call spent.
             handle.commit(f"[{step}] merge {base} — no conflicts")
-            return BehaviorResult(Outcome.DONE, f"merged {base} cleanly, no conflicts")
+            return BehaviorResult(DONE, f"merged {base} cleanly, no conflicts")
 
         attempt, relpath = next_attempt(handle.path, task.id, step)
         prompt = compose_prompt(

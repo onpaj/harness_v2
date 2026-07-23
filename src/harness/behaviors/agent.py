@@ -92,7 +92,7 @@ def compose_prompt(
     """
     request = _request_of(task)
     body = _body_of(task)
-    allowed = ", ".join(outcome.value for outcome in spec.allowed_outcomes)
+    allowed = ", ".join(spec.allowed_outcomes)
     artifacts_dir = f".artifacts/{task.id}/"
 
     lines = [

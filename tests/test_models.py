@@ -1,11 +1,12 @@
 from harness.models import (
+    DONE,
     END,
+    REQUEST_CHANGES,
     BehaviorResult,
     Failed,
     Finished,
     HistoryEntry,
     MoveTo,
-    Outcome,
     Task,
     Transition,
     Workflow,
@@ -14,22 +15,22 @@ from harness.models import (
 
 
 def test_behavior_result_carries_outcome_and_summary():
-    result = BehaviorResult(Outcome.DONE, summary="added retry with backoff")
+    result = BehaviorResult(DONE, summary="added retry with backoff")
 
-    assert result.outcome is Outcome.DONE
+    assert result.outcome == DONE
     assert result.summary == "added retry with backoff"
 
 
 def test_behavior_result_summary_defaults_empty():
-    assert BehaviorResult(Outcome.REQUEST_CHANGES).summary == ""
+    assert BehaviorResult(REQUEST_CHANGES).summary == ""
 
 
 def test_behavior_result_data_defaults_none():
-    assert BehaviorResult(Outcome.DONE).data is None
+    assert BehaviorResult(DONE).data is None
 
 
 def test_behavior_result_carries_data():
-    result = BehaviorResult(Outcome.DONE, data={"pr": {"number": 1}})
+    result = BehaviorResult(DONE, data={"pr": {"number": 1}})
 
     assert result.data == {"pr": {"number": 1}}
 
@@ -243,8 +244,8 @@ def test_workflow_finisher_for_reads_configured_kind():
 
 
 def test_outcome_values():
-    assert Outcome.DONE.value == "done"
-    assert Outcome.REQUEST_CHANGES.value == "request_changes"
+    assert DONE == "done"
+    assert REQUEST_CHANGES == "request_changes"
 
 
 def test_decisions_carry_their_payload():

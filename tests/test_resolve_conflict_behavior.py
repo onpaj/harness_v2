@@ -1,6 +1,6 @@
 from harness.behaviors.resolve_conflict import ResolveConflictBehavior
 from harness.drivers.memory import FakeAgentRunner, FakeClock, MemoryEventSink, MemoryWorkspace
-from harness.models import BehaviorResult, Outcome, Task
+from harness.models import DONE, BehaviorResult, Task
 from harness.ports.agent import AgentRun, AgentSpec
 
 
@@ -30,7 +30,7 @@ def build(*, runner=None, spec=None):
     events = MemoryEventSink()
     spec = spec or AgentSpec(name="resolve", prompt="resolve the conflict")
     runner = runner or FakeAgentRunner(
-        runs={"resolve": AgentRun(Outcome.DONE, "resolve: fixed conflict")}
+        runs={"resolve": AgentRun(DONE, "resolve: fixed conflict")}
     )
     behavior = ResolveConflictBehavior(
         clock=FakeClock(), workspace=workspace, runner=runner, spec=spec, events=events
@@ -48,7 +48,7 @@ async def test_clean_merge_commits_without_calling_the_agent():
     assert handle.merges == ["main"]
     assert runner.calls == []
     assert handle.commits == ["[resolve] merge main — no conflicts"]
-    assert result.outcome is Outcome.DONE
+    assert result.outcome == DONE
     assert "no conflicts" in result.summary
 
 
@@ -62,7 +62,7 @@ async def test_conflict_runs_the_agent_and_commits_its_summary():
     handle = workspace.handles[task.id]
     assert len(runner.calls) == 1
     assert handle.commits == ["resolve: fixed conflict"]
-    assert result == BehaviorResult(Outcome.DONE, "resolve: fixed conflict")
+    assert result == BehaviorResult(DONE, "resolve: fixed conflict")
 
 
 async def test_conflict_prompt_carries_attempt_relpath():
