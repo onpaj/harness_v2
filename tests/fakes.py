@@ -21,13 +21,19 @@ class FakeBoardView(BoardView):
 
 
 class FakeTaskControl(TaskControl):
-    """Records restart calls; returns a configurable result. Lets the API be
-    tested without queues."""
+    """Records restart/delete calls; returns configurable results. Lets the
+    API be tested without queues."""
 
-    def __init__(self, result: bool = True) -> None:
+    def __init__(self, result: bool = True, delete_result: bool = True) -> None:
         self._result = result
+        self._delete_result = delete_result
         self.restarted: list[str] = []
+        self.deleted: list[str] = []
 
     def restart(self, task_id: str) -> bool:
         self.restarted.append(task_id)
         return self._result
+
+    def delete(self, task_id: str) -> bool:
+        self.deleted.append(task_id)
+        return self._delete_result

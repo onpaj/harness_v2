@@ -60,6 +60,9 @@ class _NullTaskControl(TaskControl):
     def restart(self, task_id: str) -> bool:
         return False
 
+    def delete(self, task_id: str) -> bool:
+        return False
+
 
 class _EmptyAgentAdmin(AgentAdmin):
     """No-op agent admin for a board wired without one. Keeps `create_app`

@@ -16,14 +16,19 @@ def make_failed_task(task_id="tsk_1", **kwargs):
     )
 
 
-def build(failed_tasks=()):
-    inbox = MemoryTaskQueue("tasks")
+def build(failed_tasks=(), inbox=None, step_queues=None, done=None):
+    inbox = inbox or MemoryTaskQueue("tasks")
     failed = MemoryTaskQueue("failed")
     for task in failed_tasks:
         failed.put(task)
     events = MemoryEventSink()
     service = TaskControlService(
-        inbox=inbox, failed=failed, events=events, clock=FakeClock()
+        inbox=inbox,
+        step_queues=step_queues or {},
+        done=done or MemoryTaskQueue("done"),
+        failed=failed,
+        events=events,
+        clock=FakeClock(),
     )
     return service, inbox, failed, events
 
@@ -86,4 +91,93 @@ def test_restart_unknown_id_returns_false_and_does_nothing():
 
     assert service.restart("nope") is False
     assert inbox.list() == []
+    assert [n for n, _ in events.events] == []
+
+
+# --- delete ------------------------------------------------------------
+
+
+def make_task(task_id="tsk_1", **kwargs):
+    return Task(
+        id=task_id, workflow_template="default", created="2026-07-19T10:00:00Z", **kwargs
+    )
+
+
+def test_delete_removes_task_found_in_inbox():
+    inbox = MemoryTaskQueue("tasks")
+    inbox.put(make_task())
+    service, inbox, _, events = build(inbox=inbox)
+
+    assert service.delete("tsk_1") is True
+    assert inbox.list() == []
+    assert [n for n, _ in events.events] == ["deleted"]
+
+
+def test_delete_removes_task_found_in_a_step_queue():
+    plan = MemoryTaskQueue("plan")
+    plan.put(make_task(status="plan"))
+    service, _, _, events = build(step_queues={"plan": plan})
+
+    assert service.delete("tsk_1") is True
+    assert plan.list() == []
+    assert [n for n, _ in events.events] == ["deleted"]
+
+
+def test_delete_removes_task_found_in_done():
+    done = MemoryTaskQueue("done")
+    done.put(make_task(status="end"))
+    service, _, _, events = build(done=done)
+
+    assert service.delete("tsk_1") is True
+    assert done.list() == []
+    assert [n for n, _ in events.events] == ["deleted"]
+
+
+def test_delete_removes_task_found_in_failed():
+    service, _, failed, events = build([make_failed_task()])
+
+    assert service.delete("tsk_1") is True
+    assert failed.list() == []
+    assert [n for n, _ in events.events] == ["deleted"]
+
+
+def test_delete_emits_deleted_event_with_only_task_id():
+    service, _, failed, events = build([make_failed_task()])
+
+    service.delete("tsk_1")
+
+    _, fields = events.events[0]
+    assert fields == {"task_id": "tsk_1"}
+
+
+def test_delete_unknown_id_returns_false_and_does_nothing():
+    service, _, failed, events = build([make_failed_task()])
+
+    assert service.delete("nope") is False
+    assert failed.list() == [make_failed_task()]
+    assert [n for n, _ in events.events] == []
+
+
+def test_delete_claimed_task_is_invisible_and_returns_false():
+    service, _, failed, events = build([make_failed_task()])
+    failed.claim(failed.list()[0], "lck_1")
+
+    assert service.delete("tsk_1") is False
+    assert [n for n, _ in events.events] == []
+
+
+def test_delete_loses_claim_race_returns_false():
+    service, _, failed, events = build([make_failed_task()])
+    # Simulate another actor claiming the task between list() and claim():
+    # the first claim() steals the ready slot, the second (delete's own)
+    # then finds nothing left to claim.
+    original_claim = failed.claim
+
+    def steal_then_claim(task, lock_id):
+        original_claim(task, "lck_other")
+        return original_claim(task, lock_id)
+
+    failed.claim = steal_then_claim
+
+    assert service.delete("tsk_1") is False
     assert [n for n, _ in events.events] == []

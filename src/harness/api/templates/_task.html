@@ -6,6 +6,10 @@
             hx-target="#detail"
             hx-swap="innerHTML">Restart</button>
     {% endif %}
+    <button class="btn small" hx-post="/tasks/{{ task.id }}/delete"
+            hx-target="#detail"
+            hx-swap="innerHTML"
+            hx-confirm="Delete task {{ task.id }}? This cannot be undone.">Delete</button>
     <button class="task-detail__close" aria-label="close">✕</button>
   </header>
 

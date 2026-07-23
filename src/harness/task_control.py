@@ -26,11 +26,15 @@ class TaskControlService(TaskControl):
         self,
         *,
         inbox: TaskQueue,
+        step_queues: dict[str, TaskQueue],
+        done: TaskQueue,
         failed: TaskQueue,
         events: EventSink,
         clock: Clock,
     ) -> None:
         self._inbox = inbox
+        self._step_queues = step_queues
+        self._done = done
         self._failed = failed
         self._events = events
         self._clock = clock
@@ -65,3 +69,19 @@ class TaskControlService(TaskControl):
             task=reset.to_dict(),
         )
         return True
+
+    def delete(self, task_id: str) -> bool:
+        for queue in (self._inbox, *self._step_queues.values(), self._done, self._failed):
+            found = next((task for task in queue.list() if task.id == task_id), None)
+            if found is None:
+                continue
+
+            claimed = queue.claim(found, new_lock_id())
+            if claimed is None:
+                # Lost the race — another actor moved the file first.
+                return False
+
+            queue.discard(claimed)
+            self._events.emit("deleted", task_id=task_id)
+            return True
+        return False

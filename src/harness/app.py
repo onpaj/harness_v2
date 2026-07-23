@@ -619,7 +619,8 @@ def build(
     )
 
     control = TaskControlService(
-        inbox=inbox, failed=failed, events=events, clock=clock
+        inbox=inbox, step_queues=step_queues, done=done, failed=failed,
+        events=events, clock=clock,
     )
 
     # The healer: an agent assigned to the `failed/` queue. It reads a failed
