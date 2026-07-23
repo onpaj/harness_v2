@@ -1824,10 +1824,12 @@ def main(argv: list[str] | None = None) -> int:
     run.add_argument(
         "--watch-mergeability",
         action=argparse.BooleanOptionalAction,
-        default=True,
+        default=False,
         dest="watch_mergeability",
-        help="auto-update 'behind' PRs and queue 'dirty' ones to the resolver "
-        "workflow (no GITHUB_TOKEN → no-op, same as GitHub issue ingestion)",
+        help="legacy conflict detection: the bespoke GithubMergeabilityWatcher "
+        "that auto-updates 'behind' PRs and queues 'dirty' ones to the resolver "
+        "workflow. Off by default — prefer a 'github-conflicts' process, the one "
+        "authorable detection path (enabling both double-mints resolver tasks)",
     )
     run.add_argument(
         "--resolver-workflow",

@@ -1241,7 +1241,13 @@ def test_init_is_idempotent_for_resolver_workflow(tmp_path):
     assert resolver["transitions"] == []
 
 
-def test_run_watch_mergeability_defaults_on_and_can_be_disabled(monkeypatch, tmp_path):
+def test_run_watch_mergeability_defaults_off_and_can_be_enabled(monkeypatch, tmp_path):
+    # The bespoke mergeability watcher is retired from the *default* wiring:
+    # conflict detection is now the 'github-conflicts' process's job, the one
+    # authorable path. The legacy watcher stays available behind an explicit
+    # --watch-mergeability. No token, so neither run wires an observable source
+    # — this just exercises that both the default (off) and the opt-in parse and
+    # the run completes.
     main(["init", "--root", str(tmp_path)])
     monkeypatch.delenv("GITHUB_TOKEN", raising=False)
     captured = {}
@@ -1251,9 +1257,8 @@ def test_run_watch_mergeability_defaults_on_and_can_be_disabled(monkeypatch, tmp
 
     monkeypatch.setattr("harness.cli.serve", fake_serve)
 
-    assert main(["run", "--root", str(tmp_path), "--no-watch-mergeability"]) == 0
-    # No token either way, so no observable source either way — this just
-    # exercises that the flag parses and the run completes.
+    assert main(["run", "--root", str(tmp_path)]) == 0  # default: watcher off
+    assert main(["run", "--root", str(tmp_path), "--watch-mergeability"]) == 0
     assert "harness" in captured
 
 
