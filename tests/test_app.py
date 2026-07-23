@@ -1,13 +1,17 @@
 import asyncio
 import json
 
+import pytest
+
 from harness.app import HarnessLayout, build
+from harness.behaviors.landing import LandingBehavior
 from harness.drivers.fake_forge import FakeForge
 from harness.drivers.memory import (
     FakeIssueChecker,
     FakeMergeChecker,
     MemoryAgentCatalog,
     MemoryEventSink,
+    MemoryForge,
 )
 from harness.models import ARCHIVED, BehaviorResult, Outcome, Task
 from harness.ports.agent import AgentRun, AgentSpec
@@ -821,3 +825,130 @@ def test_task_for_nonexistent_workflow_still_fails_as_before(tmp_path):
         json.loads((tmp_path / "failed" / "tsk_1.json").read_text())
     )
     assert "does-not-exist" in failed.history[-1].reason
+
+
+PUBLISH_DEFINITION = {
+    "name": "default",
+    "start": "plan",
+    "transitions": [
+        {"from": "plan", "on": "done", "to": "publish"},
+        {"from": "publish", "on": "done", "to": "end"},
+    ],
+    "finishers": {"publish": "open-pr"},
+}
+
+
+def seed_definition(tmp_path, definition, name="default"):
+    layout = HarnessLayout(tmp_path)
+    layout.workflows.mkdir(parents=True, exist_ok=True)
+    (layout.workflows / f"{name}.json").write_text(json.dumps(definition))
+    return layout
+
+
+class RecordingFinisher(ConsumerBehavior):
+    """A minimal caller-supplied finisher: records the tasks it finished."""
+
+    def __init__(self) -> None:
+        self.finished: list[str] = []
+
+    async def run(self, task: Task) -> BehaviorResult:
+        self.finished.append(task.id)
+        return BehaviorResult(Outcome.DONE, summary="recorded")
+
+
+async def test_custom_step_bound_to_open_pr_lands_through_the_forge(tmp_path):
+    """ADR-0016 e2e: a workflow with no "land" step at all binds its own
+    "publish" step to the "open-pr" kind — the forge opens the PR from that
+    step, with no name-keyed branch involved."""
+    seed_definition(tmp_path, PUBLISH_DEFINITION)
+    forge = MemoryForge()
+    harness = build(
+        tmp_path, "default", events=MemoryEventSink(), forge=forge, delay=0.0
+    )
+    task = Task(
+        id="tsk_pub",
+        workflow_template="default",
+        created="2026-07-23T10:00:00Z",
+        repository="app",
+        worktree="/work/tsk_pub",
+        data={"title": "publish it"},
+    )
+    (tmp_path / "tasks" / "tsk_pub.json").write_text(json.dumps(task.to_dict()))
+
+    stop = asyncio.Event()
+    runner = asyncio.create_task(harness.run(poll_interval=0.01, stop=stop))
+    for _ in range(400):
+        await asyncio.sleep(0.01)
+        if (tmp_path / "done" / "tsk_pub.json").exists():
+            break
+    stop.set()
+    await asyncio.wait_for(runner, timeout=RUNNER_TIMEOUT)
+
+    assert (tmp_path / "done" / "tsk_pub.json").exists()
+    assert len(forge.opened) == 1
+    assert forge.opened[0].branch == "harness/tsk_pub"
+
+
+def test_workflow_without_finishers_key_still_binds_land_to_landing(tmp_path):
+    """Backward compatibility (ADR-0016): with no `finishers` key, the map
+    defaults `landing_step` to "open-pr", so a pre-feature workflow's `land`
+    consumer still carries the LandingBehavior — exactly as before."""
+    definition = {
+        "name": "default",
+        "start": "plan",
+        "transitions": [
+            {"from": "plan", "on": "done", "to": "land"},
+            {"from": "land", "on": "done", "to": "end"},
+        ],
+    }
+    seed_definition(tmp_path, definition)
+
+    harness = build(tmp_path, "default", events=MemoryEventSink())
+
+    by_actor = {consumer.actor: consumer for consumer in harness.consumers}
+    assert isinstance(by_actor["consumer:land"]._behavior, LandingBehavior)
+
+
+def test_build_with_unknown_finisher_kind_fails_at_build(tmp_path):
+    definition = {**PUBLISH_DEFINITION, "finishers": {"publish": "call-api"}}
+    seed_definition(tmp_path, definition)
+
+    with pytest.raises(ValueError, match="call-api"):
+        build(tmp_path, "default", events=MemoryEventSink())
+
+
+def test_build_with_conflicting_finisher_bindings_fails_at_build(tmp_path):
+    """Two served workflows share the `publish` step queue, so binding it to
+    two different kinds is a wiring contradiction — build must refuse, not
+    let queue order decide which finisher wins."""
+    layout = seed_definition(tmp_path, PUBLISH_DEFINITION)
+    other = {
+        **PUBLISH_DEFINITION,
+        "name": "other",
+        "finishers": {"publish": "record"},
+    }
+    (layout.workflows / "other.json").write_text(json.dumps(other))
+
+    with pytest.raises(ValueError, match="conflicting"):
+        build(
+            tmp_path,
+            ["default", "other"],
+            events=MemoryEventSink(),
+            finishers={"record": RecordingFinisher()},
+        )
+
+
+def test_caller_supplied_finisher_registry_entry_is_used(tmp_path):
+    definition = {**PUBLISH_DEFINITION, "finishers": {"publish": "record"}}
+    seed_definition(tmp_path, definition)
+    recorder = RecordingFinisher()
+
+    harness = build(
+        tmp_path,
+        "default",
+        events=MemoryEventSink(),
+        finishers={"record": recorder},
+    )
+
+    by_actor = {consumer.actor: consumer for consumer in harness.consumers}
+    assert by_actor["consumer:publish"]._behavior is recorder

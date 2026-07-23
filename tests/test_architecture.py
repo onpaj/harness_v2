@@ -103,6 +103,39 @@ def test_scheduled_trigger_imports_only_ports_models_and_ids():
     ), f"scheduled_trigger.py imports outside ports/models/ids: {imports}"
 
 
+def test_fs_processes_is_a_thin_aggregate_over_the_trigger_drivers():
+    """FilesystemProcessRepository compiles processes/*.json into a
+    ScheduledTrigger. It is a driver, but by design it binds to nothing beyond
+    ports (clock/triggers), models/ids, and the two trigger drivers it composes
+    (checks, scheduled_trigger) — never orchestration, never a source/forge/agent
+    driver. This keeps a Process a compile-time concept (invariant #39)."""
+    allowed_drivers = {
+        "harness.drivers.checks",
+        "harness.drivers.scheduled_trigger",
+    }
+    imports = {
+        module
+        for module in imported_modules(SOURCE / "drivers" / "fs_processes.py")
+        if module.startswith("harness")
+    }
+    assert all(
+        module in ("harness.models", "harness.ids")
+        or module.startswith("harness.ports")
+        or module in allowed_drivers
+        for module in imports
+    ), f"fs_processes.py imports outside ports/models/ids/trigger-drivers: {imports}"
+
+
+def test_orchestration_does_not_name_process():
+    """"Process" is a compile-time authoring concept — the orchestration core
+    never learns it (invariant #39). Neither dispatcher nor consumer imports the
+    process repository."""
+    for name in ("dispatcher.py", "consumer.py"):
+        assert "harness.drivers.fs_processes" not in imported_modules(SOURCE / name), (
+            f"{name} imports fs_processes"
+        )
+
+
 def test_orchestration_does_not_import_control():
     """The operator-control port (TaskControl) is not orchestration. Only the
     task-control service, the API and the wiring reach for it — never the

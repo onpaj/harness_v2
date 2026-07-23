@@ -21,11 +21,14 @@ class Observation:
 
     `state_key` feeds `per-state` dedup — two observations with the same key are
     the same standing reason and must not yield two tasks. `data` is shallow-merged
-    into the emitted task's `data`.
+    into the emitted task's `data`. `repository` names the repo the emitted task
+    belongs to (a multi-repo check stamps it per issue); when None the trigger's
+    own `repository` is used.
     """
 
     state_key: str | None = None
     data: dict[str, Any] = field(default_factory=dict)
+    repository: str | None = None
 
 
 class Check(ABC):
