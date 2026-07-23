@@ -172,7 +172,11 @@ Dependencies flow strictly downward, no cycles.
 - **`harness init`** writes the default agents (`agents/<step>.json`, the persona
   instructs the verdict block + writing an artifact) and an empty `repos.json`.
   `harness run` injects `ClaudeCliRunner`, `Filesystem{AgentCatalog,RepositoryRegistry}`,
-  `GitWorkspace` and `WorktreeArtifactView`.
+  `GitWorkspace` and `WorktreeArtifactView`. The same per-step template is available
+  on demand via `harness agent init <step> [--workflow] [--force]`, for a step added
+  to a workflow after `init` already ran, or to regenerate/inspect one step's
+  `agents/<step>.json` without touching the rest of an already-configured `agents/`
+  directory.
 - **`TaskSource`** (phase 4) is the outside world of work control behind a single port
   with three verbs: `poll()` brings new tasks (a second inbox producer alongside
   `submit`), `report_progress`/`finish` project state outward. The GitHub adapter does
