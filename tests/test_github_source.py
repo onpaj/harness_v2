@@ -1,7 +1,7 @@
 """GithubTaskSource — issue → task, status → label."""
 
 from harness.drivers.github_client import FakeGithubClient, Issue
-from harness.drivers.github_source import GithubTaskSource
+from harness.drivers.github_source import GithubLabelReflector, GithubTaskSource
 from harness.drivers.memory import FakeClock
 from harness.models import Task
 from harness.ports.source import FinishResult, Progress
@@ -185,3 +185,138 @@ def test_task_from_another_repo_is_not_mine():
     source.finish(foreign, FinishResult(ok=True))
 
     assert _labels(client, 1) == {"harness:todo"}  # untouched — not this source's repo
+
+
+def build_reflector(client, **kwargs):
+    return GithubLabelReflector(
+        client=client,
+        repo="o/r",
+        step_labels={"development": "harness:coding"},
+        **kwargs,
+    )
+
+
+def _task(number, *, repo="o/r"):
+    return Task(
+        id="tsk_x",
+        workflow_template="default",
+        created="2026-07-19T10:00:00Z",
+        repository="/repos/r",
+        worktree="/wt/tsk_x",
+        data={"source": {"kind": "github", "repo": repo, "issue": number, "url": "u"}},
+    )
+
+
+def test_reflector_poll_is_always_empty():
+    client = FakeGithubClient([Issue(1, "Fix", "", "u1", ("harness:queued",))])
+    reflector = build_reflector(client)
+
+    assert reflector.poll() == []
+
+
+def test_reflector_report_progress_known_step_sets_step_label():
+    client = FakeGithubClient([Issue(1, "Fix", "", "u1", ("harness:queued",))])
+    reflector = build_reflector(client)
+
+    reflector.report_progress(_task(1), Progress(step="development"))
+
+    assert _labels(client, 1) == {"harness:coding"}
+
+
+def test_reflector_report_progress_unknown_step_leaves_labels_unchanged():
+    client = FakeGithubClient([Issue(1, "Fix", "", "u1", ("harness:queued",))])
+    reflector = build_reflector(client)
+
+    reflector.report_progress(_task(1), Progress(step="plan"))  # not in step_labels
+
+    assert _labels(client, 1) == {"harness:queued"}
+
+
+def test_reflector_finish_ok_sets_pr_label():
+    client = FakeGithubClient([Issue(1, "Fix", "", "u1", ("harness:queued",))])
+    reflector = build_reflector(client)
+    reflector.report_progress(_task(1), Progress(step="development"))
+
+    reflector.finish(_task(1), FinishResult(ok=True))
+
+    assert _labels(client, 1) == {"harness:pr-open"}
+
+
+def test_reflector_finish_not_ok_sets_failed_label():
+    client = FakeGithubClient([Issue(1, "Fix", "", "u1", ("harness:queued",))])
+    reflector = build_reflector(client)
+
+    reflector.finish(_task(1), FinishResult(ok=False))
+
+    assert _labels(client, 1) == {"harness:failed"}
+
+
+def test_reflector_double_report_progress_is_idempotent():
+    client = FakeGithubClient([Issue(1, "Fix", "", "u1", ("harness:queued",))])
+    reflector = build_reflector(client)
+
+    reflector.report_progress(_task(1), Progress(step="development"))
+    reflector.report_progress(_task(1), Progress(step="development"))
+
+    assert _labels(client, 1) == {"harness:coding"}
+
+
+def test_reflector_double_finish_is_idempotent():
+    client = FakeGithubClient([Issue(1, "Fix", "", "u1", ("harness:queued",))])
+    reflector = build_reflector(client)
+
+    reflector.finish(_task(1), FinishResult(ok=True))
+    reflector.finish(_task(1), FinishResult(ok=True))
+
+    assert _labels(client, 1) == {"harness:pr-open"}
+
+
+def test_reflector_ignores_task_without_source():
+    client = FakeGithubClient([Issue(1, "Fix", "", "u1", ("harness:queued",))])
+    reflector = build_reflector(client)
+    foreign = Task(
+        id="tsk_x",
+        workflow_template="default",
+        created="2026-07-19T10:00:00Z",
+        data={},
+    )
+
+    reflector.report_progress(foreign, Progress(step="development"))
+    reflector.finish(foreign, FinishResult(ok=True))
+
+    assert _labels(client, 1) == {"harness:queued"}
+
+
+def test_reflector_ignores_task_from_another_repo():
+    client = FakeGithubClient([Issue(1, "Fix", "", "u1", ("harness:queued",))])
+    reflector = build_reflector(client)  # repo="o/r"
+
+    reflector.report_progress(_task(1, repo="o/other"), Progress(step="development"))
+    reflector.finish(_task(1, repo="o/other"), FinishResult(ok=True))
+
+    assert _labels(client, 1) == {"harness:queued"}
+
+
+def test_reflector_ignores_task_from_foreign_kind():
+    client = FakeGithubClient([Issue(1, "Fix", "", "u1", ("harness:queued",))])
+    reflector = build_reflector(client)
+    foreign = Task(
+        id="tsk_x",
+        workflow_template="default",
+        created="2026-07-19T10:00:00Z",
+        data={"source": {"kind": "slack", "repo": "o/r", "issue": 1, "url": "u"}},
+    )
+
+    reflector.report_progress(foreign, Progress(step="development"))
+    reflector.finish(foreign, FinishResult(ok=True))
+
+    assert _labels(client, 1) == {"harness:queued"}
+
+
+def test_reflector_preserves_non_managed_labels():
+    client = FakeGithubClient([Issue(1, "Fix", "", "u1", ("harness:queued", "bug"))])
+    reflector = build_reflector(client)
+
+    reflector.finish(_task(1), FinishResult(ok=True))
+
+    assert _labels(client, 1) == {"bug", "harness:pr-open"}

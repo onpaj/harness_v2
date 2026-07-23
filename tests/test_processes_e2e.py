@@ -18,6 +18,7 @@ from harness.drivers.memory import (
     MemoryArtifactStore,
     MemoryEventSink,
     MemoryForge,
+    MemoryRepositoryRegistry,
     MemoryWorkspace,
     ScriptedBehavior,
 )
@@ -239,5 +240,80 @@ def test_github_issues_process_ingests_a_labelled_issue_once_per_bucket(tmp_path
         # The issue was claimed (label swapped) → next bucket sees nothing new.
         clock.instant = "2026-07-22T10:01:00Z"
         assert source.poll() == []
+    finally:
+        mod.github_slug = orig  # type: ignore[assignment]
+
+
+async def test_github_issues_process_reflects_task_state_onto_issue_labels(tmp_path):
+    """`--no-github-source` configuration: ingestion via the `github-issues`
+    Process action, reflection via a standalone `GithubLabelReflector` —
+    restores the outward half of the GitHub round-trip for a Process-sourced
+    task (the regression this task fixes)."""
+    import argparse
+
+    import harness.drivers.github_issues_check as mod
+    from harness.cli import DEFAULT_STEP_LABELS, _process_sources
+    from harness.drivers.github_client import FakeGithubClient, Issue
+    from harness.drivers.github_source import GithubLabelReflector
+
+    seed(tmp_path)
+    write_process(
+        tmp_path,
+        "harness-todo",
+        {
+            "trigger": {"interval": "30s"},
+            "action": {"check": "github-issues", "params": {"label": "harness:todo"}},
+            "target": {"workflow": "default"},
+            "dedup": "per-state",
+            "sink": {"kind": "none"},
+        },
+    )
+    client = FakeGithubClient(
+        [Issue(42, "Do the thing", "body", "https://gh/i/42", ("harness:todo",))]
+    )
+    registry = MemoryRepositoryRegistry({"heblo": Path("/repos/heblo")})
+    slugs = {Path("/repos/heblo"): "onpaj/Anela.Heblo"}
+    clock = FakeClock("2026-07-22T10:00:00Z")
+
+    args = argparse.Namespace(worktree_root=None, github_label="harness:todo")
+    orig = mod.github_slug
+    mod.github_slug = slugs.get  # type: ignore[assignment]
+    try:
+        process_sources = _process_sources(
+            args, tmp_path, registry,
+            clock=clock, known_targets={"default"}, client=client,
+        )
+        # The outward half — registered standalone, exactly as `cli._run` does
+        # whenever `--no-github-source` delegates ingestion to the process.
+        reflector = GithubLabelReflector(
+            client=client, repo="onpaj/Anela.Heblo", step_labels=DEFAULT_STEP_LABELS
+        )
+        behavior = ScriptedBehavior()
+        harness = build(
+            tmp_path,
+            "default",
+            events=MemoryEventSink(),
+            clock=clock,
+            behavior=behavior,
+            workspace=MemoryWorkspace(),
+            artifacts=MemoryArtifactStore(),
+            forge=MemoryForge(),
+            delay=0.0,
+            sources=[*process_sources, reflector],
+        )
+
+        await drive_until_quiet(harness)
+
+        # `land` is always the built-in LandingBehavior (opens the PR), never
+        # the scripted one — only the earlier steps run through `behavior`.
+        assert "development" in behavior.seen
+        assert "review" in behavior.seen
+        # Terminal label reflects success; the earlier queued/step labels were
+        # each set and then superseded (a stateless recompute each time).
+        assert set(client._issues[42].labels) == {"harness:pr-open"}
+
+        done_files = list((tmp_path / "done").glob("*.json"))
+        assert len(done_files) == 1
+        assert Task.from_dict(json.loads(done_files[0].read_text())).status == "end"
     finally:
         mod.github_slug = orig  # type: ignore[assignment]

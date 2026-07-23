@@ -13,6 +13,7 @@ from harness.cli import (
     DEFAULT_WORKFLOW,
     _REVIEW_PERSONA,
     _allowed_outcomes_for,
+    _github_reflectors,
     _github_sources,
     _mergeability_sources,
     _process_sources,
@@ -664,6 +665,84 @@ def test_github_sources_empty_without_token(monkeypatch, tmp_path):
     registry = MemoryRepositoryRegistry({"heblo": Path("/repos/heblo")})
 
     assert _github_sources(_github_args(), tmp_path, registry) == []
+
+
+def test_github_reflectors_builds_one_per_github_repo(monkeypatch, tmp_path):
+    """One reflector per repos.json repo with a GitHub origin, mirroring
+    `_github_sources`'s enumeration."""
+    monkeypatch.setenv("GITHUB_TOKEN", "t0ken")
+    registry = MemoryRepositoryRegistry(
+        {"heblo": Path("/repos/heblo"), "harness_v2": Path("/repos/harness_v2")}
+    )
+    slugs = {
+        Path("/repos/heblo"): "onpaj/Anela.Heblo",
+        Path("/repos/harness_v2"): "onpaj/harness_v2",
+    }
+
+    reflectors = _github_reflectors(
+        _github_args(),
+        tmp_path,
+        registry,
+        slug_of=slugs.get,
+        client=FakeGithubClient(),
+    )
+
+    assert {r._repo for r in reflectors} == {"onpaj/Anela.Heblo", "onpaj/harness_v2"}
+
+
+def test_github_reflectors_skips_repo_without_github_origin(monkeypatch, tmp_path):
+    monkeypatch.setenv("GITHUB_TOKEN", "t0ken")
+    registry = MemoryRepositoryRegistry(
+        {"heblo": Path("/repos/heblo"), "local": Path("/repos/local")}
+    )
+    slugs = {Path("/repos/heblo"): "onpaj/Anela.Heblo", Path("/repos/local"): None}
+
+    reflectors = _github_reflectors(
+        _github_args(), tmp_path, registry, slug_of=slugs.get, client=FakeGithubClient()
+    )
+
+    assert {r._repo for r in reflectors} == {"onpaj/Anela.Heblo"}
+
+
+def test_github_reflectors_empty_without_token(monkeypatch, tmp_path):
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    registry = MemoryRepositoryRegistry({"heblo": Path("/repos/heblo")})
+
+    assert _github_reflectors(_github_args(), tmp_path, registry) == []
+
+
+def test_run_gates_github_sources_and_reflectors_mutually_exclusively(monkeypatch, tmp_path):
+    """`_run`'s `sources` composition calls exactly one of `_github_sources` /
+    `_github_reflectors` per invocation, keyed by `--no-github-source` — never
+    both, so a repo is never covered by both a `GithubTaskSource` and a
+    `GithubLabelReflector` at once."""
+    main(["init", "--root", str(tmp_path)])
+    calls = {"sources": [], "reflectors": []}
+
+    def fake_github_sources(args, root, registry):
+        calls["sources"].append(args.no_github_source)
+        return []
+
+    def fake_github_reflectors(args, root, registry):
+        calls["reflectors"].append(args.no_github_source)
+        return []
+
+    monkeypatch.setattr("harness.cli._github_sources", fake_github_sources)
+    monkeypatch.setattr("harness.cli._github_reflectors", fake_github_reflectors)
+
+    async def fake_serve(
+        harness, port, poll_interval, source_interval=30.0,
+        pr_poll_interval=0.0, reconcile_interval=300.0,
+    ):
+        pass
+
+    monkeypatch.setattr("harness.cli.serve", fake_serve)
+
+    assert main(["run", "--root", str(tmp_path), "--no-github-source"]) == 0
+    assert calls == {"sources": [], "reflectors": [True]}
+
+    assert main(["run", "--root", str(tmp_path)]) == 0
+    assert calls == {"sources": [False], "reflectors": [True]}
 
 
 def _process_args(**overrides):
