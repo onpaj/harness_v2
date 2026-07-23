@@ -9,6 +9,7 @@ to the right form field and never leaves a partial file behind.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -84,6 +85,25 @@ def test_disk_threshold_step_round_trips(tmp_path: Path) -> None:
     _compiles(tmp_path)
 
 
+def test_slack_sink_round_trips(tmp_path: Path) -> None:
+    admin = FilesystemProcessAdmin(tmp_path)
+
+    written = admin.write(
+        "notify",
+        ProcessFields(
+            interval="1h",
+            check="always",
+            target_kind="workflow",
+            target="wf",
+            sink_kind="slack",
+        ),
+    )
+
+    assert written.sink_kind == "slack"
+    assert admin.read("notify") == written
+    _compiles(tmp_path)
+
+
 # --- validation: right field key --------------------------------------------
 
 
@@ -110,7 +130,7 @@ def _valid(**overrides) -> ProcessFields:
             "params",
         ),
         (_valid(dedup="per-eternity"), "dedup"),
-        (_valid(sink_kind="slack"), "sink"),
+        (_valid(sink_kind="teams"), "sink"),
         (_valid(target_kind="banana"), "target"),
     ],
 )
@@ -145,6 +165,30 @@ def test_write_rejected_submission_leaves_existing_file_untouched(
         admin.write("nightly", _valid(interval="1x"))
 
     assert admin.read("nightly").interval == "1h"
+
+
+def test_read_tolerates_trigger_kind_and_write_never_emits_it(tmp_path: Path) -> None:
+    # `trigger.kind` is a read-tolerated reservation, not an editable field:
+    # a file carrying `"kind": "schedule"` reads fine, and a re-write through
+    # the admin drops the key (the form never emits it).
+    (tmp_path / "kinded.json").write_text(
+        json.dumps(
+            {
+                "trigger": {"kind": "schedule", "interval": "1h"},
+                "action": {"check": "always"},
+                "target": {"workflow": "wf"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    admin = FilesystemProcessAdmin(tmp_path)
+
+    fields = admin.read("kinded")
+    assert fields.interval == "1h"
+
+    admin.write("kinded", fields)
+    raw = json.loads((tmp_path / "kinded.json").read_text(encoding="utf-8"))
+    assert "kind" not in raw["trigger"]
 
 
 # --- read / delete / list ---------------------------------------------------
@@ -190,4 +234,4 @@ def test_check_names_and_sink_kinds(tmp_path: Path) -> None:
 
     assert "always" in admin.check_names()
     assert "disk-threshold" in admin.check_names()
-    assert admin.sink_kinds() == ("none",)
+    assert admin.sink_kinds() == ("none", "slack")

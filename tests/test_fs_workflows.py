@@ -167,6 +167,63 @@ def test_max_parallel_rejects_bool_even_though_bool_is_an_int_subclass(tmp_path)
         repository.get("default")
 
 
+def test_definition_without_finishers_defaults_to_empty(tmp_path):
+    (tmp_path / "default.json").write_text(json.dumps(DEFINITION))
+    repository = FilesystemWorkflowRepository(tmp_path)
+
+    workflow = repository.get("default")
+
+    assert workflow.finishers == {}
+    assert workflow.finisher_for("review") is None
+
+
+def test_finishers_are_parsed_and_exposed(tmp_path):
+    definition = {**DEFINITION, "finishers": {"review": "open-pr"}}
+    (tmp_path / "default.json").write_text(json.dumps(definition))
+    repository = FilesystemWorkflowRepository(tmp_path)
+
+    workflow = repository.get("default")
+
+    assert workflow.finishers == {"review": "open-pr"}
+    assert workflow.finisher_for("review") == "open-pr"
+    assert workflow.finisher_for("plan") is None
+
+
+def test_finishers_not_an_object_raises(tmp_path):
+    definition = {**DEFINITION, "finishers": ["review"]}
+    (tmp_path / "default.json").write_text(json.dumps(definition))
+    repository = FilesystemWorkflowRepository(tmp_path)
+
+    with pytest.raises(WorkflowNotFound, match="finishers"):
+        repository.get("default")
+
+
+def test_finisher_for_unknown_step_raises(tmp_path):
+    definition = {**DEFINITION, "finishers": {"reviw": "open-pr"}}
+    (tmp_path / "default.json").write_text(json.dumps(definition))
+    repository = FilesystemWorkflowRepository(tmp_path)
+
+    with pytest.raises(WorkflowNotFound, match="reviw"):
+        repository.get("default")
+
+
+@pytest.mark.parametrize(
+    "kind",
+    ["", 3, None, True],
+    ids=["empty", "number", "null", "bool"],
+)
+def test_finisher_invalid_kind_raises(tmp_path, kind):
+    """The kind is a name resolved against build()'s registry, so anything but
+    a non-empty string can never resolve — reject it already at parse time,
+    with the step named, exactly as a bad maxParallel value is rejected."""
+    definition = {**DEFINITION, "finishers": {"review": kind}}
+    (tmp_path / "default.json").write_text(json.dumps(definition))
+    repository = FilesystemWorkflowRepository(tmp_path)
+
+    with pytest.raises(WorkflowNotFound, match="review"):
+        repository.get("default")
+
+
 def test_path_separator_is_rejected_even_when_escape_target_exists(tmp_path):
     """A weaker version of this test (no real file at the escaped path)
     would pass even if the separator guard were deleted entirely: the

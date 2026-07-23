@@ -20,10 +20,14 @@ so a process the operator assembles in the dashboard fails exactly where a
 hand-edited file would. A `ProcessValidationError` carries an optional `field`
 so the admin can map a compile failure to the right form field.
 
-The `sink` field is a forward-compat seam (invariant #40): it is parsed and
-validated but restricted to *absent* or `{"kind": "none"}` in v1 (fire-and-forget)
-— the door for a real GitHub/Slack reflector is in the wall, but no driver ships
-here, so a non-`none` sink is a build error.
+The `sink` field names the outbound reflection destination (invariant #40):
+`none` (fire-and-forget, the default) or `slack`. A non-`none` sink is passed
+to the compiled `ScheduledTrigger`, which stamps it into every task it fires as
+`data["sink"] = {"kind": ...}` — the destination identity an outbound-only sink
+driver (`SlackWebhookSink`) routes on. The shape stays `{"kind": "..."}` with
+no params: the Slack webhook URL is a secret and never enters a JSON file (it
+arrives via `SLACK_WEBHOOK_URL` at wiring time — the service holds no secret).
+An unknown kind is still a build error.
 """
 
 from __future__ import annotations
@@ -45,15 +49,16 @@ from harness.ports.process_admin import (
 )
 from harness.ports.triggers import CheckFactory, parse_interval
 
-_ACCEPTED_SINK_KINDS = {"none"}
-"""The only sink kinds v1 accepts. A real reflector adds a kind here plus a driver."""
+_ACCEPTED_SINK_KINDS = {"none", "slack"}
+"""The accepted sink kinds. A new destination adds a kind here plus a driver."""
 
 
 class ProcessValidationError(Exception):
     """A process file is malformed. The message names the offending file; the
-    optional `field` (one of ``interval|check|params|target|dedup|sink`` or
-    ``None`` for a whole-file problem like broken JSON) lets the admin map the
-    failure onto a form field. `str()` is unchanged — still just the message."""
+    optional `field` (one of ``interval|check|params|target|dedup|sink|trigger``
+    or ``None`` for a whole-file problem like broken JSON) lets the admin map
+    the failure onto a form field. `str()` is unchanged — still just the
+    message."""
 
     def __init__(self, message: str, field: str | None = None) -> None:
         self.field = field
@@ -96,14 +101,15 @@ def compile_process(
     startup) and the admin (validate one submission before writing). `where`
     (defaults to `name`) is the label used in messages. Each failure raises
     `ProcessValidationError(msg, field=...)` with `field` one of
-    ``interval|check|params|target|dedup|sink``.
+    ``interval|check|params|target|dedup|sink|trigger``.
     """
     where = where or name
     interval = _parse_interval(where, raw.get("trigger"))
+    _check_trigger_kind(where, raw.get("trigger"))
     check = _parse_action(where, raw.get("action"), checks)
     workflow, step = _parse_target(where, raw.get("target"), known_targets)
     dedup = _parse_dedup(where, raw.get("dedup", "per-interval"))
-    _validate_sink(where, raw.get("sink"))
+    sink = _parse_sink(where, raw.get("sink"))
 
     return ScheduledTrigger(
         name=name,
@@ -115,6 +121,7 @@ def compile_process(
         repository=repository,
         worktree_root=worktree_root,
         dedup=dedup,
+        sink=sink,
     )
 
 
@@ -182,18 +189,36 @@ def _parse_dedup(where: str, dedup: object) -> str:
     return dedup
 
 
-def _validate_sink(where: str, sink: object) -> None:
-    # Forward-compat seam (invariant #40): the slot is reserved, but only a
-    # fire-and-forget sink ships in v1. A real GitHub/Slack reflector adds an
-    # accepted kind here and a driver — no schema change.
+def _check_trigger_kind(where: str, trigger: object) -> None:
+    # Forward-compat reservation, the same zero-cost move `sink` got: the
+    # trigger object may carry a `kind`, but only `"schedule"` exists — a
+    # future condition-driven trigger adds a kind here plus a compile path,
+    # never a schema change. `_parse_interval` has already established that
+    # `trigger` is a dict.
+    kind = trigger.get("kind", "schedule") if isinstance(trigger, dict) else "schedule"
+    if kind != "schedule":
+        raise ProcessValidationError(
+            f"process {where} has an unsupported trigger kind {kind!r} "
+            f"(only 'schedule' is supported in this version)",
+            field="trigger",
+        )
+
+
+def _parse_sink(where: str, sink: object) -> dict | None:
+    # The destination half of invariant #40: the accepted kinds are `none`
+    # (fire-and-forget) and `slack` (`SlackWebhookSink` routes on the stamped
+    # `data.sink`). A new destination adds an accepted kind here and a driver
+    # — no schema change.
     if sink is None:
-        return
+        return None
     if not isinstance(sink, dict) or sink.get("kind") not in _ACCEPTED_SINK_KINDS:
+        accepted = ", ".join(repr(kind) for kind in sorted(_ACCEPTED_SINK_KINDS))
         raise ProcessValidationError(
             f"process {where} has an unsupported sink {sink!r} "
-            f"(only {{'kind': 'none'}} is supported in this version)",
+            f"(accepted kinds: {accepted})",
             field="sink",
         )
+    return sink
 
 
 class FilesystemProcessRepository:
@@ -333,7 +358,7 @@ class FilesystemProcessAdmin(ProcessAdmin):
         return tuple(sorted(BUILTIN_CHECKS))
 
     def sink_kinds(self) -> tuple[str, ...]:
-        return ("none",)
+        return ("none", "slack")
 
     def _write(self, path: Path, raw: dict) -> None:
         # Same idiom as `FilesystemAgentAdmin._write` (drivers/fs_agents.py):
@@ -352,7 +377,9 @@ class FilesystemProcessAdmin(ProcessAdmin):
 
 def _raw_from_fields(fields: ProcessFields) -> dict:
     """Assemble the nested `processes/*.json` shape from the flat form fields.
-    `name` is never written — the file's stem is the name (like agents)."""
+    `name` is never written — the file's stem is the name (like agents). Nor is
+    `trigger.kind`: the reservation is read-tolerated (`_fields_from_raw` simply
+    ignores it), not an editable field, so the admin never emits it."""
     return {
         "trigger": {"interval": fields.interval},
         "action": {"check": fields.check, "params": dict(fields.params)},

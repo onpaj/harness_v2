@@ -73,6 +73,16 @@ covered):**
 is the richer, primary authoring surface; a bare trigger file is the low-level
 primitive it is built from.
 
+## Terminology
+
+An action's outputs are **Observations** — each becomes a **task** in the
+inbox, placed by the dispatcher. The word **artifact** stays reserved for a
+step's work products versioned in the worktree (`.artifacts/<id>/`,
+ADR-0006). A Process therefore never "produces artifacts": it produces
+observations that become tasks, whose steps may then produce artifacts.
+Keeping the two words apart matters — both concepts flow through the same
+documents.
+
 ## The Process shape
 
 ```json
@@ -151,6 +161,16 @@ file), mirroring `FilesystemTriggerRepository`:
 | `sink.kind` not `"none"` (when `sink` present) | no sink driver in v1 |
 
 ## The sink seam (forward-compat, not built)
+
+> **Update 2026-07-23 — partially realized.** The `slack` kind now ships:
+> `compile_process` accepts `{"kind": "slack"}`, the compiled `ScheduledTrigger`
+> stamps `data.sink = {"kind": "slack"}` into every task it fires (after the
+> observation merge, so a check cannot clobber it), and
+> `drivers/slack_sink.py`'s `SlackWebhookSink` — an outbound-only `TaskSource`
+> registered in `cli._run` when `SLACK_WEBHOOK_URL` is set — routes on that
+> destination identity, posting a stateless webhook message per report. Bullet
+> 3's stateful create-then-update handle (and the `Reflector` port) remains
+> open.
 
 The whole point of the `sink` field is to keep **source ≠ destination** open —
 today a Process's origin and its reflection target are the same medium (or, in

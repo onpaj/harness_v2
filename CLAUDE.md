@@ -80,7 +80,8 @@ swapped out later.
 37. **A scheduled trigger owns its cadence via the `Clock`, not via a loop.** `poll()` gates on the interval bucket `floor(now / interval)` and returns `[]` cheaply between fires; the shared `source_interval` is only polling granularity. The gate reads solely `Clock`, so it is `FakeClock`-testable and survives the poller's `sleep(0)` fast-path without re-firing.
 38. **A scheduled trigger's `dedup_key` is bucket-keyed, giving at-most-once per interval across restarts.** The key includes `floor(now / interval)` (and, for `per-state` dedup, an observed `state_key` instead), so the existing `SourcePoller._seen` seeding makes one period yield one task even across a restart — the same exactly-once mechanism as GitHub ingestion (ADR-0010), with a non-constant key.
 39. **A Process is a compile-time authoring aggregate, never a runtime object.** `processes/*.json` bundles a trigger (cadence), an action (a named `Check`), a target (workflow **or** step) and a `sink`, and `FilesystemProcessRepository` **compiles each into a `ScheduledTrigger`** that joins the existing `sources` list. Nothing under orchestration (`dispatcher`/`consumer`/`router`/`source_poller`) imports or names "process"; it is `cli.py` wiring turned into data. `build()` gains no parameter, and `triggers/*.json` is unchanged — a Process compiles to the *same* `ScheduledTrigger` a bare trigger file does, so the two surfaces coexist. Guarded by `test_architecture.py`. See ADR-0015.
-40. **A Process's `sink` is a forward-compat seam: parsed, validated, `none`-only in v1.** The outbound reflection destination is a distinct field from the inbound origin so source ≠ destination stays open (GitHub in, Slack out) as a driver addition, never a schema change. v1 writes no `data.sink` and reflects nothing; a real sink would route via `SourceReflectorSink` on a destination identity that defaults to `source.kind`, and a stateful sink (create-then-update, e.g. a Slack message edited as progress advances) may return a persistable handle — refining invariant #21 from "no-op" to "convergent." No `Reflector` port is built until a real destination exists. See ADR-0015.
+40. **A Process's `sink` names the outbound reflection destination — `none` or `slack` — distinct from the inbound origin.** Source ≠ destination is real (GitHub in, Slack out): a non-`none` sink is stamped by the compiled trigger as `data.sink = {"kind": ...}` (after the observation merge, so a check can never clobber it) and routed by *destination* identity — `SlackWebhookSink` (an outbound-only `TaskSource`, `poll()` always `[]`, registered in `cli._run` only when `SLACK_WEBHOOK_URL` is set; the URL is a secret and never enters a JSON file) matches on `data.sink.kind`, never `data.source`, riding the existing `SourceReflectorSink` fan-out. The shipped sink is stateless — each report posts a fresh webhook message, deduped per-run by an in-process ledger (invariant #21); the stateful create-then-update refinement (a Slack message edited as progress advances, via a persistable handle, "no-op" → "convergent") stays open, and no `Reflector` port is built until it is needed. See ADR-0015.
+41. **A finisher is data, not a step name.** A step's finishing behavior is chosen via the workflow's `finishers` mapping (step → finisher kind, parsed like `maxParallel`) resolved against a registry wired in `build()` (`{"open-pr": landing}` by default, `Forge` being the driver behind the `open-pr` kind); `behavior_for` has no branch on a step's name for finishing. Conflicting bindings across served workflows and unknown kinds fail at build, never at consume time; a workflow with no `finishers` key defaults `landing_step` to `open-pr` and behaves exactly as before. See ADR-0016.
 
 ## Working here
 
@@ -143,7 +144,7 @@ Dependencies flow strictly downward, no cycles.
 | Ports | `ports/{queue,workflows,strategy,behavior,events,clock,workspace,artifacts,forge,board,agent,repos,source,control,logs,issues,merge,issue_state,triggers,updater,process_admin}` |
 | Orchestration | `dispatcher`, `consumer`, `source_poller`, `task_control`, `healer`, `pr_watcher`, `merge_reconciler`, `issue_reconciler` — know only ports (and, for `pr_watcher`/`merge_reconciler`/`issue_reconciler`, the base `ids` module — not `workspace`/`forge`/`artifacts`/`agent`/`repos`/`drivers`) |
 | Behaviors | `behaviors/{landing,agent,resolve_conflict}` — touch ports, not drivers |
-| Drivers | `drivers/{fs_queue,fs_workflows,fifo_strategy,dummy_behavior,stdout_events,system_clock,memory,fs_artifacts,git_workspace,fake_forge,claude_cli,fs_agents,fs_repos,worktree_artifacts,source_reflector,github_client,github_source,github_forge,github_issues,github_issues_check,github_merge_checker,github_issue_checker,mergeability_watcher,launchd,composite_events,git_remote,projection_events,stage_output,scheduled_trigger,checks,fs_triggers,fs_processes,uv_updater}` |
+| Drivers | `drivers/{fs_queue,fs_workflows,fifo_strategy,dummy_behavior,stdout_events,system_clock,memory,fs_artifacts,git_workspace,fake_forge,claude_cli,fs_agents,fs_repos,worktree_artifacts,source_reflector,github_client,github_source,github_forge,github_issues,github_issues_check,github_merge_checker,github_issue_checker,mergeability_watcher,launchd,composite_events,git_remote,projection_events,stage_output,scheduled_trigger,checks,fs_triggers,fs_processes,slack_sink,uv_updater}` |
 | UI | `api/{app,routes}` — reads through `BoardView`/`ArtifactView`/`StageOutputView`, writes through `TaskControl`; never a driver |
 | Edges | `app` (wiring), `cli` |
 
@@ -206,12 +207,13 @@ Dependencies flow strictly downward, no cycles.
 - `drivers/uv_updater.py` — `UvUpdater`: the real `Updater` over `uv tool upgrade` + launchd `kickstart` (the same flow as `harness update`, reached from the board's Update button). Discovers `uv` itself; the installed entry point and the idle gate are injected by `cli.serve()` so the driver never imports back into `cli.py`
 - `issue_reconciler.py` — `IssueReconciler`: the core that sweeps every live queue and archives a task whose source issue was closed or deleted out from under it (knows only ports/models/ids, mirrors `pr_watcher.py`)
 - `drivers/github_issue_checker.py` — `GithubIssueChecker`: reads `repo`/`issue` straight off `task.data["source"]` at check time; a deleted issue (404) reads as "not open", one checker serves every repo the token can reach
-- `drivers/github_issues_check.py` — `GithubIssuesCheck(Check)`: the inbound `harness:todo` scan as a process `Check` — lists issues by label across the repo registry, claims each via the label swap (`todo`→`queued`), and emits one provenance-stamped `Observation` (`data.source`) per issue. Registered as the `github-issues` action by closing a `GithubClient` + registry into a factory in `cli._process_sources`; `BUILTIN_CHECKS` stays client-free. The inbound half of ADR-0015's action seam (the `sink`/outbound half stays open)
+- `drivers/github_issues_check.py` — `GithubIssuesCheck(Check)`: the inbound `harness:todo` scan as a process `Check` — lists issues by label across the repo registry, claims each via the label swap (`todo`→`queued`), and emits one provenance-stamped `Observation` (`data.source`) per issue. Registered as the `github-issues` action by closing a `GithubClient` + registry into a factory in `cli._process_sources`; `BUILTIN_CHECKS` stays client-free. The inbound half of ADR-0015's action seam (the outbound half is a sink, e.g. `SlackWebhookSink`)
 - `ports/triggers.py` — the `Check` (ABC) protocol (`evaluate() -> list[Observation]`), `Observation` (optional `state_key` + task `data`), `CheckFactory` and `parse_interval` (a duration string → seconds). A trigger's condition is code behind this port; the schedule is data
-- `drivers/scheduled_trigger.py` — `ScheduledTrigger(Trigger)`: composes an `interval` (data) × a `Check` (code) × a `target` (workflow **or** step). Cadence is a clock-gate on the interval bucket; `dedup_key` is bucket-keyed (`per-interval`) or state-keyed (`per-state`), never constant
-- `drivers/checks.py` — the built-in `Check`s (`AlwaysCheck`, `DiskThresholdCheck`) and the `BUILTIN_CHECKS` registry mapping a check name → factory; a bespoke condition is a new factory registered by name
+- `drivers/scheduled_trigger.py` — `ScheduledTrigger(Trigger)`: composes an `interval` (data) × a `Check` (code) × a `target` (workflow **or** step). Cadence is a clock-gate on the interval bucket; `dedup_key` is bucket-keyed (`per-interval`) or state-keyed (`per-state`), never constant. A non-`none` `sink` is stamped into each fired task as `data.sink = {"kind": ...}` — after the observation merge, so a check can't clobber it; still no `data.source` (a trigger reflects nothing outward)
+- `drivers/checks.py` — the built-in `Check`s (`AlwaysCheck`, `DiskThresholdCheck`, `FileGlobCheck` as `fs-files` — one observation per file matching a glob, `CommandCheck` as `command` — one observation per non-empty stdout line of a shell command) and the `BUILTIN_CHECKS` registry mapping a check name → factory; a bespoke condition is a new factory registered by name. `command` is the data-only escape hatch: an operator can author a simple action without Python
 - `drivers/fs_triggers.py` — `FilesystemTriggerRepository`: reads `triggers/*.json` and builds one `ScheduledTrigger` per file, validating fast at load (`TriggerValidationError` on a bad `interval`, an unknown `check`, or a `target` naming neither a served workflow nor a known step) — exactly as `FilesystemAgentCatalog` reads `agents/*.json`
-- `drivers/fs_processes.py` — `FilesystemProcessRepository`: reads `processes/*.json` (the top-level authoring aggregate — a nested `trigger`/`action`/`target`/`sink`) and **compiles each into a `ScheduledTrigger`**, validating fast (`ProcessValidationError`). A Process is a compile-time concept only; nothing under orchestration names it. The `sink` field is a forward-compat seam — parsed and validated but `none`-only in v1. The module-level `compile_process` is the single validator both the repository (startup) and `FilesystemProcessAdmin` (the write-side admin driver, on submit) run — `ProcessValidationError` carries an optional `field` so the admin maps a compile failure onto the right form field. See ADR-0015
+- `drivers/fs_processes.py` — `FilesystemProcessRepository`: reads `processes/*.json` (the top-level authoring aggregate — a nested `trigger`/`action`/`target`/`sink`) and **compiles each into a `ScheduledTrigger`**, validating fast (`ProcessValidationError`). A Process is a compile-time concept only; nothing under orchestration names it. The `sink` field names the outbound destination (`none` or `slack`, still just `{"kind": ...}` — no params, the webhook URL is a secret and never enters a JSON file); a non-`none` sink is passed to the compiled trigger, which stamps `data.sink`. An optional `trigger.kind` is a read-tolerated reservation: `"schedule"`-only, never written by the admin. The module-level `compile_process` is the single validator both the repository (startup) and `FilesystemProcessAdmin` (the write-side admin driver, on submit) run — `ProcessValidationError` carries an optional `field` so the admin maps a compile failure onto the right form field. See ADR-0015
+- `drivers/slack_sink.py` — `SlackWebhookSink(TaskSource)`, `kind = "slack"`: the first real Process sink — the outbound-only mirror of `GithubLabelReflector`, but matched on the *destination* identity (`task.data.sink.kind`), never the origin. `poll()` is always `[]`; `report_progress`/`finish` post short lines to a Slack incoming webhook over stdlib `urllib` (the POST is injectable for tests), deduped per-run by an in-process `(task, step)` ledger. Stateless by choice — the create-then-update Web-API sink stays the spec's future refinement. Wired in `cli._run` only when `SLACK_WEBHOOK_URL` is set; a slack-declaring process without the variable gets a warning and an inert sink
 
 ## What is responsible for what
 
@@ -334,8 +336,8 @@ Dependencies flow strictly downward, no cycles.
   concept: `FilesystemProcessRepository` compiles each file into a `ScheduledTrigger`
   (a `TaskSource`), so the whole runtime — `SourcePoller`, the dispatcher, the router
   — sees only the primitives it already knows, and every invariant holds unchanged.
-  The `sink` is a `none`-only forward-compat seam reserving the schema slot for a
-  later GitHub→Slack (source ≠ destination) split without a migration. `harness init`
+  The `sink` names the outbound destination — `none` or `slack`, the GitHub-in/
+  Slack-out (source ≠ destination) split made real (invariant #40). `harness init`
   writes an empty `processes/`; the operator defines several, each an independent file.
   A Process compiles to the same `ScheduledTrigger` a bare `triggers/*.json` does, so
   both surfaces coexist — the Process is the richer primary surface, the trigger file
@@ -424,15 +426,24 @@ Dependencies flow strictly downward, no cycles.
   Process's payoff is its *nested roles* and its `sink` slot, the structure the
   future increments hang on. Folding `triggers/` into `processes/` is a later
   cleanup, not this increment's job.
-- **Two Process seams are recorded in the spec but NOT built — don't mistake them
-  for done.** (1) The **`sink`** accepts only `{"kind":"none"}`; there is no
-  reflector registry and no GitHub/Slack sink driver yet, so a Process reflects
-  nothing outward (its trigger stamps no `data.source`). (2) The **`github-issues`
-  action** (scan issues by label as a `Check`) is deferred because a source-bearing
-  check needs a `GithubClient` injected into a widened factory — the seam is
-  `FilesystemProcessRepository.build()` growing a dependency bag, exactly as
-  `_github_sources` obtains a client from `GITHUB_TOKEN`. Both are additive; see
-  the spec's "sink seam" / "action seam" sections.
+- **"Artifact" is reserved vocabulary — an action's outputs are Observations.**
+  A `Check` returns `Observation`s that become inbox *tasks*; an **artifact** is
+  a step's work product versioned in the worktree (`.artifacts/<id>/`,
+  ADR-0006). Specs, personas and issues must not call a trigger's or action's
+  outputs "artifacts" — both concepts flow through the same documents, and the
+  drift is cheap to police now, costly to untangle later.
+- **The two Process seams recorded in the spec are now both realized — but only
+  partially on the sink side, so know exactly which half exists.** (1) The
+  **`sink`** accepts `{"kind":"none"}` or `{"kind":"slack"}`: a slack sink is
+  stamped as `data.sink` by the compiled trigger and reflected by
+  `SlackWebhookSink` — a *stateless* webhook post per report, registered only
+  when `SLACK_WEBHOOK_URL` is set (a slack-declaring process without it gets a
+  warning and an inert sink, never a fatal error). The stateful
+  create-then-update handle and a dedicated `Reflector` port stay unbuilt.
+  (2) The **`github-issues` action** exists — `GithubIssuesCheck`, registered
+  in `cli._process_sources` by closing a `GithubClient` + registry into a
+  factory, exactly the dependency-bag shape the spec's action seam planned.
+  See the spec's "sink seam" / "action seam" sections and their dated notes.
 
 ## Operator
 

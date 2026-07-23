@@ -113,6 +113,66 @@ def test_sink_absent_is_accepted(tmp_path: Path) -> None:
     assert len(_build(tmp_path)) == 1
 
 
+def test_sink_none_or_absent_stamps_no_data_sink(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "explicit-none",
+        {
+            "trigger": {"interval": "1h"},
+            "action": {"check": "always"},
+            "target": {"workflow": "wf"},
+            "sink": {"kind": "none"},
+        },
+    )
+    _write(
+        tmp_path,
+        "no-sink",
+        {
+            "trigger": {"interval": "1h"},
+            "action": {"check": "always"},
+            "target": {"workflow": "wf"},
+        },
+    )
+
+    for trigger in _build(tmp_path):
+        (task,) = trigger.poll()
+        assert "sink" not in task.data
+
+
+def test_slack_sink_is_accepted_and_stamped_onto_tasks(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "notify",
+        {
+            "trigger": {"interval": "1h"},
+            "action": {"check": "always"},
+            "target": {"workflow": "wf"},
+            "sink": {"kind": "slack"},
+        },
+    )
+
+    (trigger,) = _build(tmp_path)
+
+    assert trigger.sink == {"kind": "slack"}
+    (task,) = trigger.poll()
+    assert task.data["sink"] == {"kind": "slack"}
+    assert "source" not in task.data  # destination identity, no origin stamp
+
+
+def test_trigger_kind_schedule_is_accepted(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "explicit-kind",
+        {
+            "trigger": {"kind": "schedule", "interval": "1h"},
+            "action": {"check": "always"},
+            "target": {"workflow": "wf"},
+        },
+    )
+
+    assert len(_build(tmp_path)) == 1
+
+
 def test_missing_directory_returns_empty_list(tmp_path: Path) -> None:
     assert _build(tmp_path / "does-not-exist") == []
 
@@ -255,21 +315,39 @@ def test_unknown_dedup_raises_naming_the_file(tmp_path: Path) -> None:
     assert "bad-dedup" in str(excinfo.value)
 
 
-def test_non_none_sink_raises_naming_the_file(tmp_path: Path) -> None:
+def test_unknown_sink_raises_naming_the_file(tmp_path: Path) -> None:
     _write(
         tmp_path,
-        "slack-sink",
+        "teams-sink",
         {
             "trigger": {"interval": "1h"},
             "action": {"check": "always"},
             "target": {"workflow": "wf"},
-            "sink": {"kind": "slack"},
+            "sink": {"kind": "teams"},
         },
     )
 
     with pytest.raises(ProcessValidationError) as excinfo:
         _build(tmp_path)
-    assert "slack-sink" in str(excinfo.value)
+    assert "teams-sink" in str(excinfo.value)
+    assert excinfo.value.field == "sink"
+
+
+def test_unknown_trigger_kind_raises_naming_the_file(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "webhook-trigger",
+        {
+            "trigger": {"kind": "webhook", "interval": "1h"},
+            "action": {"check": "always"},
+            "target": {"workflow": "wf"},
+        },
+    )
+
+    with pytest.raises(ProcessValidationError) as excinfo:
+        _build(tmp_path)
+    assert "webhook-trigger" in str(excinfo.value)
+    assert excinfo.value.field == "trigger"
 
 
 def test_disk_threshold_missing_params_raises_process_error_not_keyerror(
