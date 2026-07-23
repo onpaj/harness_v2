@@ -99,6 +99,29 @@ def test_transfer_to_foreign_queue_type_still_works(tmp_path):
     assert not (tmp_path / "tasks" / ".processing" / "tsk_1.json").exists()
 
 
+def test_discard_removes_claimed_task_permanently(tmp_path):
+    queue, _ = build(tmp_path)
+    queue.put(make_task())
+    claimed = queue.claim(queue.list()[0], "lck_1")
+
+    queue.discard(claimed)
+
+    assert queue.list() == []
+    assert not (tmp_path / "tasks" / ".processing" / "tsk_1.json").exists()
+    assert queue.recover() == 0
+
+
+def test_discard_of_already_removed_task_is_a_no_op(tmp_path):
+    queue, _ = build(tmp_path)
+    queue.put(make_task())
+    claimed = queue.claim(queue.list()[0], "lck_1")
+
+    queue.discard(claimed)
+    queue.discard(claimed)  # does not raise
+
+    assert queue.list() == []
+
+
 def test_recover_returns_claimed_tasks_and_clears_lock(tmp_path):
     queue, _ = build(tmp_path)
     queue.put(make_task())

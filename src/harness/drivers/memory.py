@@ -63,6 +63,9 @@ class MemoryTaskQueue(TaskQueue):
         self._claimed.clear()
         return count
 
+    def discard(self, task: Task) -> None:
+        self._claimed.pop(task.id, None)
+
 
 class MemoryWorkflowRepository(WorkflowRepository):
     def __init__(self, workflows: dict[str, Workflow]) -> None:

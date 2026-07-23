@@ -105,6 +105,15 @@ class BoardProjection(BoardView):
     def get(self, task_id: str) -> Task | None:
         return self._tasks.get(task_id)
 
+    def remove(self, task_id: str) -> None:
+        """Drop a task from the read model entirely — the counterpart to
+        apply(), which places a task into a column. No-op if unknown, so a
+        stray or duplicate event doesn't tick the revision for nothing.
+        """
+        if self._tasks.pop(task_id, None) is not None:
+            self._columns.pop(task_id, None)
+            self._bump()
+
     async def subscribe(self) -> AsyncIterator[int]:
         """Stream of revisions. The queue is bounded — a slow client stalls no one."""
         inbox: asyncio.Queue[int] = asyncio.Queue(maxsize=1)

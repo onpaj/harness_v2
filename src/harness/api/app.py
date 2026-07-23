@@ -49,6 +49,9 @@ class _NullTaskControl(TaskControl):
     def restart(self, task_id: str) -> bool:
         return False
 
+    def delete(self, task_id: str) -> bool:
+        return False
+
 
 def create_app(
     *,

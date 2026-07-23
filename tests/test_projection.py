@@ -112,6 +112,26 @@ def test_get_returns_full_task():
     assert projection.get("unknown") is None
 
 
+def test_remove_drops_task_from_the_read_model():
+    projection = BoardProjection(WORKFLOW)
+    projection.apply("plan", make_task(status="plan"))
+
+    projection.remove("tsk_1")
+
+    assert projection.get("tsk_1") is None
+    assert projection.snapshot().column("plan").tasks == ()
+
+
+def test_remove_of_unknown_id_is_a_no_op_and_does_not_bump_revision():
+    projection = BoardProjection(WORKFLOW)
+    projection.apply("plan", make_task(status="plan"))
+    before = projection.snapshot().revision
+
+    projection.remove("unknown")
+
+    assert projection.snapshot().revision == before
+
+
 def test_revision_grows_monotonically():
     projection = BoardProjection(WORKFLOW)
     first = projection.snapshot().revision

@@ -1,4 +1,8 @@
 <h2>{{ task.id }}</h2>
+<button hx-post="/tasks/{{ task.id }}/delete"
+        hx-target="#detail"
+        hx-swap="innerHTML"
+        hx-confirm="Delete task {{ task.id }}? This cannot be undone.">Delete</button>
 {% if task.status == "failed" %}
 <button hx-post="/tasks/{{ task.id }}/restart"
         hx-target="#detail"

@@ -148,6 +148,15 @@ def build_html_router(
         # refreshed fragment shows the task now in `todo`. The board redraws via SSE.
         return _task_fragment(request, task_id)
 
+    @router.post("/tasks/{task_id}/delete", response_class=HTMLResponse)
+    def delete_task(task_id: str) -> HTMLResponse:
+        if not control.delete(task_id):
+            raise HTTPException(status_code=404, detail=f"task {task_id} does not exist")
+        # No fragment left to render — the task is gone. The empty body is the
+        # "gone" signal board.html's afterSwap listener keys off to close #detail
+        # instead of reopening it. The board redraws via the SSE revision bump.
+        return HTMLResponse("")
+
     @router.get("/api/events")
     async def events() -> StreamingResponse:
         return StreamingResponse(

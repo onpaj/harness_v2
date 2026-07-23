@@ -14,6 +14,12 @@ class ProjectionSink(EventSink):
         self._projection = projection
 
     def emit(self, name: str, **fields: Any) -> None:
+        if name == "deleted":
+            task_id = fields.get("task_id")
+            if isinstance(task_id, str):
+                self._projection.remove(task_id)
+            return
+
         raw = fields.get("task")
         column = fields.get("queue")
         if not isinstance(raw, dict) or not isinstance(column, str):
