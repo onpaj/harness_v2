@@ -452,6 +452,24 @@ def _allowed_outcomes_for(workflow, step: str) -> list[str]:
     return seen
 
 
+def _agent_definition_template(step: str, allowed_outcomes: list[str]) -> dict:
+    """The full, valid AgentSpec-JSON dict for `step`.
+
+    Known steps (AGENT_PERSONAS) get their carried-over persona and tool list;
+    any other step name gets the generic fallback. `allowed_outcomes` is the
+    caller's responsibility (derived from a workflow via
+    `_allowed_outcomes_for`) — this function has no knowledge of workflows.
+    """
+    return {
+        "prompt": _agent_persona(step),
+        "model": _agent_model(step),
+        "fallback_model": None,
+        "allowed_tools": _agent_tools(step),
+        "allowed_outcomes": allowed_outcomes,
+        "timeout": None,
+    }
+
+
 def _write_default_agents(layout: HarnessLayout, workflow) -> None:
     layout.agents.mkdir(parents=True, exist_ok=True)
     for step in workflow.steps():
@@ -460,14 +478,9 @@ def _write_default_agents(layout: HarnessLayout, workflow) -> None:
         path = layout.agents / f"{step}.json"
         if path.exists():
             continue
-        definition = {
-            "prompt": _agent_persona(step),
-            "model": _agent_model(step),
-            "fallback_model": None,
-            "allowed_tools": _agent_tools(step),
-            "allowed_outcomes": _allowed_outcomes_for(workflow, step),
-            "timeout": None,
-        }
+        definition = _agent_definition_template(
+            step, _allowed_outcomes_for(workflow, step)
+        )
         path.write_text(
             json.dumps(definition, indent=2, ensure_ascii=False), encoding="utf-8"
         )
@@ -536,6 +549,53 @@ def _submit(args: argparse.Namespace) -> int:
         json.dumps(task.to_dict(), indent=2, ensure_ascii=False), encoding="utf-8"
     )
     print(task.id)
+    return 0
+
+
+def _agent_init(args: argparse.Namespace) -> int:
+    root = _root(args.root)
+    layout = HarnessLayout(root)
+    if not layout.tasks.is_dir():
+        print(f"error: {root} is not initialized, run `harness init`", file=sys.stderr)
+        return 2
+
+    workflows = FilesystemWorkflowRepository(layout.workflows)
+    try:
+        workflow = workflows.get(args.workflow)
+    except WorkflowNotFound as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
+
+    if args.step == LANDING_STEP:
+        print(
+            f"error: {args.step!r} is the landing step, driven by the built-in "
+            "landing behavior, not an agent",
+            file=sys.stderr,
+        )
+        return 2
+    if args.step not in workflow.steps():
+        print(
+            f"error: step {args.step!r} is not part of workflow {args.workflow!r}",
+            file=sys.stderr,
+        )
+        return 2
+
+    layout.agents.mkdir(parents=True, exist_ok=True)
+    path = layout.agents / f"{args.step}.json"
+    text = path.read_text(encoding="utf-8") if path.exists() else None
+
+    if text is not None and not args.force:
+        print(f"{path} already exists, not overwritten (use --force to replace it)")
+        print(text)
+        return 0
+
+    definition = _agent_definition_template(
+        args.step, _allowed_outcomes_for(workflow, args.step)
+    )
+    text = json.dumps(definition, indent=2, ensure_ascii=False)
+    path.write_text(text, encoding="utf-8")
+    print(str(path))
+    print(text)
     return 0
 
 
@@ -1776,6 +1836,18 @@ def main(argv: list[str] | None = None) -> int:
         help="workflow template used for tasks the mergeability watcher queues",
     )
     run.set_defaults(handler=_run)
+
+    agent = subparsers.add_parser("agent", help="manage per-step agent definitions")
+    agent_actions = agent.add_subparsers(dest="action", required=True)
+
+    agent_init = agent_actions.add_parser(
+        "init", help="scaffold agents/<step>.json from the built-in template"
+    )
+    agent_init.add_argument("step")
+    agent_init.add_argument("--root", default=None)
+    agent_init.add_argument("--workflow", default=DEFAULT_WORKFLOW)
+    agent_init.add_argument("--force", action="store_true")
+    agent_init.set_defaults(handler=_agent_init)
 
     service = subparsers.add_parser(
         "service", help="run the harness as a background service (macOS launchd)"
