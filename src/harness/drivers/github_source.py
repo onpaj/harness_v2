@@ -30,7 +30,7 @@ class GithubTaskSource(TaskSource):
         client: GithubClient,
         clock: Clock,
         repo: str,
-        workflow: str = "default",
+        workflow: str = "development",
         repository: str,
         worktree_root: str,
         select_label: str = "harness:todo",
