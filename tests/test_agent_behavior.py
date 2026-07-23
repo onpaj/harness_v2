@@ -48,6 +48,9 @@ class RealFsHandle(WorkspaceHandle):
     def merge(self, base: str) -> bool:  # pragma: no cover - unused by these tests
         return False
 
+    def abort_merge(self) -> None:  # pragma: no cover - unused by these tests
+        pass
+
 
 class RealFsWorkspace(Workspace):
     """Re-attaching the same task returns the same handle over `root` (real path)."""

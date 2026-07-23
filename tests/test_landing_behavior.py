@@ -142,6 +142,52 @@ async def test_pushes_the_branch_before_opening_the_pull_request():
     assert len(forge.opened) == 1
 
 
+async def test_merges_the_base_branch_before_pushing():
+    """Pre-landing sync: landing merges the PR's base branch into the task
+    branch (a clean merge is committed) so the PR is born up-to-date with base."""
+    behavior, workspace, _, forge = build()
+
+    await behavior.run(make_task())
+
+    handle = workspace.handles["tsk_1"]
+    # The base merged is the very branch the forge opens the PR against.
+    assert handle.merges == [forge.base_branch(make_task())]
+    # A clean merge is committed onto the task branch, then pushed.
+    assert "[land] merge main" in handle.commits
+    assert handle.merge_aborts == 0
+    assert handle.pushes == ["harness/tsk_1"]
+
+
+async def test_clean_merge_summary_is_not_flagged():
+    behavior, _, _, forge = build()
+
+    result = await behavior.run(make_task())
+
+    assert result.outcome is Outcome.DONE
+    assert "conflicts with" not in result.summary
+
+
+async def test_conflict_aborts_the_merge_but_still_opens_a_flagged_pr():
+    """A base merge that conflicts is abandoned (landing has no agent to
+    resolve it); the PR opens on the un-merged branch anyway, flagged, so the
+    resolver workflow reconciles it downstream."""
+    behavior, workspace, _, forge = build()
+    workspace.attach(make_task()).conflicted = True
+
+    result = await behavior.run(make_task())
+
+    handle = workspace.handles["tsk_1"]
+    assert handle.merges == ["main"]
+    assert handle.merge_aborts == 1
+    # The conflicted merge is never committed onto the branch.
+    assert "[land] merge main" not in handle.commits
+    # The PR still opens, and the summary flags the conflict for the resolver.
+    assert len(forge.opened) == 1
+    assert handle.pushes == ["harness/tsk_1"]
+    assert result.outcome is Outcome.DONE
+    assert "conflicts with main" in result.summary
+
+
 async def test_no_pull_request_when_the_push_fails():
     """A branch the remote never received must not get a PR claiming it exists."""
     import pytest

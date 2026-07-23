@@ -134,6 +134,28 @@ class GithubForge(Forge):
             repo=slug,
         )
 
+    def base_branch(self, task: Task) -> str:
+        client = self._client
+        if client is None:
+            raise ForgeError(
+                "GITHUB_TOKEN is not set — cannot resolve the base branch. "
+                "Export it, or run with --forge fake."
+            )
+        repo_path = self._repo_path(task)
+        if repo_path is None:
+            raise ForgeError(
+                f"task {task.id}: cannot locate repository {task.repository!r} — "
+                "not in repos.json and the task carries no worktree"
+            )
+        slug = self._slug_of(repo_path)
+        if slug is None:
+            raise ForgeError(
+                f"{task.repository} has no GitHub origin — cannot resolve the base branch"
+            )
+        # The very value open_pull_request targets (and caches per slug), so the
+        # branch landing merges in is exactly the one the PR is opened against.
+        return self._default_branch(client, slug)
+
     def pull_request_state(self, task: Task) -> PullRequestState:
         client = self._client
         if client is None:

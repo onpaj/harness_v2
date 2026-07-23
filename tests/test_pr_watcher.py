@@ -94,6 +94,9 @@ class RaisingForge(Forge):
     def open_pull_request(self, task, *, branch, title, body):  # pragma: no cover - not called
         raise NotImplementedError
 
+    def base_branch(self, task):  # pragma: no cover - not called
+        raise NotImplementedError
+
     def pull_request_state(self, task):
         raise RuntimeError("GitHub is down")
 
@@ -107,6 +110,9 @@ def test_forge_error_is_isolated_per_task_and_does_not_stop_the_tick():
 
     class MixedForge(Forge):
         def open_pull_request(self, task, *, branch, title, body):  # pragma: no cover
+            raise NotImplementedError
+
+        def base_branch(self, task):  # pragma: no cover - not called
             raise NotImplementedError
 
         def pull_request_state(self, task):

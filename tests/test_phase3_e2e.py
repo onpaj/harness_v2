@@ -113,12 +113,16 @@ def _make_repo(path: Path) -> None:
     _git(path, "add", "-A")
     _git(path, "commit", "-q", "-m", "init")
 
-    # Landing now pushes the task branch before proposing a PR, so the fixture
+    # Landing pushes the task branch before proposing a PR, so the fixture
     # needs somewhere to push to. A bare sibling repo stands in for the remote —
     # this keeps the smoke honest: a repo with no remote genuinely cannot land.
+    # Landing also merges the PR's base branch (MemoryForge → "main") in first,
+    # so — as on a real forge — that base branch must exist on origin; push the
+    # initial commit up as `main`.
     remote = path.parent / (path.name + "-remote.git")
     _git(remote.parent, "init", "--bare", "-q", str(remote))
     _git(path, "remote", "add", "origin", str(remote))
+    _git(path, "push", "-q", "origin", "HEAD:main")
 
 
 def _catalog() -> MemoryAgentCatalog:

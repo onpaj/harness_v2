@@ -48,6 +48,23 @@ class LandingBehavior(ConsumerBehavior):
                 handle.write(relpath, content)
             handle.commit("[land] task artifacts")
 
+        # Pre-landing sync: merge the PR's base branch into the task branch so
+        # the PR is born up-to-date with base — mergeable, no stale-base
+        # resolver round-trip. The base is the very branch the forge opens the
+        # PR against, so the merge base always matches the PR base. A clean
+        # merge is committed onto the branch; a real conflict (landing has no
+        # agent to resolve it) is abandoned and the PR opened on the un-merged
+        # branch anyway — the resolver workflow reconciles the dirty PR
+        # downstream, exactly as it does for a conflict that appears after the
+        # PR is open. Either way the PR still opens; the conflict is only ever
+        # flagged, never fatal to landing.
+        base = self._forge.base_branch(task)
+        conflicted = handle.merge(base)
+        if conflicted:
+            handle.abort_merge()
+        else:
+            handle.commit(f"[land] merge {base}")
+
         # The forge cannot open a PR for a ref the remote has never seen. A
         # failure here raises, and the consumer writes the task into `failed/`.
         handle.push()
@@ -58,9 +75,15 @@ class LandingBehavior(ConsumerBehavior):
             title=self._title(task),
             body=self._body(task),
         )
+        summary = f"opened PR {pull.url}"
+        if conflicted:
+            summary += (
+                f" — conflicts with {base}, opened un-merged for the resolver "
+                "to reconcile"
+            )
         return BehaviorResult(
             Outcome.DONE,
-            f"opened PR {pull.url}",
+            summary,
             data={
                 "pr": {
                     "repo": pull.repo,

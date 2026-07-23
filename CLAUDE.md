@@ -52,7 +52,7 @@ swapped out later.
 9. **The commit is done by the behavior driver, not the consumer and not the LLM.** The consumer knows no git. See ADR-0006.
 10. **Artifacts are attempt-indexed** (`<task>/<step>/<attempt>/`). A step re-run never overwrites the previous attempt — otherwise the `request_changes` loop would vanish from the audit trail. See ADR-0006.
 11. **`Workspace`/`Forge`/`ArtifactStore` are unknown to the dispatcher and consumer.** Only the behavior touches them; wiring in `app.py`. `api/` touches only `ArtifactView`. Guarded by `test_architecture.py`.
-12. **Landing is a step, not magic.** It lands the artifacts into the worktree and opens a PR; it may fail into `failed/`. `end` stays a clean terminal. Phase 3: the artifacts are already in the worktree, landing doesn't copy them — it just opens a PR. See ADR-0009.
+12. **Landing is a step, not magic.** It lands the artifacts into the worktree and opens a PR; it may fail into `failed/`. `end` stays a clean terminal. Phase 3: the artifacts are already in the worktree, landing doesn't copy them — it just opens a PR. See ADR-0009. **Before proposing, landing syncs the PR's base branch into the task branch** (`Forge.base_branch(task)` → `WorkspaceHandle.merge`), so the PR is born up-to-date with base: a clean merge is committed, a conflict landing can't auto-resolve is abandoned (`WorkspaceHandle.abort_merge`) and the PR opened un-merged and flagged for the resolver — never a landing failure. The merge base is the forge's (the exact branch the PR targets), never a hardcoded `main`. See ADR-0017.
 13. **The agent lives behind `AgentRunner`.** `ClaudeCliBehavior` knows nothing of subprocesses or CLI flags; a test drives it with `FakeAgentRunner`, the way phase 1 drove time with `FakeClock`. See ADR-0007.
 14. **The persona is data, not code.** `behaviors/agent.py` has no branch on the agent's name — the difference between personas is the content of the `AgentSpec` supplied at construction. See ADR-0007.
 15. **`task.repository` is a name, not a path.** Paths are resolved by `RepositoryRegistry` — machine-specific config (`repos.json`), outside the task. The worktree path is derived by the harness (`<worktrees_root>/<task_id>`). See ADR-0008.
@@ -152,8 +152,8 @@ Dependencies flow strictly downward, no cycles.
 - `artifacts_layout.py` — the single source of truth for artifact placement in the worktree (`next_attempt`, `artifacts_dir`); read by both the behavior and `WorktreeArtifactView`
 - `ports/board.py` — the `BoardView` port through which the UI looks
 - `ports/artifacts.py` — `ArtifactStore` (writing, phase 2) and `ArtifactView` (reading for the UI); phase 3 reads via `WorktreeArtifactView`
-- `ports/workspace.py` — `Workspace.attach(task) -> WorkspaceHandle` (worktree + commit)
-- `ports/forge.py` — `Forge.open_pull_request(...)` (landing proposes a PR)
+- `ports/workspace.py` — `Workspace.attach(task) -> WorkspaceHandle` (worktree + commit; `merge`/`abort_merge` for the base-sync)
+- `ports/forge.py` — `Forge.open_pull_request(...)` (landing proposes a PR) + `base_branch(task)` (the branch that PR targets, which landing syncs in first — ADR-0017)
 - `ports/agent.py` — `AgentRunner.run(...)`, `AgentCatalog.get(name)`, `AgentSpec` (persona as data)
 - `ports/repos.py` — `RepositoryRegistry.resolve(name) -> Path` (repo name → path)
 - `behaviors/agent.py` — `ClaudeCliBehavior`: attach worktree → allocate attempt → run the agent → the worker commits
@@ -373,6 +373,14 @@ Dependencies flow strictly downward, no cycles.
 - **Landing needs a pushable remote.** `land` pushes the task branch before it
   proposes, so a registered repo with no `origin` cannot land — that is why the
   git e2e/smoke fixtures create a bare sibling repo and add it as `origin`.
+- **Landing's base sync needs the base branch on `origin`.** Before pushing,
+  `land` merges `Forge.base_branch(task)` in (ADR-0017), which fetches
+  `origin/<base>` — so the base branch must exist on the remote. Always true on
+  a real forge (a PR's base is a real branch); the git e2e/smoke fixtures
+  therefore now *push their initial commit as `origin/main`*, not just add an
+  empty bare remote. A base that genuinely can't be fetched fails the task
+  (`GitError`) rather than being silently skipped — a missing default branch is
+  a real anomaly, not a soft-skip case.
 - **A failed PR fails the task.** `GithubForge` raises `ForgeError` on a missing
   `GITHUB_TOKEN`, a non-GitHub origin or an API error, and the task lands in
   `failed/`. Deliberate: before this, `land` reported success while only writing

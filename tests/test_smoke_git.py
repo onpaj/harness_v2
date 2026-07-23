@@ -173,6 +173,9 @@ def _make_repo(path):
     # bare remote must land on `main`, not the host's `init.defaultBranch`.
     _git(remote.parent, "init", "--bare", "-q", "-b", "main", str(remote))
     _git(path, "remote", "add", "origin", str(remote))
+    # Landing merges the PR's base branch in before proposing, so — as on a real
+    # forge — `origin/main` must exist; publish the initial commit as `main`.
+    _git(path, "push", "-q", "origin", "main")
 
 
 def _catalog() -> MemoryAgentCatalog:
@@ -345,11 +348,9 @@ async def test_review_syncs_with_base_and_requests_changes_on_real_conflict(tmp_
     repo = tmp_path / "repo"
     worktrees_root = tmp_path / "wt"
     _make_repo(repo)
-    # `_make_repo` only adds the remote, it never pushes — publish the initial
-    # commit first so the later divergent commit shares a common ancestor with
-    # the task branch (otherwise the merge fails on unrelated histories rather
-    # than producing a real conflict).
-    _git(repo, "push", "-q", "origin", "main")
+    # `_make_repo` already publishes the initial commit as `origin/main`, so the
+    # later divergent commit shares a common ancestor with the task branch (the
+    # merge produces a real conflict rather than failing on unrelated histories).
 
     remote = repo.parent / (repo.name + "-remote.git")
     clone = tmp_path / "origin-clone"
@@ -437,3 +438,72 @@ async def test_review_syncs_with_base_and_requests_changes_on_real_conflict(tmp_
         if entry.from_step == "review" and entry.to_step == "development"
     ]
     assert routed, "review's request_changes never routed back to development"
+
+
+async def test_landing_merges_a_divergent_base_so_the_pr_is_born_up_to_date(tmp_path):
+    """The feature's point, on real git: when `origin/main` advances with a
+    non-conflicting change while a task worked on a now-stale base, landing
+    merges `main` into the task branch before opening the PR — so the branch
+    (and thus the PR) is born up-to-date with base, mergeable without a
+    resolver round-trip.
+    """
+    from harness.behaviors.landing import LandingBehavior
+
+    repo = tmp_path / "repo"
+    worktrees_root = tmp_path / "wt"
+    _make_repo(repo)  # publishes the init commit as origin/main
+
+    # `origin/main` moves ahead with a brand-new file — pushed from a clone, so
+    # the task's local repo doesn't see it until landing fetches at merge time.
+    remote = repo.parent / (repo.name + "-remote.git")
+    clone = tmp_path / "origin-clone"
+    _git(tmp_path, "clone", "-q", str(remote), str(clone))
+    _git(clone, "config", "user.email", "t@t")
+    _git(clone, "config", "user.name", "t")
+    (clone / "NOTES.md").write_text("upstream note\n")
+    _git(clone, "add", "-A")
+    _git(clone, "commit", "-q", "-m", "upstream: add NOTES")
+    _git(clone, "push", "-q", "origin", "main")
+
+    registry = MemoryRepositoryRegistry({"app": repo})
+    workspace = GitWorkspace(registry, worktrees_root)
+    task = Task(
+        id="tsk_born_mergeable",
+        workflow_template="default",
+        created="2026-07-23T00:00:00Z",
+        repository="app",
+        status="land",
+        data={"title": "feature"},
+    )
+    # A task-branch commit touching a *different* file — clean against NOTES.md.
+    handle = workspace.attach(task)
+    handle.write("feature.txt", "task work\n")
+    handle.commit("development: feature")
+
+    behavior = LandingBehavior(
+        clock=SystemClock(),
+        workspace=workspace,
+        artifacts=WorktreeArtifactView(worktrees_root),
+        forge=FakeForge(tmp_path / "forge"),
+        copy_artifacts=False,
+    )
+
+    result = await behavior.run(task)
+
+    assert result.outcome is Outcome.DONE
+    assert "conflicts with" not in result.summary
+
+    worktree = worktrees_root / task.id
+    # origin/main's new commit is now an ancestor of the task branch (merged in)
+    # and its file is present — the branch is born up-to-date with base.
+    assert (worktree / "NOTES.md").is_file()
+    is_ancestor = subprocess.run(
+        ["git", "-C", str(worktree), "merge-base", "--is-ancestor", "origin/main", "HEAD"],
+    ).returncode
+    assert is_ancestor == 0
+    # The task's own work survived the merge.
+    assert (worktree / "feature.txt").is_file()
+
+    prs = json.loads((tmp_path / "forge" / "prs.json").read_text())
+    assert len(prs) == 1
+    assert prs[0]["branch"] == f"harness/{task.id}"
