@@ -11,7 +11,7 @@
   <tr><th>status</th><td>{{ task.status or "—" }}</td></tr>
   <tr><th>lastOutcome</th><td>{{ task.last_outcome or "—" }}</td></tr>
   <tr><th>lockId</th><td>{{ task.lock_id or "—" }}</td></tr>
-  <tr><th>created</th><td>{{ task.created }}</td></tr>
+  <tr><th>created</th><td><time datetime="{{ task.created }}" title="{{ task.created }} UTC">{{ task.created }}</time></td></tr>
   <tr><th>data</th><td><pre>{{ task.data }}</pre></td></tr>
 </table>
 
@@ -20,7 +20,7 @@
   <tr><th>time</th><th>actor</th><th>from</th><th>to</th><th>outcome</th><th>reason</th></tr>
   {% for entry in task.history %}
   <tr>
-    <td>{{ entry.at }}</td>
+    <td><time datetime="{{ entry.at }}" title="{{ entry.at }} UTC">{{ entry.at }}</time></td>
     <td>{{ entry.actor }}</td>
     <td>{{ entry.from_step or "—" }}</td>
     <td>{{ entry.to_step or "—" }}</td>
