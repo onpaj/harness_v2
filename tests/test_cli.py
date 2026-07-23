@@ -803,6 +803,56 @@ def test_process_sources_github_issues_fails_fast_without_a_client(tmp_path, mon
     assert "GITHUB_TOKEN" in str(exc.value)
 
 
+def test_process_sources_builds_a_resolve_conflicts_process(tmp_path):
+    from harness.drivers.memory import FakeClock
+
+    (tmp_path / "processes").mkdir()
+    (tmp_path / "processes" / "resolve-conflicts.json").write_text(
+        '{"trigger": {"interval": "60s"},'
+        ' "action": {"check": "github-conflicts", "params": {"head_prefix": "harness/"}},'
+        ' "target": {"workflow": "resolver"}, "dedup": "per-state",'
+        ' "sink": {"kind": "none"}}'
+    )
+    registry = MemoryRepositoryRegistry({"harness_v2": Path("/repos/harness_v2")})
+
+    sources = _process_sources(
+        _process_args(),
+        tmp_path,
+        registry,
+        clock=FakeClock("2026-07-23T10:00:00Z"),
+        known_targets={"resolver"},
+        client=FakeGithubClient(),
+    )
+
+    assert len(sources) == 1
+    assert sources[0].kind == "scheduled:resolve-conflicts"
+
+
+def test_process_sources_github_conflicts_fails_fast_without_a_client(tmp_path, monkeypatch):
+    from harness.drivers.fs_processes import ProcessValidationError
+    from harness.drivers.memory import FakeClock
+
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    (tmp_path / "processes").mkdir()
+    (tmp_path / "processes" / "resolve-conflicts.json").write_text(
+        '{"trigger": {"interval": "60s"},'
+        ' "action": {"check": "github-conflicts"},'
+        ' "target": {"workflow": "resolver"}}'
+    )
+    registry = MemoryRepositoryRegistry({"harness_v2": Path("/repos/harness_v2")})
+
+    with pytest.raises(ProcessValidationError) as exc:
+        _process_sources(
+            _process_args(),
+            tmp_path,
+            registry,
+            clock=FakeClock("2026-07-23T10:00:00Z"),
+            known_targets={"resolver"},
+            client=None,
+        )
+    assert "GITHUB_TOKEN" in str(exc.value)
+
+
 def _slack_process_sources(tmp_path, sink_kind="slack"):
     """Compiled process sources with one process declaring the given sink."""
     from harness.drivers.memory import FakeClock

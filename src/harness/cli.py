@@ -708,6 +708,7 @@ def _process_sources(
         FilesystemProcessRepository,
         ProcessValidationError,
     )
+    from harness.drivers.github_conflicts_check import GithubConflictsCheck
     from harness.drivers.github_issues_check import GithubIssuesCheck
 
     if client is None:
@@ -725,7 +726,22 @@ def _process_sources(
             label=params.get("label", args.github_label),
         )
 
-    checks = {**BUILTIN_CHECKS, "github-issues": github_issues_factory}
+    def github_conflicts_factory(params: dict) -> GithubConflictsCheck:
+        if client is None:
+            raise ProcessValidationError(
+                "github-conflicts action requires GITHUB_TOKEN", field="check"
+            )
+        return GithubConflictsCheck(
+            client=client,
+            registry=registry,
+            head_prefix=params.get("head_prefix", "harness/"),
+        )
+
+    checks = {
+        **BUILTIN_CHECKS,
+        "github-issues": github_issues_factory,
+        "github-conflicts": github_conflicts_factory,
+    }
     repo = FilesystemProcessRepository(root / "processes")
     worktree_root = args.worktree_root or str(root / "worktrees")
     return repo.build(
