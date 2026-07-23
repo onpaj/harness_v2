@@ -175,6 +175,7 @@ class MemoryWorkspaceHandle(WorkspaceHandle):
         # merge() call should report a conflict.
         self.conflicted: bool = False
         self.merges: list[str] = []
+        self.merge_aborts: int = 0
 
     @property
     def path(self) -> Path:
@@ -197,6 +198,9 @@ class MemoryWorkspaceHandle(WorkspaceHandle):
     def merge(self, base: str) -> bool:
         self.merges.append(base)
         return self.conflicted
+
+    def abort_merge(self) -> None:
+        self.merge_aborts += 1
 
 
 class MemoryWorkspace(Workspace):
@@ -290,9 +294,10 @@ class MemoryTaskSource(TaskSource):
 class MemoryForge(Forge):
     """Records PRs. Idempotent by branch."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, base: str = "main") -> None:
         self.opened: list[PullRequest] = []
         self.bodies: dict[str, str] = {}
+        self._base = base
         # (state, merged) per branch. A branch with no recorded state change
         # defaults to OPEN.
         self._states: dict[str, tuple[PullRequestState, bool]] = {}
@@ -313,6 +318,9 @@ class MemoryForge(Forge):
         self.opened.append(pull)
         self.bodies[branch] = body
         return pull
+
+    def base_branch(self, task: Task) -> str:
+        return self._base
 
     def pull_request_state(self, task: Task) -> PullRequestState:
         pr = task.data.get("pr")

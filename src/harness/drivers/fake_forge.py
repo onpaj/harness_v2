@@ -18,9 +18,10 @@ from harness.ports.forge import Forge, PullRequest, PullRequestState
 class FakeForge(Forge):
     """Records PRs into `<root>/prs.json`. Idempotent by branch."""
 
-    def __init__(self, root: Path) -> None:
+    def __init__(self, root: Path, *, base: str = "main") -> None:
         self._root = Path(root)
         self._file = self._root / "prs.json"
+        self._base = base
 
     def open_pull_request(
         self, task: Task, *, branch: str, title: str, body: str
@@ -43,6 +44,12 @@ class FakeForge(Forge):
         records.append(record)
         self._store(records)
         return self._to_pr(record)
+
+    def base_branch(self, task: Task) -> str:
+        # A fake run controls its own fixture; the base is a fixed branch name
+        # (the smoke/e2e repos are created with `-b main`), configurable for a
+        # fixture that uses a different default.
+        return self._base
 
     def pull_request_state(self, task: Task) -> PullRequestState:
         pr = task.data.get("pr")
