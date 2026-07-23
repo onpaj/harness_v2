@@ -443,22 +443,19 @@ def _agent_tools(step: str) -> list[str]:
     return list(known[1]) if known is not None else []
 
 
-def _allowed_outcomes_for(workflow, step: str) -> list[str]:
-    """Unique outcomes of edges leaving the step (in definition order)."""
-    seen: list[str] = []
-    for transition in workflow.transitions:
-        if transition.from_step == step and transition.on not in seen:
-            seen.append(transition.on)
-    return seen
-
-
 def _agent_definition_template(step: str, allowed_outcomes: list[str]) -> dict:
     """The full, valid AgentSpec-JSON dict for `step`.
 
     Known steps (AGENT_PERSONAS) get their carried-over persona and tool list;
     any other step name gets the generic fallback. `allowed_outcomes` is the
     caller's responsibility (derived from a workflow via
-    `_allowed_outcomes_for`) — this function has no knowledge of workflows.
+    `Workflow.outcomes_for`) — this function has no knowledge of workflows.
+
+    The seeded value written here is now only the *workflow-less fallback*:
+    once a workflow drives the step, `Workflow.outcomes_for(step)` is the live
+    authority (Package B/C of the workflow-defined-outcomes design) and this
+    snapshot is advisory only, kept for the workflow-less path and to avoid
+    churning every existing `agents/<step>.json` fixture.
     """
     return {
         "prompt": _agent_persona(step),
@@ -478,9 +475,7 @@ def _write_default_agents(layout: HarnessLayout, workflow) -> None:
         path = layout.agents / f"{step}.json"
         if path.exists():
             continue
-        definition = _agent_definition_template(
-            step, _allowed_outcomes_for(workflow, step)
-        )
+        definition = _agent_definition_template(step, list(workflow.outcomes_for(step)))
         path.write_text(
             json.dumps(definition, indent=2, ensure_ascii=False), encoding="utf-8"
         )
@@ -590,7 +585,7 @@ def _agent_init(args: argparse.Namespace) -> int:
         return 0
 
     definition = _agent_definition_template(
-        args.step, _allowed_outcomes_for(workflow, args.step)
+        args.step, list(workflow.outcomes_for(args.step))
     )
     text = json.dumps(definition, indent=2, ensure_ascii=False)
     path.write_text(text, encoding="utf-8")

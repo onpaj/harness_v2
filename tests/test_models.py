@@ -248,6 +248,75 @@ def test_outcome_values():
     assert REQUEST_CHANGES == "request_changes"
 
 
+def test_transition_hint_defaults_to_empty_string():
+    transition = Transition(from_step="plan", on="done", to_step=END)
+
+    assert transition.hint == ""
+
+
+def test_transition_hint_can_be_set():
+    transition = Transition(from_step="plan", on="done", to_step=END, hint="ship it")
+
+    assert transition.hint == "ship it"
+
+
+def test_workflow_outcomes_for_preserves_definition_order_and_collapses_duplicates():
+    workflow = Workflow(
+        name="default",
+        start="plan",
+        transitions=(
+            Transition(from_step="plan", on="backend", to_step="development"),
+            Transition(from_step="plan", on="ui", to_step="designer"),
+            Transition(from_step="plan", on="backend", to_step="development"),
+            Transition(from_step="review", on="done", to_step=END),
+        ),
+    )
+
+    assert workflow.outcomes_for("plan") == ("backend", "ui")
+
+
+def test_workflow_outcomes_for_step_with_no_outgoing_transitions_is_empty():
+    workflow = Workflow(
+        name="default",
+        start="plan",
+        transitions=(Transition(from_step="plan", on="done", to_step=END),),
+    )
+
+    assert workflow.outcomes_for("end") == ()
+
+
+def test_workflow_outcomes_for_unknown_step_is_empty():
+    workflow = Workflow(
+        name="default",
+        start="plan",
+        transitions=(Transition(from_step="plan", on="done", to_step=END),),
+    )
+
+    assert workflow.outcomes_for("unknown") == ()
+
+
+def test_workflow_description_for_absent_step_is_none():
+    workflow = Workflow(
+        name="default",
+        start="plan",
+        transitions=(Transition(from_step="plan", on="done", to_step=END),),
+    )
+
+    assert workflow.description_for("plan") is None
+
+
+def test_workflow_description_for_returns_configured_text():
+    workflow = Workflow(
+        name="default",
+        start="plan",
+        transitions=(Transition(from_step="plan", on="done", to_step=END),),
+        descriptions={"plan": "Write the implementation plan."},
+    )
+
+    assert workflow.description_for("plan") == "Write the implementation plan."
+    assert workflow.description_for("unknown") is None
+
+
 def test_decisions_carry_their_payload():
     assert MoveTo("design").step == "design"
     assert Failed("nope").reason == "nope"

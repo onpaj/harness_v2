@@ -14,7 +14,6 @@ from harness.cli import (
     DEFAULT_WORKFLOW,
     _REVIEW_PERSONA,
     _agent_definition_template,
-    _allowed_outcomes_for,
     _github_reflectors,
     _github_sources,
     _mergeability_sources,
@@ -222,7 +221,7 @@ def test_review_allowed_outcomes_unaffected_by_sync_instructions():
             Transition(from_step=t["from"], on=t["on"], to_step=t["to"]) for t in DEFAULT_DEFINITION["transitions"]
         ),
     )
-    assert _allowed_outcomes_for(workflow, "review") == ["done", "request_changes"]
+    assert workflow.outcomes_for("review") == ("done", "request_changes")
 
 
 def test_review_persona_checks_plan_and_adr_conformance():
@@ -249,7 +248,7 @@ def test_review_persona_tool_list_and_outcomes_unchanged_by_plan_adr_instruction
             Transition(from_step=t["from"], on=t["on"], to_step=t["to"]) for t in DEFAULT_DEFINITION["transitions"]
         ),
     )
-    assert _allowed_outcomes_for(workflow, "review") == ["done", "request_changes"]
+    assert workflow.outcomes_for("review") == ("done", "request_changes")
     assert AGENT_PERSONAS["review"][1] == ["Read", "Grep", "Glob", "Bash"]
 
 
