@@ -58,6 +58,31 @@ def test_write_raw_is_immediately_visible_to_a_read(tmp_path):
     assert admin.read_raw("default") == DEFINITION_TEXT
 
 
+def test_write_raw_accepts_the_structured_finisher_form(tmp_path):
+    """A finisher binding needing config (label-issue's outcome -> label
+    mapping) round-trips through the admin's write/read path unmodified —
+    `write_raw` validates via the same `_parse_workflow` the read path uses,
+    it never re-serializes what the operator submitted."""
+    text = json.dumps(
+        {
+            "start": "triage",
+            "transitions": [{"from": "triage", "on": "done", "to": "end"}],
+            "finishers": {
+                "triage": {
+                    "kind": "label-issue",
+                    "labels": {"done": "harness:todo"},
+                }
+            },
+        },
+        indent=2,
+    )
+    admin = FilesystemWorkflowAdmin(tmp_path)
+
+    admin.write_raw("triage", text)
+
+    assert admin.read_raw("triage") == text
+
+
 def test_write_raw_invalid_json_is_rejected_and_leaves_no_file(tmp_path):
     admin = FilesystemWorkflowAdmin(tmp_path)
 

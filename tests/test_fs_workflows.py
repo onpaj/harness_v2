@@ -7,7 +7,7 @@ from harness.drivers.fs_workflows import (
     ServedWorkflowRepository,
     invalid_step_name,
 )
-from harness.models import END, FAILED, Transition
+from harness.models import END, FAILED, FinisherBinding, Transition
 from harness.ports.board import DONE_COLUMN, TODO_COLUMN
 from harness.ports.workflows import WorkflowNotFound
 
@@ -184,9 +184,41 @@ def test_finishers_are_parsed_and_exposed(tmp_path):
 
     workflow = repository.get("default")
 
-    assert workflow.finishers == {"review": "open-pr"}
-    assert workflow.finisher_for("review") == "open-pr"
+    assert workflow.finishers == {"review": FinisherBinding(kind="open-pr")}
+    assert workflow.finisher_for("review") == FinisherBinding(kind="open-pr")
     assert workflow.finisher_for("plan") is None
+
+
+def test_finisher_structured_form_parses_kind_and_config(tmp_path):
+    """A finisher that needs per-binding data (e.g. label-issue's outcome ->
+    label mapping) is an object; everything but "kind" becomes opaque config."""
+    definition = {
+        **DEFINITION,
+        "finishers": {
+            "review": {
+                "kind": "label-issue",
+                "labels": {"done": "harness:todo", "request_changes": "harness:needs-info"},
+            }
+        },
+    }
+    (tmp_path / "default.json").write_text(json.dumps(definition))
+    repository = FilesystemWorkflowRepository(tmp_path)
+
+    workflow = repository.get("default")
+
+    assert workflow.finisher_for("review") == FinisherBinding(
+        kind="label-issue",
+        config={"labels": {"done": "harness:todo", "request_changes": "harness:needs-info"}},
+    )
+
+
+def test_finisher_structured_form_missing_kind_raises(tmp_path):
+    definition = {**DEFINITION, "finishers": {"review": {"labels": {}}}}
+    (tmp_path / "default.json").write_text(json.dumps(definition))
+    repository = FilesystemWorkflowRepository(tmp_path)
+
+    with pytest.raises(WorkflowNotFound, match="review"):
+        repository.get("default")
 
 
 def test_finishers_not_an_object_raises(tmp_path):

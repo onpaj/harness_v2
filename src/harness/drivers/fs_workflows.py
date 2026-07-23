@@ -8,7 +8,7 @@ import uuid
 from collections.abc import Sequence
 from pathlib import Path
 
-from harness.models import END, FAILED, Transition, Workflow
+from harness.models import END, FAILED, FinisherBinding, Transition, Workflow
 from harness.ports.board import DONE_COLUMN, TODO_COLUMN
 from harness.ports.workflow_admin import WorkflowAdmin, WorkflowValidationError
 from harness.ports.workflows import WorkflowNotFound, WorkflowRepository
@@ -78,28 +78,45 @@ def _parse_workflow(name: str, raw: dict) -> Workflow:
             )
         max_parallel[step] = limit
 
-    # `finishers` maps a step name to a finisher kind (ADR-0016) — validated
-    # here, exactly like `maxParallel`, so both the read path and the admin
-    # write path reject a bad binding through this one shared contract. The
-    # kind itself is resolved against the registry at build time (`app.build`),
-    # not here: the file doesn't know which kinds this harness wires.
+    # `finishers` maps a step name to a finisher binding (ADR-0016/ADR-0018) —
+    # validated here, exactly like `maxParallel`, so both the read path and the
+    # admin write path reject a bad binding through this one shared contract.
+    # The kind itself (and its config's shape) is resolved against the
+    # registry at build time (`app.build`), not here: the file doesn't know
+    # which kinds this harness wires. Two shapes are accepted per step:
+    # a plain string ("open-pr") for a kind with no config, or an object
+    # ({"kind": "label-issue", "labels": {...}}) for one that needs its own
+    # data — everything except "kind" becomes opaque `config`.
     raw_finishers = raw.get("finishers", {})
     if not isinstance(raw_finishers, dict):
         raise ValueError(
             f"workflow {name!r} has an invalid finishers: expected object, "
             f"got {type(raw_finishers).__name__}"
         )
-    finishers: dict[str, str] = {}
-    for step, kind in raw_finishers.items():
+    finishers: dict[str, FinisherBinding] = {}
+    for step, raw_binding in raw_finishers.items():
         if step not in known_steps:
             raise ValueError(
                 f"workflow {name!r} has a finisher for unknown step {step!r}"
             )
-        if not isinstance(kind, str) or not kind:
+        if isinstance(raw_binding, str):
+            if not raw_binding:
+                raise ValueError(
+                    f"workflow {name!r} has an invalid finisher for step {step!r}: {raw_binding!r}"
+                )
+            finishers[step] = FinisherBinding(kind=raw_binding)
+        elif isinstance(raw_binding, dict):
+            kind = raw_binding.get("kind")
+            if not isinstance(kind, str) or not kind:
+                raise ValueError(
+                    f"workflow {name!r} has an invalid finisher kind for step {step!r}: {kind!r}"
+                )
+            config = {k: v for k, v in raw_binding.items() if k != "kind"}
+            finishers[step] = FinisherBinding(kind=kind, config=config)
+        else:
             raise ValueError(
-                f"workflow {name!r} has an invalid finisher for step {step!r}: {kind!r}"
+                f"workflow {name!r} has an invalid finisher for step {step!r}: {raw_binding!r}"
             )
-        finishers[step] = kind
 
     return Workflow(
         name=raw.get("name", name),

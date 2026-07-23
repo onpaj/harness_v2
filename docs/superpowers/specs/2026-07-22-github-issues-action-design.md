@@ -240,6 +240,14 @@ Extend the CLAUDE.md note on the action seam to say it is now built for the
 inbound half; the sink half (outbound reflection) remains the open seam
 (invariant #40).
 
+## Follow-up
+
+`claimed_label` (the swap-to label on claim, default `"harness:queued"`) is
+also exposed as a `params` key, alongside `label`, so a second, upstream
+Process can compose with this one without touching it — see
+`docs/superpowers/specs/2026-07-23-triage-process-design.md` (the triage
+Process + the `label-issue` finisher).
+
 ## Completion check
 
 1. A `processes/harness-todo.json` (`github-issues` / `label harness:todo` /

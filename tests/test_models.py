@@ -2,6 +2,7 @@ from harness.models import (
     END,
     BehaviorResult,
     Failed,
+    FinisherBinding,
     Finished,
     HistoryEntry,
     MoveTo,
@@ -235,10 +236,10 @@ def test_workflow_finisher_for_reads_configured_kind():
             Transition(from_step="plan", on="done", to_step="publish"),
             Transition(from_step="publish", on="done", to_step=END),
         ),
-        finishers={"publish": "open-pr"},
+        finishers={"publish": FinisherBinding(kind="open-pr")},
     )
 
-    assert workflow.finisher_for("publish") == "open-pr"
+    assert workflow.finisher_for("publish") == FinisherBinding(kind="open-pr")
     assert workflow.finisher_for("plan") is None
 
 

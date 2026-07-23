@@ -11,6 +11,7 @@ import plistlib
 import shutil
 import subprocess
 import sys
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -38,6 +39,7 @@ from harness.drivers.github_forge import GithubForge
 from harness.drivers.github_issue_checker import GithubIssueChecker
 from harness.drivers.github_merge_checker import GithubMergeChecker
 from harness.drivers.github_source import GithubLabelReflector, GithubTaskSource
+from harness.drivers.label_issue import LabelIssueBehavior
 from harness.drivers.mergeability_watcher import GithubMergeabilityWatcher
 from harness.drivers.slack_sink import SlackWebhookSink
 from harness.drivers.uv_updater import UvUpdater
@@ -61,6 +63,7 @@ from harness.drivers.system_clock import SystemClock
 from harness.drivers.worktree_artifacts import WorktreeArtifactView
 from harness.ids import new_task_id
 from harness.models import Task
+from harness.ports.behavior import ConsumerBehavior
 from harness.ports.clock import Clock
 from harness.ports.issue_state import IssueChecker
 from harness.ports.merge import MergeChecker
@@ -780,10 +783,18 @@ def _process_sources(
             raise ProcessValidationError(
                 "github-issues action requires GITHUB_TOKEN", field="check"
             )
+        label = params.get("label", args.github_label)
+        claimed_label = params.get("claimed_label", "harness:queued")
+        if not isinstance(label, str) or not isinstance(claimed_label, str):
+            raise ProcessValidationError(
+                "github-issues action requires label/claimed_label to be strings",
+                field="params",
+            )
         return GithubIssuesCheck(
             client=client,
             registry=registry,
-            label=params.get("label", args.github_label),
+            label=label,
+            claimed_label=claimed_label,
         )
 
     def github_conflicts_factory(params: dict) -> GithubConflictsCheck:
@@ -810,6 +821,7 @@ def _process_sources(
         repository=None,
         worktree_root=worktree_root,
         known_targets=known_targets,
+        default_github_issues_label=args.github_label,
     )
 
 
@@ -1560,10 +1572,34 @@ def _run(args: argparse.Namespace) -> int:
     # no new loop, no `build()` parameter (invariant #39). A slack sink rides
     # alongside them when `SLACK_WEBHOOK_URL` is set — the outbound half of a
     # process declaring `{"kind": "slack"}` (invariant #40).
+    #
+    # The same client is threaded into the finisher registry below (the
+    # "label-issue" kind) — one client per wiring site, like every other
+    # GitHub-touching helper in this function.
+    token = os.environ.get("GITHUB_TOKEN")
+    github_client = HttpGithubClient(token) if token else None
     process_sources = _process_sources(
-        args, root, registry, clock=SystemClock(), known_targets=known_targets
+        args,
+        root,
+        registry,
+        clock=SystemClock(),
+        known_targets=known_targets,
+        client=github_client,
     )
     sources = sources + process_sources + _slack_sinks(process_sources)
+
+    # "label-issue" (a finisher, invariant #41/ADR-0018): applies an outcome ->
+    # label mapping to a task's source GitHub issue, wrapping (not replacing)
+    # the step's own agent behavior — used by a triage Process's PM persona to
+    # relabel an issue harness:todo/harness:needs-info after judging it. Only
+    # registered when a token is configured; a workflow binding a step to it
+    # otherwise fails at `build()` through the existing "unknown finisher
+    # kind" error, no new error path.
+    finishers: dict[str, Callable[[str, dict, Callable[[], ConsumerBehavior]], ConsumerBehavior]] = {}
+    if github_client is not None:
+        finishers["label-issue"] = lambda step, config, inner: LabelIssueBehavior(
+            inner=inner(), client=github_client, labels=config.get("labels", {})
+        )
 
     # Self-healing: an agent assigned to the `failed/` queue. Enabled by
     # `--heal-repo <owner/repo>` (where the healer opens issues). It reuses the
@@ -1599,6 +1635,7 @@ def _run(args: argparse.Namespace) -> int:
             sources=sources or None,
             merge_checker=merge_checker,
             issue_checker=issue_checker,
+            finishers=finishers or None,
             delay=args.delay,
             request_changes_once_at=args.request_changes_at,
             issue_tracker=issue_tracker,

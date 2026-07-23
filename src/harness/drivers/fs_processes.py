@@ -28,6 +28,20 @@ driver (`SlackWebhookSink`) routes on. The shape stays `{"kind": "..."}` with
 no params: the Slack webhook URL is a secret and never enters a JSON file (it
 arrives via `SLACK_WEBHOOK_URL` at wiring time — the service holds no secret).
 An unknown kind is still a build error.
+
+`build()` additionally guards against a cross-file `github-issues` label
+collision (two triage/ingestion processes fighting over the same scan or
+claim label): every file whose `action.check == "github-issues"` has its
+`label`/`claimed_label` pair collected in the same pass, and a value reused by
+two different files fails the whole build, naming both files. This is a
+**static, exact-string check only** — it does not catch a label typo, a
+collision mediated through an agent-authored label, or two processes that are
+logically incompatible without sharing a literal string; that residual
+footgun is accepted, not solved. `FilesystemProcessAdmin.write` validates one
+file at a time and has no visibility into siblings, so it cannot run this
+check at all — a hand-edited or admin-written file only gets it at the next
+full `harness run` startup (`FilesystemProcessRepository.build()`), not at
+admin-save time.
 """
 
 from __future__ import annotations
@@ -233,11 +247,13 @@ class FilesystemProcessRepository:
         repository: str | None = None,
         worktree_root: str | None = None,
         known_targets: set[str] | None = None,
+        default_github_issues_label: str = "harness:todo",
     ) -> list[ScheduledTrigger]:
         if not self._root.exists():
             return []
 
         triggers: list[ScheduledTrigger] = []
+        seen: dict[str, str] = {}  # github-issues label/claimed_label -> file name
         for path in sorted(self._root.glob("*.json")):
             triggers.append(
                 self._build_one(
@@ -249,7 +265,40 @@ class FilesystemProcessRepository:
                     known_targets=known_targets,
                 )
             )
+            self._check_github_issues_collision(
+                path, seen, default_github_issues_label=default_github_issues_label
+            )
         return triggers
+
+    @staticmethod
+    def _check_github_issues_collision(
+        path: Path,
+        seen: dict[str, str],
+        *,
+        default_github_issues_label: str,
+    ) -> None:
+        # Re-reads the file's already-validated JSON purely to see the raw
+        # `action` — `_build_one` above already raised if it were malformed,
+        # so this second parse is a startup-time, one-file cost, not a hot path.
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        action = raw.get("action") if isinstance(raw, dict) else None
+        if not isinstance(action, dict) or action.get("check") != "github-issues":
+            return
+        params = action.get("params", {})
+        params = params if isinstance(params, dict) else {}
+        label = params.get("label", default_github_issues_label)
+        claimed_label = params.get("claimed_label", "harness:queued")
+        for value in (label, claimed_label):
+            if not isinstance(value, str):
+                continue
+            if value in seen and seen[value] != path.name:
+                raise ProcessValidationError(
+                    f"processes {seen[value]!r} and {path.name!r} both use the "
+                    f"github-issues label {value!r} (label or claimed_label) — "
+                    "this would double-claim or leave claiming ambiguous",
+                    field="params",
+                )
+            seen[value] = path.name
 
     def _build_one(
         self,
