@@ -159,6 +159,13 @@ def test_fragment_task_shows_metadata_and_history(client):
     assert "dispatcher" in body
 
 
+def test_fragment_task_shows_copy_id_button(client):
+    body = client.get("/fragment/task/tsk_1").text
+
+    assert 'class="copy-id-btn"' in body
+    assert 'data-copy-id="tsk_1"' in body
+
+
 def test_fragment_task_unknown_returns_404(client):
     assert client.get("/fragment/task/neznamy").status_code == 404
 

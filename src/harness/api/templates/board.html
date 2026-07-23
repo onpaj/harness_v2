@@ -23,6 +23,26 @@
     dialog { border: none; border-radius: 6px; padding: 16px; max-width: 640px; width: 90%; }
     table { border-collapse: collapse; width: 100%; font-size: 13px; }
     td, th { text-align: left; padding: 4px 8px; border-bottom: 1px solid #ebecf0; vertical-align: top; }
+    .task-id-row { display: flex; align-items: center; gap: 8px; }
+    .copy-id-btn {
+      font: inherit;
+      border: none;
+      border-radius: 4px;
+      padding: 2px 6px;
+      background: #ebecf0;
+      cursor: pointer;
+      line-height: 1.4;
+    }
+    .copy-id-btn:hover { background: #dfe1e6; }
+    .copy-id-btn:active { background: #c1c7d0; }
+    .copy-id-btn.copied { background: #e3fcef; }
+
+    @media (prefers-color-scheme: dark) {
+      .copy-id-btn { background: #3b3f45; color: #c1c7d0; }
+      .copy-id-btn:hover { background: #4a4f57; }
+      .copy-id-btn:active { background: #5a5f68; }
+      .copy-id-btn.copied { background: #1c3829; }
+    }
   </style>
 </head>
 <body hx-ext="sse" sse-connect="/api/events">
@@ -68,6 +88,34 @@
           return;
         }
         lastRevision = revision;
+      });
+    })();
+
+    // Copy-task-id button: delegated from #detail (the only static ancestor
+    // that survives every fragment swap) since the button itself is
+    // destroyed/recreated on each open. Only one .copy-id-btn can ever be in
+    // the DOM at a time (one task detail open at once), so a single closure
+    // variable tracks the pending revert timer instead of a per-button map.
+    (function () {
+      var detail = document.getElementById('detail');
+      var revertTimer = null;
+
+      detail.addEventListener('click', function (event) {
+        var btn = event.target.closest('.copy-id-btn');
+        if (!btn) { return; }
+        navigator.clipboard.writeText(btn.dataset.copyId).then(function () {
+          if (revertTimer) { clearTimeout(revertTimer); }
+          btn.textContent = '✓';
+          btn.classList.add('copied');
+          revertTimer = setTimeout(function () {
+            btn.textContent = '📋';
+            btn.classList.remove('copied');
+            revertTimer = null;
+          }, 1500);
+        }).catch(function () {
+          // Clipboard write failed (insecure context, permission denied, …).
+          // No confirmation shown; no error surfaced.
+        });
       });
     })();
   </script>

@@ -1,4 +1,8 @@
-<h2>{{ task.id }}</h2>
+<h2 class="task-id-row">
+  <span>{{ task.id }}</span>
+  <button type="button" class="copy-id-btn" data-copy-id="{{ task.id }}"
+          aria-label="Copy task id">📋</button>
+</h2>
 {% if task.status == "failed" %}
 <button hx-post="/tasks/{{ task.id }}/restart"
         hx-target="#detail"
