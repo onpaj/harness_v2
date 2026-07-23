@@ -282,6 +282,79 @@ added or removed.
 `GITHUB_TOKEN` (see [Running it as a service](#running-it-as-a-service)), GitHub
 ingestion is simply inactive — `harness submit` keeps working regardless.
 
+This built-in ingestion is also expressible as a [process](#processes) (a
+`github-issues` action); if you author one, pass `--no-github-source` so the two
+don't claim the same issue twice.
+
+## Processes
+
+A **process** is the operator's authoring surface for automation — one
+`processes/<name>.json` that ties four interchangeable roles together:
+
+- a **trigger** — *when* to act (a schedule, e.g. `{"interval": "60s"}`);
+- an **action** — *what* to gather (a named **check** plus params; each item it
+  finds becomes one task in the inbox);
+- a **target** — where those tasks start (a **workflow** or a single **step** —
+  the dispatcher still decides the placement);
+- a **sink** — *where to report* progress outward (`none` or `slack`).
+
+`harness run` compiles every process into a scheduled task source that feeds the
+inbox, so the rest of the loop — dispatcher, router, workflow — only ever sees
+primitives it already knows. Author them by hand or in the board's process
+editor; both go through the same validator. `harness init` creates an empty
+`processes/`.
+
+```json
+{
+  "trigger": {"interval": "1h"},
+  "action": {"check": "github-issues", "params": {"label": "harness:todo"}},
+  "target": {"workflow": "default"},
+  "sink": {"kind": "slack"}
+}
+```
+
+### Actions (checks)
+
+The built-in checks are:
+
+- `always` — fires every interval unconditionally;
+- `disk-threshold` — fires while a filesystem sits at or above a percentage full;
+- `fs-files` — one task per file matching a glob;
+- `command` — one task per non-empty line of a shell command's stdout (the
+  no-code escape hatch — an action with no Python);
+- `github-issues` — one task per labeled GitHub issue (the process form of the
+  built-in ingestion above; needs `GITHUB_TOKEN`);
+- `github-conflicts` — one resolver task per harness-authored PR that has become
+  un-mergeable (needs `GITHUB_TOKEN`).
+
+A new action is a small `Check` class plus one registry entry, named from the
+process JSON by string. The schedule is data; the condition is code.
+
+### Sinks
+
+A sink reflects a task's progress outward as it moves. `none` is fire-and-forget;
+`slack` posts a short line to an incoming webhook, enabled by setting
+`SLACK_WEBHOOK_URL` in the environment. The webhook URL is a secret and never
+enters a JSON file — a slack-declaring process without the variable just warns
+and runs with an inert sink. The destination is chosen independently of the
+origin, so work can enter from GitHub and be reported to Slack.
+
+### Bare triggers
+
+`triggers/<name>.json` is the same machinery without the process wrapper — a
+trigger + check + target, and no sink slot. A process compiles to the identical
+scheduled source; the process is the richer primary surface, the trigger file the
+low-level primitive. `harness init` creates an empty `triggers/` too.
+
+### Conflict resolution
+
+When a harness-authored PR falls behind or conflicts with its base branch, a
+**resolver** workflow (scaffolded by `harness init`) re-merges the base and
+re-lands. Point a `github-conflicts` process at the `resolver` workflow to detect
+these — the one authorable detection path. A legacy built-in detector is also
+available behind `--watch-mergeability` (off by default); don't enable both at
+once, or each mints its own resolver task for the same PR.
+
 ## Self-healing the failed queue
 
 By default a task that fails comes to rest in `failed/` and stays there — an
@@ -353,6 +426,13 @@ tasks/ ──dispatcher──> queues/<step>/ ──consumer──> tasks/ ─�
 
 Backward edges are explicit and need not be symmetric. Retrying the same step is
 expressed as `to == from`.
+
+Two optional keys are data too, read at build and never touching the router. A
+**finisher** — how a terminal step *finishes* — is chosen by an optional
+`"finishers"` map (step → kind); the `open-pr` kind pushes the branch and opens a
+pull request through the forge, and is both the default and the only kind shipped
+(`create-file`/`call-api` are future siblings). `"maxParallel"` (step → N) sets
+how many tasks a step may work on at once, defaulting to 1.
 
 ## Architecture
 

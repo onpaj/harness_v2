@@ -197,3 +197,41 @@ what guarantee that:
    operators author simple actions without a code change.
 6. **Vocabulary note in the specs**: action outputs are Observations/tasks;
    "artifact" stays reserved for `.artifacts/` work products.
+
+## Addendum — the punch list has since landed (2026-07-23)
+
+The body above was written when the finisher was still a name-keyed branch and
+the sink was a reserved schema slot. Every punch-list item has since shipped, so
+read the "⚠️" verdicts on slots 5 and 6 as *historical*:
+
+1. **Finisher as data — done.** `Workflow.finishers` (step → kind) resolved
+   against a registry in `app.build()`; `Forge` is the driver behind the
+   `open-pr` kind; the name-keyed branch in `behavior_for` is gone. Conflicting
+   or unknown bindings fail at build. See **ADR-0016** and **invariant #41**.
+2. **First real sink — done.** A non-`none` sink is stamped as `data.sink` by
+   the compiled trigger and reflected by `SlackWebhookSink` (`drivers/slack_sink.py`),
+   routed on the *destination* identity through the existing `SourceReflectorSink`
+   fan-out — GitHub-in / Slack-out made real. Stateless per-report post for now;
+   the stateful create-then-update handle stays the documented future refinement.
+   See **invariant #40**.
+3. **`trigger.kind` reserved — done.** `_check_trigger_kind` in
+   `drivers/fs_processes.py` accepts only `"schedule"`, the same zero-cost
+   forward-compat move the sink got.
+4. **Filesystem action — done.** `FileGlobCheck` ships as the `fs-files` check
+   (`drivers/checks.py`), one observation per matching file — a second proof of
+   the action seam, no client dependency.
+5. **Generic data-driven check — done.** `CommandCheck` ships as the `command`
+   check: one observation per non-empty stdout line, so an operator can author a
+   simple action with no Python at all.
+6. **Vocabulary policed.** CLAUDE.md's gotchas now carry the "'Artifact' is
+   reserved vocabulary — an action's outputs are Observations" note.
+
+One structural follow-on that the punch list did not name has also started: the
+bespoke `GithubMergeabilityWatcher` is now the **`github-conflicts` process
+action** (`GithubConflictsCheck`), and the watcher is **retired from the default
+wiring** (`--watch-mergeability` defaults off) so conflict detection has one
+authorable path. The class and its finisher-side companions
+(`MergeReconciler`/`PrWatcher`) await a later deletion pass. The remaining open
+items are all genuinely future work, exactly as the body predicted: an
+event-driven trigger *kind*, the stateful Slack handle, and folding `triggers/`
+into `processes/`.

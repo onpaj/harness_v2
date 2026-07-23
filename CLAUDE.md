@@ -14,10 +14,24 @@ Phase 2 spec: `docs/superpowers/specs/2026-07-20-orchestration-phase2-design.md`
 Phase 2 plan: `docs/superpowers/plans/2026-07-20-orchestration-phase2.md`
 Phase 3 spec: `docs/superpowers/specs/2026-07-20-orchestration-phase3-design.md`
 Phase 3 plan: `docs/superpowers/plans/2026-07-20-orchestration-phase3.md`
+Phase 4 spec: `docs/superpowers/specs/2026-07-20-orchestration-phase4-design.md`
+Phase 4 plan: `docs/superpowers/plans/2026-07-20-orchestration-phase4.md`
 Generic triggers spec: `docs/superpowers/specs/2026-07-22-generic-triggers-design.md`
 Generic triggers plan: `docs/superpowers/plans/2026-07-22-generic-triggers.md`
 Processes spec: `docs/superpowers/specs/2026-07-22-processes-design.md`
 Processes plan: `docs/superpowers/plans/2026-07-22-processes.md`
+GitHub-issues action spec: `docs/superpowers/specs/2026-07-22-github-issues-action-design.md`
+GitHub-issues action plan: `docs/superpowers/plans/2026-07-22-github-issues-action.md`
+GitHub-conflicts action spec: `docs/superpowers/specs/2026-07-23-github-conflicts-action-design.md`
+Process admin UI spec: `docs/superpowers/specs/2026-07-22-process-admin-ui-design.md`
+Process admin UI plan: `docs/superpowers/plans/2026-07-22-process-admin-ui.md`
+Architecture explorer spec: `docs/superpowers/specs/2026-07-22-architecture-explorer-design.md`
+Architecture explorer plan: `docs/superpowers/plans/2026-07-22-architecture-explorer.md`
+Modularity validation: `docs/design/2026-07-23-modularity-validation.md`
+Modularity gaps plan: `docs/superpowers/plans/2026-07-23-modularity-gaps.md`
+
+Earlier increments — board UI, GitHub forge, multi-repo source, self-healing —
+each have a dated spec+plan under `docs/superpowers/{specs,plans}/`.
 
 The project is built **phase by phase**. Phase 1 is a POC of the orchestration loop.
 Phase 2 adds **worktrees, artifacts and landing**: each phase works in a worktree,
@@ -193,7 +207,14 @@ Dependencies flow strictly downward, no cycles.
 - `drivers/mergeability_watcher.py` — `GithubMergeabilityWatcher(TaskSource)`,
   `kind="mergeability"`: `poll()` auto-updates a "behind" harness-owned PR
   (side effect, no task) and queues a "dirty" one as a resolver task on the
-  same branch, deduped by `repo:pr:head_sha`
+  same branch, deduped by `repo:pr:head_sha`. **Retired from the default
+  wiring**: `--watch-mergeability` now defaults to *off*, since the
+  `github-conflicts` process (`GithubConflictsCheck`) is the one authorable
+  detection path — enabling both double-mints resolver tasks (each source keeps
+  its own `_seen` ledger). The class and its `_mergeability_sources` wiring
+  stay behind the opt-in flag for now; the full deletion (with the finisher-side
+  `MergeReconciler`/`PrWatcher`) is a later pass per the github-conflicts spec's
+  Retirement section
 - `behaviors/resolve_conflict.py` — `ResolveConflictBehavior`: merges the base
   into the attached branch; a clean merge commits without spending an agent
   call, a real conflict runs the `resolve` persona then the worker commits
