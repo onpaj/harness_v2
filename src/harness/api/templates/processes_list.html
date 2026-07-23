@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>harness · processes</title>
+  <style>
+    body { font: 14px system-ui, sans-serif; margin: 0; padding: 16px; background: #f4f5f7; }
+    h1 { font-size: 16px; margin: 0 0 16px; }
+    table { border-collapse: collapse; width: 100%; font-size: 13px; background: #fff; }
+    td, th { text-align: left; padding: 6px 10px; border-bottom: 1px solid #ebecf0; vertical-align: top; }
+    .warn { color: #974f0c; }
+    a { color: #0747a6; }
+  </style>
+</head>
+<body>
+  <h1>harness · processes</h1>
+  <table>
+    <tr><th>process</th><th>repositories</th><th></th></tr>
+    {% for process in processes %}
+    <tr>
+      <td>{{ process.name }}</td>
+      <td>
+        {% if process.repositories == "*" %}* (all repositories){% else %}{{ process.repositories | join(", ") }}{% endif %}
+        {% if process.stale %}<span class="warn">&#9888; unknown: {{ process.stale | join(", ") }}</span>{% endif %}
+      </td>
+      <td><a href="/processes/{{ process.name }}/edit">Edit</a></td>
+    </tr>
+    {% endfor %}
+  </table>
+</body>
+</html>

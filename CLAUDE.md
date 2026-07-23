@@ -109,10 +109,10 @@ Dependencies flow strictly downward, no cycles.
 | Base | `models` (imports nothing from the package), `ids` |
 | Logic | `router` (knows only `models`) |
 | Base (package-free) | `models`, `ids`, `artifacts_layout` (the `.artifacts/<id>/<step>-NN` convention) |
-| Ports | `ports/{queue,workflows,strategy,behavior,events,clock,workspace,artifacts,forge,board,agent,repos,source}` |
+| Ports | `ports/{queue,workflows,strategy,behavior,events,clock,workspace,artifacts,forge,board,agent,repos,source,control,processes}` |
 | Orchestration | `dispatcher`, `consumer`, `source_poller` — know only ports (and not `workspace`/`forge`/`artifacts`/`agent`/`repos`/`drivers`) |
 | Behaviors | `behaviors/{landing,agent}` — touch ports, not drivers |
-| Drivers | `drivers/{fs_queue,fs_workflows,fifo_strategy,dummy_behavior,stdout_events,system_clock,memory,fs_artifacts,git_workspace,fake_forge,claude_cli,fs_agents,fs_repos,worktree_artifacts,source_reflector,github_client,github_source,github_forge,launchd}` |
+| Drivers | `drivers/{fs_queue,fs_workflows,fifo_strategy,dummy_behavior,stdout_events,system_clock,memory,fs_artifacts,git_workspace,fake_forge,claude_cli,fs_agents,fs_repos,worktree_artifacts,source_reflector,github_client,github_source,github_forge,launchd,fs_processes}` |
 | Edges | `app` (wiring), `cli` |
 
 - `projection.py` — in-memory read model of the board; hydration from queues + event stream
@@ -123,6 +123,17 @@ Dependencies flow strictly downward, no cycles.
 - `ports/forge.py` — `Forge.open_pull_request(...)` (landing proposes a PR)
 - `ports/agent.py` — `AgentRunner.run(...)`, `AgentCatalog.get(name)`, `AgentSpec` (persona as data)
 - `ports/repos.py` — `RepositoryRegistry.resolve(name) -> Path` (repo name → path)
+- `ports/processes.py` — `ProcessRepository.compile_process(name) -> Process` (strict,
+  build-time read) and `ProcessAdmin.{list_processes,load_process,save_repositories}`
+  (lenient read + validated write for the editor), `ProcessValidationError`. A process
+  is a `Workflow` plus a `repositories` scope (specific names or `"*"`), stored as one
+  extra key in the same `<name>.json` file `FilesystemWorkflowRepository` already
+  reads — additive, not a rename of `Workflow`. `drivers/fs_processes.py`
+  (`FilesystemProcessRepository`, `FilesystemProcessAdmin`) implements it, rooted at
+  `layout.workflows`, reusing `FilesystemWorkflowRepository` for the state-machine
+  parsing. `api/process_routes.py` is the editor UI (`GET /processes`,
+  `GET`/`POST /processes/{name}/edit`), wired into `create_app` behind null-object
+  defaults, following the `TaskControl`/`_NullTaskControl` precedent.
 - `behaviors/agent.py` — `ClaudeCliBehavior`: attach worktree → allocate attempt → run the agent → the worker commits
 - `ports/source.py` — the `TaskSource` port (`poll`/`report_progress`/`finish`) + `Progress`/`FinishResult`
 - `source_poller.py` — `SourcePoller`: the core that fills the inbox from the source (knows only ports)

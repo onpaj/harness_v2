@@ -166,6 +166,43 @@ class Workflow:
         return tuple(found)
 
 
+RepositoryScope = Union[tuple[str, ...], str]
+"""A process's repository scope: a tuple of specific repo names, or the
+literal `"*"` meaning "all currently-registered repositories"."""
+
+
+@dataclass(frozen=True)
+class Process:
+    """A named process: its state machine (`Workflow`) plus which repositories
+    it applies to. Additive over `Workflow` — the running harness's routing
+    path knows nothing of this; only the admin/editor layer does."""
+
+    name: str
+    workflow: Workflow
+    repositories: RepositoryScope
+
+    def applies_to(self, repository: str) -> bool:
+        """`"*"` is evaluated live: it never snapshots the registry, so a repo
+        registered after this process was saved as `"*"` is in scope with no
+        re-save needed."""
+        return self.repositories == "*" or repository in self.repositories
+
+
+@dataclass(frozen=True)
+class ProcessSummary:
+    """Admin/UI-facing read shape for a process — deliberately not `Process`.
+
+    `repositories` here is exactly as stored on disk, unvalidated: the editor
+    must be able to open and display a process whose scope has drifted invalid
+    (e.g. a referenced repo was deregistered), which `Process` cannot represent
+    because it has already been validated."""
+
+    name: str
+    start: str
+    steps: tuple[str, ...]
+    repositories: RepositoryScope
+
+
 @dataclass(frozen=True)
 class MoveTo:
     """The task goes to a step's queue."""

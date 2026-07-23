@@ -6,6 +6,7 @@ from harness.models import (
     HistoryEntry,
     MoveTo,
     Outcome,
+    Process,
     Task,
     Transition,
     Workflow,
@@ -148,3 +149,27 @@ def test_decisions_carry_their_payload():
     assert MoveTo("design").step == "design"
     assert Failed("nope").reason == "nope"
     assert Finished() == Finished()
+
+
+def _process(repositories):
+    workflow = Workflow(
+        name="default",
+        start="plan",
+        transitions=(Transition(from_step="plan", on="done", to_step=END),),
+    )
+    return Process(name="default", workflow=workflow, repositories=repositories)
+
+
+def test_process_applies_to_specific_repositories_only():
+    process = _process(("repo-a", "repo-b"))
+
+    assert process.applies_to("repo-a") is True
+    assert process.applies_to("repo-b") is True
+    assert process.applies_to("repo-z") is False
+
+
+def test_process_applies_to_any_repository_when_scoped_to_all():
+    process = _process("*")
+
+    assert process.applies_to("repo-a") is True
+    assert process.applies_to("anything") is True

@@ -19,6 +19,7 @@ from harness.app import LANDING_STEP, HarnessLayout, build
 from harness.drivers.claude_cli import ClaudeCliRunner
 from harness.drivers.fake_forge import FakeForge
 from harness.drivers.fs_agents import FilesystemAgentCatalog
+from harness.drivers.fs_processes import FilesystemProcessAdmin
 from harness.drivers.fs_repos import FilesystemRepositoryRegistry
 from harness.drivers.fs_workflows import invalid_workflow_name
 from harness.drivers.git_remote import github_slug
@@ -683,15 +684,28 @@ def _run(args: argparse.Namespace) -> int:
         print(f"error: {error}", file=sys.stderr)
         return 2
 
+    processes = FilesystemProcessAdmin(layout.workflows, registry)
+
     try:
-        asyncio.run(serve(harness, args.api_port, args.poll, args.source_poll))
+        asyncio.run(
+            serve(
+                harness, args.api_port, args.poll, args.source_poll,
+                processes=processes, registry=registry,
+            )
+        )
     except KeyboardInterrupt:
         return 0
     return 0
 
 
 async def serve(
-    harness, port: int, poll_interval: float, source_interval: float = 30.0
+    harness,
+    port: int,
+    poll_interval: float,
+    source_interval: float = 30.0,
+    *,
+    processes=None,
+    registry=None,
 ) -> None:
     """The loop and the board in a single event loop."""
     stop = asyncio.Event()
@@ -710,6 +724,8 @@ async def serve(
         artifacts=harness.artifacts,
         output=harness.stage_output,
         control=harness.control,
+        processes=processes,
+        repos=registry,
         clock=SystemClock(),
     )
     config = uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning")

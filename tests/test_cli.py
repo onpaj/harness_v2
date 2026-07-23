@@ -209,7 +209,7 @@ def test_run_accepts_api_port(monkeypatch, tmp_path):
     main(["init", "--root", str(tmp_path)])
     captured = {}
 
-    async def fake_serve(harness, port, poll_interval, source_interval=30.0):
+    async def fake_serve(harness, port, poll_interval, source_interval=30.0, **kwargs):
         captured["port"] = port
         captured["source_interval"] = source_interval
 
@@ -224,7 +224,7 @@ def test_run_forwards_source_poll(monkeypatch, tmp_path):
     main(["init", "--root", str(tmp_path)])
     captured = {}
 
-    async def fake_serve(harness, port, poll_interval, source_interval=30.0):
+    async def fake_serve(harness, port, poll_interval, source_interval=30.0, **kwargs):
         captured["source_interval"] = source_interval
 
     monkeypatch.setattr("harness.cli.serve", fake_serve)
