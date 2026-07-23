@@ -594,7 +594,7 @@ def test_http_get_pull_request_error_propagates():
         client.get_pull_request("o/r", 7)
 
 
-# --- mergeability watcher support: PullRequestInfo, list_pull_requests, update_branch ---
+# --- PR conflict detection support: PullRequestInfo, list_pull_requests, update_branch ---
 
 
 def test_fake_list_pull_requests_filters_by_head_prefix():

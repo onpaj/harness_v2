@@ -124,6 +124,24 @@ def test_a_failing_update_branch_does_not_drop_the_rest_of_the_tick():
     assert [o.state_key for o in obs] == ["onpaj/harness_v2:85:s2"]
 
 
+def test_skips_a_pr_outside_head_prefix():
+    # Proves the check actually threads its own `head_prefix` constructor
+    # argument through to `list_pull_requests` rather than silently dropping
+    # it or hardcoding "harness/" — every other fixture PR in this file uses
+    # the default "harness/" prefix, so none of them would catch a regression
+    # here where a non-default prefix is configured but not honored.
+    client = FakeGithubClient([])
+    client.add_pull_request(_pr(1, "dirty", head="harness/tsk_1", sha="s1"))
+    registry, slugs = _registry_and_slugs()
+    check = GithubConflictsCheck(
+        client=client, registry=registry, slug_of=slugs.get, head_prefix="release/"
+    )
+
+    obs = check.evaluate()
+
+    assert obs == []
+
+
 def test_skips_a_repo_without_a_github_origin():
     client = FakeGithubClient([])
     client.add_pull_request(_pr(1, "dirty"))

@@ -282,6 +282,33 @@ added or removed.
 `GITHUB_TOKEN` (see [Running it as a service](#running-it-as-a-service)), GitHub
 ingestion is simply inactive — `harness submit` keeps working regardless.
 
+## Autoresolving merge conflicts
+
+Earlier versions of `harness run` watched every registered repo's open PRs and
+queued a resolver task for each conflicted ("dirty") one by default
+(`--watch-mergeability`). That flag is gone — autoresolution is now opt-in,
+authored the same way any other scheduled process is: drop a file under
+`processes/`.
+
+```json
+// ~/harness-root/processes/autoresolver.json
+{
+  "trigger": {"interval": "60s"},
+  "action": {"check": "github-conflicts", "params": {"head_prefix": "harness/"}},
+  "target": {"workflow": "resolver"},
+  "dedup": "per-state",
+  "sink": {"kind": "none"}
+}
+```
+
+This is not written by `harness init` — a `github-conflicts` process without a
+`GITHUB_TOKEN` fails the run fast (`ProcessValidationError`), so seeding it
+unconditionally would break every token-less `harness run`. Copy the block
+above once a token is configured (see
+[Running it as a service](#running-it-as-a-service)); `harness run` then
+auto-updates a `behind` PR server-side and queues exactly one resolve→land task
+per `dirty` PR, deduped per conflicted head commit.
+
 ## Self-healing the failed queue
 
 By default a task that fails comes to rest in `failed/` and stays there — an
