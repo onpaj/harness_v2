@@ -341,6 +341,100 @@ def test_attach_reattach_with_override_reconciles_with_origin_after_server_side_
     handle.push()
 
 
+def test_attach_reattach_with_override_preserves_unpushed_local_commit(tmp_path):
+    """The resolve -> land hand-off: `resolve` attaches, merges, and commits
+    *locally* (no push — that isn't its job). `land` then re-attaches the same
+    override worktree before pushing. The reattach must not discard that
+    un-pushed commit by resetting to the still-stale `origin/<branch>` —
+    otherwise `land`'s push is a no-op and the PR head never advances (#86)."""
+    workspace = _workspace_with_remote(tmp_path)
+    repo = tmp_path / "repo"
+    remote = tmp_path / "remote.git"
+
+    original = workspace.attach(_make_task("tsk_original"))
+    original.write("feature.txt", "hi\n")
+    original.commit("[development] work")
+    original.push()
+
+    resolver_task = Task(
+        id="tsk_resolver",
+        workflow_template="resolver",
+        created="2026-07-20T10:00:00Z",
+        repository="app",
+        data={"branch": "harness/tsk_original"},
+    )
+
+    # `resolve` step: attach, then commit locally — no push.
+    resolve_handle = workspace.attach(resolver_task)
+    resolve_handle.write("resolved.txt", "resolved\n")
+    merge_sha = resolve_handle.commit("[resolve] merge conflict resolution")
+    assert merge_sha is not None
+
+    # `land` step: reattach the same override worktree.
+    land_handle = workspace.attach(resolver_task)
+
+    head = _git(["rev-parse", "HEAD"], land_handle.path).strip()
+    assert head == merge_sha  # the un-pushed merge commit must survive reattach
+    origin_head_before = _git(["rev-parse", "origin/harness/tsk_original"], repo).strip()
+    assert origin_head_before != merge_sha  # nothing pushed yet
+
+    land_handle.push()
+
+    origin_head_after = _git(["rev-parse", "origin/harness/tsk_original"], repo).strip()
+    assert origin_head_after == merge_sha
+
+
+def test_attach_reattach_with_override_raises_on_genuine_divergence(tmp_path):
+    """If both the local worktree (an un-pushed commit from `resolve`) and
+    `origin/<branch>` (a server-side `update_branch` merge) advance
+    independently between attach calls, neither history is a superset of the
+    other. `attach` must not silently pick a side — it raises, leaving both
+    the local HEAD and `origin/<branch>` untouched."""
+    workspace = _workspace_with_remote(tmp_path)
+    repo = tmp_path / "repo"
+    remote = tmp_path / "remote.git"
+
+    original = workspace.attach(_make_task("tsk_original"))
+    original.write("feature.txt", "hi\n")
+    original.commit("[development] work")
+    original.push()
+
+    resolver_task = Task(
+        id="tsk_resolver",
+        workflow_template="resolver",
+        created="2026-07-20T10:00:00Z",
+        repository="app",
+        data={"branch": "harness/tsk_original"},
+    )
+
+    resolve_handle = workspace.attach(resolver_task)
+    resolve_handle.write("resolved.txt", "resolved\n")
+    local_sha = resolve_handle.commit("[resolve] merge conflict resolution")
+
+    # origin/<branch> advances independently, server-side, via a second clone
+    # that never shares this local commit.
+    other_clone = tmp_path / "other_clone"
+    _git(["clone", str(remote), str(other_clone)], tmp_path)
+    _git(["checkout", "harness/tsk_original"], other_clone)
+    (other_clone / "server_side.txt").write_text("from update_branch\n", encoding="utf-8")
+    _git(["add", "-A"], other_clone)
+    _git(["commit", "-m", "server-side update-branch merge"], other_clone)
+    _git(["push", "origin", "harness/tsk_original"], other_clone)
+    # Read the bare remote directly (not `repo`'s remote-tracking ref, which
+    # `attach`'s own fetch is expected to update) — this is the canonical
+    # value that only a `push` could move, and `attach` never pushes.
+    remote_head_before = _git(["rev-parse", "refs/heads/harness/tsk_original"], remote).strip()
+
+    with pytest.raises(GitError):
+        workspace.attach(resolver_task)
+
+    # Neither side moved as a result of the failed reattach.
+    head_after = _git(["rev-parse", "HEAD"], resolve_handle.path).strip()
+    assert head_after == local_sha
+    remote_head_after = _git(["rev-parse", "refs/heads/harness/tsk_original"], remote).strip()
+    assert remote_head_after == remote_head_before
+
+
 def test_reattach_without_override_still_resets_to_local_head(tmp_path):
     """A non-override reattach is unchanged: it resets to local `HEAD`, keeping
     the committed work of the same task (nobody else advances that branch)."""

@@ -25,10 +25,15 @@ last advanced server-side (`GithubMergeabilityWatcher.update_branch`, which
 never touches any local ref) rather than through a harness-driven commit+push
 here — so once the reused worktree exists, it is immediately hard-reset to
 `origin/<branch>`'s actual tip before the caller does anything else with it.
-The same reconciliation runs on **reattach** of an override task (the worktree
-already exists from a prior attempt): reset to `origin/<branch>`, not local
-`HEAD`, since the branch may have advanced server-side between attempts. A
-non-override reattach still resets to local `HEAD` — nobody else moves a
+A similar reconciliation runs on **reattach** of an override task (the worktree
+already exists from a prior attempt), but there it is ancestry-aware rather
+than an unconditional reset: local `HEAD` behind or equal to `origin/<branch>`
+still resets to origin (a resolver retry, or a server-side advance with
+nothing local to lose); local `HEAD` ahead of `origin/<branch>` — the
+`resolve` step's un-pushed merge commit, waiting for `land` to push it — is
+left untouched; if the two have diverged, `attach` raises rather than
+silently discarding either side (see `GitError`, invariant 31). A non-override
+reattach still unconditionally resets to local `HEAD` — nobody else moves a
 `harness/<task.id>` branch.
 
 Every `git` invocation that may create a commit (`commit`, and the up-front
@@ -88,6 +93,47 @@ def _branch_exists_locally(repo: Path, branch: str) -> bool:
         text=True,
     )
     return result.returncode == 0
+
+
+def _is_ancestor(repo: Path, maybe_ancestor: str, descendant: str) -> bool:
+    result = subprocess.run(
+        ["git", "-C", str(repo), "merge-base", "--is-ancestor", maybe_ancestor, descendant],
+        capture_output=True,
+        text=True,
+    )
+    return result.returncode == 0
+
+
+def _reconcile_override_reattach(base: Path, worktree: Path, branch: str) -> None:
+    """Reattach an override (resolver) worktree, preserving any un-pushed local
+    commit instead of blindly resetting to origin.
+
+    Three-way ancestry check via `git merge-base --is-ancestor`:
+      - local HEAD is an ancestor of (or equal to) origin/<branch>: nothing
+        local to lose — reset to origin (today's behavior, e.g. a resolver
+        retry with no commit yet, or update_branch's server-side advance).
+      - origin/<branch> is an ancestor of local HEAD: a real, un-pushed local
+        commit is sitting ahead (the resolve -> land hand-off) — keep it,
+        untouched.
+      - neither is an ancestor of the other: both sides advanced
+        independently since the worktree was last reconciled — raise rather
+        than silently pick a side.
+    """
+    _git(["-C", str(base), "fetch", "origin", branch])
+    local_head = _git(["-C", str(worktree), "rev-parse", "HEAD"]).strip()
+    origin_head = _git(["-C", str(base), "rev-parse", f"origin/{branch}"]).strip()
+
+    if local_head == origin_head or _is_ancestor(worktree, local_head, origin_head):
+        _git(["-C", str(worktree), "reset", "--hard", f"origin/{branch}"])
+    elif _is_ancestor(worktree, origin_head, local_head):
+        pass  # local is ahead — nothing to reconcile, HEAD stays as-is
+    else:
+        raise GitError(
+            f"branch {branch!r} diverged on reattach: local HEAD {local_head} and "
+            f"origin/{branch} {origin_head} share no ancestry — refusing to guess "
+            "which side to keep"
+        )
+    _git(["-C", str(worktree), "clean", "-fd"])
 
 
 class GitWorkspaceHandle(WorkspaceHandle):
@@ -260,9 +306,17 @@ class GitWorkspace(Workspace):
             # create path does (invariant 31), extended to the reattach path.
             # The reset targets the branch as checked out *in this worktree*, so
             # the "checked out elsewhere" guard (invariant 30) doesn't apply.
-            _git(["-C", str(base), "fetch", "origin", branch])
-            _git(["-C", str(worktree), "reset", "--hard", f"origin/{branch}"])
-            _git(["-C", str(worktree), "clean", "-fd"])
+            #
+            # But a plain reset-to-origin is only safe when there's nothing
+            # local to lose. The `resolve` step commits its merge resolution
+            # *locally* (pushing isn't its job — see `ports/workspace.py`);
+            # `land` then reattaches this same worktree before pushing. If we
+            # reset unconditionally here, that un-pushed commit is discarded
+            # before `land` ever gets a chance to push it (#86). So this is a
+            # three-way ancestry check, not a blind reset: behind/equal ->
+            # reset (unchanged), ahead -> keep local HEAD untouched, diverged
+            # -> raise rather than silently discard either side.
+            _reconcile_override_reattach(base, worktree, branch)
         else:
             # Reset-on-reattach: both a backward edge and a restart after a
             # crash must start from a clean slate. `reset --hard` discards
