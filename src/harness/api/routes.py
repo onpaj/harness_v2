@@ -23,7 +23,13 @@ from harness.models import END
 from harness.ports.agent import AgentNotFound, AgentSpec
 from harness.ports.agent_admin import AgentAdmin, AgentFields, AgentValidationError
 from harness.ports.artifacts import ArtifactView
-from harness.ports.board import DONE_COLUMN, FAILED_COLUMN, TODO_COLUMN, BoardView
+from harness.ports.board import (
+    DONE_COLUMN,
+    FAILED_COLUMN,
+    TODO_COLUMN,
+    AgentActivity,
+    BoardView,
+)
 from harness.ports.clock import Clock
 from harness.ports.control import TaskControl
 from harness.ports.logs import StageOutputView
@@ -167,6 +173,7 @@ def _agent_form_context(
     allowed_outcomes: tuple[str, ...],
     errors: dict[str, str],
     saved: bool,
+    history: tuple[AgentActivity, ...] = (),
 ) -> dict:
     return {
         "name": name,
@@ -178,6 +185,7 @@ def _agent_form_context(
         "checked_outcomes": set(allowed_outcomes),
         "errors": errors,
         "saved": saved,
+        "history": history,
     }
 
 
@@ -371,6 +379,13 @@ def build_json_router(
         except AgentNotFound as error:
             raise HTTPException(status_code=404, detail=str(error)) from None
         return _agent_spec_dict(spec)
+
+    @router.get("/agents/{name}/history")
+    def get_agent_history(name: str) -> dict:
+        # No existence check: history is about tasks the agent ran, independent of
+        # whether its persona file still exists — a deleted agent can still have a
+        # trail worth reading. An unknown name simply yields an empty list.
+        return {"history": [activity.to_dict() for activity in view.agent_history(name)]}
 
     @router.put("/agents/{name}")
     async def put_agent(name: str, request: Request) -> JSONResponse:
@@ -604,6 +619,7 @@ def build_html_router(
                 allowed_outcomes=tuple(outcome.value for outcome in spec.allowed_outcomes),
                 errors={},
                 saved=False,
+                history=view.agent_history(spec.name),
             ),
         )
 
@@ -674,6 +690,7 @@ def build_html_router(
                     allowed_outcomes=fields.allowed_outcomes,
                     errors=error.errors,
                     saved=False,
+                    history=view.agent_history(name),
                 ),
             )
         return TEMPLATES.TemplateResponse(
@@ -689,6 +706,7 @@ def build_html_router(
                 allowed_outcomes=tuple(outcome.value for outcome in spec.allowed_outcomes),
                 errors={},
                 saved=True,
+                history=view.agent_history(spec.name),
             ),
         )
 

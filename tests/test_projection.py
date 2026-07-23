@@ -1,7 +1,7 @@
 import asyncio
 
 from harness.drivers.memory import MemoryTaskQueue
-from harness.models import END, Task, Transition, Workflow
+from harness.models import END, HistoryEntry, Task, Transition, Workflow
 from harness.ports.board import DONE_COLUMN, FAILED_COLUMN, TODO_COLUMN, UNKNOWN_WORKFLOW
 from harness.projection import BoardProjection, column_order
 
@@ -544,3 +544,150 @@ def test_snapshot_tabs_are_sorted_alphabetically():
     board = projection.snapshot()
 
     assert [tab.name for tab in board.workflows] == ["default", "hotfix"]
+
+
+# --- agent history -----------------------------------------------------------
+
+
+def _handled(step, at, *, outcome=None, summary=None, reason=None):
+    """A history line as the consumer writes it: actor="consumer:<step>"."""
+    return HistoryEntry(
+        at=at,
+        actor=f"consumer:{step}",
+        from_step=step,
+        to_step=None,
+        outcome=outcome,
+        summary=summary,
+        reason=reason,
+    )
+
+
+def test_agent_history_collects_only_that_agents_handlings():
+    projection = BoardProjection(WORKFLOW.steps(), [WORKFLOW])
+    task = make_task(
+        "tsk_1",
+        data={"title": "Fix the bug"},
+        history=(
+            _handled("plan", "2026-07-19T10:00:00Z", outcome="done", summary="planned it"),
+            _handled("review", "2026-07-19T12:00:00Z", outcome="done", summary="looks good"),
+        ),
+    )
+    projection.apply("review", task)
+
+    history = projection.agent_history("plan")
+
+    assert len(history) == 1
+    assert history[0].task_id == "tsk_1"
+    assert history[0].title == "Fix the bug"
+    assert history[0].outcome == "done"
+    assert history[0].summary == "planned it"
+
+
+def test_agent_history_ignores_non_consumer_actors_sharing_the_step():
+    """A dispatcher move records from_step="plan" too, but actor="dispatcher".
+    The agent's history is the consumer entries only — not routing moves."""
+    projection = BoardProjection(WORKFLOW.steps(), [WORKFLOW])
+    task = make_task(
+        "tsk_1",
+        history=(
+            _handled("plan", "2026-07-19T10:00:00Z", outcome="done"),
+            HistoryEntry(
+                at="2026-07-19T10:00:01Z",
+                actor="dispatcher",
+                from_step="plan",
+                to_step="design",
+                outcome="done",
+            ),
+        ),
+    )
+    projection.apply("design", task)
+
+    assert len(projection.agent_history("plan")) == 1
+
+
+def test_agent_history_has_a_row_per_handling_across_tasks_newest_first():
+    """A re-run through the same step (the request_changes loop) is a second
+    handling — two rows for one task — and rows sort newest first across tasks."""
+    projection = BoardProjection(WORKFLOW.steps(), [WORKFLOW])
+    projection.apply(
+        "development",
+        make_task(
+            "tsk_1",
+            history=(
+                _handled("development", "2026-07-19T10:00:00Z", outcome="done"),
+                _handled("development", "2026-07-19T14:00:00Z", outcome="done"),
+            ),
+        ),
+    )
+    projection.apply(
+        "development",
+        make_task(
+            "tsk_2",
+            created="2026-07-19T09:00:00Z",
+            history=(_handled("development", "2026-07-19T12:00:00Z", outcome="done"),),
+        ),
+    )
+
+    history = projection.agent_history("development")
+
+    assert [(activity.task_id, activity.at) for activity in history] == [
+        ("tsk_1", "2026-07-19T14:00:00Z"),
+        ("tsk_2", "2026-07-19T12:00:00Z"),
+        ("tsk_1", "2026-07-19T10:00:00Z"),
+    ]
+
+
+def test_agent_history_includes_failures_with_their_reason():
+    projection = BoardProjection(WORKFLOW.steps(), [WORKFLOW])
+    task = make_task(
+        "tsk_1",
+        status="failed",
+        history=(
+            HistoryEntry(
+                at="2026-07-19T10:00:00Z",
+                actor="consumer:review",
+                from_step="review",
+                to_step="failed",
+                reason="behavior raised an exception: boom",
+            ),
+        ),
+    )
+    projection.apply(FAILED_COLUMN, task)
+
+    history = projection.agent_history("review")
+
+    assert len(history) == 1
+    assert history[0].outcome is None
+    assert history[0].reason == "behavior raised an exception: boom"
+
+
+def test_agent_history_includes_archived_tasks():
+    """An archived task lives in _tasks with no column — its handlings still count."""
+    projection = BoardProjection(WORKFLOW.steps(), [WORKFLOW])
+    task = make_task(
+        "tsk_1",
+        history=(_handled("plan", "2026-07-19T10:00:00Z", outcome="done"),),
+    )
+    projection.archive(task)
+
+    assert len(projection.agent_history("plan")) == 1
+
+
+def test_agent_history_of_unknown_agent_is_empty():
+    projection = BoardProjection(WORKFLOW.steps(), [WORKFLOW])
+    projection.apply(
+        "plan",
+        make_task("tsk_1", history=(_handled("plan", "2026-07-19T10:00:00Z"),)),
+    )
+
+    assert projection.agent_history("nobody") == ()
+
+
+def test_agent_history_falls_back_to_task_id_when_no_title():
+    projection = BoardProjection(WORKFLOW.steps(), [WORKFLOW])
+    projection.apply(
+        "plan",
+        make_task("tsk_1", history=(_handled("plan", "2026-07-19T10:00:00Z"),)),
+    )
+
+    assert projection.agent_history("plan")[0].title == "tsk_1"

@@ -73,6 +73,29 @@
     {% if saved %}
     <div class="banner success">saved — picked up on the next run, no restart</div>
     {% endif %}
+    {% if not is_new %}
+    <div class="panel history">
+      <h2>Tasks handled</h2>
+      {% if history %}
+      <div class="table-scroll">
+        <table>
+          <tr><th>time</th><th>task</th><th>outcome</th><th>summary</th><th>reason</th></tr>
+          {% for activity in history %}
+          <tr>
+            <td title="{{ activity.at }}">{{ activity.at | shorttime }}</td>
+            <td title="{{ activity.task_id }}">{{ activity.title }}</td>
+            <td>{{ activity.outcome or "—" }}</td>
+            <td class="wrap">{{ activity.summary or "—" }}</td>
+            <td class="wrap">{{ activity.reason or "—" }}</td>
+          </tr>
+          {% endfor %}
+        </table>
+      </div>
+      {% else %}
+      <p class="hint">This agent hasn't handled any tasks in the current run.</p>
+      {% endif %}
+    </div>
+    {% endif %}
   </main>
 </body>
 </html>

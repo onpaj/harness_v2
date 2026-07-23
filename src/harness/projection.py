@@ -17,6 +17,7 @@ from harness.ports.board import (
     HEALED_COLUMN,
     TODO_COLUMN,
     UNKNOWN_WORKFLOW,
+    AgentActivity,
     Board,
     BoardColumn,
     BoardTab,
@@ -190,6 +191,32 @@ class BoardProjection(BoardView):
 
     def get(self, task_id: str) -> Task | None:
         return self._tasks.get(task_id)
+
+    def agent_history(self, name: str) -> tuple[AgentActivity, ...]:
+        # The consumer stamps every handling — a delivery or a fail — with
+        # actor="consumer:<step>" (consumer.py). The step IS the agent's name,
+        # so this actor string is the exact, unambiguous marker of "this agent
+        # ran on this task"; a dispatcher move sharing the same from_step is not
+        # matched. Archived tasks stay in _tasks with no column, so their
+        # handlings still show up here.
+        actor = f"consumer:{name}"
+        activities = [
+            AgentActivity(
+                task_id=task.id,
+                title=task.data.get("title") or task.id,
+                at=entry.at,
+                outcome=entry.outcome,
+                summary=entry.summary,
+                reason=entry.reason,
+            )
+            for task in self._tasks.values()
+            for entry in task.history
+            if entry.actor == actor
+        ]
+        # Newest first; task id as a stable tie-break keeps the order
+        # deterministic when a FakeClock hands out identical timestamps.
+        activities.sort(key=lambda activity: (activity.at, activity.task_id), reverse=True)
+        return tuple(activities)
 
     def remove(self, task_id: str) -> None:
         """Drop a task from the read model entirely — the counterpart to
