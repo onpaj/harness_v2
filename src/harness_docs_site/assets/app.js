@@ -39,6 +39,20 @@
     return svg.querySelector('.edge[data-src="' + a + '"][data-dst="' + b + '"]') ||
            svg.querySelector('.edge[data-src="' + b + '"][data-dst="' + a + '"]');
   }
+  function neighborsOf(id) {
+    var seen = {}, out = [];
+    model.edges.forEach(function (e) {
+      var other = e.src === id ? e.dst : (e.dst === id ? e.src : null);
+      if (other && !seen[other]) { seen[other] = 1; out.push(other); }
+    });
+    return out;
+  }
+  function litIncident(id) {
+    neighborsOf(id).forEach(function (other) {
+      var e = edgeLine(id, other);
+      if (e) e.classList.add("lit");
+    });
+  }
   function clearHighlights() {
     svg.querySelectorAll(".part.active").forEach(function (g) { g.classList.remove("active"); });
     svg.querySelectorAll(".edge.lit").forEach(function (e) { e.classList.remove("lit"); });
@@ -124,6 +138,15 @@
     h.push("<h2>" + esc(part.name) + "</h2>");
     h.push('<p class="tagline">' + esc(part.tagline) + "</p>");
     h.push("<p>" + esc(part.description) + "</p>");
+    var neighbors = neighborsOf(part.id);
+    if (neighbors.length) {
+      h.push('<div class="connects"><strong>Connects to</strong><ul>');
+      neighbors.forEach(function (nid) {
+        var n = partsById[nid];
+        if (n) h.push('<li><a href="#/part/' + esc(nid) + '">' + esc(n.name) + "</a></li>");
+      });
+      h.push("</ul></div>");
+    }
     h.push('<div class="enforced"><strong>Enforced by</strong><ul>');
     part.sources.forEach(function (s) { h.push("<li><code>" + esc(s) + "</code></li>"); });
     part.adrs.forEach(function (slug) {
@@ -146,6 +169,7 @@
     clearHighlights();
     var g = partGroup(id);
     if (g) g.classList.add("active");
+    litIncident(id);
     renderDrawer(part);
   }
   function closeDrawer() {

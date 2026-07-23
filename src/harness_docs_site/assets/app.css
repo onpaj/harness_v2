@@ -99,7 +99,15 @@ body {
 }
 .drawer h2 { margin: 10px 0 4px; }
 .drawer .tagline { color: var(--muted); margin-top: 0; }
+.drawer .connects,
 .drawer .enforced { border-top: 1px solid var(--line); margin-top: 18px; padding-top: 14px; }
+.drawer .connects ul { list-style: none; padding: 0; display: flex; flex-wrap: wrap; gap: 8px; }
+.drawer .connects li { margin: 0; }
+.drawer .connects a {
+  display: inline-block; padding: 3px 10px; border: 1px solid var(--line);
+  border-radius: 999px; text-decoration: none; color: var(--ink);
+}
+.drawer .connects a:hover { border-color: var(--accent); color: var(--accent); }
 .drawer .enforced code, .drawer a { font-family: var(--mono); font-size: 13px; }
 .drawer .adr { border-top: 1px solid var(--line); margin-top: 18px; padding-top: 14px; }
 .drawer .close { position: absolute; top: 16px; right: 18px; background: transparent; border: 0; color: var(--muted); font-size: 22px; cursor: pointer; }
