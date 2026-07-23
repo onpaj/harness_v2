@@ -58,23 +58,54 @@
       </section>
       {% endif %}
 
-      <section class="form-section {{ 'error' if errors.interval }}">
+      <section class="form-section {{ 'error' if errors.interval or errors.cron or errors.trigger }}">
         <header class="form-section__head">
           <h2><span class="form-section__num">{{ 2 if is_new else 1 }}</span> Schedule</h2>
           <p class="hint">How often the check runs.</p>
         </header>
-        <div class="chip-row" id="interval-chips" role="group" aria-label="Common intervals">
-          {% for preset in ["5m", "15m", "30m", "1h", "6h", "24h"] %}
-          <button type="button" class="chip" data-value="{{ preset }}">{{ preset }}</button>
-          {% endfor %}
+        {% if errors.trigger %}<div class="field-error">{{ errors.trigger }}</div>{% endif %}
+        <div class="seg" role="radiogroup" aria-label="Cadence">
+          <label class="seg__option">
+            <input type="radio" name="cadence" value="interval"
+                   {{ 'checked' if cadence != 'cron' }}>
+            <span>Interval</span>
+          </label>
+          <label class="seg__option">
+            <input type="radio" name="cadence" value="cron"
+                   {{ 'checked' if cadence == 'cron' }}>
+            <span>Cron</span>
+          </label>
         </div>
-        <div class="field {{ 'error' if errors.interval }}">
-          <label for="interval">Interval</label>
-          <input type="text" id="interval" name="interval" value="{{ interval }}"
-                 placeholder="e.g. 30m or 1h" autocomplete="off" autocapitalize="none"
-                 spellcheck="false">
-          <div class="hint">A number with a unit: <code>s</code> seconds, <code>m</code> minutes, <code>h</code> hours.</div>
-          {% if errors.interval %}<div class="field-error">{{ errors.interval }}</div>{% endif %}
+
+        <div id="cadence-interval">
+          <div class="chip-row" id="interval-chips" role="group" aria-label="Common intervals">
+            {% for preset in ["5m", "15m", "30m", "1h", "6h", "24h"] %}
+            <button type="button" class="chip" data-value="{{ preset }}">{{ preset }}</button>
+            {% endfor %}
+          </div>
+          <div class="field {{ 'error' if errors.interval }}">
+            <label for="interval">Interval</label>
+            <input type="text" id="interval" name="interval" value="{{ interval }}"
+                   placeholder="e.g. 30m or 1h" autocomplete="off" autocapitalize="none"
+                   spellcheck="false">
+            <div class="hint">A number with a unit: <code>s</code> seconds, <code>m</code> minutes, <code>h</code> hours.</div>
+            {% if errors.interval %}<div class="field-error">{{ errors.interval }}</div>{% endif %}
+          </div>
+        </div>
+
+        <div id="cadence-cron">
+          <div class="field {{ 'error' if errors.cron }}">
+            <label for="cron">Cron expression</label>
+            <input type="text" id="cron" name="cron" value="{{ cron }}"
+                   placeholder="e.g. 0 6 * * 1" autocomplete="off" autocapitalize="none"
+                   spellcheck="false">
+            <div class="hint">
+              <code>minute hour day-of-month month day-of-week</code>, evaluated in
+              <strong>UTC</strong>. e.g. <code>0 6 * * 1</code> = every Monday at 06:00 UTC —
+              not 06:00 local time; a per-trigger timezone isn't built yet.
+            </div>
+            {% if errors.cron %}<div class="field-error">{{ errors.cron }}</div>{% endif %}
+          </div>
         </div>
       </section>
 
@@ -258,8 +289,30 @@
         return div.innerHTML;
       }
 
+      /* --- Schedule: cadence toggle (interval <-> cron) --------------------- */
+      var cadenceInterval = document.getElementById('cadence-interval');
+      var cadenceCron = document.getElementById('cadence-cron');
+      function currentCadence() {
+        var checked = form.querySelector('input[name="cadence"]:checked');
+        return checked ? checked.value : 'interval';
+      }
+      function syncCadence() {
+        var cron = currentCadence() === 'cron';
+        cadenceInterval.hidden = cron;
+        cadenceCron.hidden = !cron;
+      }
+      Array.prototype.forEach.call(
+        form.querySelectorAll('input[name="cadence"]'),
+        function (radio) {
+          radio.addEventListener('change', function () {
+            syncCadence();
+            updateSummary();
+          });
+        });
+
       /* --- Schedule: preset chips <-> the interval input ------------------- */
       var interval = document.getElementById('interval');
+      var cron = document.getElementById('cron');
       var chips = Array.prototype.slice.call(
         document.querySelectorAll('#interval-chips .chip'));
       function syncChips() {
@@ -275,6 +328,7 @@
         });
       });
       interval.addEventListener('input', function () { syncChips(); updateSummary(); });
+      cron.addEventListener('input', updateSummary);
       syncChips();
 
       /* --- Action: structured fields <-> the raw params JSON --------------- */
@@ -416,11 +470,13 @@
         return checked ? checked.value : '';
       }
       function updateSummary() {
-        var every = interval.value.trim() || '…';
         var check = currentCheck() || '…';
         var kind = currentKind();
         var where = target.value.trim() || '…';
-        var text = 'Every <strong>' + esc(every) + '</strong>, run <strong>' +
+        var schedule = currentCadence() === 'cron'
+          ? 'Every <strong>' + esc(cron.value.trim() || '…') + '</strong> (UTC)'
+          : 'Every <strong>' + esc(interval.value.trim() || '…') + '</strong>';
+        var text = schedule + ', run <strong>' +
           esc(check) + '</strong> — each result becomes a task in ' +
           esc(kind) + ' <strong>' + esc(where) + '</strong>';
         if (checkedValue('dedup') === 'per-state') text += ', once per distinct result';
@@ -435,6 +491,7 @@
 
       renderParamFields();
       syncTargetKind();
+      syncCadence();
       updateSummary();
 
       /* Bring the first server-reported error into view. */

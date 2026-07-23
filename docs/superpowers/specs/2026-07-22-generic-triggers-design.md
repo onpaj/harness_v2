@@ -360,3 +360,32 @@ The feature is done when:
    `ports.source` nor `ports.triggers`; `ScheduledTrigger`/`FilesystemTriggerRepository`
    are touched only by `cli.py`/`app.py` wiring; `SourcePoller` still imports only
    ports.
+
+## Addendum (2026-07-23): cron cadence supersedes the "out of scope" line above
+
+The "What's out of scope" section above says *"A real scheduler daemon (cron),
+webhooks, distributed leases [are out of scope]. A trigger is still a plain
+poll tick; the cadence is a clock-gate inside `poll()`."* That line is now
+superseded for the *expression* only: a trigger's cadence may be a standard
+5-field cron expression (`"0 6 * * 1"`) as an alternative to an interval
+duration, evaluated by a stdlib-only parser (`parse_cron`/`CronSchedule`,
+`ports/triggers.py`). The architecture this spec describes is otherwise
+unchanged — still a plain poll tick, still a clock-gate inside `poll()`, still
+no new loop, port, or daemon. See ADR-0018 for the full design; in short:
+
+- `ScheduledTrigger` gains one occurrence seam (`self._occurrence`) serving
+  both an interval and a cron cadence — the bucket
+  `floor(epoch(now)/interval)` generalizes to an occurrence identity, with
+  `CronSchedule.occurrence_at_or_before(now)` as the cron implementation. The
+  clock-gate/no-new-loop and at-most-once-per-occurrence dedup guarantees this
+  spec describes for the interval path apply unchanged to cron.
+- **UTC-only this increment.** Cron fields evaluate against `Clock.now()`'s UTC
+  components directly; a per-trigger timezone (`tz`) is a noted, separate
+  follow-up, not built now.
+- **Fire-once-on-catchup.** If the harness was down over a scheduled
+  occurrence, the first poll after restart fires it exactly once (the same
+  `_seen`-seeding mechanism this spec's Dedup section already describes for
+  interval mode, unchanged) — never zero, never more than one.
+- `triggers/*.json` gains an optional `cron` field as a sibling of `interval`:
+  exactly one of the two must be present. Every existing interval-only file
+  keeps validating unchanged.

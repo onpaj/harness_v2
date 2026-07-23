@@ -237,7 +237,9 @@ def _target_option_groups(view: BoardView) -> tuple[list[str], list[str]]:
 def _process_fields_dict(name: str, fields: ProcessFields) -> dict:
     return {
         "name": name,
+        "cadence": fields.cadence,
         "interval": fields.interval,
+        "cron": fields.cron,
         "check": fields.check,
         "target_kind": fields.target_kind,
         "target": fields.target,
@@ -248,8 +250,11 @@ def _process_fields_dict(name: str, fields: ProcessFields) -> dict:
 
 
 def _process_fields_from(payload: dict) -> ProcessFields:
+    cadence = (payload.get("cadence") or "interval").strip()
     return ProcessFields(
+        cadence=cadence,
         interval=(payload.get("interval") or "").strip(),
+        cron=(payload.get("cron") or "").strip(),
         check=(payload.get("check") or "").strip(),
         target_kind=(payload.get("target_kind") or "workflow").strip(),
         target=(payload.get("target") or "").strip(),
@@ -278,8 +283,11 @@ def _process_fields_from_form(form) -> ProcessFields:
             raise ProcessAdminValidationError(
                 {"params": "params must be a JSON object"}
             )
+    cadence = (form.get("cadence") or "interval").strip()
     return ProcessFields(
+        cadence=cadence,
         interval=(form.get("interval") or "").strip(),
+        cron=(form.get("cron") or "").strip(),
         check=(form.get("check") or "").strip(),
         target_kind=(form.get("target_kind") or "workflow").strip(),
         target=(form.get("target") or "").strip(),
@@ -307,7 +315,9 @@ def _process_form_context(
     return {
         "name": name,
         "is_new": is_new,
+        "cadence": fields.cadence,
         "interval": fields.interval,
+        "cron": fields.cron,
         "check": fields.check,
         "target_kind": fields.target_kind,
         "target": fields.target,
@@ -325,7 +335,7 @@ def _process_form_context(
 
 
 _NEW_PROCESS_FIELDS = ProcessFields(
-    interval="", check="always", target_kind="workflow", target=""
+    cadence="interval", interval="", cron="", check="always", target_kind="workflow", target=""
 )
 
 
