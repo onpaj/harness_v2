@@ -1,5 +1,9 @@
-"""Writes the generated Architecture Explorer: an animated explorer index, one
-restyled page per document, and the copied static assets.
+"""Writes the generated Architecture Explorer: a port-first explorer index,
+one restyled page per document, and the copied static assets.
+
+The index shows just the harness's ports, grouped by area. Clicking a port
+expands it in place, revealing the drivers available behind it, each with its
+own documentation — no graph, no animation, nothing to decode.
 
 Idempotent — `build_site` clears `out_dir` first, so re-running the generator
 (or rebuilding after a doc rename) never leaves a stale page behind.
@@ -8,11 +12,10 @@ Idempotent — `build_site` clears `out_dir` first, so re-running the generator
 from __future__ import annotations
 
 import html
-import json
 import shutil
 from pathlib import Path
 
-from harness_docs_site.architecture import MODEL, model_to_dict
+from harness_docs_site.architecture import MODEL, Driver, Port
 from harness_docs_site.corpus import DocEntry
 from harness_docs_site.markdown import render
 
@@ -50,57 +53,102 @@ def _shell(title: str, body: str, css_href: str, body_class: str) -> str:
     )
 
 
-def _svg_diagram() -> str:
-    parts = {p.id: p for p in MODEL.parts}
-    out = ['<svg id="hexmap" viewBox="0 0 100 100" role="img" '
-           'aria-label="Architecture map">']
-    out.append('<g class="edges">')
-    for edge in MODEL.edges:
-        a, b = parts[edge.src], parts[edge.dst]
-        out.append(
-            f'<line class="edge" x1="{a.x}" y1="{a.y}" x2="{b.x}" y2="{b.y}" '
-            f'data-src="{edge.src}" data-dst="{edge.dst}"></line>'
+def _refs_html(adrs: tuple[str, ...], sources: tuple[str, ...],
+               adr_titles: dict[str, str]) -> str:
+    """The 'Grounded in' block: source paths plus ADR links (only ADRs whose
+    file exists — a fixture tree may lack one a real repo has)."""
+    items = []
+    for src in sources:
+        items.append(f"<li><code>{html.escape(src)}</code></li>")
+    for slug in adrs:
+        if slug not in adr_titles:
+            continue
+        items.append(
+            f'<li><a href="adr/{html.escape(slug)}.html">'
+            f"{html.escape(adr_titles[slug])}</a></li>"
         )
-    out.append("</g>")
-    out.append('<g class="parts">')
-    for part in MODEL.parts:
-        out.append(
-            f'<g class="part" data-part-id="{html.escape(part.id)}" '
-            f'data-kind="{html.escape(part.kind)}" tabindex="0" role="button" '
-            f'aria-label="{html.escape(part.name)}">'
-        )
-        out.append(f'<circle class="node" cx="{part.x}" cy="{part.y}" r="4.2"></circle>')
-        out.append(
-            f'<text class="label" x="{part.x}" y="{part.y + 7.5}" '
-            f'text-anchor="middle">{html.escape(part.name)}</text>'
-        )
-        out.append("</g>")
-    out.append("</g>")
-    out.append('<circle id="token" r="1.8"></circle>')
-    out.append("</svg>")
+    if not items:
+        return ""
+    return '<ul class="refs">' + "".join(items) + "</ul>"
+
+
+def _driver_html(driver: Driver, adr_titles: dict[str, str]) -> str:
+    out = [f'<details class="driver" id="driver-{html.escape(driver.id)}">']
+    out.append(
+        "<summary>"
+        f'<span class="driver-name">{html.escape(driver.name)}</span>'
+        f'<span class="driver-tagline">{html.escape(driver.tagline)}</span>'
+        "</summary>"
+    )
+    out.append('<div class="driver-body">')
+    out.append(f"<p>{html.escape(driver.description)}</p>")
+    out.append(_refs_html(driver.adrs, driver.sources, adr_titles))
+    out.append("</div>")
+    out.append("</details>")
     return "\n".join(out)
 
 
-def _adr_html_map(repo_root: Path) -> dict[str, str]:
-    """Rendered HTML for every ADR any part cites. A cited slug whose file is
-    absent (e.g. under a test fixture) is skipped, never fatal."""
+def _port_html(port: Port, adr_titles: dict[str, str]) -> str:
+    count = len(port.drivers)
+    noun = "driver" if count == 1 else "drivers"
+    out = [f'<details class="port" id="port-{html.escape(port.id)}">']
+    out.append(
+        "<summary>"
+        f'<span class="port-name">{html.escape(port.name)}</span>'
+        f'<span class="port-tagline">{html.escape(port.tagline)}</span>'
+        f'<span class="driver-count">{count} {noun}</span>'
+        "</summary>"
+    )
+    out.append('<div class="port-body">')
+    out.append(f"<p>{html.escape(port.description)}</p>")
+    out.append(_refs_html(port.adrs, port.sources, adr_titles))
+    out.append(f'<h3 class="drivers-heading">Available {noun}</h3>')
+    for driver in port.drivers:
+        out.append(_driver_html(driver, adr_titles))
+    out.append("</div>")
+    out.append("</details>")
+    return "\n".join(out)
+
+
+def _port_catalogue(adr_titles: dict[str, str]) -> str:
+    out = ['<section class="ports">']
+    out.append(
+        '<p class="ports-intro">Every moving part of the harness sits behind '
+        "a <strong>port</strong> — a small interface the core depends on. "
+        "What actually runs is a <strong>driver</strong> plugged into that "
+        "port, wired at the edges. Click a port to see the drivers available "
+        "behind it.</p>"
+    )
+    for group in MODEL.groups:
+        ports = [p for p in MODEL.ports if p.group == group]
+        if not ports:
+            continue
+        out.append(f'<h2 class="group-title">{html.escape(group)}</h2>')
+        out.append('<div class="port-grid">')
+        for port in ports:
+            out.append(_port_html(port, adr_titles))
+        out.append("</div>")
+    out.append("</section>")
+    return "\n".join(out)
+
+
+def _adr_titles(repo_root: Path) -> dict[str, str]:
+    """slug → link text for every ADR the model cites. A cited slug whose file
+    is absent (e.g. under a test fixture) is skipped, never fatal."""
     slugs: list[str] = []
-    for part in MODEL.parts:
-        for slug in part.adrs:
+    for port in MODEL.ports:
+        for slug in port.adrs:
             if slug not in slugs:
                 slugs.append(slug)
-    mapping: dict[str, str] = {}
+        for driver in port.drivers:
+            for slug in driver.adrs:
+                if slug not in slugs:
+                    slugs.append(slug)
+    titles: dict[str, str] = {}
     for slug in slugs:
-        path = repo_root / "docs" / "adr" / f"{slug}.md"
-        if path.is_file():
-            mapping[slug] = render(path.read_text(encoding="utf-8"))
-    return mapping
-
-
-def _json_block(element_id: str, payload: object) -> str:
-    # `</` cannot appear inside a <script>; escape the slash defensively.
-    text = json.dumps(payload).replace("</", "<\\/")
-    return f'<script type="application/json" id="{element_id}">{text}</script>'
+        if (repo_root / "docs" / "adr" / f"{slug}.md").is_file():
+            titles[slug] = f"ADR {slug.split('-', 1)[0]}"
+    return titles
 
 
 def _index_page(entries: list[DocEntry], repo_root: Path) -> str:
@@ -113,22 +161,9 @@ def _index_page(entries: list[DocEntry], repo_root: Path) -> str:
             '<button id="theme-toggle" type="button" aria-label="Toggle theme">◑</button>',
             '</header>',
             '<main class="explorer">',
-            '<section class="stage">',
-            '<div class="controls">',
-            '<button id="play" type="button">▶ Play</button>',
-            '<button id="step" type="button">Step ›</button>',
-            '<span id="caption" class="caption"></span>',
-            '</div>',
-            _svg_diagram(),
-            '<ul class="legend">',
+            _port_catalogue(_adr_titles(repo_root)),
+            "</main>",
             ]
-    for kind in ("port", "driver", "core", "ui", "store"):
-        body.append(f'<li data-kind="{kind}"><span class="swatch"></span>{kind}</li>')
-    body.append("</ul>")
-    body.append("</section>")
-
-    body.append('<aside id="drawer" class="drawer" hidden></aside>')
-    body.append("</main>")
 
     body.append('<section class="doc-index">')
     for category in _CATEGORY_ORDER:
@@ -145,8 +180,6 @@ def _index_page(entries: list[DocEntry], repo_root: Path) -> str:
         body.append("</ul>")
     body.append("</section>")
 
-    body.append(_json_block("model-data", model_to_dict(MODEL)))
-    body.append(_json_block("adr-html", _adr_html_map(repo_root)))
     body.append('<script src="assets/app.js" defer></script>')
 
     return _shell("harness — architecture explorer", "\n".join(body),
