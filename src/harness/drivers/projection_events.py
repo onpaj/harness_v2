@@ -21,8 +21,7 @@ class ProjectionSink(EventSink):
             return
 
         raw = fields.get("task")
-        column = fields.get("queue")
-        if not isinstance(raw, dict) or not isinstance(column, str):
+        if not isinstance(raw, dict):
             return
 
         try:
@@ -30,4 +29,11 @@ class ProjectionSink(EventSink):
         except (KeyError, TypeError):
             return
 
+        if name == "archived":
+            self._projection.archive(task)
+            return
+
+        column = fields.get("queue")
+        if not isinstance(column, str):
+            return
         self._projection.apply(column, task)

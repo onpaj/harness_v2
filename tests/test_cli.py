@@ -1,11 +1,26 @@
 import argparse
 import asyncio
 import json
+import os
 from pathlib import Path
 
 import pytest
 
-from harness.cli import DEFAULT_WORKFLOW, _github_sources, main, serve
+from harness.app import HarnessLayout
+from harness.cli import (
+    AGENT_PERSONAS,
+    DEFAULT_DEFINITION,
+    DEFAULT_WORKFLOW,
+    _REVIEW_PERSONA,
+    _allowed_outcomes_for,
+    _github_reflectors,
+    _github_sources,
+    _mergeability_sources,
+    _process_sources,
+    _slack_sinks,
+    main,
+    serve,
+)
 from harness.drivers.github_client import FakeGithubClient
 from harness.drivers.memory import MemoryArtifactStore, MemoryRepositoryRegistry
 from harness.drivers.stage_output import StageOutputProjection
@@ -35,6 +50,144 @@ def test_init_creates_layout_and_default_workflow(tmp_path):
     assert (tmp_path / "failed").is_dir()
 
 
+def test_init_writes_default_agents_with_null_timeout(tmp_path):
+    assert main(["init", "--root", str(tmp_path)]) == 0
+
+    definition = json.loads((tmp_path / "agents" / "development.json").read_text())
+    assert definition["timeout"] is None
+
+
+def test_init_writes_healer_persona(tmp_path):
+    from harness.drivers.fs_agents import FilesystemAgentCatalog
+    from harness.models import Outcome
+
+    assert main(["init", "--root", str(tmp_path)]) == 0
+
+    path = tmp_path / "agents" / "healer.json"
+    assert path.is_file()
+    definition = json.loads(path.read_text())
+    assert definition["allowed_outcomes"] == ["done", "request_changes"]
+
+    # it parses to a valid AgentSpec with both outcomes
+    spec = FilesystemAgentCatalog(tmp_path / "agents").get("healer")
+    assert spec.allowed_outcomes == (Outcome.DONE, Outcome.REQUEST_CHANGES)
+    assert spec.prompt
+
+
+def test_run_heal_repo_passes_heal_config_and_tracker(monkeypatch, tmp_path):
+    from harness.app import HealConfig
+    from harness.drivers.memory import MemoryIssueTracker
+
+    main(["init", "--root", str(tmp_path)])
+    captured = {}
+
+    def fake_build(*args, **kwargs):
+        captured["heal"] = kwargs.get("heal")
+        captured["issue_tracker"] = kwargs.get("issue_tracker")
+        return object()
+
+    async def fake_serve(harness, port, poll_interval, source_interval=30.0, pr_poll_interval=0.0, reconcile_interval=300.0):
+        pass
+
+    monkeypatch.setattr("harness.cli.build", fake_build)
+    monkeypatch.setattr("harness.cli.serve", fake_serve)
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+
+    assert main(["run", "--root", str(tmp_path), "--heal-repo", "onpaj/harness_v2"]) == 0
+    assert captured["heal"] == HealConfig(repository="onpaj/harness_v2")
+    # offline (no token) → the in-memory tracker, so the loop still runs
+    assert isinstance(captured["issue_tracker"], MemoryIssueTracker)
+
+
+def test_run_heal_repo_uses_github_tracker_with_a_token(monkeypatch, tmp_path):
+    from harness.drivers.github_issues import GithubIssueTracker
+
+    main(["init", "--root", str(tmp_path)])
+    captured = {}
+
+    def fake_build(*args, **kwargs):
+        captured["issue_tracker"] = kwargs.get("issue_tracker")
+        return object()
+
+    async def fake_serve(harness, port, poll_interval, source_interval=30.0, pr_poll_interval=0.0, reconcile_interval=300.0):
+        pass
+
+    monkeypatch.setattr("harness.cli.build", fake_build)
+    monkeypatch.setattr("harness.cli.serve", fake_serve)
+    monkeypatch.setenv("GITHUB_TOKEN", "tok")
+
+    assert main(["run", "--root", str(tmp_path), "--heal-repo", "onpaj/harness_v2"]) == 0
+    assert isinstance(captured["issue_tracker"], GithubIssueTracker)
+
+
+def test_run_without_heal_repo_wires_no_healer(monkeypatch, tmp_path):
+    main(["init", "--root", str(tmp_path)])
+    captured = {}
+
+    def fake_build(*args, **kwargs):
+        captured["heal"] = kwargs.get("heal")
+        return object()
+
+    async def fake_serve(harness, port, poll_interval, source_interval=30.0, pr_poll_interval=0.0, reconcile_interval=300.0):
+        pass
+
+    monkeypatch.setattr("harness.cli.build", fake_build)
+    monkeypatch.setattr("harness.cli.serve", fake_serve)
+
+    assert main(["run", "--root", str(tmp_path)]) == 0
+    assert captured["heal"] is None
+
+
+def test_run_heal_repo_needs_claude_agent(monkeypatch, tmp_path):
+    main(["init", "--root", str(tmp_path)])
+
+    def fake_build(*args, **kwargs):  # must not be reached
+        raise AssertionError("build should not run when --heal-repo rejects the args")
+
+    monkeypatch.setattr("harness.cli.build", fake_build)
+
+    code = main(
+        ["run", "--root", str(tmp_path), "--heal-repo", "o/r", "--agent", "dummy"]
+    )
+    assert code == 2
+
+
+def test_run_defaults_agent_timeout_to_1800(monkeypatch, tmp_path):
+    main(["init", "--root", str(tmp_path)])
+    captured = {}
+
+    def fake_build(*args, **kwargs):
+        captured["agent_timeout"] = kwargs["agent_timeout"]
+        return object()
+
+    async def fake_serve(harness, port, poll_interval, source_interval=30.0, pr_poll_interval=0.0, reconcile_interval=300.0):
+        pass
+
+    monkeypatch.setattr("harness.cli.build", fake_build)
+    monkeypatch.setattr("harness.cli.serve", fake_serve)
+
+    assert main(["run", "--root", str(tmp_path)]) == 0
+    assert captured["agent_timeout"] == 1800.0
+
+
+def test_run_accepts_explicit_agent_timeout(monkeypatch, tmp_path):
+    main(["init", "--root", str(tmp_path)])
+    captured = {}
+
+    def fake_build(*args, **kwargs):
+        captured["agent_timeout"] = kwargs["agent_timeout"]
+        return object()
+
+    async def fake_serve(harness, port, poll_interval, source_interval=30.0, pr_poll_interval=0.0, reconcile_interval=300.0):
+        pass
+
+    monkeypatch.setattr("harness.cli.build", fake_build)
+    monkeypatch.setattr("harness.cli.serve", fake_serve)
+
+    assert main(["run", "--root", str(tmp_path), "--agent-timeout", "60"]) == 0
+    assert captured["agent_timeout"] == 60.0
+
+
 def test_init_is_idempotent_and_keeps_edits(tmp_path):
     main(["init", "--root", str(tmp_path)])
     (tmp_path / "workflows" / "default.json").write_text(
@@ -45,6 +198,57 @@ def test_init_is_idempotent_and_keeps_edits(tmp_path):
 
     definition = json.loads((tmp_path / "workflows" / "default.json").read_text())
     assert definition["transitions"] == []
+
+
+def test_review_persona_syncs_with_base_branch_before_checking_conformance():
+    sync_index = _REVIEW_PERSONA.index("git fetch origin")
+    check_index = _REVIEW_PERSONA.index("Check:")
+    assert sync_index < check_index
+
+    assert "git merge origin" in _REVIEW_PERSONA
+    assert "git merge --abort" in _REVIEW_PERSONA
+    conflict_index = _REVIEW_PERSONA.index("git merge --abort")
+    assert "request_changes" in _REVIEW_PERSONA[conflict_index:check_index]
+    assert "do not switch branches" in _REVIEW_PERSONA.lower() or "do not create or switch branches" in _REVIEW_PERSONA.lower()
+
+
+def test_review_allowed_outcomes_unaffected_by_sync_instructions():
+    workflow = Workflow(
+        name=DEFAULT_DEFINITION["name"],
+        start=DEFAULT_DEFINITION["start"],
+        transitions=tuple(
+            Transition(from_step=t["from"], on=t["on"], to_step=t["to"]) for t in DEFAULT_DEFINITION["transitions"]
+        ),
+    )
+    assert _allowed_outcomes_for(workflow, "review") == ["done", "request_changes"]
+
+
+def test_review_persona_checks_plan_and_adr_conformance():
+    check_index = _REVIEW_PERSONA.index("Check:")
+    verdict_index = _REVIEW_PERSONA.index("Return the verdict")
+    in_time_index = _REVIEW_PERSONA.index("In that case")
+
+    check_section = _REVIEW_PERSONA[check_index:verdict_index]
+    assert "docs/adr" in check_section
+    assert "docs/superpowers/plans" in check_section
+
+    request_changes_section = _REVIEW_PERSONA[verdict_index:in_time_index]
+    assert "deviates from the plan" in request_changes_section
+    assert "violates an ADR" in request_changes_section
+
+    assert "naming the concrete artifact" in _REVIEW_PERSONA[in_time_index:]
+
+
+def test_review_persona_tool_list_and_outcomes_unchanged_by_plan_adr_instructions():
+    workflow = Workflow(
+        name=DEFAULT_DEFINITION["name"],
+        start=DEFAULT_DEFINITION["start"],
+        transitions=tuple(
+            Transition(from_step=t["from"], on=t["on"], to_step=t["to"]) for t in DEFAULT_DEFINITION["transitions"]
+        ),
+    )
+    assert _allowed_outcomes_for(workflow, "review") == ["done", "request_changes"]
+    assert AGENT_PERSONAS["review"][1] == ["Read", "Grep", "Glob", "Bash"]
 
 
 def test_submit_writes_a_task(tmp_path, capsys):
@@ -93,6 +297,83 @@ def test_submit_without_init_fails_cleanly(tmp_path, capsys):
     assert "initialized" in err
 
 
+def test_submit_step_writes_a_workflow_less_task(tmp_path, capsys):
+    main(["init", "--root", str(tmp_path), "--no-workflow"])
+    (tmp_path / "agents" / "development.json").write_text(
+        json.dumps({"prompt": "do it"}), encoding="utf-8"
+    )
+    capsys.readouterr()
+
+    assert main(
+        ["submit", "--root", str(tmp_path), "--step", "development"]
+    ) == 0
+
+    task_id = capsys.readouterr().out.strip()
+    raw = json.loads((tmp_path / "tasks" / f"{task_id}.json").read_text())
+    assert raw["workflowTemplate"] is None
+    assert raw["step"] == "development"
+    task = Task.from_dict(raw)
+    assert task.workflow_template is None
+    assert task.step == "development"
+
+
+def test_submit_rejects_workflow_and_step_together(tmp_path, capsys):
+    main(["init", "--root", str(tmp_path)])
+    capsys.readouterr()
+
+    with pytest.raises(SystemExit) as excinfo:
+        main(
+            [
+                "submit",
+                "--root",
+                str(tmp_path),
+                "--workflow",
+                "default",
+                "--step",
+                "development",
+            ]
+        )
+
+    assert excinfo.value.code == 2
+
+
+def test_submit_rejects_a_reserved_step_name(tmp_path, capsys):
+    main(["init", "--root", str(tmp_path)])
+    capsys.readouterr()
+
+    assert main(["submit", "--root", str(tmp_path), "--step", "end"]) == 2
+
+    out, err = capsys.readouterr()
+    assert out == ""
+    assert "end" in err
+    assert list((tmp_path / "tasks").glob("*.json")) == []
+
+
+def test_init_no_workflow_writes_no_default_workflow(tmp_path, capsys):
+    assert main(["init", "--root", str(tmp_path), "--no-workflow"]) == 0
+
+    out = capsys.readouterr().out
+    assert "no workflow" in out
+    assert not (tmp_path / "workflows" / "default.json").exists()
+    assert (tmp_path / "agents").is_dir()
+    assert (tmp_path / "repos.json").exists()
+
+
+def test_init_creates_processes_directory(tmp_path):
+    """`harness init` writes an empty processes/ next to agents/ and triggers/;
+    building over it yields no sources, so the harness runs exactly as today."""
+    from harness.drivers.fs_processes import FilesystemProcessRepository
+    from harness.drivers.system_clock import SystemClock
+
+    assert main(["init", "--root", str(tmp_path)]) == 0
+
+    assert (tmp_path / "processes").is_dir()
+    built = FilesystemProcessRepository(tmp_path / "processes").build(
+        clock=SystemClock()
+    )
+    assert built == []
+
+
 def test_run_with_unknown_workflow_fails_cleanly(tmp_path, capsys):
     """The third documented error path: unknown workflow (via `run`)."""
     main(["init", "--root", str(tmp_path)])
@@ -103,6 +384,144 @@ def test_run_with_unknown_workflow_fails_cleanly(tmp_path, capsys):
     out, err = capsys.readouterr()
     assert out == ""
     assert "nonexistent" in err
+
+
+HOTFIX_DEFINITION = {
+    "name": "hotfix",
+    "start": "plan",
+    "transitions": [{"from": "plan", "on": "done", "to": "end"}],
+}
+
+
+def test_run_serves_multiple_workflows_with_repeated_flag(monkeypatch, tmp_path):
+    main(["init", "--root", str(tmp_path)])
+    (tmp_path / "workflows" / "hotfix.json").write_text(json.dumps(HOTFIX_DEFINITION))
+    captured = {}
+
+    async def fake_serve(harness, port, poll_interval, source_interval=30.0, pr_poll_interval=0.0, reconcile_interval=300.0):
+        captured["harness"] = harness
+
+    monkeypatch.setattr("harness.cli.serve", fake_serve)
+
+    assert main(
+        [
+            "run",
+            "--root",
+            str(tmp_path),
+            "--workflow",
+            "default",
+            "--workflow",
+            "hotfix",
+        ]
+    ) == 0
+    # The scaffolded resolver workflow is served whenever its file exists.
+    assert set(captured["harness"].workflows) == {"default", "hotfix", "resolver"}
+
+
+def test_run_with_no_workflow_flag_serves_default_and_resolver(monkeypatch, tmp_path):
+    main(["init", "--root", str(tmp_path)])
+    (tmp_path / "workflows" / "hotfix.json").write_text(json.dumps(HOTFIX_DEFINITION))
+    captured = {}
+
+    async def fake_serve(harness, port, poll_interval, source_interval=30.0, pr_poll_interval=0.0, reconcile_interval=300.0):
+        captured["harness"] = harness
+
+    monkeypatch.setattr("harness.cli.serve", fake_serve)
+
+    assert main(["run", "--root", str(tmp_path)]) == 0
+    # `hotfix` isn't served (not selected), but the scaffolded `resolver` is —
+    # its definition exists, so it rides alongside the default (decoupled from
+    # the mergeability watcher flag).
+    assert set(captured["harness"].workflows) == {"default", "resolver"}
+
+
+def test_run_all_workflows_serves_every_definition_found(monkeypatch, tmp_path):
+    main(["init", "--root", str(tmp_path)])
+    (tmp_path / "workflows" / "hotfix.json").write_text(json.dumps(HOTFIX_DEFINITION))
+    captured = {}
+
+    async def fake_serve(harness, port, poll_interval, source_interval=30.0, pr_poll_interval=0.0, reconcile_interval=300.0):
+        captured["harness"] = harness
+
+    monkeypatch.setattr("harness.cli.serve", fake_serve)
+
+    assert main(["run", "--root", str(tmp_path), "--all-workflows"]) == 0
+    # `init` also scaffolds the resolver workflow, so `--all-workflows` serves it too.
+    assert set(captured["harness"].workflows) == {"default", "hotfix", "resolver"}
+
+
+def test_run_rejects_workflow_and_all_workflows_together(tmp_path, capsys):
+    main(["init", "--root", str(tmp_path)])
+    capsys.readouterr()
+
+    assert main(
+        ["run", "--root", str(tmp_path), "--workflow", "default", "--all-workflows"]
+    ) == 2
+
+    out, err = capsys.readouterr()
+    assert out == ""
+    assert "mutually exclusive" in err
+
+
+def test_run_all_workflows_with_no_definitions_is_a_startup_error(tmp_path, capsys):
+    (tmp_path / "workflows").mkdir(parents=True)
+
+    assert main(["run", "--root", str(tmp_path), "--all-workflows"]) == 2
+
+    out, err = capsys.readouterr()
+    assert out == ""
+    assert "no workflow definitions found" in err
+
+
+def test_run_rejects_github_workflow_not_in_served_set(tmp_path, capsys):
+    main(["init", "--root", str(tmp_path)])
+    (tmp_path / "workflows" / "hotfix.json").write_text(json.dumps(HOTFIX_DEFINITION))
+    capsys.readouterr()
+
+    assert main(
+        [
+            "run",
+            "--root",
+            str(tmp_path),
+            "--workflow",
+            "default",
+            "--github-workflow",
+            "hotfix",
+        ]
+    ) == 2
+
+    out, err = capsys.readouterr()
+    assert out == ""
+    assert "hotfix" in err
+    assert "not served" in err
+
+
+def test_run_single_custom_workflow_ignores_github_workflow_default(
+    monkeypatch, tmp_path, capsys
+):
+    """Regression: `--github-workflow` used to default to `DEFAULT_WORKFLOW`
+    ("default") and get checked against the served set unconditionally, so
+    `run --workflow hotfix` with no GitHub flags at all (and no GITHUB_TOKEN)
+    used to fail startup even though no GithubTaskSource is ever built in that
+    case. FR-6 requires single-workflow runs to behave exactly as before."""
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    main(["init", "--root", str(tmp_path)])
+    (tmp_path / "workflows" / "hotfix.json").write_text(json.dumps(HOTFIX_DEFINITION))
+    captured = {}
+
+    async def fake_serve(harness, port, poll_interval, source_interval=30.0, pr_poll_interval=0.0, reconcile_interval=300.0):
+        captured["harness"] = harness
+
+    monkeypatch.setattr("harness.cli.serve", fake_serve)
+    capsys.readouterr()
+
+    assert main(["run", "--root", str(tmp_path), "--workflow", "hotfix"]) == 0
+
+    out, err = capsys.readouterr()
+    assert err == ""
+    # `hotfix` is the selected workflow; the scaffolded `resolver` rides along
+    # because its definition exists.
+    assert set(captured["harness"].workflows) == {"hotfix", "resolver"}
 
 
 def test_init_rejects_workflow_name_with_path_separator(tmp_path, capsys):
@@ -150,6 +569,7 @@ def _github_args(**overrides):
     """The minimal namespace the `run` parser hands to `_github_sources`."""
     base = dict(
         github_workflow="default",
+        github_step=None,
         github_label="harness:todo",
         worktree_root=None,
     )
@@ -197,6 +617,55 @@ def test_github_sources_skips_repo_without_github_origin(monkeypatch, tmp_path, 
     assert "local has no GitHub origin" in capsys.readouterr().err
 
 
+def test_github_sources_default_to_default_workflow_when_neither_flag_given(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("GITHUB_TOKEN", "t0ken")
+    registry = MemoryRepositoryRegistry({"heblo": Path("/repos/heblo")})
+    slugs = {Path("/repos/heblo"): "onpaj/Anela.Heblo"}
+
+    sources = _github_sources(
+        _github_args(github_workflow=None),
+        tmp_path,
+        registry,
+        slug_of=slugs.get,
+        client=FakeGithubClient(),
+    )
+
+    assert sources[0]._workflow == DEFAULT_WORKFLOW
+    assert sources[0]._step is None
+
+
+def test_github_sources_step_alongside_workflow_none(monkeypatch, tmp_path):
+    monkeypatch.setenv("GITHUB_TOKEN", "t0ken")
+    registry = MemoryRepositoryRegistry({"heblo": Path("/repos/heblo")})
+    slugs = {Path("/repos/heblo"): "onpaj/Anela.Heblo"}
+
+    sources = _github_sources(
+        _github_args(github_workflow=None, github_step="development"),
+        tmp_path,
+        registry,
+        slug_of=slugs.get,
+        client=FakeGithubClient(),
+    )
+
+    assert sources[0]._workflow is None
+    assert sources[0]._step == "development"
+
+
+def test_run_github_workflow_and_github_step_are_mutually_exclusive():
+    with pytest.raises(SystemExit):
+        main(
+            [
+                "run",
+                "--github-workflow",
+                "default",
+                "--github-step",
+                "development",
+            ]
+        )
+
+
 def test_github_sources_empty_without_token(monkeypatch, tmp_path):
     """No GITHUB_TOKEN → no sources (harness runs on `submit` alone), silently."""
     monkeypatch.delenv("GITHUB_TOKEN", raising=False)
@@ -205,26 +674,457 @@ def test_github_sources_empty_without_token(monkeypatch, tmp_path):
     assert _github_sources(_github_args(), tmp_path, registry) == []
 
 
+def test_github_reflectors_builds_one_per_github_repo(monkeypatch, tmp_path):
+    """One reflector per repos.json repo with a GitHub origin, mirroring
+    `_github_sources`'s enumeration."""
+    monkeypatch.setenv("GITHUB_TOKEN", "t0ken")
+    registry = MemoryRepositoryRegistry(
+        {"heblo": Path("/repos/heblo"), "harness_v2": Path("/repos/harness_v2")}
+    )
+    slugs = {
+        Path("/repos/heblo"): "onpaj/Anela.Heblo",
+        Path("/repos/harness_v2"): "onpaj/harness_v2",
+    }
+
+    reflectors = _github_reflectors(
+        _github_args(),
+        tmp_path,
+        registry,
+        slug_of=slugs.get,
+        client=FakeGithubClient(),
+    )
+
+    assert {r._repo for r in reflectors} == {"onpaj/Anela.Heblo", "onpaj/harness_v2"}
+
+
+def test_github_reflectors_skips_repo_without_github_origin(monkeypatch, tmp_path):
+    monkeypatch.setenv("GITHUB_TOKEN", "t0ken")
+    registry = MemoryRepositoryRegistry(
+        {"heblo": Path("/repos/heblo"), "local": Path("/repos/local")}
+    )
+    slugs = {Path("/repos/heblo"): "onpaj/Anela.Heblo", Path("/repos/local"): None}
+
+    reflectors = _github_reflectors(
+        _github_args(), tmp_path, registry, slug_of=slugs.get, client=FakeGithubClient()
+    )
+
+    assert {r._repo for r in reflectors} == {"onpaj/Anela.Heblo"}
+
+
+def test_github_reflectors_empty_without_token(monkeypatch, tmp_path):
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    registry = MemoryRepositoryRegistry({"heblo": Path("/repos/heblo")})
+
+    assert _github_reflectors(_github_args(), tmp_path, registry) == []
+
+
+def test_run_gates_github_sources_and_reflectors_mutually_exclusively(monkeypatch, tmp_path):
+    """`_run`'s `sources` composition calls exactly one of `_github_sources` /
+    `_github_reflectors` per invocation, keyed by `--no-github-source` — never
+    both, so a repo is never covered by both a `GithubTaskSource` and a
+    `GithubLabelReflector` at once."""
+    main(["init", "--root", str(tmp_path)])
+    calls = {"sources": [], "reflectors": []}
+
+    def fake_github_sources(args, root, registry):
+        calls["sources"].append(args.no_github_source)
+        return []
+
+    def fake_github_reflectors(args, root, registry):
+        calls["reflectors"].append(args.no_github_source)
+        return []
+
+    monkeypatch.setattr("harness.cli._github_sources", fake_github_sources)
+    monkeypatch.setattr("harness.cli._github_reflectors", fake_github_reflectors)
+
+    async def fake_serve(
+        harness, port, poll_interval, source_interval=30.0,
+        pr_poll_interval=0.0, reconcile_interval=300.0,
+    ):
+        pass
+
+    monkeypatch.setattr("harness.cli.serve", fake_serve)
+
+    assert main(["run", "--root", str(tmp_path), "--no-github-source"]) == 0
+    assert calls == {"sources": [], "reflectors": [True]}
+
+    assert main(["run", "--root", str(tmp_path)]) == 0
+    assert calls == {"sources": [False], "reflectors": [True]}
+
+
+def _process_args(**overrides):
+    """Minimal namespace `_process_sources` reads (worktree_root + github_label)."""
+    base = dict(worktree_root=None, github_label="harness:todo")
+    base.update(overrides)
+    return argparse.Namespace(**base)
+
+
+def test_process_sources_builds_a_github_issues_process(tmp_path):
+    from harness.drivers.memory import FakeClock
+
+    (tmp_path / "processes").mkdir()
+    (tmp_path / "processes" / "harness-todo.json").write_text(
+        '{"trigger": {"interval": "30s"},'
+        ' "action": {"check": "github-issues", "params": {"label": "harness:todo"}},'
+        ' "target": {"workflow": "default"}, "dedup": "per-state",'
+        ' "sink": {"kind": "none"}}'
+    )
+    registry = MemoryRepositoryRegistry({"heblo": Path("/repos/heblo")})
+
+    sources = _process_sources(
+        _process_args(),
+        tmp_path,
+        registry,
+        clock=FakeClock("2026-07-22T10:00:00Z"),
+        known_targets={"default"},
+        client=FakeGithubClient(),
+    )
+
+    assert len(sources) == 1
+    assert sources[0].kind == "scheduled:harness-todo"
+
+
+def test_process_sources_github_issues_fails_fast_without_a_client(tmp_path, monkeypatch):
+    from harness.drivers.fs_processes import ProcessValidationError
+    from harness.drivers.memory import FakeClock
+
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    (tmp_path / "processes").mkdir()
+    (tmp_path / "processes" / "harness-todo.json").write_text(
+        '{"trigger": {"interval": "30s"},'
+        ' "action": {"check": "github-issues"},'
+        ' "target": {"workflow": "default"}}'
+    )
+    registry = MemoryRepositoryRegistry({"heblo": Path("/repos/heblo")})
+
+    with pytest.raises(ProcessValidationError) as exc:
+        _process_sources(
+            _process_args(),
+            tmp_path,
+            registry,
+            clock=FakeClock("2026-07-22T10:00:00Z"),
+            known_targets={"default"},
+            client=None,
+        )
+    assert "GITHUB_TOKEN" in str(exc.value)
+
+
+def test_process_sources_builds_a_resolve_conflicts_process(tmp_path):
+    from harness.drivers.memory import FakeClock
+
+    (tmp_path / "processes").mkdir()
+    (tmp_path / "processes" / "resolve-conflicts.json").write_text(
+        '{"trigger": {"interval": "60s"},'
+        ' "action": {"check": "github-conflicts", "params": {"head_prefix": "harness/"}},'
+        ' "target": {"workflow": "resolver"}, "dedup": "per-state",'
+        ' "sink": {"kind": "none"}}'
+    )
+    registry = MemoryRepositoryRegistry({"harness_v2": Path("/repos/harness_v2")})
+
+    sources = _process_sources(
+        _process_args(),
+        tmp_path,
+        registry,
+        clock=FakeClock("2026-07-23T10:00:00Z"),
+        known_targets={"resolver"},
+        client=FakeGithubClient(),
+    )
+
+    assert len(sources) == 1
+    assert sources[0].kind == "scheduled:resolve-conflicts"
+
+
+def test_process_sources_github_conflicts_fails_fast_without_a_client(tmp_path, monkeypatch):
+    from harness.drivers.fs_processes import ProcessValidationError
+    from harness.drivers.memory import FakeClock
+
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    (tmp_path / "processes").mkdir()
+    (tmp_path / "processes" / "resolve-conflicts.json").write_text(
+        '{"trigger": {"interval": "60s"},'
+        ' "action": {"check": "github-conflicts"},'
+        ' "target": {"workflow": "resolver"}}'
+    )
+    registry = MemoryRepositoryRegistry({"harness_v2": Path("/repos/harness_v2")})
+
+    with pytest.raises(ProcessValidationError) as exc:
+        _process_sources(
+            _process_args(),
+            tmp_path,
+            registry,
+            clock=FakeClock("2026-07-23T10:00:00Z"),
+            known_targets={"resolver"},
+            client=None,
+        )
+    assert "GITHUB_TOKEN" in str(exc.value)
+
+
+def _slack_process_sources(tmp_path, sink_kind="slack"):
+    """Compiled process sources with one process declaring the given sink."""
+    from harness.drivers.memory import FakeClock
+
+    (tmp_path / "processes").mkdir(exist_ok=True)
+    (tmp_path / "processes" / "notify.json").write_text(
+        json.dumps(
+            {
+                "trigger": {"interval": "1h"},
+                "action": {"check": "always"},
+                "target": {"workflow": "default"},
+                "sink": {"kind": sink_kind},
+            }
+        )
+    )
+    registry = MemoryRepositoryRegistry({})
+    return _process_sources(
+        _process_args(),
+        tmp_path,
+        registry,
+        clock=FakeClock("2026-07-23T10:00:00Z"),
+        known_targets={"default"},
+        client=None,
+    )
+
+
+def test_slack_sinks_registers_one_sink_when_url_is_set(monkeypatch, tmp_path):
+    from harness.drivers.slack_sink import SlackWebhookSink
+
+    monkeypatch.setenv("SLACK_WEBHOOK_URL", "https://hooks.slack.example/x")
+
+    sinks = _slack_sinks(_slack_process_sources(tmp_path))
+
+    assert len(sinks) == 1
+    assert isinstance(sinks[0], SlackWebhookSink)
+
+
+def test_slack_sinks_warns_when_a_process_declares_slack_but_url_is_missing(
+    monkeypatch, capsys, tmp_path
+):
+    monkeypatch.delenv("SLACK_WEBHOOK_URL", raising=False)
+
+    sinks = _slack_sinks(_slack_process_sources(tmp_path))
+
+    assert sinks == []
+    assert "SLACK_WEBHOOK_URL" in capsys.readouterr().err
+
+
+def test_slack_sinks_silent_when_no_process_declares_slack(
+    monkeypatch, capsys, tmp_path
+):
+    monkeypatch.delenv("SLACK_WEBHOOK_URL", raising=False)
+
+    sinks = _slack_sinks(_slack_process_sources(tmp_path, sink_kind="none"))
+
+    assert sinks == []
+    assert capsys.readouterr().err == ""
+
+
+def test_run_has_a_no_github_source_flag_defaulting_off():
+    parser = _build_run_parser_namespace()
+    assert parser.no_github_source is False
+
+
+def _build_run_parser_namespace():
+    return _parse_run(["run"])
+
+
+def _parse_run(argv):
+    """Parse an argv through the real `main` parser and return the Namespace,
+    intercepting before the handler runs."""
+    import harness.cli as cli
+
+    captured = {}
+
+    def fake_run(args):
+        captured["args"] = args
+        return 0
+
+    orig = cli._run
+    cli._run = fake_run  # the run handler
+    try:
+        cli.main(argv)
+    finally:
+        cli._run = orig
+    return captured["args"]
+
+
+def test_run_resolves_default_workflow_when_omitted(tmp_path, monkeypatch):
+    """Plain `harness run` (no --workflow) against an ordinarily-initialized
+    harness serves `default` — the same effective default as before --workflow's
+    argparse default became None to support --no-workflow harnesses. The
+    scaffolded `resolver` workflow is appended because its definition exists."""
+    main(["init", "--root", str(tmp_path)])
+    seen = {}
+
+    def fake_build(root, served, **kwargs):
+        seen["served"] = served
+        raise SystemExit(0)
+
+    monkeypatch.setattr("harness.cli.build", fake_build)
+
+    with pytest.raises(SystemExit):
+        main(["run", "--root", str(tmp_path), "--api-port", "0"])
+
+    assert list(seen["served"]) == ["default", "resolver"]
+
+
+def test_run_with_no_workflow_harness_defaults_to_none(tmp_path, monkeypatch):
+    """A --no-workflow harness has no workflows/default.json, so an omitted
+    --workflow flag must resolve to an empty served set (workflow-less), not
+    raise WorkflowNotFound."""
+    main(["init", "--root", str(tmp_path), "--no-workflow"])
+    seen = {}
+
+    def fake_build(root, served, **kwargs):
+        seen["served"] = served
+        raise SystemExit(0)
+
+    monkeypatch.setattr("harness.cli.build", fake_build)
+
+    with pytest.raises(SystemExit):
+        main(["run", "--root", str(tmp_path), "--api-port", "0"])
+
+    assert seen["served"] == ()
+
+
+def _mergeability_args(**overrides):
+    base = dict(worktree_root=None, resolver_workflow="resolver")
+    base.update(overrides)
+    return argparse.Namespace(**base)
+
+
+def test_mergeability_sources_builds_one_per_github_repo(monkeypatch, tmp_path):
+    monkeypatch.setenv("GITHUB_TOKEN", "t0ken")
+    registry = MemoryRepositoryRegistry(
+        {"heblo": Path("/repos/heblo"), "harness_v2": Path("/repos/harness_v2")}
+    )
+    slugs = {
+        Path("/repos/heblo"): "onpaj/Anela.Heblo",
+        Path("/repos/harness_v2"): "onpaj/harness_v2",
+    }
+
+    sources = _mergeability_sources(
+        _mergeability_args(),
+        tmp_path,
+        registry,
+        slug_of=slugs.get,
+        client=FakeGithubClient(),
+    )
+
+    assert {s._repository for s in sources} == {"heblo", "harness_v2"}
+    assert {s._repo for s in sources} == {"onpaj/Anela.Heblo", "onpaj/harness_v2"}
+    assert all(s._resolver_workflow == "resolver" for s in sources)
+
+
+def test_mergeability_sources_skips_repo_without_github_origin(monkeypatch, tmp_path):
+    monkeypatch.setenv("GITHUB_TOKEN", "t0ken")
+    registry = MemoryRepositoryRegistry(
+        {"heblo": Path("/repos/heblo"), "local": Path("/repos/local")}
+    )
+    slugs = {Path("/repos/heblo"): "onpaj/Anela.Heblo", Path("/repos/local"): None}
+
+    sources = _mergeability_sources(
+        _mergeability_args(), tmp_path, registry, slug_of=slugs.get, client=FakeGithubClient()
+    )
+
+    assert [s._repository for s in sources] == ["heblo"]
+
+
+def test_mergeability_sources_empty_without_token(monkeypatch, tmp_path):
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    registry = MemoryRepositoryRegistry({"heblo": Path("/repos/heblo")})
+
+    assert _mergeability_sources(_mergeability_args(), tmp_path, registry) == []
+
+
+def test_init_also_writes_resolver_workflow_and_resolve_agent(tmp_path):
+    assert main(["init", "--root", str(tmp_path)]) == 0
+
+    resolver = json.loads((tmp_path / "workflows" / "resolver.json").read_text())
+    assert resolver["start"] == "resolve"
+    assert {"from": "resolve", "on": "done", "to": "land"} in resolver["transitions"]
+    assert {"from": "land", "on": "done", "to": "end"} in resolver["transitions"]
+
+    resolve_agent = json.loads((tmp_path / "agents" / "resolve.json").read_text())
+    assert resolve_agent["allowed_outcomes"] == ["done"]
+    assert "merge conflict" in resolve_agent["prompt"]
+    # `land` is shared with the default workflow and already written there —
+    # no separate agents/land.json (landing has no persona, invariant unchanged).
+    assert not (tmp_path / "agents" / "land.json").exists()
+
+
+def test_init_is_idempotent_for_resolver_workflow(tmp_path):
+    main(["init", "--root", str(tmp_path)])
+    (tmp_path / "workflows" / "resolver.json").write_text(
+        json.dumps({"name": "resolver", "start": "resolve", "transitions": []})
+    )
+
+    assert main(["init", "--root", str(tmp_path)]) == 0
+
+    resolver = json.loads((tmp_path / "workflows" / "resolver.json").read_text())
+    assert resolver["transitions"] == []
+
+
+def test_run_watch_mergeability_defaults_on_and_can_be_disabled(monkeypatch, tmp_path):
+    main(["init", "--root", str(tmp_path)])
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    captured = {}
+
+    async def fake_serve(harness, port, poll_interval, source_interval=30.0, pr_poll_interval=0.0, reconcile_interval=300.0):
+        captured["harness"] = harness
+
+    monkeypatch.setattr("harness.cli.serve", fake_serve)
+
+    assert main(["run", "--root", str(tmp_path), "--no-watch-mergeability"]) == 0
+    # No token either way, so no observable source either way — this just
+    # exercises that the flag parses and the run completes.
+    assert "harness" in captured
+
+
+def test_run_serves_resolver_workflow_when_its_file_exists_without_watch_mergeability(
+    monkeypatch, tmp_path
+):
+    # The resolver workflow must be served (its own step queues + a valid target
+    # for a `github-conflicts` process) whenever `workflows/resolver.json`
+    # exists — not only when the mergeability watcher is on.
+    main(["init", "--root", str(tmp_path)])  # scaffolds resolver.json
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    captured = {}
+
+    async def fake_serve(harness, port, poll_interval, source_interval=30.0, pr_poll_interval=0.0, reconcile_interval=300.0):
+        captured["harness"] = harness
+
+    monkeypatch.setattr("harness.cli.serve", fake_serve)
+
+    assert main(["run", "--root", str(tmp_path), "--no-watch-mergeability"]) == 0
+    assert "resolver" in captured["harness"].workflows
+
+
 def test_run_accepts_api_port(monkeypatch, tmp_path):
     main(["init", "--root", str(tmp_path)])
     captured = {}
 
-    async def fake_serve(harness, port, poll_interval, source_interval=30.0):
+    async def fake_serve(
+        harness, port, poll_interval, source_interval=30.0, pr_poll_interval=0.0, reconcile_interval=300.0
+    ):
         captured["port"] = port
         captured["source_interval"] = source_interval
+        captured["pr_poll_interval"] = pr_poll_interval
 
     monkeypatch.setattr("harness.cli.serve", fake_serve)
 
     assert main(["run", "--root", str(tmp_path), "--api-port", "9123"]) == 0
     assert captured["port"] == 9123
     assert captured["source_interval"] == 30.0
+    assert captured["pr_poll_interval"] == 0.0
 
 
 def test_run_forwards_source_poll(monkeypatch, tmp_path):
     main(["init", "--root", str(tmp_path)])
     captured = {}
 
-    async def fake_serve(harness, port, poll_interval, source_interval=30.0):
+    async def fake_serve(
+        harness, port, poll_interval, source_interval=30.0, pr_poll_interval=0.0, reconcile_interval=300.0
+    ):
         captured["source_interval"] = source_interval
 
     monkeypatch.setattr("harness.cli.serve", fake_serve)
@@ -233,7 +1133,39 @@ def test_run_forwards_source_poll(monkeypatch, tmp_path):
     assert captured["source_interval"] == 5.0
 
 
-async def test_serve_returns_when_uvicorn_stops_before_the_loop(monkeypatch):
+def test_run_forwards_pr_poll(monkeypatch, tmp_path):
+    main(["init", "--root", str(tmp_path)])
+    captured = {}
+
+    async def fake_serve(
+        harness, port, poll_interval, source_interval=30.0,
+        pr_poll_interval=0.0, reconcile_interval=300.0
+    ):
+        captured["pr_poll_interval"] = pr_poll_interval
+
+    monkeypatch.setattr("harness.cli.serve", fake_serve)
+
+    assert main(["run", "--root", str(tmp_path), "--pr-poll", "60"]) == 0
+    assert captured["pr_poll_interval"] == 60.0
+
+
+def test_run_forwards_reconcile_poll(monkeypatch, tmp_path):
+    main(["init", "--root", str(tmp_path)])
+    captured = {}
+
+    async def fake_serve(
+        harness, port, poll_interval, source_interval=30.0,
+        pr_poll_interval=0.0, reconcile_interval=300.0
+    ):
+        captured["reconcile_interval"] = reconcile_interval
+
+    monkeypatch.setattr("harness.cli.serve", fake_serve)
+
+    assert main(["run", "--root", str(tmp_path), "--reconcile-poll", "42"]) == 0
+    assert captured["reconcile_interval"] == 42.0
+
+
+async def test_serve_returns_when_uvicorn_stops_before_the_loop(monkeypatch, tmp_path):
     """Regression: `serve()` used to do `await asyncio.gather(loop, uvicorn.Server(...).serve())`
     and only called `stop.set()` in `finally`. When uvicorn (after Ctrl+C)
     finishes first and returns WITHOUT an exception, `gather` kept waiting on
@@ -248,13 +1180,18 @@ async def test_serve_returns_when_uvicorn_stops_before_the_loop(monkeypatch):
 
     class FakeHarness:
         def __init__(self):
-            self.projection = BoardProjection(SERVE_TEST_WORKFLOW)
+            self.layout = HarnessLayout(tmp_path)
+            self.projection = BoardProjection(
+                SERVE_TEST_WORKFLOW.steps(), (SERVE_TEST_WORKFLOW,)
+            )
             self.artifacts = MemoryArtifactStore()
             self.stage_output = StageOutputProjection()
             self.control = FakeTaskControl()
             self.stop_seen: asyncio.Event | None = None
 
-        async def run(self, poll_interval, source_interval=30.0, stop=None):
+        async def run(
+            self, poll_interval, source_interval=30.0, pr_poll_interval=0.0, reconcile_interval=300.0, stop=None
+        ):
             self.stop_seen = stop
             while not stop.is_set():
                 await asyncio.sleep(0.01)
@@ -273,6 +1210,56 @@ async def test_serve_returns_when_uvicorn_stops_before_the_loop(monkeypatch):
 
     assert harness.stop_seen is not None
     assert harness.stop_seen.is_set()
+
+
+def test_layout_processes_property(tmp_path):
+    assert HarnessLayout(tmp_path).processes == tmp_path / "processes"
+
+
+async def test_serve_wires_the_filesystem_process_admin(monkeypatch, tmp_path):
+    """`serve()` passes a real `FilesystemProcessAdmin(layout.processes)` into
+    `create_app`, beside the agent/workflow admins — the driver is wired only
+    here (invariant #33)."""
+    from harness.drivers.fs_processes import FilesystemProcessAdmin
+
+    captured = {}
+
+    real_create_app = __import__("harness.api.app", fromlist=["create_app"]).create_app
+
+    def capturing_create_app(**kwargs):
+        captured.update(kwargs)
+        return real_create_app(**kwargs)
+
+    class FakeUvicornServer:
+        def __init__(self, config):
+            pass
+
+        async def serve(self):
+            return
+
+    monkeypatch.setattr("harness.cli.create_app", capturing_create_app)
+    monkeypatch.setattr("harness.cli.uvicorn.Server", FakeUvicornServer)
+
+    class FakeHarness:
+        def __init__(self):
+            self.layout = HarnessLayout(tmp_path)
+            self.projection = BoardProjection(
+                SERVE_TEST_WORKFLOW.steps(), (SERVE_TEST_WORKFLOW,)
+            )
+            self.artifacts = MemoryArtifactStore()
+            self.stage_output = StageOutputProjection()
+            self.control = FakeTaskControl()
+
+        async def run(
+            self, poll_interval, source_interval=30.0, pr_poll_interval=0.0, reconcile_interval=300.0, stop=None
+        ):
+            while not stop.is_set():
+                await asyncio.sleep(0.01)
+
+    await asyncio.wait_for(serve(FakeHarness(), 8000, 0.01), timeout=2.0)
+
+    admin = captured["process_admin"]
+    assert isinstance(admin, FilesystemProcessAdmin)
 
 
 # --- harness service -------------------------------------------------------
@@ -322,6 +1309,211 @@ def test_service_path_entries_lead_with_the_venv_bin():
     # git and gh live in these; without them the service cannot work at all.
     assert "/usr/local/bin" in entries
     assert "/usr/bin" in entries
+
+
+def test_service_autoupdate_requires_an_action():
+    with pytest.raises(SystemExit):
+        main(["service", "autoupdate"])
+
+
+def test_service_autoupdate_install_requires_every():
+    with pytest.raises(SystemExit):
+        main(["service", "autoupdate", "install"])
+
+
+def test_service_autoupdate_install_refuses_a_non_macos_host(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr("harness.cli.sys.platform", "linux")
+
+    code = main(
+        ["service", "autoupdate", "install", "--root", str(tmp_path), "--every", "15m"]
+    )
+
+    assert code == 2
+    err = capsys.readouterr().err
+    assert "launchd" in err and "linux" in err
+
+
+def test_service_autoupdate_install_rejects_a_bad_interval(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr("harness.cli.sys.platform", "darwin")
+
+    code = main(
+        ["service", "autoupdate", "install", "--root", str(tmp_path), "--every", "90s"]
+    )
+
+    assert code == 2
+    assert "expected <N>m, <N>h or <N>d" in capsys.readouterr().err
+
+
+def test_service_autoupdate_install_refuses_an_uninitialized_root(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr("harness.cli.sys.platform", "darwin")
+
+    code = main(
+        [
+            "service",
+            "autoupdate",
+            "install",
+            "--root",
+            str(tmp_path / "nope"),
+            "--every",
+            "15m",
+        ]
+    )
+
+    assert code == 2
+    assert "not initialized" in capsys.readouterr().err
+
+
+def test_service_autoupdate_status_refuses_a_non_macos_host(monkeypatch, capsys):
+    monkeypatch.setattr("harness.cli.sys.platform", "linux")
+
+    assert main(["service", "autoupdate", "status"]) == 2
+    assert "launchd" in capsys.readouterr().err
+
+
+def test_service_autoupdate_uninstall_refuses_a_non_macos_host(monkeypatch, capsys):
+    monkeypatch.setattr("harness.cli.sys.platform", "linux")
+
+    assert main(["service", "autoupdate", "uninstall"]) == 2
+    assert "launchd" in capsys.readouterr().err
+
+
+def test_service_autoupdate_install_writes_wrapper_and_plist_and_loads(
+    tmp_path, monkeypatch, capsys
+):
+    from harness import cli
+
+    monkeypatch.setattr(cli.sys, "platform", "darwin")
+    main(["init", "--root", str(tmp_path)])
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(cli.Path, "home", staticmethod(lambda: home))
+
+    entry = tmp_path / "harness"
+    entry.write_text("#!/bin/sh\n", encoding="utf-8")
+    monkeypatch.setattr(cli, "service_entry_point", lambda: entry)
+
+    loaded = []
+    monkeypatch.setattr(cli, "load", lambda uid, path, label: loaded.append((path, label)))
+
+    code = main(
+        [
+            "service",
+            "autoupdate",
+            "install",
+            "--root",
+            str(tmp_path),
+            "--every",
+            "15m",
+            "--service-label",
+            "com.harness",
+        ]
+    )
+
+    assert code == 0
+    wrapper = tmp_path / "harness-autoupdate.sh"
+    assert wrapper.exists()
+    assert "update --restart-service" in wrapper.read_text()
+
+    plist = home / "Library" / "LaunchAgents" / "com.harness.autoupdate.plist"
+    assert loaded == [(plist, "com.harness.autoupdate")]
+
+    out = capsys.readouterr().out
+    assert "every 15m" in out
+
+
+def test_service_autoupdate_install_is_idempotent(tmp_path, monkeypatch):
+    """Re-running install with a different --every must not error — it must
+    converge to the new interval via load()'s bootout/bootstrap dance."""
+    from harness import cli
+
+    monkeypatch.setattr(cli.sys, "platform", "darwin")
+    main(["init", "--root", str(tmp_path)])
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(cli.Path, "home", staticmethod(lambda: home))
+
+    entry = tmp_path / "harness"
+    entry.write_text("#!/bin/sh\n", encoding="utf-8")
+    monkeypatch.setattr(cli, "service_entry_point", lambda: entry)
+    monkeypatch.setattr(cli, "load", lambda uid, path, label: None)
+
+    assert main(
+        ["service", "autoupdate", "install", "--root", str(tmp_path), "--every", "15m"]
+    ) == 0
+    assert main(
+        ["service", "autoupdate", "install", "--root", str(tmp_path), "--every", "1h"]
+    ) == 0
+
+    import plistlib
+
+    plist = home / "Library" / "LaunchAgents" / "com.harness.autoupdate.plist"
+    assert plistlib.loads(plist.read_bytes())["StartInterval"] == 3600
+
+
+def test_service_autoupdate_uninstall_removes_the_plist(tmp_path, monkeypatch, capsys):
+    from harness import cli
+
+    monkeypatch.setattr(cli.sys, "platform", "darwin")
+    home = tmp_path / "home"
+    (home / "Library" / "LaunchAgents").mkdir(parents=True)
+    monkeypatch.setattr(cli.Path, "home", staticmethod(lambda: home))
+
+    plist = home / "Library" / "LaunchAgents" / "com.harness.autoupdate.plist"
+    plist.write_bytes(b"<plist></plist>")
+
+    monkeypatch.setattr(cli, "unload", lambda uid, label: True)
+
+    assert main(["service", "autoupdate", "uninstall"]) == 0
+    assert not plist.exists()
+    assert "removed" in capsys.readouterr().out
+
+
+def test_service_autoupdate_uninstall_when_nothing_installed_is_a_noop(
+    tmp_path, monkeypatch, capsys
+):
+    from harness import cli
+
+    monkeypatch.setattr(cli.sys, "platform", "darwin")
+    monkeypatch.setattr(cli.Path, "home", staticmethod(lambda: tmp_path / "home"))
+    monkeypatch.setattr(cli, "unload", lambda uid, label: False)
+
+    assert main(["service", "autoupdate", "uninstall"]) == 0
+    assert "was not installed" in capsys.readouterr().out
+
+
+def test_service_autoupdate_status_reports_the_configured_interval(
+    tmp_path, monkeypatch, capsys
+):
+    import plistlib
+
+    from harness import cli
+
+    monkeypatch.setattr(cli.sys, "platform", "darwin")
+    home = tmp_path / "home"
+    (home / "Library" / "LaunchAgents").mkdir(parents=True)
+    monkeypatch.setattr(cli.Path, "home", staticmethod(lambda: home))
+
+    plist = home / "Library" / "LaunchAgents" / "com.harness.autoupdate.plist"
+    plist.write_bytes(
+        plistlib.dumps({"Label": "com.harness.autoupdate", "StartInterval": 900})
+    )
+    monkeypatch.setattr(cli, "status", lambda uid, label: "state = running\n")
+
+    assert main(["service", "autoupdate", "status"]) == 0
+    assert "every 15m" in capsys.readouterr().out
+
+
+def test_service_autoupdate_status_not_loaded(tmp_path, monkeypatch, capsys):
+    from harness import cli
+
+    monkeypatch.setattr(cli.sys, "platform", "darwin")
+    monkeypatch.setattr(cli.Path, "home", staticmethod(lambda: tmp_path / "home"))
+    monkeypatch.setattr(cli, "status", lambda uid, label: None)
+
+    assert main(["service", "autoupdate", "status"]) == 1
+    assert "not loaded" in capsys.readouterr().out
 
 
 def test_service_entry_point_is_a_real_script():
@@ -452,6 +1644,107 @@ def test_update_reports_a_failed_upgrade(monkeypatch, capsys):
     assert "uv tool upgrade failed" in capsys.readouterr().err
 
 
+# --- update --restart-service ----------------------------------------------
+
+
+def test_update_restart_service_kickstarts_on_a_real_version_change(monkeypatch, capsys):
+    from harness import cli
+
+    class Result:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    monkeypatch.setattr(cli, "uv_executable", lambda: Path("/uv"))
+    monkeypatch.setattr(cli.subprocess, "run", lambda cmd, **kw: Result())
+
+    reports = iter(["harness 0.2.0 (git aaaaaaa)", "harness 0.3.0 (git bbbbbbb)"])
+    monkeypatch.setattr(cli, "installed_version_report", lambda: next(reports))
+
+    kicked = []
+    monkeypatch.setattr(cli, "kickstart", lambda uid, label: kicked.append((uid, label)))
+
+    assert main(["update", "--restart-service", "com.harness"]) == 0
+    assert kicked == [(cli.os.getuid(), "com.harness")]
+    assert "restarted service com.harness" in capsys.readouterr().out
+
+
+def test_update_restart_service_does_not_kickstart_on_a_noop_upgrade(monkeypatch, capsys):
+    """The one test that would have caught comparing two different string
+    shapes (version_string() vs installed_version_report()) — both snapshots
+    must be the same function so a true no-op is recognized as unchanged."""
+    from harness import cli
+
+    class Result:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    monkeypatch.setattr(cli, "uv_executable", lambda: Path("/uv"))
+    monkeypatch.setattr(cli.subprocess, "run", lambda cmd, **kw: Result())
+    monkeypatch.setattr(
+        cli, "installed_version_report", lambda: "harness 0.2.0 (git aaaaaaa)"
+    )
+
+    kicked = []
+    monkeypatch.setattr(cli, "kickstart", lambda uid, label: kicked.append((uid, label)))
+
+    assert main(["update", "--restart-service", "com.harness"]) == 0
+    assert kicked == []
+    assert "left running (no version change)" in capsys.readouterr().out
+
+
+def test_update_restart_service_reports_a_failed_kickstart(monkeypatch, capsys):
+    from harness import cli
+
+    class Result:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    monkeypatch.setattr(cli, "uv_executable", lambda: Path("/uv"))
+    monkeypatch.setattr(cli.subprocess, "run", lambda cmd, **kw: Result())
+
+    reports = iter(["harness 0.2.0", "harness 0.3.0"])
+    monkeypatch.setattr(cli, "installed_version_report", lambda: next(reports))
+
+    def failing_kickstart(uid, label):
+        raise cli.ServiceError("launchd is busy")
+
+    monkeypatch.setattr(cli, "kickstart", failing_kickstart)
+
+    assert main(["update", "--restart-service", "com.harness"]) == 1
+    assert "restart failed" in capsys.readouterr().err
+
+
+def test_update_without_restart_service_keeps_the_manual_hint(monkeypatch, capsys):
+    """Regression: the flag's absence must reproduce today's output exactly —
+    only one subprocess call (no extra "before" snapshot)."""
+    from harness import cli
+
+    class Result:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    calls = []
+    monkeypatch.setattr(cli, "uv_executable", lambda: Path("/uv"))
+    monkeypatch.setattr(cli.subprocess, "run", lambda cmd, **kw: Result())
+
+    report_calls = []
+
+    def fake_report():
+        report_calls.append(1)
+        return "harness 0.2.0"
+
+    monkeypatch.setattr(cli, "installed_version_report", fake_report)
+
+    assert main(["update"]) == 0
+    assert len(report_calls) == 1
+    out = capsys.readouterr().out
+    assert "launchctl kickstart -k gui/$(id -u)/com.harness" in out
+
+
 def test_version_string_includes_the_source_commit(monkeypatch):
     """pyproject carries one static version, so two installs both say 0.1.0 —
     the commit from PEP 610 direct_url.json is what tells them apart."""
@@ -500,6 +1793,51 @@ def test_version_string_survives_a_missing_direct_url(monkeypatch):
     monkeypatch.setattr(cli.metadata, "distribution", lambda name: Dist())
 
     assert cli.version_string() == "0.1.0"
+
+
+def test_build_timestamp_is_the_install_locations_mtime(tmp_path, monkeypatch):
+    from harness import cli
+
+    install_dir = tmp_path / "harness-0.1.0.dist-info"
+    install_dir.mkdir()
+    # A known mtime, expressed in whole seconds (the function truncates to
+    # second precision), so the assertion is exact rather than approximate.
+    stamp = 1_784_629_920  # 2026-07-21T10:32:00Z
+    os.utime(install_dir, (stamp, stamp))
+
+    class Dist:
+        @staticmethod
+        def locate_file(name):
+            assert name == ""
+            return install_dir
+
+    monkeypatch.setattr(cli.metadata, "distribution", lambda name: Dist())
+
+    assert cli.build_timestamp() == "2026-07-21T10:32:00Z"
+
+
+def test_build_timestamp_is_none_when_not_installed(monkeypatch):
+    from harness import cli
+
+    def raise_not_found(name):
+        raise cli.metadata.PackageNotFoundError(name)
+
+    monkeypatch.setattr(cli.metadata, "distribution", raise_not_found)
+
+    assert cli.build_timestamp() is None
+
+
+def test_build_timestamp_is_none_on_an_unreadable_location(monkeypatch):
+    from harness import cli
+
+    class Dist:
+        @staticmethod
+        def locate_file(name):
+            return "/no/such/path/at/all"
+
+    monkeypatch.setattr(cli.metadata, "distribution", lambda name: Dist())
+
+    assert cli.build_timestamp() is None
 
 
 def test_installed_version_report_asks_the_new_script(tmp_path, monkeypatch):
@@ -584,6 +1922,54 @@ def test_build_forge_with_a_token_wires_the_http_client(tmp_path, monkeypatch):
     assert isinstance(_build_forge("github", tmp_path)._client, HttpGithubClient)
 
 
+# --- merge checker selection -------------------------------------------------
+
+
+def test_build_merge_checker_returns_none_without_a_token(monkeypatch):
+    from harness.cli import _build_merge_checker
+
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+
+    assert _build_merge_checker(_github_args()) is None
+
+
+def test_build_merge_checker_with_a_token_wires_the_http_client(monkeypatch):
+    from harness.cli import _build_merge_checker
+    from harness.drivers.github_client import HttpGithubClient
+    from harness.drivers.github_merge_checker import GithubMergeChecker
+
+    monkeypatch.setenv("GITHUB_TOKEN", "tok")
+
+    checker = _build_merge_checker(_github_args())
+
+    assert isinstance(checker, GithubMergeChecker)
+    assert isinstance(checker._client, HttpGithubClient)
+
+
+# --- issue checker selection -------------------------------------------------
+
+
+def test_build_issue_checker_returns_none_without_a_token(monkeypatch):
+    from harness.cli import _build_issue_checker
+
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+
+    assert _build_issue_checker(_github_args()) is None
+
+
+def test_build_issue_checker_with_a_token_wires_the_http_client(monkeypatch):
+    from harness.cli import _build_issue_checker
+    from harness.drivers.github_client import HttpGithubClient
+    from harness.drivers.github_issue_checker import GithubIssueChecker
+
+    monkeypatch.setenv("GITHUB_TOKEN", "tok")
+
+    checker = _build_issue_checker(_github_args())
+
+    assert isinstance(checker, GithubIssueChecker)
+    assert isinstance(checker._client, HttpGithubClient)
+
+
 def test_run_agent_defaults_to_claude_and_accepts_dummy(tmp_path, monkeypatch):
     """`--agent dummy` runs the real pipeline (worktree, push, forge) with a stub
     step behavior — the only way to exercise landing where claude is unusable."""
@@ -604,3 +1990,170 @@ def test_run_agent_defaults_to_claude_and_accepts_dummy(tmp_path, monkeypatch):
     with pytest.raises(SystemExit):
         main(["run", "--root", str(tmp_path), "--api-port", "0"])
     assert seen["catalog"] is not None and seen["runner"] is not None
+
+
+def test_service_install_prints_setup_token_steps_when_no_active_token(tmp_path, monkeypatch, capsys):
+    """The commented example in the template must not be mistaken for a real
+    token — otherwise the operator never sees the setup instructions."""
+    monkeypatch.setattr("harness.cli.sys.platform", "darwin")
+    monkeypatch.setattr("harness.cli.load", lambda *a, **k: None)
+    monkeypatch.setattr("harness.cli.Path.home", staticmethod(lambda: tmp_path))
+    main(["init", "--root", str(tmp_path / "root")])
+    capsys.readouterr()
+
+    main(["service", "install", "--root", str(tmp_path / "root")])
+
+    out = capsys.readouterr().out
+    assert "claude setup-token" in out
+    assert (tmp_path / "root" / "secrets.env").stat().st_mode & 0o777 == 0o600
+
+
+def test_service_install_stays_quiet_once_a_token_is_set(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr("harness.cli.sys.platform", "darwin")
+    monkeypatch.setattr("harness.cli.load", lambda *a, **k: None)
+    monkeypatch.setattr("harness.cli.Path.home", staticmethod(lambda: tmp_path))
+    root = tmp_path / "root"
+    main(["init", "--root", str(root)])
+    (root / "secrets.env").write_text("CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-real\n")
+    capsys.readouterr()
+
+    main(["service", "install", "--root", str(root)])
+
+    out = capsys.readouterr().out
+    assert "claude setup-token" not in out
+    # An existing secrets file is never clobbered.
+    assert "sk-ant-oat01-real" in (root / "secrets.env").read_text()
+
+
+# --- idle detection & idle-gated restart -----------------------------------
+
+
+def _claim(root: Path, step: str, task_id: str) -> None:
+    """Simulate a stage actively working: a task in <queue>/.processing/."""
+    proc = root / "queues" / step / ".processing"
+    proc.mkdir(parents=True, exist_ok=True)
+    (proc / f"{task_id}.json").write_text("{}", encoding="utf-8")
+
+
+def test_active_stages_empty_when_nothing_is_processing(tmp_path):
+    from harness.cli import active_stages
+
+    main(["init", "--root", str(tmp_path)])
+    assert active_stages(tmp_path) == []
+
+
+def test_active_stages_lists_claimed_tasks(tmp_path):
+    from harness.cli import active_stages
+
+    main(["init", "--root", str(tmp_path)])
+    _claim(tmp_path, "development", "tsk_a")
+    _claim(tmp_path, "review", "tsk_b")
+
+    assert active_stages(tmp_path) == ["tsk_a", "tsk_b"]
+
+
+def test_update_restart_only_if_idle_skips_when_busy(tmp_path, monkeypatch, capsys):
+    from harness import cli
+
+    main(["init", "--root", str(tmp_path)])
+    _claim(tmp_path, "plan", "tsk_live")
+    capsys.readouterr()
+
+    class Ok:
+        returncode = 0
+        stdout = "upgraded\n"
+        stderr = ""
+
+    monkeypatch.setattr(cli, "uv_executable", lambda: Path("/uv"))
+    monkeypatch.setattr(cli.subprocess, "run", lambda cmd, **k: Ok())
+    monkeypatch.setattr(cli, "installed_version_report", lambda: "harness 0.9.0")
+    restarted = []
+    monkeypatch.setattr(cli, "kickstart", lambda uid, label: restarted.append(label))
+
+    assert main(["update", "--root", str(tmp_path), "--restart", "--only-if-idle"]) == 0
+    out = capsys.readouterr().out
+    assert "tsk_live" in out and "skipping the restart" in out
+    assert restarted == []  # a live stage must never be killed
+
+
+def test_update_restart_only_if_idle_restarts_when_quiet(tmp_path, monkeypatch, capsys):
+    from harness import cli
+
+    main(["init", "--root", str(tmp_path)])  # no .processing => idle
+    capsys.readouterr()
+
+    class Ok:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    monkeypatch.setattr(cli, "uv_executable", lambda: Path("/uv"))
+    monkeypatch.setattr(cli.subprocess, "run", lambda cmd, **k: Ok())
+    monkeypatch.setattr(cli, "installed_version_report", lambda: "harness 0.9.0")
+    monkeypatch.setattr("harness.cli.sys.platform", "darwin")
+    restarted = []
+    monkeypatch.setattr(cli, "kickstart", lambda uid, label: restarted.append(label))
+
+    assert main(["update", "--root", str(tmp_path), "--restart", "--only-if-idle"]) == 0
+    assert restarted == ["com.harness"]
+    assert "restarted service com.harness" in capsys.readouterr().out
+
+
+def test_update_without_restart_still_only_prints_the_hint(monkeypatch, capsys):
+    from harness import cli
+
+    class Ok:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    monkeypatch.setattr(cli, "uv_executable", lambda: Path("/uv"))
+    monkeypatch.setattr(cli.subprocess, "run", lambda cmd, **k: Ok())
+    monkeypatch.setattr(cli, "installed_version_report", lambda: "harness 0.9.0")
+    restarted = []
+    monkeypatch.setattr(cli, "kickstart", lambda uid, label: restarted.append(label))
+
+    assert main(["update"]) == 0
+    assert restarted == []
+    assert "kickstart" in capsys.readouterr().out
+
+
+# --- autoupdate schedule ---------------------------------------------------
+
+
+def test_autoupdate_hours_parse_and_reject():
+    from harness.cli import _parse_hours
+    import pytest as _pytest
+
+    assert _parse_hours("2,8,14,20") == [2, 8, 14, 20]
+    assert _parse_hours("20,2,2") == [2, 20]  # sorted + deduped
+    for bad in ("24", "-1", "x", ""):
+        with _pytest.raises(ValueError):
+            _parse_hours(bad)
+
+
+def test_autoupdate_plist_runs_the_idle_gated_update():
+    from harness.drivers.launchd import autoupdate_plist_bytes
+    import plistlib
+
+    raw = autoupdate_plist_bytes(
+        label="com.harness.autoupdate",
+        harness=Path("/Users/rem/.local/bin/harness"),
+        service_label="com.harness",
+        hours=[2, 14],
+        path_entries=["/Users/rem/.local/bin", "/usr/bin"],
+        log_dir=Path("/r/logs"),
+        home=Path("/Users/rem"),
+    )
+    d = plistlib.loads(raw)
+
+    assert d["ProgramArguments"] == [
+        "/Users/rem/.local/bin/harness",
+        "update",
+        "--restart",
+        "--only-if-idle",
+        "--label",
+        "com.harness",
+    ]
+    assert d["StartCalendarInterval"] == [{"Hour": 2, "Minute": 0}, {"Hour": 14, "Minute": 0}]
+    assert "KeepAlive" not in d  # a periodic one-shot, not a daemon

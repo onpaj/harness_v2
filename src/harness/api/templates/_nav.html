@@ -1,0 +1,50 @@
+{% set nav_items = [
+  {"label": "Board", "href": "/", "section": "board"},
+  {"label": "Agents", "href": "/admin/agents", "section": "agents"},
+  {"label": "Workflows", "href": "/admin/workflows", "section": "workflows"},
+  {"label": "Processes", "href": "/admin/processes", "section": "processes"},
+] %}
+<header class="appbar">
+  <span class="appbar__brand"><span class="dot"></span>harness</span>
+  <nav class="appbar__links">
+    {% for item in nav_items %}
+    <a href="{{ item.href }}" data-section="{{ item.section }}">{{ item.label }}</a>
+    {% endfor %}
+  </nav>
+  <span class="appbar__actions">
+    <button type="button"
+            class="btn small"
+            hx-post="/admin/update"
+            hx-target="#update-result"
+            hx-swap="innerHTML"
+            hx-confirm="Upgrade the harness now and restart the service? A running stage defers the restart.">
+      Update
+    </button>
+    <span id="update-result"></span>
+  </span>
+</header>
+<nav class="tabbar" aria-label="Primary">
+  {% for item in nav_items %}
+  <a href="{{ item.href }}" data-section="{{ item.section }}">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+         stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <rect x="3" y="4" width="5" height="16" rx="1"></rect>
+      <rect x="10" y="4" width="5" height="10" rx="1"></rect>
+      <rect x="17" y="4" width="4" height="13" rx="1"></rect>
+    </svg>
+    {{ item.label }}
+  </a>
+  {% endfor %}
+</nav>
+<script>
+  (function () {
+    var path = window.location.pathname;
+    document.querySelectorAll('[data-section]').forEach(function (el) {
+      var href = el.getAttribute('href');
+      if (path === href || (href !== '/' && path.indexOf(href) === 0)) {
+        el.classList.add('active');
+        el.setAttribute('aria-current', 'page');
+      }
+    });
+  })();
+</script>
