@@ -37,7 +37,7 @@ from harness.drivers.github_client import GithubClient, HttpGithubClient
 from harness.drivers.github_forge import GithubForge
 from harness.drivers.github_issue_checker import GithubIssueChecker
 from harness.drivers.github_merge_checker import GithubMergeChecker
-from harness.drivers.github_source import GithubTaskSource
+from harness.drivers.github_source import GithubLabelReflector, GithubTaskSource
 from harness.drivers.mergeability_watcher import GithubMergeabilityWatcher
 from harness.drivers.uv_updater import UvUpdater
 from harness.drivers.launchd import (
@@ -579,6 +579,42 @@ def _github_sources(
                 repository=name,
                 worktree_root=worktree_root,
                 select_label=args.github_label,
+                step_labels=DEFAULT_STEP_LABELS,
+            )
+        )
+    return sources
+
+
+def _github_reflectors(
+    args: argparse.Namespace,
+    root: Path,
+    registry: RepositoryRegistry,
+    *,
+    slug_of=github_slug,
+    client: GithubClient | None = None,
+) -> list[TaskSource]:
+    """One `GithubLabelReflector` per repo in `repos.json` that has a GitHub
+    origin — the outbound half of GitHub reflection, registered whenever
+    classic ingestion (`GithubTaskSource`) is *not* also registered for that
+    repo (`_run` gates both on `--no-github-source`), so exactly one
+    reflecting source per repo ever exists — never doubled label calls.
+    Mirrors `_github_sources`'s enumeration exactly: no token (and no injected
+    client) → no sources, a repo with no GitHub origin is skipped."""
+    if client is None:
+        token = os.environ.get("GITHUB_TOKEN")
+        if not token:
+            return []
+        client = HttpGithubClient(token)
+
+    sources: list[TaskSource] = []
+    for name in registry.names():
+        slug = slug_of(registry.resolve(name))
+        if slug is None:
+            continue  # already warned about by _github_sources for the same repo
+        sources.append(
+            GithubLabelReflector(
+                client=client,
+                repo=slug,
                 step_labels=DEFAULT_STEP_LABELS,
             )
         )
@@ -1386,7 +1422,11 @@ def _run(args: argparse.Namespace) -> int:
     forge = _build_forge(args.forge, root, registry)
     mergeability = _mergeability_sources(args, root, registry) if args.watch_mergeability else []
     github = [] if args.no_github_source else _github_sources(args, root, registry)
-    sources = github + mergeability
+    # The outbound reflector is registered only when classic ingestion is off
+    # (`--no-github-source`) — never alongside `GithubTaskSource` for the same
+    # repo, which already reflects via its own composed reflector.
+    reflectors = _github_reflectors(args, root, registry) if args.no_github_source else []
+    sources = github + reflectors + mergeability
     merge_checker = _build_merge_checker(args)
     issue_checker = _build_issue_checker(args)
     # The resolver workflow rides alongside the primary one so its tasks (queued

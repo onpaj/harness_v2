@@ -165,6 +165,13 @@ Dependencies flow strictly downward, no cycles.
 - `drivers/source_reflector.py` — `SourceReflectorSink(EventSink)`: event stream → projection into the source
 - `drivers/github_client.py` — `GithubClient` (ABC), `Issue`, `FakeGithubClient`, `HttpGithubClient` (stdlib `urllib`)
 - `drivers/github_source.py` — `GithubTaskSource`: issue → task, state → label
+  (delegates the label half to a composed `GithubLabelReflector`).
+  `GithubLabelReflector` is the standalone outbound-only half — `poll()` is
+  always `[]`; `cli._run` registers one per GitHub-origin repo whenever
+  `--no-github-source` delegates ingestion elsewhere (e.g. to a Process's
+  `github-issues` action), so a Process-sourced task's issue keeps getting its
+  labels updated as the task moves, the same way a classic `GithubTaskSource`
+  does for its own tasks
 - `drivers/github_forge.py` — `GithubForge`: opens the real PR. Slug per task from
   the worktree's origin, base = the repo's default branch, `Closes #n` for an
   issue-born task, `ForgeError` on every failure path
