@@ -6,7 +6,6 @@ from harness.models import (
     HistoryEntry,
     MoveTo,
     Outcome,
-    Process,
     Task,
     Transition,
     Workflow,
@@ -23,6 +22,16 @@ def test_behavior_result_carries_outcome_and_summary():
 
 def test_behavior_result_summary_defaults_empty():
     assert BehaviorResult(Outcome.REQUEST_CHANGES).summary == ""
+
+
+def test_behavior_result_data_defaults_none():
+    assert BehaviorResult(Outcome.DONE).data is None
+
+
+def test_behavior_result_carries_data():
+    result = BehaviorResult(Outcome.DONE, data={"pr": {"number": 1}})
+
+    assert result.data == {"pr": {"number": 1}}
 
 
 def test_history_entry_roundtrips_summary():
@@ -67,6 +76,47 @@ def test_task_roundtrips_through_camelcase_json():
     assert raw["lockId"] == "lck_1"
     assert raw["dedupKey"] == "github:o/r:42"
     assert Task.from_dict(raw) == task
+
+
+def test_workflow_less_task_roundtrips_through_json():
+    task = Task(
+        id="tsk_1",
+        workflow_template=None,
+        step="development",
+        created="2026-07-19T10:00:00Z",
+    )
+
+    raw = task.to_dict()
+
+    assert raw["workflowTemplate"] is None
+    assert raw["step"] == "development"
+    assert Task.from_dict(raw) == task
+
+
+def test_task_from_dict_defaults_step_when_absent():
+    """Backward compatibility: an existing task file on disk never carries a
+    `step` key. `from_dict` must default it to None, not raise KeyError."""
+    raw = {
+        "id": "tsk_1",
+        "workflowTemplate": "default",
+        "created": "2026-07-19T10:00:00Z",
+    }
+
+    task = Task.from_dict(raw)
+
+    assert task.step is None
+    assert task.workflow_template == "default"
+
+
+def test_task_from_dict_defaults_workflow_template_when_absent():
+    """A workflow-less task written before this change never had a
+    `workflowTemplate` key either — must default to None, not KeyError."""
+    raw = {"id": "tsk_1", "created": "2026-07-19T10:00:00Z"}
+
+    task = Task.from_dict(raw)
+
+    assert task.workflow_template is None
+    assert task.step is None
 
 
 def test_new_task_has_null_status_and_empty_history():
@@ -140,6 +190,58 @@ def test_workflow_steps_excludes_end():
     assert workflow.steps() == ("plan", "review")
 
 
+def test_workflow_max_parallel_for_defaults_to_one():
+    workflow = Workflow(
+        name="default",
+        start="plan",
+        transitions=(Transition(from_step="plan", on="done", to_step=END),),
+    )
+
+    assert workflow.max_parallel_for("plan") == 1
+    assert workflow.max_parallel_for("unknown") == 1
+
+
+def test_workflow_max_parallel_for_reads_configured_limit():
+    workflow = Workflow(
+        name="default",
+        start="plan",
+        transitions=(
+            Transition(from_step="plan", on="done", to_step="review"),
+            Transition(from_step="review", on="done", to_step=END),
+        ),
+        max_parallel={"review": 3},
+    )
+
+    assert workflow.max_parallel_for("review") == 3
+    assert workflow.max_parallel_for("plan") == 1
+
+
+def test_workflow_finisher_for_defaults_to_none():
+    workflow = Workflow(
+        name="default",
+        start="plan",
+        transitions=(Transition(from_step="plan", on="done", to_step=END),),
+    )
+
+    assert workflow.finisher_for("plan") is None
+    assert workflow.finisher_for("unknown") is None
+
+
+def test_workflow_finisher_for_reads_configured_kind():
+    workflow = Workflow(
+        name="default",
+        start="plan",
+        transitions=(
+            Transition(from_step="plan", on="done", to_step="publish"),
+            Transition(from_step="publish", on="done", to_step=END),
+        ),
+        finishers={"publish": "open-pr"},
+    )
+
+    assert workflow.finisher_for("publish") == "open-pr"
+    assert workflow.finisher_for("plan") is None
+
+
 def test_outcome_values():
     assert Outcome.DONE.value == "done"
     assert Outcome.REQUEST_CHANGES.value == "request_changes"
@@ -149,27 +251,3 @@ def test_decisions_carry_their_payload():
     assert MoveTo("design").step == "design"
     assert Failed("nope").reason == "nope"
     assert Finished() == Finished()
-
-
-def _process(repositories):
-    workflow = Workflow(
-        name="default",
-        start="plan",
-        transitions=(Transition(from_step="plan", on="done", to_step=END),),
-    )
-    return Process(name="default", workflow=workflow, repositories=repositories)
-
-
-def test_process_applies_to_specific_repositories_only():
-    process = _process(("repo-a", "repo-b"))
-
-    assert process.applies_to("repo-a") is True
-    assert process.applies_to("repo-b") is True
-    assert process.applies_to("repo-z") is False
-
-
-def test_process_applies_to_any_repository_when_scoped_to_all():
-    process = _process("*")
-
-    assert process.applies_to("repo-a") is True
-    assert process.applies_to("anything") is True

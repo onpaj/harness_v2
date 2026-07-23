@@ -1,205 +1,371 @@
+"""`FilesystemProcessRepository`: `processes/*.json` → `ScheduledTrigger`s.
+
+A Process is a compile-time authoring aggregate — a nested
+trigger/action/target/sink shape — that compiles to the same `ScheduledTrigger`
+a bare `triggers/*.json` file does. These tests exercise the schema shape and
+its fail-fast validation; the trigger's runtime behaviour (clock-gate, dedup) is
+covered by `test_scheduled_trigger.py`.
+"""
+
+from __future__ import annotations
+
 import json
+from pathlib import Path
 
 import pytest
 
-from harness.drivers.fs_processes import FilesystemProcessAdmin, FilesystemProcessRepository
-from harness.drivers.memory import MemoryRepositoryRegistry
-from harness.ports.processes import ProcessValidationError
-from harness.ports.workflows import WorkflowNotFound
-
-DEFINITION = {
-    "name": "default",
-    "start": "plan",
-    "transitions": [
-        {"from": "plan", "on": "done", "to": "review"},
-        {"from": "review", "on": "done", "to": "end"},
-    ],
-}
+from harness.drivers.fs_processes import (
+    FilesystemProcessRepository,
+    ProcessValidationError,
+)
+from harness.drivers.scheduled_trigger import ScheduledTrigger
+from harness.drivers.system_clock import SystemClock
 
 
-def _write(tmp_path, name, extra=None):
-    payload = dict(DEFINITION, name=name)
-    if extra:
-        payload.update(extra)
-    (tmp_path / f"{name}.json").write_text(json.dumps(payload))
+def _write(root: Path, name: str, body: dict) -> None:
+    root.mkdir(parents=True, exist_ok=True)
+    (root / f"{name}.json").write_text(json.dumps(body), encoding="utf-8")
 
 
-def _registry(**repos):
-    return MemoryRepositoryRegistry({name: tmp_path for name, tmp_path in repos.items()})
+def _build(root: Path, **kwargs) -> list[ScheduledTrigger]:
+    return FilesystemProcessRepository(root).build(clock=SystemClock(), **kwargs)
 
 
-# --- FilesystemProcessRepository.compile_process ---------------------------
+# --- happy paths ------------------------------------------------------------
 
 
-def test_compile_process_defaults_to_all_repositories_when_absent(tmp_path):
-    _write(tmp_path, "default")
-    repository = FilesystemProcessRepository(tmp_path, _registry())
-
-    process = repository.compile_process("default")
-
-    assert process.repositories == "*"
-    assert process.workflow.start == "plan"
-
-
-def test_compile_process_accepts_specific_known_repositories(tmp_path):
-    _write(tmp_path, "default", {"repositories": ["repo-a", "repo-b"]})
-    repository = FilesystemProcessRepository(
-        tmp_path, MemoryRepositoryRegistry({"repo-a": tmp_path, "repo-b": tmp_path})
+def test_valid_always_workflow_process_builds_one_trigger(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "nightly",
+        {
+            "trigger": {"interval": "1h"},
+            "action": {"check": "always"},
+            "target": {"workflow": "wf"},
+            "sink": {"kind": "none"},
+        },
     )
 
-    process = repository.compile_process("default")
+    triggers = _build(tmp_path)
 
-    assert process.repositories == ("repo-a", "repo-b")
-    assert process.applies_to("repo-a")
-    assert not process.applies_to("repo-z")
+    assert len(triggers) == 1
+    (trigger,) = triggers
+    assert isinstance(trigger, ScheduledTrigger)
+    assert trigger.kind == "scheduled:nightly"
+    assert trigger._interval == 3600.0
+    assert trigger._workflow == "wf"
+    assert trigger._step is None
+    # It really produces a task on a fresh bucket, wired to the workflow.
+    (task,) = trigger.poll()
+    assert task.workflow_template == "wf"
+    assert task.step is None
+    assert "source" not in task.data  # a Process reflects nothing outward in v1
 
 
-def test_compile_process_accepts_all_wildcard(tmp_path):
-    _write(tmp_path, "default", {"repositories": "*"})
-    repository = FilesystemProcessRepository(
-        tmp_path, MemoryRepositoryRegistry({"repo-a": tmp_path})
+def test_disk_threshold_step_process_builds_a_working_trigger(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "disk-pressure",
+        {
+            "trigger": {"interval": "1h"},
+            "action": {"check": "disk-threshold", "params": {"path": "/", "percent": 80}},
+            "target": {"step": "cleanup"},
+            "dedup": "per-state",
+        },
     )
 
-    process = repository.compile_process("default")
+    (trigger,) = _build(tmp_path)
 
-    assert process.applies_to("repo-a")
-    assert process.applies_to("any-other-repo")
-
-
-def test_compile_process_rejects_empty_repositories(tmp_path):
-    _write(tmp_path, "default", {"repositories": []})
-    repository = FilesystemProcessRepository(tmp_path, _registry())
-
-    with pytest.raises(ProcessValidationError, match="no repositories selected"):
-        repository.compile_process("default")
+    assert trigger.kind == "scheduled:disk-pressure"
+    assert trigger._step == "cleanup"
+    assert trigger._workflow is None
+    assert trigger._dedup == "per-state"
 
 
-def test_compile_process_rejects_unknown_repository(tmp_path):
-    _write(tmp_path, "default", {"repositories": ["repo-a", "repo-z"]})
-    repository = FilesystemProcessRepository(
-        tmp_path, MemoryRepositoryRegistry({"repo-a": tmp_path})
+def test_name_key_overrides_file_stem(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "on-disk-stem",
+        {
+            "name": "chosen-name",
+            "trigger": {"interval": "30m"},
+            "action": {"check": "always"},
+            "target": {"workflow": "wf"},
+        },
     )
 
-    with pytest.raises(ProcessValidationError, match="repo-z") as excinfo:
-        repository.compile_process("default")
-    assert "repo-a" in str(excinfo.value)
+    (trigger,) = _build(tmp_path)
+
+    assert trigger.kind == "scheduled:chosen-name"
 
 
-def test_compile_process_missing_file_raises_workflow_not_found(tmp_path):
-    repository = FilesystemProcessRepository(tmp_path, _registry())
+def test_sink_absent_is_accepted(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "no-sink",
+        {
+            "trigger": {"interval": "1h"},
+            "action": {"check": "always"},
+            "target": {"workflow": "wf"},
+        },
+    )
 
-    with pytest.raises(WorkflowNotFound):
-        repository.compile_process("unknown")
-
-
-# --- FilesystemProcessAdmin --------------------------------------------------
-
-
-def test_list_processes_lists_json_files(tmp_path):
-    _write(tmp_path, "alpha")
-    _write(tmp_path, "beta")
-    admin = FilesystemProcessAdmin(tmp_path, _registry())
-
-    assert admin.list_processes() == ["alpha", "beta"]
+    assert len(_build(tmp_path)) == 1
 
 
-def test_load_process_returns_summary(tmp_path):
-    _write(tmp_path, "default", {"repositories": ["repo-a"]})
-    admin = FilesystemProcessAdmin(tmp_path, MemoryRepositoryRegistry({"repo-a": tmp_path}))
+def test_sink_none_or_absent_stamps_no_data_sink(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "explicit-none",
+        {
+            "trigger": {"interval": "1h"},
+            "action": {"check": "always"},
+            "target": {"workflow": "wf"},
+            "sink": {"kind": "none"},
+        },
+    )
+    _write(
+        tmp_path,
+        "no-sink",
+        {
+            "trigger": {"interval": "1h"},
+            "action": {"check": "always"},
+            "target": {"workflow": "wf"},
+        },
+    )
 
-    summary = admin.load_process("default")
-
-    assert summary.name == "default"
-    assert summary.start == "plan"
-    assert summary.steps == ("plan", "review")
-    assert summary.repositories == ("repo-a",)
-
-
-def test_load_process_is_lenient_about_deregistered_repository(tmp_path):
-    """The one non-obvious invariant: load must not raise even when the stored
-    scope no longer matches the registry, or the editor could never open the
-    process to fix the drift."""
-    _write(tmp_path, "default", {"repositories": ["repo-z"]})
-    admin = FilesystemProcessAdmin(tmp_path, _registry())  # repo-z not registered
-
-    summary = admin.load_process("default")
-
-    assert summary.repositories == ("repo-z",)
-
-
-def test_load_process_missing_raises(tmp_path):
-    admin = FilesystemProcessAdmin(tmp_path, _registry())
-
-    with pytest.raises(WorkflowNotFound):
-        admin.load_process("unknown")
+    for trigger in _build(tmp_path):
+        (task,) = trigger.poll()
+        assert "sink" not in task.data
 
 
-def test_save_repositories_persists_specific_repos(tmp_path):
-    _write(tmp_path, "default")
-    registry = MemoryRepositoryRegistry({"repo-a": tmp_path, "repo-b": tmp_path})
-    admin = FilesystemProcessAdmin(tmp_path, registry)
+def test_slack_sink_is_accepted_and_stamped_onto_tasks(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "notify",
+        {
+            "trigger": {"interval": "1h"},
+            "action": {"check": "always"},
+            "target": {"workflow": "wf"},
+            "sink": {"kind": "slack"},
+        },
+    )
 
-    admin.save_repositories("default", ("repo-a", "repo-b"))
+    (trigger,) = _build(tmp_path)
 
-    repository = FilesystemProcessRepository(tmp_path, registry)
-    assert repository.compile_process("default").repositories == ("repo-a", "repo-b")
-
-
-def test_save_repositories_persists_all_wildcard(tmp_path):
-    _write(tmp_path, "default", {"repositories": ["repo-a"]})
-    registry = MemoryRepositoryRegistry({"repo-a": tmp_path})
-    admin = FilesystemProcessAdmin(tmp_path, registry)
-
-    admin.save_repositories("default", "*")
-
-    repository = FilesystemProcessRepository(tmp_path, registry)
-    process = repository.compile_process("default")
-    assert process.repositories == "*"
-    assert process.applies_to("repo-a")
+    assert trigger.sink == {"kind": "slack"}
+    (task,) = trigger.poll()
+    assert task.data["sink"] == {"kind": "slack"}
+    assert "source" not in task.data  # destination identity, no origin stamp
 
 
-def test_save_repositories_preserves_other_keys(tmp_path):
-    _write(tmp_path, "default")
-    admin = FilesystemProcessAdmin(tmp_path, MemoryRepositoryRegistry({"repo-a": tmp_path}))
+def test_trigger_kind_schedule_is_accepted(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "explicit-kind",
+        {
+            "trigger": {"kind": "schedule", "interval": "1h"},
+            "action": {"check": "always"},
+            "target": {"workflow": "wf"},
+        },
+    )
 
-    admin.save_repositories("default", ("repo-a",))
-
-    raw = json.loads((tmp_path / "default.json").read_text())
-    assert raw["start"] == "plan"
-    assert raw["transitions"] == DEFINITION["transitions"]
-
-
-def test_save_repositories_rejects_empty_and_leaves_file_untouched(tmp_path):
-    _write(tmp_path, "default", {"repositories": ["repo-a"]})
-    registry = MemoryRepositoryRegistry({"repo-a": tmp_path})
-    admin = FilesystemProcessAdmin(tmp_path, registry)
-    before = (tmp_path / "default.json").read_text()
-
-    with pytest.raises(ProcessValidationError, match="no repositories selected"):
-        admin.save_repositories("default", ())
-
-    assert (tmp_path / "default.json").read_text() == before
+    assert len(_build(tmp_path)) == 1
 
 
-def test_save_repositories_rejects_unknown_repository(tmp_path):
-    _write(tmp_path, "default")
-    admin = FilesystemProcessAdmin(tmp_path, MemoryRepositoryRegistry({"repo-a": tmp_path}))
-
-    with pytest.raises(ProcessValidationError, match="repo-z"):
-        admin.save_repositories("default", ("repo-a", "repo-z"))
+def test_missing_directory_returns_empty_list(tmp_path: Path) -> None:
+    assert _build(tmp_path / "does-not-exist") == []
 
 
-def test_save_repositories_missing_process_raises(tmp_path):
-    admin = FilesystemProcessAdmin(tmp_path, _registry())
-
-    with pytest.raises(WorkflowNotFound):
-        admin.save_repositories("unknown", "*")
+# --- fail-fast validation ---------------------------------------------------
 
 
-def test_process_name_with_path_separator_is_rejected(tmp_path):
-    admin = FilesystemProcessAdmin(tmp_path, _registry())
+def test_broken_json_raises_naming_the_file(tmp_path: Path) -> None:
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    (tmp_path / "broken.json").write_text("{not json", encoding="utf-8")
 
-    with pytest.raises(WorkflowNotFound):
-        admin.load_process("../secret")
-    with pytest.raises(WorkflowNotFound):
-        admin.save_repositories("../secret", "*")
+    with pytest.raises(ProcessValidationError) as excinfo:
+        _build(tmp_path)
+    assert "broken" in str(excinfo.value)
+
+
+def test_non_object_raises_naming_the_file(tmp_path: Path) -> None:
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    (tmp_path / "a-list.json").write_text("[]", encoding="utf-8")
+
+    with pytest.raises(ProcessValidationError) as excinfo:
+        _build(tmp_path)
+    assert "a-list" in str(excinfo.value)
+
+
+def test_missing_trigger_raises_naming_the_file(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "no-trigger",
+        {"action": {"check": "always"}, "target": {"workflow": "wf"}},
+    )
+
+    with pytest.raises(ProcessValidationError) as excinfo:
+        _build(tmp_path)
+    assert "no-trigger" in str(excinfo.value)
+
+
+def test_bad_interval_raises_naming_the_file(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "bad-interval",
+        {
+            "trigger": {"interval": "1x"},
+            "action": {"check": "always"},
+            "target": {"workflow": "wf"},
+        },
+    )
+
+    with pytest.raises(ProcessValidationError) as excinfo:
+        _build(tmp_path)
+    assert "bad-interval" in str(excinfo.value)
+
+
+def test_missing_action_raises_naming_the_file(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "no-action",
+        {"trigger": {"interval": "1h"}, "target": {"workflow": "wf"}},
+    )
+
+    with pytest.raises(ProcessValidationError) as excinfo:
+        _build(tmp_path)
+    assert "no-action" in str(excinfo.value)
+
+
+def test_unknown_check_raises_naming_the_file(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "bad-check",
+        {
+            "trigger": {"interval": "1h"},
+            "action": {"check": "nope"},
+            "target": {"workflow": "wf"},
+        },
+    )
+
+    with pytest.raises(ProcessValidationError) as excinfo:
+        _build(tmp_path)
+    assert "bad-check" in str(excinfo.value)
+
+
+def test_missing_target_raises_naming_the_file(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "no-target",
+        {"trigger": {"interval": "1h"}, "action": {"check": "always"}},
+    )
+
+    with pytest.raises(ProcessValidationError) as excinfo:
+        _build(tmp_path)
+    assert "no-target" in str(excinfo.value)
+
+
+def test_both_targets_raises_naming_the_file(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "both-targets",
+        {
+            "trigger": {"interval": "1h"},
+            "action": {"check": "always"},
+            "target": {"workflow": "wf", "step": "cleanup"},
+        },
+    )
+
+    with pytest.raises(ProcessValidationError) as excinfo:
+        _build(tmp_path)
+    assert "both-targets" in str(excinfo.value)
+
+
+def test_target_outside_known_targets_raises_naming_the_file(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "unknown-wf",
+        {
+            "trigger": {"interval": "1h"},
+            "action": {"check": "always"},
+            "target": {"workflow": "other"},
+        },
+    )
+
+    with pytest.raises(ProcessValidationError) as excinfo:
+        _build(tmp_path, known_targets={"wf"})
+    assert "unknown-wf" in str(excinfo.value)
+
+
+def test_unknown_dedup_raises_naming_the_file(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "bad-dedup",
+        {
+            "trigger": {"interval": "1h"},
+            "action": {"check": "always"},
+            "target": {"workflow": "wf"},
+            "dedup": "per-eternity",
+        },
+    )
+
+    with pytest.raises(ProcessValidationError) as excinfo:
+        _build(tmp_path)
+    assert "bad-dedup" in str(excinfo.value)
+
+
+def test_unknown_sink_raises_naming_the_file(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "teams-sink",
+        {
+            "trigger": {"interval": "1h"},
+            "action": {"check": "always"},
+            "target": {"workflow": "wf"},
+            "sink": {"kind": "teams"},
+        },
+    )
+
+    with pytest.raises(ProcessValidationError) as excinfo:
+        _build(tmp_path)
+    assert "teams-sink" in str(excinfo.value)
+    assert excinfo.value.field == "sink"
+
+
+def test_unknown_trigger_kind_raises_naming_the_file(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "webhook-trigger",
+        {
+            "trigger": {"kind": "webhook", "interval": "1h"},
+            "action": {"check": "always"},
+            "target": {"workflow": "wf"},
+        },
+    )
+
+    with pytest.raises(ProcessValidationError) as excinfo:
+        _build(tmp_path)
+    assert "webhook-trigger" in str(excinfo.value)
+    assert excinfo.value.field == "trigger"
+
+
+def test_disk_threshold_missing_params_raises_process_error_not_keyerror(
+    tmp_path: Path,
+) -> None:
+    # The `disk-threshold` factory reads `params["path"]`; a file missing it used
+    # to surface a raw KeyError from the factory. `compile_process` now wraps the
+    # factory call, so the build fails as a ProcessValidationError naming the file.
+    _write(
+        tmp_path,
+        "no-params",
+        {
+            "trigger": {"interval": "1h"},
+            "action": {"check": "disk-threshold"},
+            "target": {"step": "cleanup"},
+        },
+    )
+
+    with pytest.raises(ProcessValidationError) as excinfo:
+        _build(tmp_path)
+    assert "no-params" in str(excinfo.value)

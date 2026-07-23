@@ -6,3 +6,4 @@ __pycache__/
 .harness/
 .claude/*
 !.claude/skills/
+site/

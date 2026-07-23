@@ -87,6 +87,9 @@ class FilesystemTaskQueue(TaskQueue):
         destination.put(task)
         held.unlink(missing_ok=True)
 
+    def discard(self, task: Task) -> None:
+        (self._processing / f"{task.id}.json").unlink(missing_ok=True)
+
     def recover(self) -> int:
         count = 0
         for path in sorted(self._processing.glob("*.json")):

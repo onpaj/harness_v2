@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#f8f8fa" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#141416" media="(prefers-color-scheme: dark)">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <title>harness board — workflow {{ name }}</title>
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+  {% include "_nav.html" %}
+  <main class="page">
+    <a class="hint" href="/admin/workflows">&larr; back to workflows</a>
+    <div class="page-header">
+      {% if is_new %}<h1>New workflow</h1>{% else %}<h1>Workflow: {{ name }}</h1>{% endif %}
+    </div>
+    <div class="panel wide">
+      <form method="post" action="{{ '/admin/workflows' if is_new else '/admin/workflows/' + name }}">
+        {% if is_new %}
+        <div class="field">
+          <label for="name">Name</label>
+          <input type="text" id="name" name="name" value="{{ name }}" autofocus>
+        </div>
+        {% endif %}
+
+        <div class="field">
+          <label for="text">Definition (raw JSON)</label>
+          <textarea class="editor" id="text" name="text" rows="20">{{ text }}</textarea>
+        </div>
+
+        <div class="actions">
+          <button class="btn primary" type="submit">Save</button>
+        </div>
+      </form>
+      {% if not is_new %}
+      <form method="post" action="/admin/workflows/{{ name }}/delete"
+            onsubmit="return confirm('Delete workflow {{ name }}?');" class="actions">
+        <button class="btn danger" type="submit">Delete</button>
+      </form>
+      {% endif %}
+    </div>
+    {% if error %}
+    <div class="banner error">{{ error }}</div>
+    {% endif %}
+    {% if saved %}
+    <div class="banner success">saved</div>
+    {% endif %}
+    {% for warning in warnings %}
+    <div class="banner warning">{{ warning }}</div>
+    {% endfor %}
+  </main>
+</body>
+</html>
