@@ -37,3 +37,9 @@ class TaskQueue(ABC):
     @abstractmethod
     def recover(self) -> int:
         """Return claimed tasks to the queue and clear lockId. Returns the count."""
+
+    @abstractmethod
+    def discard(self, task: Task) -> None:
+        """Permanently remove a claimed task — the terminal counterpart to
+        transfer(), which moves a claimed task elsewhere instead. The task
+        must currently be held (i.e. returned by a prior claim())."""

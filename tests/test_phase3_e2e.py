@@ -113,12 +113,16 @@ def _make_repo(path: Path) -> None:
     _git(path, "add", "-A")
     _git(path, "commit", "-q", "-m", "init")
 
-    # Landing now pushes the task branch before proposing a PR, so the fixture
+    # Landing pushes the task branch before proposing a PR, so the fixture
     # needs somewhere to push to. A bare sibling repo stands in for the remote —
     # this keeps the smoke honest: a repo with no remote genuinely cannot land.
+    # Landing also merges the PR's base branch (MemoryForge → "main") in first,
+    # so — as on a real forge — that base branch must exist on origin; push the
+    # initial commit up as `main`.
     remote = path.parent / (path.name + "-remote.git")
     _git(remote.parent, "init", "--bare", "-q", str(remote))
     _git(path, "remote", "add", "origin", str(remote))
+    _git(path, "push", "-q", "origin", "HEAD:main")
 
 
 def _catalog() -> MemoryAgentCatalog:
@@ -267,3 +271,57 @@ async def test_landing_opens_exactly_one_pull_request(tmp_path):
 
     assert len(forge.opened) == 1
     assert forge.opened[0].branch == f"harness/{TASK_ID}"
+
+
+# --- Workflow-less task (FR-1/FR-2): no workflows/*.json needed at all -----
+
+WORKFLOW_LESS_TASK_ID = "tsk_p3_no_workflow"
+
+
+async def test_workflow_less_task_reaches_done_after_one_step(tmp_path):
+    """A task submitted with `--step` and no workflow is a complete unit of
+    work: it runs its one agent step and lands directly in `done/`, with no
+    `workflows/*.json` file anywhere on disk and no `land` step involved."""
+    repo = tmp_path / "repo"
+    _make_repo(repo)
+    worktrees_root = tmp_path / "wt"
+
+    registry = MemoryRepositoryRegistry({"app": repo})
+    workspace = GitWorkspace(registry, worktrees_root)
+    catalog = MemoryAgentCatalog(
+        {"triage": AgentSpec(name="triage", prompt="Persona for the triage step.")}
+    )
+    runner = EchoRunner()
+    artifact_view = WorktreeArtifactView(worktrees_root)
+    forge = MemoryForge()
+
+    harness = build(
+        tmp_path,
+        clock=FakeClock(),
+        forge=forge,
+        workspace=workspace,
+        catalog=catalog,
+        runner=runner,
+        artifact_view=artifact_view,
+        delay=0.0,
+    )
+    assert harness.workflows == {}
+
+    task = Task(
+        id=WORKFLOW_LESS_TASK_ID,
+        workflow_template=None,
+        step="triage",
+        created="2026-07-20T10:00:00Z",
+        repository="app",
+        worktree=None,
+    )
+    submit(tmp_path, task)
+    await drive_until_quiet(harness)
+
+    finished = Task.from_dict(
+        json.loads((tmp_path / "done" / f"{WORKFLOW_LESS_TASK_ID}.json").read_text())
+    )
+    assert finished.status == "end"
+    routed = [e.to_step for e in finished.history if e.actor == "dispatcher"]
+    assert routed == ["triage", "end"]
+    assert runner.count("triage") == 1

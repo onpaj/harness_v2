@@ -1,6 +1,533 @@
 # CHANGELOG
 
 
+## v0.16.0 (2026-07-23)
+
+### Features
+
+- Sync the base branch into the task branch before landing opens the PR
+  ([#90](https://github.com/onpaj/harness_v2/pull/90),
+  [`bec080b`](https://github.com/onpaj/harness_v2/commit/bec080bcd5f7d894c7bf893d06df2d41725dbe29))
+
+A task's worktree branch is created from HEAD when the task starts and is never re-synced with the
+  base while it travels plan -> ... -> land, so on a repo where main moves during that window the PR
+  is born behind its base -- stale at best, conflicted at worst, and only reconciled later by the
+  out-of-band resolver sweep.
+
+Landing now merges the PR's base branch into the task branch before it pushes and proposes, so the
+  PR is born up-to-date with base:
+
+- Forge.base_branch(task) is the branch the forge opens the PR against (GithubForge -> default
+  branch, cached per slug; fakes -> configurable, default "main"), so the merge base always matches
+  the PR base -- never a hardcoded "main". - A clean merge is committed onto the task branch ([land]
+  merge <base>); an already-up-to-date base is a no-op. - A conflict landing cannot auto-resolve is
+  abandoned via the new WorkspaceHandle.abort_merge(), and the PR is opened un-merged and flagged in
+  the result summary -- the existing resolver workflow reconciles the dirty PR downstream. Landing
+  never fails on a base conflict: pure improvement for clean merges, status quo for conflicts.
+
+The sync lives entirely in LandingBehavior.run -- no new port, loop or wiring; behavior_for still
+  selects landing as the open-pr finisher unchanged.
+
+The e2e/smoke fixtures now publish their initial commit as origin/main (a PR's base branch always
+  exists on the remote in reality), and a new real-git smoke proves a divergent-but-clean base is
+  merged in so the branch is born up-to-date. Full suite: 1220 passed, 1 skipped.
+
+See ADR-0017.
+
+Co-authored-by: Claude <noreply@anthropic.com>
+
+- **ui**: Redesign the process editor as a guided, mobile-friendly form
+  ([#92](https://github.com/onpaj/harness_v2/pull/92),
+  [`e8a6bff`](https://github.com/onpaj/harness_v2/commit/e8a6bff96ea143431360156895215240cff0ee36))
+
+The process admin was a flat form: a free-text interval, a raw JSON params textarea, an unexplained
+  target-kind pair and dedup jargon, and a list page of bare name links. Replace both pages with a
+  guided editor in the board's design language, keeping every form field name and route contract
+  intact.
+
+- List page: summary cards (schedule + check -> target, dedup/sink tags, broken-definition marker)
+  and an inviting empty state; the route now reads each definition to render the summary. - Editor:
+  numbered sections (Name / Schedule / Action / Target / Options). Interval gets preset chips synced
+  with the text input; checks are radio cards with plain-English descriptions; check settings are
+  structured per-check fields kept in sync with the raw-JSON textarea (collapsed as a fallback,
+  opened on a params error or an unknown check); the target is a workflow/step segmented toggle
+  whose suggestion list follows the kind; dedup and sink are explained option cards. A live summary
+  sentence mirrors the current state, the save button sticks above the tab bar on the phone, and
+  delete moves into a danger zone. - Switching checks prunes params keys that belong only to other
+  known checks, so the previous check's settings no longer linger in the JSON. - routes.py: target
+  options are now split into workflow/step groups and the list route passes full fields; validation
+  and field names are unchanged.
+
+Claude-Session: https://claude.ai/code/session_012V4Bg2Je7ULxHC4maisGuk
+
+Co-authored-by: Claude <noreply@anthropic.com>
+
+
+## v0.15.0 (2026-07-23)
+
+### Features
+
+- Show per-agent task history in the agent detail view
+  ([#75](https://github.com/onpaj/harness_v2/pull/75),
+  [`6a0ba5b`](https://github.com/onpaj/harness_v2/commit/6a0ba5be0850c9b14d5f5239b8631185528e5543))
+
+
+## v0.14.0 (2026-07-23)
+
+### Documentation
+
+- Spec for the github-conflicts action (resolver as a Process)
+  ([`771bba4`](https://github.com/onpaj/harness_v2/commit/771bba453a49f0b5680eacba902921c7bc451c46))
+
+- Validate the composable-process vision against the code
+  ([#87](https://github.com/onpaj/harness_v2/pull/87),
+  [`9ce676c`](https://github.com/onpaj/harness_v2/commit/9ce676cd95ba35589e04c42c2531ee92c8a348c1))
+
+### Features
+
+- Github-conflicts action — conflict detection as a Process check
+  ([`10df67b`](https://github.com/onpaj/harness_v2/commit/10df67bc83c165cbf78e76bfc29bebf07ae4fac9))
+
+A `GithubConflictsCheck` (sibling of `GithubIssuesCheck`) lists harness-authored open PRs across the
+  registry, auto-updates `behind` ones server-side, and emits one resolver task per `dirty` PR
+  carrying `data.branch`/`data.source.base`. Registered as the `github-conflicts` action in
+  `cli._process_sources`, so the resolver's conflict detection becomes an authorable Process instead
+  of the bespoke `GithubMergeabilityWatcher`. Dedup is per-state on `slug:pr:head_sha`.
+
+- Serve the resolver workflow whenever its definition exists
+  ([`a5cd377`](https://github.com/onpaj/harness_v2/commit/a5cd3774f2f83ddf783f98097c87ca7c40d70012))
+
+Decouple serving `resolver` from the `--watch-mergeability` flag: it rides alongside the primary
+  workflow whenever `workflows/resolver.json` exists. A `github-conflicts` process targets the
+  resolver workflow, and a process whose target is not served fails to compile — so the
+  process-based detection path needs the resolver served independently of the watcher. Existing
+  served-set tests updated to the new contract (the scaffolded resolver is always served).
+
+
+## v0.13.0 (2026-07-23)
+
+### Features
+
+- Github-issues action — the harness:todo trigger as a Process
+  ([#79](https://github.com/onpaj/harness_v2/pull/79),
+  [`e181607`](https://github.com/onpaj/harness_v2/commit/e181607e4e89aa7300c60281041b987fca50b474))
+
+
+## v0.12.0 (2026-07-22)
+
+### Documentation
+
+- Spec, plan and ADR-0015 for the Process authoring aggregate
+  ([#77](https://github.com/onpaj/harness_v2/pull/77),
+  [`ebaa9b5`](https://github.com/onpaj/harness_v2/commit/ebaa9b500f54eee11df2059ce230070054e9acd4))
+
+### Features
+
+- Structured board editor for processes (ProcessAdmin UI)
+  ([#78](https://github.com/onpaj/harness_v2/pull/78),
+  [`a550521`](https://github.com/onpaj/harness_v2/commit/a5505212d049dc9eb9099748be2852ce93430dfa))
+
+
+## v0.11.0 (2026-07-22)
+
+### Features
+
+- **agents**: Default step models from v1 personas
+  ([#74](https://github.com/onpaj/harness_v2/pull/74),
+  [`f91fb05`](https://github.com/onpaj/harness_v2/commit/f91fb057c566a79efa427a530c6322bac45c0e88))
+
+The default agent personas were carried over from harness v1 but their model was left null, so every
+  step ran on the CLI's configured default. v1 assigned each persona a model tier; restore that
+  mapping per step, written as a CLI alias so it tracks the latest of the tier instead of pinning a
+  now-retired id:
+
+plan, architecture -> opus (v1 analyst/planner, architect) design, development -> sonnet (v1
+  designer, developer) review -> sonnet (v1 code-reviewer, the full-diff review) resolve -> sonnet
+  (developer-class conflict fix) healer -> opus (conservative diagnosis)
+
+A step with no mapping still gets model null. The operator can pin an exact id in agents/<step>.json
+  as before.
+
+Claude-Session: https://claude.ai/code/session_01XzKK1gNSuT8bYBStRkCJQL
+
+Co-authored-by: Claude <noreply@anthropic.com>
+
+
+## v0.10.1 (2026-07-22)
+
+### Bug Fixes
+
+- Correct black-on-dark task-detail text in dark mode
+  ([#72](https://github.com/onpaj/harness_v2/pull/72),
+  [`4195c5b`](https://github.com/onpaj/harness_v2/commit/4195c5b2fe9825d0967c98fe8198b9213e4ae116))
+
+The task-detail sheet renders inside a <dialog>, whose UA rule `color: CanvasText` overrides
+  inherited color. With no `color-scheme` declared, CanvasText resolved to its light value (black)
+  even in dark mode, so the .kv values rendered black-on-dark (the keys stayed visible because they
+  set an explicit color).
+
+Declare `color-scheme: light dark` on :root so system colors track the theme, and set an explicit
+  `color: var(--text)` on .task-detail so the detail content never depends on system colors.
+
+Claude-Session: https://claude.ai/code/session_0168J1hKcrtu7JKdNJ3Y3Jeb
+
+Co-authored-by: Claude <noreply@anthropic.com>
+
+### Documentation
+
+- Document self-healing (the healer on the failed queue) in the README
+  ([#68](https://github.com/onpaj/harness_v2/pull/68),
+  [`d76a170`](https://github.com/onpaj/harness_v2/commit/d76a17080dd92a1176ccdc3e06b264463613fae6))
+
+
+## v0.10.0 (2026-07-22)
+
+### Documentation
+
+- Add generic triggers design spec and ADR-0014 ([#57](https://github.com/onpaj/harness_v2/pull/57),
+  [`2f7b6a6`](https://github.com/onpaj/harness_v2/commit/2f7b6a69b9fa9b111f14c61af9ad2b3ddbdcdf55))
+
+* docs: add generic triggers design spec and ADR-0013
+
+Design a generic trigger mechanism for schedule- and condition-driven task creation, on top of the
+  existing TaskSource port.
+
+- Spec: 2026-07-22-generic-triggers-design.md — a Trigger is a TaskSource that produces tasks and
+  reflects nothing outward; ScheduledTrigger composes interval x check x target; cadence is gated on
+  the Clock; dedup is bucket-keyed for at-most-once per interval across restarts; triggers declared
+  as data in triggers/*.json with a named check registry. - ADR-0013: triggers produce tasks, never
+  queue placements — the dispatcher stays the sole placement authority (invariants #3/#8), and "any
+  queue" is a workflow-less task naming a step.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+
+Claude-Session: https://claude.ai/code/session_01UDvCSno7r1B5tLSF5HHzi6
+
+* docs: add generic triggers implementation plan
+
+TDD task-by-task plan for the generic triggers spec: Trigger base, Check port + interval parsing,
+  ScheduledTrigger, built-in checks, FilesystemTriggerRepository, wiring + e2e, and
+  architecture/docs. Seven tasks with a dependency graph and implementation notes; no new production
+  dependency, no build() signature change, no new run loop.
+
+* feat: Trigger base — a TaskSource with no outward projection
+
+Add Trigger(TaskSource) with concrete no-op report_progress/finish and an inherited abstract poll();
+  a schedule- or condition-trigger implements only poll() and is listed-and-ignored by
+  SourceReflectorSink (it stamps no matching data.source). Implements invariant #35.
+
+* feat: Check port, Observation, interval parsing
+
+Add ports/triggers.py: Observation (state_key + data), the Check ABC (evaluate ->
+  list[Observation]), the CheckFactory alias, and parse_interval for "s"/"m"/"h" durations. Pure
+  port — no driver imports.
+
+* feat: built-in trigger checks (always, disk-threshold)
+
+AlwaysCheck fires one empty observation per interval; DiskThresholdCheck fires when used/total
+  crosses a percent (injectable usage reader, guards total==0). BUILTIN_CHECKS maps the names to
+  CheckFactory callables.
+
+* feat: ScheduledTrigger — interval x check x target
+
+A Trigger that fires a Check on a clock-gated interval bucket and emits one task per Observation,
+  targeting a workflow or a single step. dedup_key is bucket-keyed (per-interval) or state-keyed
+  (per-state) for at-most-once ingestion across restarts. Stamps no data.source. Implements
+  invariants #34/#36/#37.
+
+* feat: FilesystemTriggerRepository — triggers/*.json
+
+Reads triggers/*.json and builds one ScheduledTrigger per file, failing fast (TriggerValidationError
+  naming the file) on a bad kind/interval/check/ target/dedup, or a target outside a supplied
+  known_targets set. Missing directory yields an empty list.
+
+* feat: wire scheduled triggers; harness init writes triggers/
+
+_run reads triggers/*.json via FilesystemTriggerRepository and appends the ScheduledTriggers to the
+  existing sources list — no build() parameter and no new run loop, since a Trigger is a TaskSource.
+  known_targets (served workflow names, their steps, and catalog agents) lets the repository reject
+  a misnamed target at startup. harness init now creates triggers/. Missing triggers/ keeps
+  behaviour identical to before.
+
+* docs+test: architecture guards and CLAUDE.md for generic triggers
+
+Add test_orchestration_does_not_import_triggers_port and
+  test_scheduled_trigger_imports_only_ports_models_and_ids. Document the feature in CLAUDE.md:
+  invariants 34-37, module-map rows and bullets for ports/triggers and
+  drivers/{scheduled_trigger,checks,fs_triggers}, a responsibilities note, and a gotcha on the
+  non-constant bucket-keyed dedup_key and the at-most-once-per-interval limitation.
+
+* feat: retire dashboard tasks whose GitHub issue was closed or deleted (#58)
+
+* fix: update Board.columns access to per-workflow tabs (#62)
+
+PR #48 refactored Board from a flat `columns` tuple into `workflows` (a tuple of BoardTab, each
+  carrying its own columns), but three call sites still read the old flat `.columns`:
+
+- `_new_step_warnings` in api/routes.py raised AttributeError on every workflow-admin PUT /
+  create-form request, taking CI red. - the client fixtures in test_api_agents.py and
+  test_api_workflows.py built a Board with the removed `columns=` kwarg (TypeError at setup).
+
+Collect known step names across every tab's columns and rebuild the test boards through BoardTab.
+
+Co-authored-by: ci <ci@local>
+
+* feat(docs): interactive Architecture Explorer documentation site (#63)
+
+* chore(release): 0.9.0
+
+[skip ci]
+
+* Add a CI gate that runs the full test suite on every pull request and blocks merge unless all
+  tests pass (#60)
+
+* fix: give the resolver's git merge an identity and reconcile its branch on reattach (#61)
+
+* chore(release): 0.9.1
+
+* Add a 'healer' workflow: a new failed-queue TaskSource polls failed/ for default-workflow failures
+  and enqueues a deduped healer task that diagnoses the failure and, on a confirmed harness bug,
+  auto-files a GitHub issue via a new Forge.open_issue verb (#55)
+
+---------
+
+Co-authored-by: Claude <noreply@anthropic.com>
+
+Co-authored-by: semantic-release <semantic-release>
+
+### Features
+
+- Add a board Update button that upgrades the harness and restarts
+  ([#67](https://github.com/onpaj/harness_v2/pull/67),
+  [`cd8a67e`](https://github.com/onpaj/harness_v2/commit/cd8a67eb522df6c2b416bdb4c5cd4ddcefafd725))
+
+
+## v0.9.1 (2026-07-22)
+
+### Bug Fixes
+
+- Give the resolver's git merge an identity and reconcile its branch on reattach
+  ([#61](https://github.com/onpaj/harness_v2/pull/61),
+  [`fd700ae`](https://github.com/onpaj/harness_v2/commit/fd700ae1ea2809ceaf144e0ddc0d933e350fe39c))
+
+
+## v0.9.0 (2026-07-22)
+
+### Bug Fixes
+
+- Update Board.columns access to per-workflow tabs
+  ([#62](https://github.com/onpaj/harness_v2/pull/62),
+  [`14a1e28`](https://github.com/onpaj/harness_v2/commit/14a1e28fdf57b37ad4b730190028176870b740c5))
+
+PR #48 refactored Board from a flat `columns` tuple into `workflows` (a tuple of BoardTab, each
+  carrying its own columns), but three call sites still read the old flat `.columns`:
+
+- `_new_step_warnings` in api/routes.py raised AttributeError on every workflow-admin PUT /
+  create-form request, taking CI red. - the client fixtures in test_api_agents.py and
+  test_api_workflows.py built a Board with the removed `columns=` kwarg (TypeError at setup).
+
+Collect known step names across every tab's columns and rebuild the test boards through BoardTab.
+
+Co-authored-by: ci <ci@local>
+
+### Continuous Integration
+
+- Publish the docs drill-down to GitHub Pages ([#54](https://github.com/onpaj/harness_v2/pull/54),
+  [`2ba3122`](https://github.com/onpaj/harness_v2/commit/2ba3122309b66f0ff77b55dd37809c981e46cb74))
+
+### Documentation
+
+- Add self-healing design spec and implementation plan
+  ([#42](https://github.com/onpaj/harness_v2/pull/42),
+  [`6d96d36`](https://github.com/onpaj/harness_v2/commit/6d96d365e8ab9ba3bd64ac50236fdf1b84d499fa))
+
+- Ground the architecture in ADRs, refresh README/CLAUDE.md, and ship an HTML drill-down
+  ([#39](https://github.com/onpaj/harness_v2/pull/39),
+  [`7bae036`](https://github.com/onpaj/harness_v2/commit/7bae03653c211fa75c532281fda663b7dced5127))
+
+### Features
+
+- Retire dashboard tasks whose GitHub issue was closed or deleted
+  ([#58](https://github.com/onpaj/harness_v2/pull/58),
+  [`a80afef`](https://github.com/onpaj/harness_v2/commit/a80afef3af8ee227c47bd393448889616ade34ca))
+
+- **docs**: Interactive Architecture Explorer documentation site
+  ([#63](https://github.com/onpaj/harness_v2/pull/63),
+  [`b533208`](https://github.com/onpaj/harness_v2/commit/b5332080e0c121e2f6d3d8615c85a430b2f5a104))
+
+
+## v0.8.1 (2026-07-21)
+
+### Bug Fixes
+
+- Recover a finished agent run whose verdict block is missing
+  ([`6333c6e`](https://github.com/onpaj/harness_v2/commit/6333c6e729e074310eec896c75865a2a604f6920))
+
+An agent that ran to completion but ended with a prose summary instead of the required ```json
+  {outcome, summary}``` block was failing the whole task ("verdict is not readable JSON"),
+  discarding a green run (tests passing, artifact written, uncommitted). This hit the development
+  step repeatedly.
+
+Three composed defenses: - A (fallback_verdict): a single-outcome step (development/plan/design/
+  architecture) is unambiguous, so a missing block is synthesized to that outcome with the final
+  text as the summary — no second claude call. - C (_reprompt_verdict): a multi-outcome step
+  (review) is genuinely ambiguous, so re-enter the same session via `claude -p --resume` and ask for
+  just the verdict; best-effort, any failure falls through. - B (compose_prompt): state the verdict
+  block as mandatory and last, so the model omits it less often to begin with.
+
+Envelope-level failures (is_error, no result, non-zero exit, timeout) still fail hard — only a
+  forgotten/garbled/disallowed verdict is now recoverable. verdict parsing is split into a strict
+  path (parse_verdict/verdict_from_final, unchanged contract) and a tolerant try_verdict the runner
+  drives.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+
+
+## v0.8.0 (2026-07-21)
+
+### Features
+
+- Serve multiple workflows in a single running harness
+  ([#31](https://github.com/onpaj/harness_v2/pull/31),
+  [`24a34db`](https://github.com/onpaj/harness_v2/commit/24a34db2be66b2f781d14359795492a962a1c55d))
+
+Build queues, projection and consumers for every served workflow: union step queues by name, a
+  merged BoardProjection, a ServedWorkflowRepository decorator for clear unserved-workflow failures,
+  and repeatable --workflow/--all-workflows on `harness run`. Default single-workflow behavior is
+  preserved.
+
+Closes #29
+
+
+## v0.7.0 (2026-07-21)
+
+### Features
+
+- Configurable per-step agent timeout, default raised to 1800s
+  ([#30](https://github.com/onpaj/harness_v2/pull/30),
+  [`56a50b8`](https://github.com/onpaj/harness_v2/commit/56a50b8b88670ed30f756b37288e84e5433b6d45))
+
+Raise the default agent timeout 600s->1800s and add a per-step override via an optional
+  AgentSpec.timeout field read from agents/<step>.json, resolved in app.py's behavior_for().
+
+Closes #28
+
+
+## v0.6.0 (2026-07-21)
+
+### Features
+
+- Make the dashboard mobile friendly ([#21](https://github.com/onpaj/harness_v2/pull/21),
+  [`a530359`](https://github.com/onpaj/harness_v2/commit/a5303594ced4c487068d83aa77e9ea54552d2ce2))
+
+CSS-only responsive layout for the board: a @media(max-width:767px) block for
+  .column/.card/dialog/.tabs and a .table-scroll wrapper on the task-detail tables, layered onto the
+  tabbed task-detail design. Reconciled with the tab redesign that landed on main after this branch
+  was cut.
+
+Closes #16
+
+
+## v0.5.0 (2026-07-21)
+
+### Features
+
+- Add per-step max-parallel-task limits to workflows
+  ([#27](https://github.com/onpaj/harness_v2/pull/27),
+  [`6e16c73`](https://github.com/onpaj/harness_v2/commit/6e16c73a15b51c858952586579a194675416582f))
+
+Adds a validated maxParallel map on the workflow JSON (default 1 per step),
+  Workflow.max_parallel_for() accessor, Consumer.step property, and Harness.run() spawning N
+  concurrent consumer loops per step. Relies on the existing atomic queue claim; no changes to
+  Dispatcher or router.
+
+Closes #25
+
+- Create-harness-issue skill creates directly when inputs are complete
+  ([#26](https://github.com/onpaj/harness_v2/pull/26),
+  [`b0554f0`](https://github.com/onpaj/harness_v2/commit/b0554f0e6634c3d4f78e86d27285a057d01e9b0f))
+
+Rewrites SKILL.md step 4 into a completeness-check router
+  (repo_resolved/title_concrete/body_substantive) that creates the issue directly when all three
+  pass and asks a targeted question otherwise. Extends step 6 into a five-field post-creation
+  report.
+
+Closes #24
+
+
+## v0.4.0 (2026-07-21)
+
+### Features
+
+- One-step update+restart, idle-gated, and a schedule for it
+  ([`998c8b8`](https://github.com/onpaj/harness_v2/commit/998c8b8fb525445c0632a1f9ff2a6abe45dcac55))
+
+Updating meant two commands and remembering the second, and nothing kept the box current on its own.
+  Three additions:
+
+- `harness update --restart` upgrades and restarts the service in one step. - `--only-if-idle` skips
+  the restart when a stage is mid-run (a task claimed in a queue's .processing/), so an update never
+  kills a live agent — it applies at the next idle restart instead. - `harness service autoupdate`
+  installs a launchd timer that runs `update --restart --only-if-idle` a few times a day (default
+  02/08/14/20).
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+
+
+## v0.3.1 (2026-07-21)
+
+### Bug Fixes
+
+- Detect an active token, not the template's commented example
+  ([`89df965`](https://github.com/onpaj/harness_v2/commit/89df9650840eb5d622bd210c36f48acbc2f905ce))
+
+harness service install printed no setup-token guidance because the check matched the commented
+  CLAUDE_CODE_OAUTH_TOKEN= example line in the template it had just written. It now looks for an
+  uncommented assignment.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+
+
+## v0.3.0 (2026-07-21)
+
+### Features
+
+- Service sources a secrets file for CLAUDE_CODE_OAUTH_TOKEN
+  ([`e98a543`](https://github.com/onpaj/harness_v2/commit/e98a5439f877c7e977b17d842cc3c329f62148fb))
+
+Under launchd, claude cannot read the macOS login keychain where an interactive login stores its
+  credential, so every agent step failed with "Not logged in" even though the same binary works from
+  a shell. Proven by running claude inside a launchd agent.
+
+The service wrapper now sources <root>/secrets.env (created 0600, never overwritten) and exports
+  CLAUDE_CODE_OAUTH_TOKEN from it, which makes claude bypass the keychain — the supported headless
+  path via `claude setup-token`. A missing token warns loudly rather than failing silently, and the
+  install prints the exact setup-token steps.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+
+
+## v0.2.2 (2026-07-20)
+
+### Bug Fixes
+
+- Dummy writes where the agent does, and forge reports GitHub's reason
+  ([`0c8027b`](https://github.com/onpaj/harness_v2/commit/0c8027b58155dd01d68e502e4e838d424e8036ea))
+
+A live end-to-end run failed at land with a bare "HTTP Error 422: Unprocessable Entity". Two
+  separate faults behind it:
+
+- DummyBehavior wrote its work into `.harness/`, which repos routinely gitignore (this one does).
+  Ignored writes stage nothing, so commit() returned None, the task branch carried no diff, and
+  GitHub correctly refused a PR with no commits. It now writes into `.artifacts/<task>/`, the
+  versioned location the real agent uses (invariant 16) — so --agent dummy can actually exercise
+  landing. - urllib's HTTPError stringifies to just the status line. GitHub puts the real reason in
+  the response body ("No commits between main and ..."); the forge now surfaces it, along with the
+  head -> base it attempted.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+
+
 ## v0.2.1 (2026-07-20)
 
 ### Bug Fixes
