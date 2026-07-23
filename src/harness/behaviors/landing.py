@@ -58,7 +58,18 @@ class LandingBehavior(ConsumerBehavior):
             title=self._title(task),
             body=self._body(task),
         )
-        return BehaviorResult(Outcome.DONE, f"opened PR {pull.url}")
+        return BehaviorResult(
+            Outcome.DONE,
+            f"opened PR {pull.url}",
+            data={
+                "pr": {
+                    "repo": pull.repo,
+                    "number": pull.number,
+                    "url": pull.url,
+                    "branch": pull.branch,
+                }
+            },
+        )
 
     @staticmethod
     def _title(task: Task) -> str:

@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#f8f8fa" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#141416" media="(prefers-color-scheme: dark)">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <title>harness board — process {{ name }}</title>
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+  {% include "_nav.html" %}
+  <main class="page">
+    <a class="hint" href="/admin/processes">&larr; back to processes</a>
+    <div class="page-header">
+      {% if is_new %}<h1>New process</h1>{% else %}<h1>Process: {{ name }}</h1>{% endif %}
+    </div>
+    <div class="panel">
+      <form method="post" action="{{ '/admin/processes' if is_new else '/admin/processes/' + name }}">
+        {% if is_new %}
+        <div class="field {{ 'error' if errors.name }}">
+          <label for="name">Name</label>
+          <input type="text" id="name" name="name" value="{{ name }}" autofocus>
+          {% if errors.name %}<div class="field-error">{{ errors.name }}</div>{% endif %}
+        </div>
+        {% endif %}
+
+        <div class="field {{ 'error' if errors.interval }}">
+          <label for="interval">Interval *</label>
+          <input type="text" id="interval" name="interval" value="{{ interval }}" placeholder="1h">
+          <div class="hint">a duration, e.g. 30m, 1h, 24h</div>
+          {% if errors.interval %}<div class="field-error">{{ errors.interval }}</div>{% endif %}
+        </div>
+
+        <div class="field {{ 'error' if errors.check }}">
+          <label for="check">Check</label>
+          <select id="check" name="check">
+            {% for option in check_names %}
+            <option value="{{ option }}" {{ 'selected' if option == check }}>{{ option }}</option>
+            {% endfor %}
+          </select>
+          {% if errors.check %}<div class="field-error">{{ errors.check }}</div>{% endif %}
+        </div>
+
+        <div class="field {{ 'error' if errors.params }}">
+          <label for="params">Params</label>
+          <textarea id="params" name="params" rows="5">{{ params }}</textarea>
+          <div class="hint">JSON object, optional</div>
+          {% if errors.params %}<div class="field-error">{{ errors.params }}</div>{% endif %}
+        </div>
+
+        <div class="field {{ 'error' if errors.target }}">
+          <label for="target_kind">Target kind</label>
+          <select id="target_kind" name="target_kind">
+            <option value="workflow" {{ 'selected' if target_kind == 'workflow' }}>workflow</option>
+            <option value="step" {{ 'selected' if target_kind == 'step' }}>step</option>
+          </select>
+          <label for="target">Target</label>
+          <input type="text" id="target" name="target" value="{{ target }}" list="target-options">
+          <datalist id="target-options">
+            {% for option in target_options %}
+            <option value="{{ option }}"></option>
+            {% endfor %}
+          </datalist>
+          <div class="hint">a served workflow or step name</div>
+          {% if errors.target %}<div class="field-error">{{ errors.target }}</div>{% endif %}
+        </div>
+
+        <div class="field {{ 'error' if errors.sink }}">
+          <label for="sink_kind">Sink</label>
+          <select id="sink_kind" name="sink_kind">
+            {% for option in sink_kinds %}
+            <option value="{{ option }}" {{ 'selected' if option == sink_kind }}>{{ option }}</option>
+            {% endfor %}
+          </select>
+          {% if errors.sink %}<div class="field-error">{{ errors.sink }}</div>{% endif %}
+        </div>
+
+        <div class="field {{ 'error' if errors.dedup }}">
+          <label for="dedup">Dedup</label>
+          <select id="dedup" name="dedup">
+            {% for option in dedup_options %}
+            <option value="{{ option }}" {{ 'selected' if option == dedup }}>{{ option }}</option>
+            {% endfor %}
+          </select>
+          {% if errors.dedup %}<div class="field-error">{{ errors.dedup }}</div>{% endif %}
+        </div>
+
+        {% if errors._ %}<div class="field-error">{{ errors._ }}</div>{% endif %}
+
+        <div class="actions">
+          <button class="btn primary" type="submit">Save</button>
+        </div>
+      </form>
+      {% if not is_new %}
+      <form method="post" action="/admin/processes/{{ name }}/delete"
+            onsubmit="return confirm('Delete process {{ name }}?');" class="actions">
+        <button class="btn danger" type="submit">Delete</button>
+      </form>
+      {% endif %}
+    </div>
+    {% if saved %}
+    <div class="banner success">saved — picked up on the next run, no restart</div>
+    {% endif %}
+  </main>
+</body>
+</html>
