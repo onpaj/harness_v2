@@ -1,6 +1,68 @@
 # CHANGELOG
 
 
+## v0.16.0 (2026-07-23)
+
+### Features
+
+- Sync the base branch into the task branch before landing opens the PR
+  ([#90](https://github.com/onpaj/harness_v2/pull/90),
+  [`bec080b`](https://github.com/onpaj/harness_v2/commit/bec080bcd5f7d894c7bf893d06df2d41725dbe29))
+
+A task's worktree branch is created from HEAD when the task starts and is never re-synced with the
+  base while it travels plan -> ... -> land, so on a repo where main moves during that window the PR
+  is born behind its base -- stale at best, conflicted at worst, and only reconciled later by the
+  out-of-band resolver sweep.
+
+Landing now merges the PR's base branch into the task branch before it pushes and proposes, so the
+  PR is born up-to-date with base:
+
+- Forge.base_branch(task) is the branch the forge opens the PR against (GithubForge -> default
+  branch, cached per slug; fakes -> configurable, default "main"), so the merge base always matches
+  the PR base -- never a hardcoded "main". - A clean merge is committed onto the task branch ([land]
+  merge <base>); an already-up-to-date base is a no-op. - A conflict landing cannot auto-resolve is
+  abandoned via the new WorkspaceHandle.abort_merge(), and the PR is opened un-merged and flagged in
+  the result summary -- the existing resolver workflow reconciles the dirty PR downstream. Landing
+  never fails on a base conflict: pure improvement for clean merges, status quo for conflicts.
+
+The sync lives entirely in LandingBehavior.run -- no new port, loop or wiring; behavior_for still
+  selects landing as the open-pr finisher unchanged.
+
+The e2e/smoke fixtures now publish their initial commit as origin/main (a PR's base branch always
+  exists on the remote in reality), and a new real-git smoke proves a divergent-but-clean base is
+  merged in so the branch is born up-to-date. Full suite: 1220 passed, 1 skipped.
+
+See ADR-0017.
+
+Co-authored-by: Claude <noreply@anthropic.com>
+
+- **ui**: Redesign the process editor as a guided, mobile-friendly form
+  ([#92](https://github.com/onpaj/harness_v2/pull/92),
+  [`e8a6bff`](https://github.com/onpaj/harness_v2/commit/e8a6bff96ea143431360156895215240cff0ee36))
+
+The process admin was a flat form: a free-text interval, a raw JSON params textarea, an unexplained
+  target-kind pair and dedup jargon, and a list page of bare name links. Replace both pages with a
+  guided editor in the board's design language, keeping every form field name and route contract
+  intact.
+
+- List page: summary cards (schedule + check -> target, dedup/sink tags, broken-definition marker)
+  and an inviting empty state; the route now reads each definition to render the summary. - Editor:
+  numbered sections (Name / Schedule / Action / Target / Options). Interval gets preset chips synced
+  with the text input; checks are radio cards with plain-English descriptions; check settings are
+  structured per-check fields kept in sync with the raw-JSON textarea (collapsed as a fallback,
+  opened on a params error or an unknown check); the target is a workflow/step segmented toggle
+  whose suggestion list follows the kind; dedup and sink are explained option cards. A live summary
+  sentence mirrors the current state, the save button sticks above the tab bar on the phone, and
+  delete moves into a danger zone. - Switching checks prunes params keys that belong only to other
+  known checks, so the previous check's settings no longer linger in the JSON. - routes.py: target
+  options are now split into workflow/step groups and the list route passes full fields; validation
+  and field names are unchanged.
+
+Claude-Session: https://claude.ai/code/session_012V4Bg2Je7ULxHC4maisGuk
+
+Co-authored-by: Claude <noreply@anthropic.com>
+
+
 ## v0.15.0 (2026-07-23)
 
 ### Features
