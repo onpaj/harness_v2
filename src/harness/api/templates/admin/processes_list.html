@@ -17,16 +17,59 @@
       <h1>Processes</h1>
       <a class="btn small primary page-header__action" href="/admin/processes/new">+ New process</a>
     </div>
-    {% if names %}
-    <div class="table-scroll">
-      <table>
-        {% for name in names %}
-        <tr><td><a href="/admin/processes/{{ name }}">{{ name }}</a></td></tr>
-        {% endfor %}
-      </table>
+    <p class="hint page-intro">A process runs a check on a schedule; every result becomes a task on the board.</p>
+    {% if processes %}
+    <div class="process-list">
+      {% for entry in processes %}
+      <a class="process-card" href="/admin/processes/{{ entry.name }}">
+        <span class="process-card__icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+               stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="9"></circle>
+            <polyline points="12 7 12 12 15.5 14"></polyline>
+          </svg>
+        </span>
+        <span class="process-card__body">
+          <span class="process-card__name">{{ entry.name }}</span>
+          {% if entry.fields %}
+          <span class="process-card__summary">
+            every {{ entry.fields.interval }} &middot; {{ entry.fields.check }}
+            &rarr; {{ entry.fields.target_kind }} <strong>{{ entry.fields.target }}</strong>
+          </span>
+          <span class="process-card__tags">
+            {% if entry.fields.dedup == 'per-state' %}
+            <span class="tag">per-state</span>
+            {% endif %}
+            {% if entry.fields.sink_kind != 'none' %}
+            <span class="tag tag--accent">{{ entry.fields.sink_kind }}</span>
+            {% endif %}
+          </span>
+          {% else %}
+          <span class="process-card__summary process-card__summary--broken">definition unreadable — open to inspect</span>
+          {% endif %}
+        </span>
+        <span class="process-card__chevron" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+               stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="9 6 15 12 9 18"></polyline>
+          </svg>
+        </span>
+      </a>
+      {% endfor %}
     </div>
     {% else %}
-    <p class="hint">No processes defined yet.</p>
+    <div class="empty-state">
+      <span class="empty-state__icon" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"
+             stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="9"></circle>
+          <polyline points="12 7 12 12 15.5 14"></polyline>
+        </svg>
+      </span>
+      <p class="empty-state__title">No processes defined yet.</p>
+      <p class="hint">Create one to run a check on a schedule — new tasks appear on the board automatically.</p>
+      <a class="btn primary" href="/admin/processes/new">Create your first process</a>
+    </div>
     {% endif %}
   </main>
 </body>

@@ -439,3 +439,188 @@ input[type="text"]:focus, textarea:focus {
 
 .update-result-ok { color: var(--done-fg); }
 .update-result-error { color: var(--failed-fg); }
+
+/* --- Process list (summary cards) -------------------------------------------- */
+
+.page-intro { margin: -6px 2px 16px; }
+
+.process-list { display: flex; flex-direction: column; gap: 10px; max-width: 720px; }
+.process-card {
+  display: flex; align-items: center; gap: 14px;
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius); box-shadow: var(--shadow);
+  padding: 14px 16px; color: var(--text);
+  transition: transform .08s ease;
+}
+.process-card:active { transform: scale(.985); }
+.process-card__icon {
+  flex: 0 0 auto; width: 38px; height: 38px; border-radius: 12px;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--accent-weak); color: var(--accent);
+}
+.process-card__icon svg { width: 22px; height: 22px; }
+.process-card__body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.process-card__name { font-size: 16px; font-weight: 600; }
+.process-card__summary {
+  color: var(--text-2); font-size: 13px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.process-card__summary--broken { color: var(--failed-fg); font-family: inherit; }
+.process-card__tags { display: flex; gap: 6px; }
+.process-card__tags:empty { display: none; }
+.tag {
+  font-size: 11px; font-weight: 600; color: var(--text-2);
+  background: var(--surface-2); border: 1px solid var(--border);
+  border-radius: var(--radius-pill); padding: 1px 8px;
+}
+.tag--accent { color: var(--accent); background: var(--accent-weak); border-color: transparent; }
+.process-card__chevron { flex: 0 0 auto; color: var(--text-3); }
+.process-card__chevron svg { width: 18px; height: 18px; display: block; }
+
+.empty-state {
+  display: flex; flex-direction: column; align-items: center; gap: 10px;
+  text-align: center; padding: 48px 24px; max-width: 720px;
+  background: var(--surface); border: 1px dashed var(--border-strong);
+  border-radius: var(--radius);
+}
+.empty-state__icon { color: var(--text-3); }
+.empty-state__icon svg { width: 44px; height: 44px; }
+.empty-state__title { margin: 0; font-size: 16px; font-weight: 600; }
+.empty-state .btn { margin-top: 8px; }
+
+/* --- Process editor (sectioned form) ------------------------------------------ */
+
+.page--editor { max-width: 760px; }
+
+#process-form { display: flex; flex-direction: column; gap: 14px; margin-top: 4px; }
+
+.summary-bar {
+  margin: 0; padding: 12px 16px; font-size: 14px; line-height: 1.5;
+  color: var(--text-2);
+  background: var(--accent-weak); border-radius: var(--radius-sm);
+  border: 1px solid transparent;
+}
+.summary-bar strong { color: var(--text); font-weight: 600; }
+
+.form-section {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius); box-shadow: var(--shadow);
+  padding: 16px 18px 18px;
+}
+.form-section.error { border-color: var(--failed-fg); }
+.form-section__head { margin-bottom: 12px; }
+.form-section__head h2 {
+  display: flex; align-items: center; gap: 8px; font-size: 16px;
+}
+.form-section__head .hint { margin: 4px 0 0; }
+.form-section__num {
+  flex: 0 0 auto; width: 22px; height: 22px; border-radius: 50%;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: var(--accent-weak); color: var(--accent);
+  font-size: 12px; font-weight: 700;
+}
+.form-section .field:last-child { margin-bottom: 0; }
+
+/* Option cards — radio buttons rendered as tappable cards. */
+.option-cards {
+  display: grid; gap: 8px; margin-bottom: 4px;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+}
+.option-cards--two { grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); }
+/* `.option-cards .option-card` outweighs the generic `.field label` rule —
+ * these cards may sit inside a `.field` and must keep their stacked layout. */
+.option-cards .option-card {
+  position: relative; display: flex; flex-direction: column; gap: 3px;
+  padding: 12px 14px; min-height: 44px; cursor: pointer; margin: 0;
+  background: var(--surface-2); border: 1.5px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+.option-card input {
+  position: absolute; opacity: 0; pointer-events: none;
+}
+.option-card:has(input:checked) {
+  border-color: var(--accent); background: var(--accent-weak);
+}
+.option-card:has(input:focus-visible) {
+  outline: 2px solid var(--accent); outline-offset: 1px;
+}
+.option-card__title { font-size: 14px; font-weight: 600; color: var(--text); }
+.option-card__desc { font-size: 12.5px; color: var(--text-2); line-height: 1.4; font-weight: 400; }
+.option-card__kind {
+  font-size: 11px; color: var(--text-3);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.option-card:active { opacity: .75; }
+
+/* Segmented control — the workflow/step toggle. */
+.seg {
+  display: inline-flex; gap: 2px; padding: 3px; margin-bottom: 14px;
+  background: var(--surface-2); border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+}
+.seg__option { position: relative; }
+.seg__option input { position: absolute; opacity: 0; pointer-events: none; }
+.seg__option span {
+  display: inline-flex; align-items: center; justify-content: center;
+  padding: 8px 18px; min-height: 38px; cursor: pointer;
+  border-radius: var(--radius-pill);
+  font-size: 14px; font-weight: 600; color: var(--text-2);
+}
+.seg__option:has(input:checked) span { background: var(--accent); color: var(--on-accent); }
+.seg__option:has(input:focus-visible) span { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+/* Interval preset chips. */
+.chip-row { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 14px; }
+.chip {
+  font: inherit; font-size: 14px; font-weight: 600; cursor: pointer;
+  padding: 8px 16px; min-height: 38px;
+  color: var(--text-2); background: var(--surface-2);
+  border: 1.5px solid var(--border); border-radius: var(--radius-pill);
+}
+.chip.active { color: var(--accent); background: var(--accent-weak); border-color: var(--accent); }
+.chip:active { opacity: .6; }
+
+/* Structured check settings (JS-rendered) + the raw-JSON fallback. */
+.param-fields { margin-top: 14px; }
+.param-fields .field { margin-bottom: 14px; }
+.param-fields > .hint { margin: 2px 0 0; }
+.raw-params { margin-top: 10px; }
+.raw-params summary {
+  cursor: pointer; font-size: 13px; font-weight: 500; color: var(--text-3);
+  padding: 6px 0; user-select: none; -webkit-user-select: none;
+}
+.raw-params[open] summary { color: var(--text-2); margin-bottom: 6px; }
+.raw-params.error summary { color: var(--failed-fg); }
+input[type="number"] {
+  width: 100%; box-sizing: border-box; font: inherit; font-size: 15px;
+  padding: 10px 12px; min-height: 44px; border-radius: var(--radius-sm);
+  border: 1px solid var(--border-strong); background: var(--surface); color: var(--text);
+}
+input[type="number"]:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+.field.error input[type="number"] { border-color: var(--failed-fg); }
+
+/* Save bar — sticks above the tab bar while the form scrolls. The container
+ * ignores pointer events so only the button itself floats over content. */
+.form-actions {
+  position: sticky; bottom: calc(var(--tabbar-h) + var(--safe-bottom) + 10px);
+  z-index: 20; display: flex; padding: 6px 0; pointer-events: none;
+}
+.form-actions .btn { pointer-events: auto; }
+.btn--wide { flex: 1; box-shadow: var(--shadow-lg); }
+
+.danger-zone {
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  margin-top: 22px; padding: 14px 18px; max-width: 760px;
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.danger-zone__text { flex: 1; min-width: 200px; display: flex; flex-direction: column; gap: 2px; }
+.danger-zone__text strong { font-size: 14px; }
+
+@media (min-width: 768px) {
+  .form-actions {
+    position: sticky; bottom: 12px;
+  }
+  .btn--wide { flex: 0 0 auto; min-width: 220px; }
+}
