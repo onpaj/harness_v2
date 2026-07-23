@@ -1,6 +1,15 @@
 # CHANGELOG
 
 
+## v0.13.0 (2026-07-23)
+
+### Features
+
+- Github-issues action — the harness:todo trigger as a Process
+  ([#79](https://github.com/onpaj/harness_v2/pull/79),
+  [`e181607`](https://github.com/onpaj/harness_v2/commit/e181607e4e89aa7300c60281041b987fca50b474))
+
+
 ## v0.12.0 (2026-07-22)
 
 ### Documentation
