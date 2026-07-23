@@ -12,7 +12,19 @@ END = "end"
 FAILED = "failed"
 """Reserved terminal status of a task that ended up in the `failed/` queue.
 Like END it has no outgoing edges — it just additionally isn't known to any
-workflow as one of its steps."""
+workflow as one of its steps. Unlike a true terminal, `failed/` has exactly one
+reader: the `Healer` loop, which drains it into `healed/` (invariant 24)."""
+
+HEALED = "healed"
+"""Reserved terminal status of a task the healer has settled onto the `healed/`
+queue. This is the never-consumed terminal that `failed/` used to be — the
+healer reads `failed/` and moves a task here once, success or failure, so a
+failure can never be healed twice (invariant 25)."""
+
+ARCHIVED = "archived"
+"""Reserved terminal status of a task whose PR resolved and was moved out of
+`done/` into `archived/`. Purely informational — nothing routes on it, since an
+archived task is never reintroduced to the inbox."""
 
 
 class Outcome(str, Enum):
@@ -28,10 +40,17 @@ class BehaviorResult:
 
     `outcome` is the control signal the dispatcher routes on. `summary` is a short
     terminal statement about the run — commit message, history line, PR body, board.
+    `data`, when present, is shallow-merged into `task.data` by the consumer — a way
+    for a behavior to attach structured facts about what it produced (e.g. landing's
+    PR identity). Not a general escape hatch: it exists for a behavior's own output,
+    not for reaching into unrelated keys.
     """
 
     outcome: Outcome
     summary: str = ""
+    data: dict[str, Any] | None = None
+    """Extra fields the consumer merges into task.data on delivery. None (the
+    default) merges nothing — every existing behavior is unaffected."""
 
 
 @dataclass(frozen=True)
@@ -87,8 +106,9 @@ class Task:
     """
 
     id: str
-    workflow_template: str
     created: str
+    workflow_template: str | None = None
+    step: str | None = None
     repository: str | None = None
     worktree: str | None = None
     status: str | None = None
@@ -104,6 +124,7 @@ class Task:
             "repository": self.repository,
             "worktree": self.worktree,
             "workflowTemplate": self.workflow_template,
+            "step": self.step,
             "status": self.status,
             "lastOutcome": self.last_outcome,
             "lockId": self.lock_id,
@@ -117,7 +138,8 @@ class Task:
     def from_dict(cls, raw: dict[str, Any]) -> Task:
         return cls(
             id=raw["id"],
-            workflow_template=raw["workflowTemplate"],
+            workflow_template=raw.get("workflowTemplate"),
+            step=raw.get("step"),
             created=raw["created"],
             repository=raw.get("repository"),
             worktree=raw.get("worktree"),
@@ -146,6 +168,8 @@ class Workflow:
     name: str
     start: str
     transitions: tuple[Transition, ...]
+    max_parallel: dict[str, int] = field(default_factory=dict)
+    finishers: dict[str, str] = field(default_factory=dict)
 
     def target(self, status: str, outcome: str) -> str | None:
         """Target of the matching edge, or None when none matches."""
@@ -164,6 +188,14 @@ class Workflow:
         if self.start != END and self.start not in found:
             found.append(self.start)
         return tuple(found)
+
+    def max_parallel_for(self, step: str) -> int:
+        """The configured concurrency limit for a step. Absent entries default to 1."""
+        return self.max_parallel.get(step, 1)
+
+    def finisher_for(self, step: str) -> str | None:
+        """The finisher kind bound to a step, or None when the step has none."""
+        return self.finishers.get(step)
 
 
 @dataclass(frozen=True)

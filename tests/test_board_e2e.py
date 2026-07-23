@@ -87,9 +87,10 @@ async def test_board_follows_a_task_all_the_way_to_done(tmp_path):
 
     def observe() -> None:
         payload = client.get("/api/board").json()
-        for column in payload["columns"]:
-            if any(item["id"] == "tsk_1" for item in column["tasks"]):
-                seen_columns.add(column["name"])
+        for workflow in payload["workflows"]:
+            for column in workflow["columns"]:
+                if any(item["id"] == "tsk_1" for item in column["tasks"]):
+                    seen_columns.add(column["name"])
 
     await drive_until_quiet(harness, on_tick=observe)
 
@@ -117,8 +118,9 @@ async def test_failed_task_lands_in_failed_column(tmp_path):
 
     await drive_until_quiet(harness)
 
-    columns = client.get("/api/board").json()["columns"]
-    failed = next(item for item in columns if item["name"] == "failed")
+    workflows = client.get("/api/board").json()["workflows"]
+    unknown = next(item for item in workflows if item["name"] == "unknown")
+    failed = next(item for item in unknown["columns"] if item["name"] == "failed")
     assert failed["tasks"], "task with an unknown workflow did not reach the failed column"
     assert failed["tasks"][0]["id"] == "tsk_2"
 
@@ -141,9 +143,10 @@ async def test_restart_moves_failed_task_back_to_todo(tmp_path):
     await drive_until_quiet(harness)
 
     def column_of(task_id: str) -> str | None:
-        for column in client.get("/api/board").json()["columns"]:
-            if any(item["id"] == task_id for item in column["tasks"]):
-                return column["name"]
+        for workflow in client.get("/api/board").json()["workflows"]:
+            for column in workflow["columns"]:
+                if any(item["id"] == task_id for item in column["tasks"]):
+                    return column["name"]
         return None
 
     assert column_of("tsk_3") == "failed"
