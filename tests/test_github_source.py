@@ -320,3 +320,73 @@ def test_reflector_preserves_non_managed_labels():
     reflector.finish(_task(1), FinishResult(ok=True))
 
     assert _labels(client, 1) == {"bug", "harness:pr-open"}
+
+
+def test_reflector_matches_explicit_sink_on_a_non_github_origin():
+    """A process-born task with `data.source.kind` other than `github` (or
+    absent) but an explicit `data.sink = {"kind": "github"}` is still matched
+    — the explicit-sink path, not the default-to-source path."""
+    client = FakeGithubClient([Issue(1, "Fix", "", "u1", ("harness:queued",))])
+    reflector = build_reflector(client)
+    # The reflector still resolves repo/issue from `data.source` regardless
+    # of which field made the effective-kind match.
+    task = Task(
+        id="tsk_x",
+        workflow_template="default",
+        created="2026-07-19T10:00:00Z",
+        data={
+            "source": {"kind": "scheduled:nightly", "repo": "o/r", "issue": 1},
+            "sink": {"kind": "github"},
+        },
+    )
+
+    reflector.finish(task, FinishResult(ok=True))
+
+    assert _labels(client, 1) == {"harness:pr-open"}
+
+
+def test_reflector_explicit_other_sink_overrides_github_origin_default():
+    """A GitHub-origin task that also carries an explicit non-github sink is
+    NOT reflected by `GithubLabelReflector` — the explicit sink overrides the
+    default, documenting that `github` is a fallback, not an always-on side
+    channel."""
+    client = FakeGithubClient([Issue(1, "Fix", "", "u1", ("harness:queued",))])
+    reflector = build_reflector(client)
+    task = Task(
+        id="tsk_x",
+        workflow_template="default",
+        created="2026-07-19T10:00:00Z",
+        data={
+            "source": {"kind": "github", "repo": "o/r", "issue": 1, "url": "u"},
+            "sink": {"kind": "slack"},
+        },
+    )
+
+    reflector.report_progress(task, Progress(step="development"))
+    reflector.finish(task, FinishResult(ok=True))
+
+    assert _labels(client, 1) == {"harness:queued"}  # untouched
+
+
+def test_reflector_matches_github_issues_check_shaped_task():
+    """Regression guard: a task built the way `ScheduledTrigger._task_for`
+    actually builds one from a `GithubIssuesCheck` observation — `data =
+    {"source": {...}}`, no `sink` key at all. Live in production today via the
+    default-to-source path; must keep matching after the `_mine` rewrite."""
+    client = FakeGithubClient([Issue(1, "Fix", "", "u1", ("harness:queued",))])
+    reflector = build_reflector(client)
+    observation_data = {
+        "title": "Fix bug",
+        "body": "details",
+        "source": {"kind": "github", "repo": "o/r", "issue": 1, "url": "u1"},
+    }
+    task = Task(
+        id="tsk_x",
+        workflow_template="default",
+        created="2026-07-19T10:00:00Z",
+        data={**observation_data},  # mirrors ScheduledTrigger._task_for's merge, no sink stamped
+    )
+
+    reflector.finish(task, FinishResult(ok=True))
+
+    assert _labels(client, 1) == {"harness:pr-open"}

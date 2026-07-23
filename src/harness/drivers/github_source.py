@@ -18,7 +18,13 @@ from harness.drivers.github_client import GithubClient
 from harness.ids import new_task_id
 from harness.models import Task
 from harness.ports.clock import Clock
-from harness.ports.source import FinishResult, Progress, TaskSource, dedup_key
+from harness.ports.source import (
+    FinishResult,
+    Progress,
+    TaskSource,
+    dedup_key,
+    effective_sink_kind,
+)
 
 
 class GithubLabelReflector(TaskSource):
@@ -27,12 +33,16 @@ class GithubLabelReflector(TaskSource):
 
     Never produces a task (`poll()` is always `[]`), so it can be registered
     alongside any inbound producer (`GithubTaskSource`, `GithubIssuesCheck`, or
-    neither) without double-claiming anything. Matches a task purely by
-    `task.data.source` (kind + repo) — the same guard `GithubTaskSource` uses —
-    so it doesn't care who created the task, only where it's headed. Subclasses
-    `TaskSource` directly (not `Trigger`): `Trigger` names the inbound-only
-    shape (real `poll()`, no-op reflection), which is the exact inverse of this
-    class.
+    neither) without double-claiming anything. Matches a task by its
+    *effective sink kind* (`effective_sink_kind` — `data.sink.kind`, falling
+    back to `data.source.kind`) plus the repo, resolved from `data.source`
+    regardless of which one matched: `github` can never be a destination
+    *independent* of origin, because the only issue a task has is its origin
+    issue — so the repo/issue always come from `data.source`, even when an
+    explicit `data.sink = {"kind": "github"}` is what made the kind match.
+    Subclasses `TaskSource` directly (not `Trigger`): `Trigger` names the
+    inbound-only shape (real `poll()`, no-op reflection), which is the exact
+    inverse of this class.
     """
 
     kind = "github"
@@ -83,8 +93,9 @@ class GithubLabelReflector(TaskSource):
         self._client.add_label(self._repo, number, target)
 
     def _mine(self, task: Task) -> bool:
-        src = task.data.get("source", {})
-        return src.get("kind") == self.kind and src.get("repo") == self._repo
+        if effective_sink_kind(task) != self.kind:
+            return False
+        return task.data.get("source", {}).get("repo") == self._repo
 
     def _issue(self, task: Task) -> int:
         return task.data["source"]["issue"]

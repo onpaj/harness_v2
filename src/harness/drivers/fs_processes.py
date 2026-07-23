@@ -49,8 +49,15 @@ from harness.ports.process_admin import (
 )
 from harness.ports.triggers import CheckFactory, parse_interval
 
-_ACCEPTED_SINK_KINDS = {"none", "slack"}
-"""The accepted sink kinds. A new destination adds a kind here plus a driver."""
+_ACCEPTED_SINK_KINDS = {"none", "slack", "github"}
+"""The accepted sink kinds. A new destination adds a kind here plus a driver.
+
+`github` is the degenerate, same-as-origin case (`GithubLabelReflector` can
+only ever target a task's origin issue) — schema-valid here, but only
+*functional* for a task whose `data.source` actually carries a GitHub repo/
+issue (e.g. one produced by the `github-issues` check); a Process using any
+other action stamps `data.sink` with no matching `data.source` to resolve an
+issue from, so the sink is accepted but inert for it."""
 
 
 class ProcessValidationError(Exception):
@@ -206,9 +213,10 @@ def _check_trigger_kind(where: str, trigger: object) -> None:
 
 def _parse_sink(where: str, sink: object) -> dict | None:
     # The destination half of invariant #40: the accepted kinds are `none`
-    # (fire-and-forget) and `slack` (`SlackWebhookSink` routes on the stamped
-    # `data.sink`). A new destination adds an accepted kind here and a driver
-    # — no schema change.
+    # (fire-and-forget), `slack` (`SlackWebhookSink` routes on the stamped
+    # `data.sink`) and `github` (`GithubLabelReflector`, the degenerate
+    # same-as-origin case). A new destination adds an accepted kind here and
+    # a driver — no schema change.
     if sink is None:
         return None
     if not isinstance(sink, dict) or sink.get("kind") not in _ACCEPTED_SINK_KINDS:
@@ -358,7 +366,7 @@ class FilesystemProcessAdmin(ProcessAdmin):
         return tuple(sorted(BUILTIN_CHECKS))
 
     def sink_kinds(self) -> tuple[str, ...]:
-        return ("none", "slack")
+        return tuple(sorted(_ACCEPTED_SINK_KINDS))
 
     def _write(self, path: Path, raw: dict) -> None:
         # Same idiom as `FilesystemAgentAdmin._write` (drivers/fs_agents.py):
