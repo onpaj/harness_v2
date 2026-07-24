@@ -1,9 +1,11 @@
 """End-to-end for processes on in-memory drivers.
 
 A Process is a compile-time aggregate: `FilesystemProcessRepository` reads
-`processes/*.json` and compiles each into a `ScheduledTrigger` — a `TaskSource`
-that rides the existing `sources` list. This mirrors `test_generic_triggers_e2e`
-but starts from the *authoring* surface (files on disk), proving the whole
+`processes/*.json` and compiles each into a `ScheduledTrigger` — a `TaskSource`.
+Compilation itself now happens *inside* `app.build()` (ADR-0018 relocated it
+there so the `failed-tasks` check can close over the harness's own live
+`failed`/`healed`/`events`) — this mirrors `test_generic_triggers_e2e` but
+starts from the *authoring* surface (files on disk), proving the whole
 compile → poll → dispatch → done path with no disk beyond the queues and no real
 waiting.
 """
@@ -75,7 +77,12 @@ async def drive_until_quiet(harness) -> int:
 
 def build_harness(tmp_path, *, clock, behavior=None):
     seed(tmp_path)
-    sources = FilesystemProcessRepository(tmp_path / "processes").build(clock=clock)
+    # `build()` auto-discovers and compiles `tmp_path/"processes"` itself
+    # (it defaults `processes_root` to `layout.processes`) — no manual
+    # compile-and-pass-through needed (and doing both would double-fire
+    # every process, since the same `ScheduledTrigger` would ride the source
+    # list twice: once from a manual `sources=`, once from `build()`'s own
+    # internal discovery).
     return build(
         tmp_path,
         "default",
@@ -86,7 +93,6 @@ def build_harness(tmp_path, *, clock, behavior=None):
         artifacts=MemoryArtifactStore(),
         forge=MemoryForge(),
         delay=0.0,
-        sources=sources or None,
     )
 
 
@@ -195,7 +201,8 @@ async def test_no_processes_behaves_as_before(tmp_path):
 
 
 def test_github_issues_process_ingests_a_labelled_issue_once_per_bucket(tmp_path):
-    from harness.cli import _process_sources
+    from harness.cli import _process_check_factories
+    from harness.drivers.fs_processes import FilesystemProcessRepository
     from harness.drivers.github_client import FakeGithubClient, Issue
     from harness.drivers.memory import MemoryRepositoryRegistry
 
@@ -224,9 +231,14 @@ def test_github_issues_process_ingests_a_labelled_issue_once_per_bucket(tmp_path
     orig = mod.github_slug
     mod.github_slug = slugs.get  # type: ignore[assignment]
     try:
-        (source,) = _process_sources(
-            args, tmp_path, registry,
-            clock=clock, known_targets={"default"}, client=client,
+        # `_process_check_factories` only supplies the github-issues/
+        # github-conflicts check factories now — compiling `processes/*.json`
+        # into `ScheduledTrigger`s happens inside `app.build()` (ADR-0018);
+        # this test drives that compilation directly, exactly as `build()`
+        # does internally.
+        checks = _process_check_factories(args, registry, client=client)
+        (source,) = FilesystemProcessRepository(tmp_path / "processes").build(
+            clock=clock, checks=checks, known_targets={"default"}
         )
 
         first = source.poll()
@@ -258,7 +270,7 @@ async def test_github_issues_process_reflects_task_state_onto_issue_labels(tmp_p
     import argparse
 
     import harness.drivers.github_issues_check as mod
-    from harness.cli import DEFAULT_STEP_LABELS, _process_sources
+    from harness.cli import DEFAULT_STEP_LABELS, _process_check_factories
     from harness.drivers.github_client import FakeGithubClient, Issue
     from harness.drivers.github_source import GithubLabelReflector
 
@@ -285,10 +297,12 @@ async def test_github_issues_process_reflects_task_state_onto_issue_labels(tmp_p
     orig = mod.github_slug
     mod.github_slug = slugs.get  # type: ignore[assignment]
     try:
-        process_sources = _process_sources(
-            args, tmp_path, registry,
-            clock=clock, known_targets={"default"}, client=client,
-        )
+        # Only the check *factories* are supplied here — `build()` compiles
+        # `processes/harness-todo.json` itself (auto-discovery of
+        # `tmp_path/"processes"`). Manually compiling and also threading the
+        # result through `sources=` would double-fire it (architecture-02
+        # §2.4): the same `ScheduledTrigger` would ride the source list twice.
+        extra_checks = _process_check_factories(args, registry, client=client)
         # The outward half — registered standalone, exactly as `cli._run` does
         # whenever `--no-github-source` delegates ingestion to the process.
         reflector = GithubLabelReflector(
@@ -305,7 +319,8 @@ async def test_github_issues_process_reflects_task_state_onto_issue_labels(tmp_p
             artifacts=MemoryArtifactStore(),
             forge=MemoryForge(),
             delay=0.0,
-            sources=[*process_sources, reflector],
+            sources=[reflector],
+            extra_checks=extra_checks,
         )
 
         await drive_until_quiet(harness)
@@ -392,7 +407,19 @@ def build_autoresolver_harness(tmp_path, client, workspace):
     registry = MemoryRepositoryRegistry({"app": Path("/repos/app")})
     slugs = {Path("/repos/app"): "o/r"}
     clock = FakeClock()
-    sources = _build_autoresolver_sources(tmp_path, client, registry, slugs.get, clock)
+
+    # Process compilation happens inside `build()` now (ADR-0018); the
+    # `github-conflicts` factory it can't build itself (it needs the client +
+    # an injected `slug_of`, not a git-remote lookup) is supplied via
+    # `extra_checks`, exactly as `cli._process_check_factories` supplies it in
+    # production. `build()` auto-discovers and compiles `tmp_path/processes`.
+    def github_conflicts_factory(params: dict) -> GithubConflictsCheck:
+        return GithubConflictsCheck(
+            client=client,
+            registry=registry,
+            slug_of=slugs.get,
+            head_prefix=params.get("head_prefix", "harness/"),
+        )
 
     catalog = MemoryAgentCatalog(
         {
@@ -414,10 +441,11 @@ def build_autoresolver_harness(tmp_path, client, workspace):
         forge=MemoryForge(),
         catalog=catalog,
         runner=runner,
-        sources=sources,
+        extra_checks={"github-conflicts": github_conflicts_factory},
         delay=0.0,
     )
-    return harness, (sources[0] if sources else None), registry, slugs
+    source = harness.pollers[0]._source if harness.pollers else None
+    return harness, source, registry, slugs
 
 
 async def test_dirty_pr_via_autoresolver_process_flows_through_resolver_to_a_single_pr_on_the_same_branch(

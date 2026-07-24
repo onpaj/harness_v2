@@ -293,6 +293,19 @@ MODEL = ArchitectureModel(
                     ),
                     sources=("src/harness/drivers/github_conflicts_check.py",),
                 ),
+                Driver(
+                    id="failed-tasks-check",
+                    name="FailedTasksCheck (failed-tasks)",
+                    tagline="Draining the failed queue as a Process action.",
+                    description=(
+                        "Claims each task out of failed/, settles it to healed/, "
+                        "and emits one observation carrying the rendered failure "
+                        "report — the single reader of failed/, with a data.heal "
+                        "marker guarding against healing a failed heal."
+                    ),
+                    sources=("src/harness/drivers/failed_tasks_check.py",),
+                    adrs=("0018-healing-as-a-process",),
+                ),
             ),
         ),
         # ---- Orchestration ----------------------------------------------
@@ -438,6 +451,23 @@ MODEL = ArchitectureModel(
                         "rewritten."
                     ),
                     sources=("src/harness/behaviors/resolve_conflict.py",),
+                ),
+                Driver(
+                    id="open-issue-behavior",
+                    name="OpenIssueBehavior",
+                    tagline="The open-issue finisher: files the heal draft as an issue.",
+                    description=(
+                        "The finisher bound to the heal workflow's file-issue "
+                        "step: it reads the heal artifact and opens the issue "
+                        "through IssueTracker — the worker, never the LLM. "
+                        "Idempotent by the original failed-task id; which step "
+                        "finishes by which kind is workflow data."
+                    ),
+                    sources=("src/harness/behaviors/open_issue.py",),
+                    adrs=(
+                        "0016-finisher-as-data",
+                        "0018-healing-as-a-process",
+                    ),
                 ),
                 Driver(
                     id="dummy-behavior",
@@ -896,15 +926,19 @@ MODEL = ArchitectureModel(
             id="issue-tracker",
             name="IssueTracker",
             group="Reconciliation",
-            tagline="Opens the healer's diagnostic issue, idempotently.",
+            tagline="Opens the self-heal diagnostic issue, idempotently.",
             description=(
-                "The healer's deliverable goes out through this port: when a "
-                "failed task looks like a fixable harness bug, the Healer loop "
+                "The heal deliverable goes out through this port: when a failed "
+                "task looks like a fixable harness bug, the open-issue finisher "
                 "— not the LLM — opens an advisory issue. Idempotent by a "
                 "per-task marker, so a crash before the settle never files a "
                 "second issue."
             ),
-            sources=("src/harness/ports/issues.py", "src/harness/healer.py"),
+            adrs=("0018-healing-as-a-process",),
+            sources=(
+                "src/harness/ports/issues.py",
+                "src/harness/behaviors/open_issue.py",
+            ),
             drivers=(
                 Driver(
                     id="github-issue-tracker",

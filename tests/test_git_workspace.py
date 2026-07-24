@@ -546,3 +546,75 @@ def test_merge_conflict_leaves_markers_and_returns_true(tmp_path):
     content = (branch_handle.path / "README.md").read_text(encoding="utf-8")
     assert "<<<<<<<" in content
     assert ">>>>>>>" in content
+
+
+def _repo_less_task(task_id="tsk_heal_1"):
+    return Task(
+        id=task_id,
+        workflow_template="heal",
+        created="2026-07-23T10:00:00Z",
+        repository=None,
+    )
+
+
+def test_attach_repo_less_creates_a_standalone_repo_with_a_head_commit(tmp_path):
+    """ADR-0018: a task with no `repository` (e.g. `heal`) gets a standalone
+    scratch repo instead of `RepositoryRegistry.resolve(None)` — which would
+    raise. The empty repo needs a HEAD commit up front so reset-on-reattach
+    has something to reset *to*."""
+    registry = MemoryRepositoryRegistry({})
+    workspace = GitWorkspace(registry, worktrees_root=tmp_path / "wt")
+
+    handle = workspace.attach(_repo_less_task())
+
+    assert handle.path == tmp_path / "wt" / "tsk_heal_1"
+    assert handle.path.is_dir()
+    assert handle.branch == "harness/tsk_heal_1"
+    branch = _git(["rev-parse", "--abbrev-ref", "HEAD"], handle.path).strip()
+    assert branch == "harness/tsk_heal_1"
+    log = _git(["log", "--oneline"], handle.path).strip()
+    assert log != ""  # a root commit exists
+
+
+def test_attach_repo_less_write_and_commit_works_with_no_registered_repo(tmp_path):
+    registry = MemoryRepositoryRegistry({})
+    workspace = GitWorkspace(registry, worktrees_root=tmp_path / "wt")
+    handle = workspace.attach(_repo_less_task())
+
+    handle.write("issue.md", "# Title\n\nbody\n")
+    sha = handle.commit("[heal] draft")
+
+    assert sha is not None
+    assert (handle.path / "issue.md").read_text(encoding="utf-8") == "# Title\n\nbody\n"
+
+
+def test_attach_repo_less_reattach_resets_to_its_own_root_commit(tmp_path):
+    """Reset-on-reattach mirrors the registered-repo path, just against this
+    scratch repo's own root commit instead of a shared repo's HEAD."""
+    registry = MemoryRepositoryRegistry({})
+    workspace = GitWorkspace(registry, worktrees_root=tmp_path / "wt")
+    task = _repo_less_task()
+    handle = workspace.attach(task)
+    handle.write("scratch.txt", "uncommitted\n")
+
+    reattached = workspace.attach(task)
+
+    assert reattached.path == handle.path
+    assert not (reattached.path / "scratch.txt").exists()
+    status = _git(["status", "--porcelain"], reattached.path)
+    assert status.strip() == ""
+
+
+def test_attach_repo_less_reattach_is_idempotent_across_two_crash_retries(tmp_path):
+    """A crash-and-retry before anything was ever committed must not fail —
+    the create path's own root commit already gives `attach` a HEAD to find,
+    same as it always finds one for a registered repo."""
+    registry = MemoryRepositoryRegistry({})
+    workspace = GitWorkspace(registry, worktrees_root=tmp_path / "wt")
+    task = _repo_less_task()
+
+    first = workspace.attach(task)
+    second = workspace.attach(task)
+
+    assert first.path == second.path
+    assert second.path.is_dir()

@@ -18,7 +18,8 @@ from pathlib import Path
 import uvicorn
 
 from harness.api.app import create_app
-from harness.app import LANDING_STEP, HarnessLayout, HealConfig, build
+from harness.app import LANDING_STEP, HarnessLayout, build
+from harness.behaviors.open_issue import OpenIssueBehavior
 from harness.drivers.claude_cli import ClaudeCliRunner
 from harness.drivers.fake_forge import FakeForge
 from harness.drivers.fs_agents import FilesystemAgentAdmin, FilesystemAgentCatalog
@@ -68,6 +69,7 @@ from harness.ports.issue_state import IssueChecker
 from harness.ports.merge import MergeChecker
 from harness.ports.repos import RepositoryRegistry
 from harness.ports.source import TaskSource
+from harness.ports.triggers import CheckFactory
 from harness.ports.workflows import WorkflowNotFound
 
 PACKAGE_NAME = "harness"
@@ -121,6 +123,19 @@ RESOLVER_DEFINITION = {
         {"from": "resolve", "on": "done", "to": "land"},
         {"from": "land", "on": "done", "to": "end"},
     ],
+}
+
+DEFAULT_HEAL_WORKFLOW = "heal"
+
+HEAL_DEFINITION = {
+    "name": "heal",
+    "start": "heal",
+    "transitions": [
+        {"from": "heal", "on": "done", "to": "file-issue"},
+        {"from": "heal", "on": "request_changes", "to": "end"},
+        {"from": "file-issue", "on": "done", "to": "end"},
+    ],
+    "finishers": {"file-issue": "open-issue"},
 }
 
 
@@ -188,10 +203,24 @@ def _init(args: argparse.Namespace) -> int:
             encoding="utf-8",
         )
 
+    # `heal`/`file-issue` (ADR-0018): dormant data, shipped unconditionally
+    # exactly like the resolver workflow — the process that actually drives it
+    # (`processes/autoheal.json`) is gated behind `--heal-repo` instead (a bare
+    # `harness init` has no repo to file issues against).
+    heal_definition_path = layout.workflows / f"{DEFAULT_HEAL_WORKFLOW}.json"
+    if not heal_definition_path.exists():
+        heal_definition_path.write_text(
+            json.dumps(HEAL_DEFINITION, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+
     try:
         harness = build(root, args.workflow)
         resolver_workflow = FilesystemWorkflowRepository(layout.workflows).get(
             DEFAULT_RESOLVER_WORKFLOW
+        )
+        heal_workflow = FilesystemWorkflowRepository(layout.workflows).get(
+            DEFAULT_HEAL_WORKFLOW
         )
     except WorkflowNotFound as error:
         print(f"error: {error}", file=sys.stderr)
@@ -200,7 +229,7 @@ def _init(args: argparse.Namespace) -> int:
     workflow = harness.workflows[args.workflow]
     _write_default_agents(layout, workflow)
     _write_default_agents(layout, resolver_workflow)
-    _write_healer_agent(layout)
+    _write_default_agents(layout, heal_workflow)
 
     print(f"harness ready at {root}")
     print(f"steps: {', '.join(workflow.steps())}")
@@ -396,15 +425,16 @@ _HEALER_PERSONA = (
     "wrong or impossible). Be conservative: only propose a change when there is a "
     "concrete, plausible harness fix.\n\n"
     "When it IS a fixable harness bug: write a proposed GitHub issue to the file "
-    "`issue.md` in your working directory. Its first line must be a title "
-    "`# <concise title>`; then a short diagnosis (what failed and why), and a "
-    "concrete proposed change (which module/contract, and what to do). Finish "
-    "with the verdict `done`.\n\n"
+    "the harness told you to write your output to above. Its first line must be "
+    "a title `# <concise title>`; then a short diagnosis (what failed and why), "
+    "and a concrete proposed change (which module/contract, and what to do). "
+    "Finish with the verdict `done`.\n\n"
     "When there is nothing actionable for the harness: do not write a file, and "
     "finish with the verdict `request_changes` — its summary saying briefly why "
     "the failure is not a harness bug.\n\n"
     "You are working from the failure report alone; you do not have the task's "
-    "worktree. Do not attempt to run or fix code — your deliverable is the issue."
+    "own worktree. Do not attempt to run or fix code — your deliverable is the "
+    "issue."
 )
 
 
@@ -420,6 +450,7 @@ AGENT_PERSONAS: dict[str, tuple[str, list[str]]] = {
     ),
     "review": (_REVIEW_PERSONA, ["Read", "Grep", "Glob", "Bash"]),
     "resolve": (_RESOLVE_PERSONA, ["Read", "Edit", "Bash", "Grep", "Glob"]),
+    "heal": (_HEALER_PERSONA, ["Read", "Write"]),
 }
 
 
@@ -441,6 +472,7 @@ AGENT_MODELS: dict[str, str] = {
     "development": "sonnet",
     "review": "sonnet",
     "resolve": "sonnet",
+    "heal": "opus",
 }
 
 
@@ -496,7 +528,15 @@ def _agent_definition_template(step: str, allowed_outcomes: list[str]) -> dict:
 def _write_default_agents(layout: HarnessLayout, workflow) -> None:
     layout.agents.mkdir(parents=True, exist_ok=True)
     for step in workflow.steps():
-        if step == LANDING_STEP:
+        # The landing step (bound to "open-pr" by app.build()'s own implicit
+        # default when no served workflow declares `finishers`) and any step a
+        # workflow explicitly binds to a finisher kind (e.g. `heal.json`'s
+        # `file-issue` → "open-issue") are driven by the finisher registry, not
+        # an agent persona — additive, not a replacement: `land` relies on the
+        # implicit default (its own `Workflow` carries no `finishers` entry for
+        # it), so the explicit `LANDING_STEP` check must stay alongside the
+        # generic one, not instead of it.
+        if step == LANDING_STEP or workflow.finisher_for(step) is not None:
             continue
         path = layout.agents / f"{step}.json"
         if path.exists():
@@ -505,28 +545,6 @@ def _write_default_agents(layout: HarnessLayout, workflow) -> None:
         path.write_text(
             json.dumps(definition, indent=2, ensure_ascii=False), encoding="utf-8"
         )
-
-
-def _write_healer_agent(layout: HarnessLayout) -> None:
-    """Write the `healer` persona used by the self-healing loop (invariant 14:
-    persona as data). It is not a workflow step — the healer is a loop assigned to
-    the `failed/` queue — so it lives beside the step agents but is written here."""
-    layout.agents.mkdir(parents=True, exist_ok=True)
-    path = layout.agents / "healer.json"
-    if path.exists():
-        return
-    definition = {
-        "prompt": _HEALER_PERSONA,
-        # Diagnosis is conservative-judgment work (v1's analyst/architect tier).
-        "model": "opus",
-        "fallback_model": None,
-        "allowed_tools": ["Read", "Write"],
-        "allowed_outcomes": ["done", "request_changes"],
-        "timeout": None,
-    }
-    path.write_text(
-        json.dumps(definition, indent=2, ensure_ascii=False), encoding="utf-8"
-    )
 
 
 def _write_default_repos(layout: HarnessLayout) -> None:
@@ -731,28 +749,24 @@ def _scheduled_sources(
     )
 
 
-def _process_sources(
+def _process_check_factories(
     args: argparse.Namespace,
-    root: Path,
     registry: RepositoryRegistry,
     *,
-    clock: Clock,
-    known_targets: set[str] | None,
     client: GithubClient | None = None,
-) -> list[TaskSource]:
-    """Processes declared under `<root>/processes/*.json`.
-
-    Compiles each into a `ScheduledTrigger` (see `_scheduled_sources`), and
-    additionally registers the `github-issues` action: a `GithubIssuesCheck`
+) -> dict[str, CheckFactory]:
+    """Check kinds `processes/*.json` may name that need a dependency
+    `BUILTIN_CHECKS` can't carry — `github-issues`/`github-conflicts`, each
     closed over a `GithubClient` + the repo registry. The client comes from the
-    caller (tests) or `GITHUB_TOKEN`. `BUILTIN_CHECKS` stays client-free; the
-    github-issues factory is added only here at wiring time. A `github-issues`
-    process without a client fails fast at build (`ProcessValidationError`)."""
-    from harness.drivers.checks import BUILTIN_CHECKS
-    from harness.drivers.fs_processes import (
-        FilesystemProcessRepository,
-        ProcessValidationError,
-    )
+    caller (tests) or `GITHUB_TOKEN`.
+
+    Returns just the factory dict — process *compilation* itself now happens
+    inside `app.build()` (ADR-0018), which merges this dict over
+    `BUILTIN_CHECKS` alongside its own internal `"failed-tasks"` factory (a
+    dependency this function has no reason to carry: that check needs the
+    harness's own live `failed`/`healed` queues, not an external client).
+    """
+    from harness.drivers.fs_processes import ProcessValidationError
     from harness.drivers.github_conflicts_check import GithubConflictsCheck
     from harness.drivers.github_issues_check import GithubIssuesCheck
 
@@ -790,24 +804,34 @@ def _process_sources(
             head_prefix=params.get("head_prefix", "harness/"),
         )
 
-    checks = {
-        **BUILTIN_CHECKS,
+    return {
         "github-issues": github_issues_factory,
         "github-conflicts": github_conflicts_factory,
     }
-    repo = FilesystemProcessRepository(root / "processes")
-    worktree_root = args.worktree_root or str(root / "worktrees")
-    return repo.build(
-        clock=clock,
-        checks=checks,
-        repository=None,
-        worktree_root=worktree_root,
-        known_targets=known_targets,
-        default_github_issues_label=args.github_label,
-    )
 
 
-def _slack_sinks(process_sources: list[TaskSource]) -> list[TaskSource]:
+def _declared_sink_kinds(processes_root: Path) -> set[str]:
+    """Which sink kinds `processes/*.json` declares, read straight off the raw
+    JSON — no `Check`/`compile_process` involved. This pre-scan only decides
+    whether a `SlackWebhookSink` should exist; a malformed process file's real
+    failure surfaces later, loudly, when `app.build()` actually compiles it."""
+    kinds: set[str] = set()
+    if not processes_root.is_dir():
+        return kinds
+    for path in processes_root.glob("*.json"):
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            continue
+        if not isinstance(raw, dict):
+            continue
+        kind = (raw.get("sink") or {}).get("kind")
+        if isinstance(kind, str):
+            kinds.add(kind)
+    return kinds
+
+
+def _slack_sinks(declared_kinds: set[str]) -> list[TaskSource]:
     """One `SlackWebhookSink` when `SLACK_WEBHOOK_URL` is set — the outbound
     destination for any process-born task stamped `data.sink == {"kind":
     "slack"}`. The webhook URL is a secret and comes only from the environment
@@ -818,16 +842,50 @@ def _slack_sinks(process_sources: list[TaskSource]) -> list[TaskSource]:
     webhook_url = os.environ.get("SLACK_WEBHOOK_URL")
     if webhook_url:
         return [SlackWebhookSink(webhook_url=webhook_url)]
-    if any(
-        (getattr(source, "sink", None) or {}).get("kind") == "slack"
-        for source in process_sources
-    ):
+    if "slack" in declared_kinds:
         print(
             "warning: a process declares a slack sink but SLACK_WEBHOOK_URL "
             "is not set, slack reflection is disabled",
             file=sys.stderr,
         )
     return []
+
+
+AUTOHEAL_PROCESS_DEFINITION = {
+    "trigger": {"interval": "30s"},
+    "action": {"check": "failed-tasks", "params": {}},
+    "target": {"workflow": "heal"},
+    "dedup": "per-state",
+    "sink": {"kind": "none"},
+}
+"""Target is `{"workflow": "heal"}`, not `{"step": "heal"}`: a workflow-less
+(bare `step`) task finishes after a single hop through `route()` (see
+`router.py`) — `file-issue` and its `open-issue` finisher would never run,
+silently. `heal`/`file-issue` is a genuine two-step workflow, so it needs a
+real `Workflow` in scope on the *second* `route()` call, which only happens
+when `task.workflow_template` is set (ADR-0018)."""
+
+
+def _ensure_autoheal_process(layout: HarnessLayout) -> None:
+    """`--heal-repo`'s thin-generator half: write `processes/autoheal.json`
+    unless one already exists — never clobbering an operator's hand-edited
+    file. Written directly (like `_init`'s `HEAL_DEFINITION`/
+    `RESOLVER_DEFINITION`), **not** through `FilesystemProcessAdmin.write`:
+    that write path validates via `compile_process`'s *default* `checks`
+    (`BUILTIN_CHECKS`, dependency-free) with no way to pass the merged dict
+    `app.build()` assembles — so it would reject `"failed-tasks"` as an
+    unknown check, even though the file is genuinely valid once `build()`
+    compiles it for real. The real validation this file needs to pass happens
+    at that point, not at write time.
+    """
+    path = layout.processes / "autoheal.json"
+    if path.exists():
+        return
+    layout.processes.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(AUTOHEAL_PROCESS_DEFINITION, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
 
 
 def service_path_entries(harness: Path) -> list[str]:
@@ -1553,6 +1611,42 @@ def _run(args: argparse.Namespace) -> int:
     if resolver_defined and args.resolver_workflow not in served_names:
         served_names = [*served_names, args.resolver_workflow]
 
+    # Self-healing (ADR-0018): enabled by `--heal-repo <owner/repo>` (where the
+    # `open-issue` finisher files issues). This must run *before* `known_targets`
+    # is computed below — the autoheal process's `{"workflow": "heal"}` target
+    # (and any bare trigger naming it) needs "heal" in the served set to
+    # validate. It reuses the claude agent, so it needs `--agent claude`;
+    # offline (no GITHUB_TOKEN) it falls back to the in-memory tracker so the
+    # loop still runs harmlessly.
+    finishers: dict[
+        str, Callable[[str, dict, Callable[[], ConsumerBehavior]], ConsumerBehavior]
+    ] = {}
+    if args.heal_repo:
+        if not use_agent:
+            print(
+                "error: --heal-repo needs --agent claude (the healer is a claude agent)",
+                file=sys.stderr,
+            )
+            return 2
+        if DEFAULT_HEAL_WORKFLOW not in served_names:
+            served_names = [*served_names, DEFAULT_HEAL_WORKFLOW]
+        token = os.environ.get("GITHUB_TOKEN")
+        issue_tracker = (
+            GithubIssueTracker(HttpGithubClient(token))
+            if token
+            else MemoryIssueTracker()
+        )
+        # `open-issue` replaces the file-issue step's behavior (like `open-pr`):
+        # it ignores step/config/inner and files the drafted heal issue. A
+        # factory, per the finisher registry contract (invariant #41).
+        finishers["open-issue"] = lambda step, config, inner: OpenIssueBehavior(
+            tracker=issue_tracker,
+            repo=args.heal_repo,
+            artifacts=artifact_view,
+            clock=SystemClock(),
+        )
+        _ensure_autoheal_process(layout)
+
     # Scheduled triggers (`triggers/*.json`) are `TaskSource`s that ride the
     # existing `sources` list — no new loop, no `build()` parameter. A trigger's
     # target must be a served workflow or a known step; `known_targets` (served
@@ -1570,60 +1664,35 @@ def _run(args: argparse.Namespace) -> int:
     sources = sources + _scheduled_sources(
         args, root, registry, clock=SystemClock(), known_targets=known_targets
     )
-    # Processes (`processes/*.json`) are the top-level authoring aggregate; each
-    # compiles to a `ScheduledTrigger` that rides the same `sources` list —
-    # no new loop, no `build()` parameter (invariant #39). A slack sink rides
-    # alongside them when `SLACK_WEBHOOK_URL` is set — the outbound half of a
-    # process declaring `{"kind": "slack"}` (invariant #40).
-    #
-    # The same client is threaded into the finisher registry below (the
-    # "label-issue" kind) — one client per wiring site, like every other
-    # GitHub-touching helper in this function.
+    # A single GitHub client threads into both the process check factories
+    # (`github-issues`/`github-conflicts`) and the `label-issue` finisher —
+    # one client per wiring site, like every other GitHub-touching helper here.
     token = os.environ.get("GITHUB_TOKEN")
     github_client = HttpGithubClient(token) if token else None
-    process_sources = _process_sources(
-        args,
-        root,
-        registry,
-        clock=SystemClock(),
-        known_targets=known_targets,
-        client=github_client,
-    )
-    sources = sources + process_sources + _slack_sinks(process_sources)
 
-    # "label-issue" (a finisher, invariant #41/ADR-0018): applies an outcome ->
-    # label mapping to a task's source GitHub issue, wrapping (not replacing)
-    # the step's own agent behavior — used by a triage Process's PM persona to
+    # Processes (`processes/*.json`) compile inside `app.build()` itself now
+    # (ADR-0018) — the `failed-tasks` check needs the harness's own live
+    # `failed`/`healed`/`events`, which only exist once `build()` has
+    # constructed them. `_process_check_factories` supplies just the two
+    # externally-dependent check kinds (`github-issues`/`github-conflicts`);
+    # the Slack-sink *decision*, though, still has to happen here, before
+    # `build()` — a `SlackWebhookSink` must be present in `sources` before
+    # `build()` constructs `SourceReflectorSink(sources)` internally. Reading
+    # the raw declared sink kinds needs no compilation at all (invariant #40).
+    sources = sources + _slack_sinks(_declared_sink_kinds(layout.processes))
+    extra_checks = _process_check_factories(args, registry, client=github_client)
+
+    # "label-issue" (a finisher, invariant #41): applies an outcome -> label
+    # mapping to a task's source GitHub issue, wrapping (not replacing) the
+    # step's own agent behavior — used by a triage Process's PM persona to
     # relabel an issue harness:todo/harness:needs-info after judging it. Only
     # registered when a token is configured; a workflow binding a step to it
-    # otherwise fails at `build()` through the existing "unknown finisher
-    # kind" error, no new error path.
-    finishers: dict[str, Callable[[str, dict, Callable[[], ConsumerBehavior]], ConsumerBehavior]] = {}
+    # otherwise fails at `build()` through the existing "unknown finisher kind"
+    # error, no new error path.
     if github_client is not None:
         finishers["label-issue"] = lambda step, config, inner: LabelIssueBehavior(
             inner=inner(), client=github_client, labels=config.get("labels", {})
         )
-
-    # Self-healing: an agent assigned to the `failed/` queue. Enabled by
-    # `--heal-repo <owner/repo>` (where the healer opens issues). It reuses the
-    # claude agent, so it needs `--agent claude`; offline (no GITHUB_TOKEN) it
-    # falls back to the in-memory tracker so the loop still runs harmlessly.
-    heal = None
-    issue_tracker = None
-    if args.heal_repo:
-        if not use_agent:
-            print(
-                "error: --heal-repo needs --agent claude (the healer is a claude agent)",
-                file=sys.stderr,
-            )
-            return 2
-        token = os.environ.get("GITHUB_TOKEN")
-        issue_tracker = (
-            GithubIssueTracker(HttpGithubClient(token))
-            if token
-            else MemoryIssueTracker()
-        )
-        heal = HealConfig(repository=args.heal_repo)
 
     try:
         harness = build(
@@ -1641,10 +1710,15 @@ def _run(args: argparse.Namespace) -> int:
             finishers=finishers or None,
             delay=args.delay,
             request_changes_once_at=args.request_changes_at,
-            issue_tracker=issue_tracker,
-            heal=heal,
+            extra_checks=extra_checks,
         )
     except WorkflowNotFound as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
+    except ValueError as error:
+        # e.g. a served workflow names a finisher kind nothing registered — most
+        # commonly `heal.json`'s `file-issue` step served without `--heal-repo`
+        # (which is what wires the "open-issue" kind into the registry).
         print(f"error: {error}", file=sys.stderr)
         return 2
 

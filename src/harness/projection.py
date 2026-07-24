@@ -54,8 +54,6 @@ def _reachable_order(workflow: Workflow) -> list[str]:
 def column_order(
     steps: Iterable[str],
     workflows: Sequence[Workflow] = (),
-    *,
-    healed: bool = False,
 ) -> tuple[str, ...]:
     """Union of each workflow's own reachability order (first-seen wins), then
     every remaining known step in the order `steps` was given, then terminals.
@@ -64,8 +62,9 @@ def column_order(
     workflows[1]'s not-yet-seen steps, and so on; a step shared by two
     workflows shows up once. Any remaining known step (workflow-less, or
     unreferenced by any workflow) then follows in the order `steps` was given.
-    `healed=True` appends the `healed` terminal column — only when a healer is
-    wired, so a plain harness keeps its exact column set.
+    The `healed` terminal column is unconditional — an empty, harmless column
+    when nothing ever heals, exactly like an unused workflow step's column
+    already is.
     """
     order: list[str] = []
     for workflow in workflows:
@@ -77,7 +76,7 @@ def column_order(
         if step != END and step not in order:
             order.append(step)
 
-    tail = (DONE_COLUMN, FAILED_COLUMN) + ((HEALED_COLUMN,) if healed else ())
+    tail = (DONE_COLUMN, FAILED_COLUMN, HEALED_COLUMN)
     return (TODO_COLUMN,) + tuple(order) + tail
 
 
@@ -86,15 +85,11 @@ class BoardProjection(BoardView):
         self,
         steps: Iterable[str],
         workflows: Sequence[Workflow] = (),
-        *,
-        include_healed: bool = False,
     ) -> None:
         # One tab per served workflow, each carrying that workflow's own column
-        # order. `include_healed` appends the `healed` terminal column — only
-        # when a healer is wired, so a plain harness keeps its exact column set.
+        # order (including the unconditional `healed` terminal column).
         self._orders: dict[str, tuple[str, ...]] = {
-            workflow.name: column_order((), [workflow], healed=include_healed)
-            for workflow in workflows
+            workflow.name: column_order((), [workflow]) for workflow in workflows
         }
         # The UNKNOWN tab catches tasks whose template isn't a served workflow —
         # a dispatch failure, historical done/failed data from a removed
@@ -102,7 +97,7 @@ class BoardProjection(BoardView):
         # being optional) workflow-less step-only tasks, whose bare `steps`
         # become real columns here. TODO_COLUMN must stay or such a task is
         # silently dropped from the board until the dispatcher fails it.
-        self._orders[UNKNOWN_WORKFLOW] = column_order(steps, healed=include_healed)
+        self._orders[UNKNOWN_WORKFLOW] = column_order(steps)
         self._tasks: dict[str, Task] = {}
         self._locations: dict[str, tuple[str, str]] = {}
         self._revision = 0

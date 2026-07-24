@@ -2,7 +2,13 @@ import asyncio
 
 from harness.drivers.memory import MemoryTaskQueue
 from harness.models import END, HistoryEntry, Task, Transition, Workflow
-from harness.ports.board import DONE_COLUMN, FAILED_COLUMN, TODO_COLUMN, UNKNOWN_WORKFLOW
+from harness.ports.board import (
+    DONE_COLUMN,
+    FAILED_COLUMN,
+    HEALED_COLUMN,
+    TODO_COLUMN,
+    UNKNOWN_WORKFLOW,
+)
 from harness.projection import BoardProjection, column_order
 
 WORKFLOW = Workflow(
@@ -49,6 +55,7 @@ def test_column_order_follows_reachability_and_ignores_back_edges():
         "review",
         DONE_COLUMN,
         FAILED_COLUMN,
+        HEALED_COLUMN,
     )
 
 
@@ -72,6 +79,7 @@ def test_column_order_unions_multiple_workflows_no_duplicates():
         "review",
         DONE_COLUMN,
         FAILED_COLUMN,
+        HEALED_COLUMN,
     )
 
 
@@ -95,6 +103,7 @@ def test_column_order_falls_back_to_declaration_order_for_workflow_less_steps():
         "triage",
         DONE_COLUMN,
         FAILED_COLUMN,
+        HEALED_COLUMN,
     )
 
 
@@ -109,6 +118,7 @@ def test_column_order_folds_in_extra_workflow_steps():
         "land",
         DONE_COLUMN,
         FAILED_COLUMN,
+        HEALED_COLUMN,
     )
 
 
@@ -118,6 +128,7 @@ def test_column_order_with_no_workflow_uses_declaration_order():
         "triage",
         DONE_COLUMN,
         FAILED_COLUMN,
+        HEALED_COLUMN,
     )
 
 

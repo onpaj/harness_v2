@@ -11,12 +11,14 @@ from harness.app import HarnessLayout
 from harness.cli import (
     AGENT_PERSONAS,
     DEFAULT_DEFINITION,
+    DEFAULT_HEAL_WORKFLOW,
     DEFAULT_WORKFLOW,
     _REVIEW_PERSONA,
     _agent_definition_template,
+    _declared_sink_kinds,
     _github_reflectors,
     _github_sources,
-    _process_sources,
+    _process_check_factories,
     _slack_sinks,
     main,
     serve,
@@ -60,32 +62,43 @@ def test_init_writes_default_agents_with_null_timeout(tmp_path):
     assert definition["timeout"] is None
 
 
-def test_init_writes_healer_persona(tmp_path):
-    from harness.drivers.fs_agents import FilesystemAgentCatalog
-
+def test_init_writes_heal_workflow_and_agent(tmp_path):
     assert main(["init", "--root", str(tmp_path)]) == 0
 
-    path = tmp_path / "agents" / "healer.json"
-    assert path.is_file()
-    definition = json.loads(path.read_text())
+    workflow = json.loads((tmp_path / "workflows" / "heal.json").read_text())
+    assert workflow["start"] == "heal"
+    assert {"from": "heal", "on": "done", "to": "file-issue"} in workflow["transitions"]
+    assert workflow["finishers"] == {"file-issue": "open-issue"}
+
+    definition = json.loads((tmp_path / "agents" / "heal.json").read_text())
     assert definition["allowed_outcomes"] == ["done", "request_changes"]
 
     # it parses to a valid AgentSpec with both outcomes
-    spec = FilesystemAgentCatalog(tmp_path / "agents").get("healer")
+    spec = FilesystemAgentCatalog(tmp_path / "agents").get("heal")
     assert spec.allowed_outcomes == (DONE, REQUEST_CHANGES)
     assert spec.prompt
 
+    # `file-issue` is bound to a finisher kind, not an agent persona — no
+    # agents/file-issue.json, mirroring how `land` never gets one either
+    # (architecture-02's regression guard on the generalized skip condition).
+    assert not (tmp_path / "agents" / "file-issue.json").exists()
+    assert not (tmp_path / "agents" / "land.json").exists()
 
-def test_run_heal_repo_passes_heal_config_and_tracker(monkeypatch, tmp_path):
-    from harness.app import HealConfig
+    # a bare `harness init` has no repo to file issues against — the process
+    # that actually drives healing stays gated behind `--heal-repo`.
+    assert not (tmp_path / "processes" / "autoheal.json").exists()
+
+
+def test_run_heal_repo_wires_open_issue_finisher_and_tracker(monkeypatch, tmp_path):
+    from harness.behaviors.open_issue import OpenIssueBehavior
     from harness.drivers.memory import MemoryIssueTracker
 
     main(["init", "--root", str(tmp_path)])
     captured = {}
 
     def fake_build(*args, **kwargs):
-        captured["heal"] = kwargs.get("heal")
-        captured["issue_tracker"] = kwargs.get("issue_tracker")
+        captured["served_names"] = args[1]
+        captured["finishers"] = kwargs.get("finishers")
         return object()
 
     async def fake_serve(harness, port, poll_interval, source_interval=30.0, pr_poll_interval=0.0, reconcile_interval=300.0):
@@ -96,9 +109,21 @@ def test_run_heal_repo_passes_heal_config_and_tracker(monkeypatch, tmp_path):
     monkeypatch.delenv("GITHUB_TOKEN", raising=False)
 
     assert main(["run", "--root", str(tmp_path), "--heal-repo", "onpaj/harness_v2"]) == 0
-    assert captured["heal"] == HealConfig(repository="onpaj/harness_v2")
+    assert DEFAULT_HEAL_WORKFLOW in captured["served_names"]
+    # the finisher registry holds factories (invariant #41), so call it to get
+    # the behavior — open-issue ignores step/config/inner and replaces the step.
+    behavior = captured["finishers"]["open-issue"]("file-issue", {}, lambda: None)
+    assert isinstance(behavior, OpenIssueBehavior)
     # offline (no token) → the in-memory tracker, so the loop still runs
-    assert isinstance(captured["issue_tracker"], MemoryIssueTracker)
+    assert isinstance(behavior._tracker, MemoryIssueTracker)
+    assert behavior._repo == "onpaj/harness_v2"
+
+    # the thin generator also wrote the autoheal process — targeting the
+    # *workflow*, not the bare step (a workflow-less target finishes after one
+    # hop and never reaches file-issue/open-issue, ADR-0018).
+    process = json.loads((tmp_path / "processes" / "autoheal.json").read_text())
+    assert process["target"] == {"workflow": "heal"}
+    assert process["action"]["check"] == "failed-tasks"
 
 
 def test_run_heal_repo_uses_github_tracker_with_a_token(monkeypatch, tmp_path):
@@ -108,7 +133,7 @@ def test_run_heal_repo_uses_github_tracker_with_a_token(monkeypatch, tmp_path):
     captured = {}
 
     def fake_build(*args, **kwargs):
-        captured["issue_tracker"] = kwargs.get("issue_tracker")
+        captured["finishers"] = kwargs.get("finishers")
         return object()
 
     async def fake_serve(harness, port, poll_interval, source_interval=30.0, pr_poll_interval=0.0, reconcile_interval=300.0):
@@ -119,7 +144,34 @@ def test_run_heal_repo_uses_github_tracker_with_a_token(monkeypatch, tmp_path):
     monkeypatch.setenv("GITHUB_TOKEN", "tok")
 
     assert main(["run", "--root", str(tmp_path), "--heal-repo", "onpaj/harness_v2"]) == 0
-    assert isinstance(captured["issue_tracker"], GithubIssueTracker)
+    built = captured["finishers"]["open-issue"]("file-issue", {}, lambda: None)
+    assert isinstance(built._tracker, GithubIssueTracker)
+
+
+def test_run_heal_repo_does_not_clobber_a_hand_edited_autoheal_process(monkeypatch, tmp_path):
+    main(["init", "--root", str(tmp_path)])
+    (tmp_path / "processes").mkdir(exist_ok=True)
+    custom = {
+        "trigger": {"interval": "5m"},
+        "action": {"check": "failed-tasks", "params": {}},
+        "target": {"workflow": "heal"},
+        "dedup": "per-state",
+        "sink": {"kind": "none"},
+    }
+    (tmp_path / "processes" / "autoheal.json").write_text(json.dumps(custom))
+
+    monkeypatch.setattr("harness.cli.build", lambda *a, **k: object())
+
+    async def fake_serve(harness, port, poll_interval, source_interval=30.0, pr_poll_interval=0.0, reconcile_interval=300.0):
+        pass
+
+    monkeypatch.setattr("harness.cli.serve", fake_serve)
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+
+    assert main(["run", "--root", str(tmp_path), "--heal-repo", "onpaj/harness_v2"]) == 0
+
+    on_disk = json.loads((tmp_path / "processes" / "autoheal.json").read_text())
+    assert on_disk["trigger"]["interval"] == "5m"
 
 
 def test_run_registers_label_issue_finisher_only_with_a_token(monkeypatch, tmp_path):
@@ -178,12 +230,13 @@ def test_run_label_issue_finisher_wraps_inner_and_applies_the_mapped_label(
     assert isinstance(built, LabelIssueBehavior)
 
 
-def test_run_without_heal_repo_wires_no_healer(monkeypatch, tmp_path):
+def test_run_without_heal_repo_wires_no_open_issue_finisher(monkeypatch, tmp_path):
     main(["init", "--root", str(tmp_path)])
     captured = {}
 
     def fake_build(*args, **kwargs):
-        captured["heal"] = kwargs.get("heal")
+        captured["finishers"] = kwargs.get("finishers")
+        captured["served_names"] = args[1]
         return object()
 
     async def fake_serve(harness, port, poll_interval, source_interval=30.0, pr_poll_interval=0.0, reconcile_interval=300.0):
@@ -193,7 +246,8 @@ def test_run_without_heal_repo_wires_no_healer(monkeypatch, tmp_path):
     monkeypatch.setattr("harness.cli.serve", fake_serve)
 
     assert main(["run", "--root", str(tmp_path)]) == 0
-    assert captured["heal"] is None
+    assert captured["finishers"] is None
+    assert DEFAULT_HEAL_WORKFLOW not in captured["served_names"]
 
 
 def test_run_heal_repo_needs_claude_agent(monkeypatch, tmp_path):
@@ -749,9 +803,25 @@ def test_run_all_workflows_serves_every_definition_found(monkeypatch, tmp_path):
 
     monkeypatch.setattr("harness.cli.serve", fake_serve)
 
-    assert main(["run", "--root", str(tmp_path), "--all-workflows"]) == 0
-    # `init` also scaffolds the resolver workflow, so `--all-workflows` serves it too.
-    assert set(captured["harness"].workflows) == {"development", "hotfix", "resolver"}
+    # `init` also scaffolds the resolver and heal workflows; `heal`'s
+    # `file-issue` step needs the "open-issue" finisher kind, which only
+    # `--heal-repo` wires in — so serving it here needs the flag too.
+    assert main(
+        ["run", "--root", str(tmp_path), "--all-workflows", "--heal-repo", "onpaj/harness_v2"]
+    ) == 0
+    assert set(captured["harness"].workflows) == {"development", "hotfix", "resolver", "heal"}
+
+
+def test_run_all_workflows_without_heal_repo_fails_fast_on_the_heal_workflow(tmp_path, capsys):
+    """Serving the dormant `heal` workflow without `--heal-repo` means nothing
+    registers its `file-issue` step's "open-issue" finisher kind — `build()`
+    refuses at startup (fail-fast configuration), not mid-run."""
+    main(["init", "--root", str(tmp_path)])
+    capsys.readouterr()
+
+    assert main(["run", "--root", str(tmp_path), "--all-workflows"]) == 2
+
+    assert "open-issue" in capsys.readouterr().err
 
 
 def test_run_rejects_workflow_and_all_workflows_together(tmp_path, capsys):
@@ -1057,13 +1127,31 @@ def test_run_gates_github_sources_and_reflectors_mutually_exclusively(monkeypatc
 
 
 def _process_args(**overrides):
-    """Minimal namespace `_process_sources` reads (worktree_root + github_label)."""
+    """Minimal namespace `_process_check_factories` reads (github_label)."""
     base = dict(worktree_root=None, github_label="harness:todo")
     base.update(overrides)
     return argparse.Namespace(**base)
 
 
-def test_process_sources_builds_a_github_issues_process(tmp_path):
+def _compile_processes(tmp_path, *, checks, known_targets, clock):
+    """Test helper standing in for what `app.build()` now does internally
+    (ADR-0018/architecture-02 §2.1): `_process_check_factories` only supplies
+    the externally-dependent check factories, compilation itself happens
+    inside `build()`. These tests exercise that compilation directly against
+    `FilesystemProcessRepository`, exactly as `build()` does."""
+    from harness.drivers.checks import BUILTIN_CHECKS
+    from harness.drivers.fs_processes import FilesystemProcessRepository
+
+    return FilesystemProcessRepository(tmp_path / "processes").build(
+        clock=clock,
+        checks={**BUILTIN_CHECKS, **checks},
+        repository=None,
+        worktree_root=str(tmp_path / "worktrees"),
+        known_targets=known_targets,
+    )
+
+
+def test_process_check_factories_builds_a_github_issues_process(tmp_path):
     from harness.drivers.memory import FakeClock
 
     (tmp_path / "processes").mkdir()
@@ -1074,99 +1162,20 @@ def test_process_sources_builds_a_github_issues_process(tmp_path):
         ' "sink": {"kind": "none"}}'
     )
     registry = MemoryRepositoryRegistry({"heblo": Path("/repos/heblo")})
+    checks = _process_check_factories(_process_args(), registry, client=FakeGithubClient())
 
-    sources = _process_sources(
-        _process_args(),
+    sources = _compile_processes(
         tmp_path,
-        registry,
-        clock=FakeClock("2026-07-22T10:00:00Z"),
+        checks=checks,
         known_targets={"default"},
-        client=FakeGithubClient(),
+        clock=FakeClock("2026-07-22T10:00:00Z"),
     )
 
     assert len(sources) == 1
     assert sources[0].kind == "scheduled:harness-todo"
 
 
-def test_process_sources_github_issues_threads_claimed_label(tmp_path):
-    """A triage process scans a different label and claims into a different
-    one than the ingestion process's harness:queued default (FR-1)."""
-    from harness.drivers.memory import FakeClock
-
-    (tmp_path / "processes").mkdir()
-    (tmp_path / "processes" / "triage.json").write_text(
-        '{"trigger": {"interval": "30s"},'
-        ' "action": {"check": "github-issues", "params": '
-        '{"label": "harness:triage", "claimed_label": "harness:validating"}},'
-        ' "target": {"workflow": "triage"}, "dedup": "per-state",'
-        ' "sink": {"kind": "none"}}'
-    )
-    registry = MemoryRepositoryRegistry({"heblo": Path("/repos/heblo")})
-
-    (sources_trigger,) = _process_sources(
-        _process_args(),
-        tmp_path,
-        registry,
-        clock=FakeClock("2026-07-22T10:00:00Z"),
-        known_targets={"triage"},
-        client=FakeGithubClient(),
-    )
-
-    check = sources_trigger._check
-    assert check._label == "harness:triage"
-    assert check._claimed_label == "harness:validating"
-
-
-def test_process_sources_github_issues_claimed_label_defaults_to_queued(tmp_path):
-    from harness.drivers.memory import FakeClock
-
-    (tmp_path / "processes").mkdir()
-    (tmp_path / "processes" / "harness-todo.json").write_text(
-        '{"trigger": {"interval": "30s"},'
-        ' "action": {"check": "github-issues", "params": {"label": "harness:todo"}},'
-        ' "target": {"workflow": "default"}, "dedup": "per-state",'
-        ' "sink": {"kind": "none"}}'
-    )
-    registry = MemoryRepositoryRegistry({"heblo": Path("/repos/heblo")})
-
-    (sources_trigger,) = _process_sources(
-        _process_args(),
-        tmp_path,
-        registry,
-        clock=FakeClock("2026-07-22T10:00:00Z"),
-        known_targets={"default"},
-        client=FakeGithubClient(),
-    )
-
-    assert sources_trigger._check._claimed_label == "harness:queued"
-
-
-def test_process_sources_github_issues_rejects_non_string_claimed_label(tmp_path):
-    from harness.drivers.fs_processes import ProcessValidationError
-    from harness.drivers.memory import FakeClock
-
-    (tmp_path / "processes").mkdir()
-    (tmp_path / "processes" / "triage.json").write_text(
-        '{"trigger": {"interval": "30s"},'
-        ' "action": {"check": "github-issues", "params": {"claimed_label": 7}},'
-        ' "target": {"workflow": "default"}, "dedup": "per-state",'
-        ' "sink": {"kind": "none"}}'
-    )
-    registry = MemoryRepositoryRegistry({"heblo": Path("/repos/heblo")})
-
-    with pytest.raises(ProcessValidationError, match="label/claimed_label") as exc:
-        _process_sources(
-            _process_args(),
-            tmp_path,
-            registry,
-            clock=FakeClock("2026-07-22T10:00:00Z"),
-            known_targets={"default"},
-            client=FakeGithubClient(),
-        )
-    assert exc.value.field == "params"
-
-
-def test_process_sources_github_issues_fails_fast_without_a_client(tmp_path, monkeypatch):
+def test_process_check_factories_github_issues_fails_fast_without_a_client(tmp_path, monkeypatch):
     from harness.drivers.fs_processes import ProcessValidationError
     from harness.drivers.memory import FakeClock
 
@@ -1178,20 +1187,19 @@ def test_process_sources_github_issues_fails_fast_without_a_client(tmp_path, mon
         ' "target": {"workflow": "default"}}'
     )
     registry = MemoryRepositoryRegistry({"heblo": Path("/repos/heblo")})
+    checks = _process_check_factories(_process_args(), registry, client=None)
 
     with pytest.raises(ProcessValidationError) as exc:
-        _process_sources(
-            _process_args(),
+        _compile_processes(
             tmp_path,
-            registry,
-            clock=FakeClock("2026-07-22T10:00:00Z"),
+            checks=checks,
             known_targets={"default"},
-            client=None,
+            clock=FakeClock("2026-07-22T10:00:00Z"),
         )
     assert "GITHUB_TOKEN" in str(exc.value)
 
 
-def test_process_sources_builds_a_resolve_conflicts_process(tmp_path):
+def test_process_check_factories_builds_a_resolve_conflicts_process(tmp_path):
     from harness.drivers.memory import FakeClock
 
     (tmp_path / "processes").mkdir()
@@ -1202,21 +1210,20 @@ def test_process_sources_builds_a_resolve_conflicts_process(tmp_path):
         ' "sink": {"kind": "none"}}'
     )
     registry = MemoryRepositoryRegistry({"harness_v2": Path("/repos/harness_v2")})
+    checks = _process_check_factories(_process_args(), registry, client=FakeGithubClient())
 
-    sources = _process_sources(
-        _process_args(),
+    sources = _compile_processes(
         tmp_path,
-        registry,
-        clock=FakeClock("2026-07-23T10:00:00Z"),
+        checks=checks,
         known_targets={"resolver"},
-        client=FakeGithubClient(),
+        clock=FakeClock("2026-07-23T10:00:00Z"),
     )
 
     assert len(sources) == 1
     assert sources[0].kind == "scheduled:resolve-conflicts"
 
 
-def test_process_sources_github_conflicts_fails_fast_without_a_client(tmp_path, monkeypatch):
+def test_process_check_factories_github_conflicts_fails_fast_without_a_client(tmp_path, monkeypatch):
     from harness.drivers.fs_processes import ProcessValidationError
     from harness.drivers.memory import FakeClock
 
@@ -1228,23 +1235,28 @@ def test_process_sources_github_conflicts_fails_fast_without_a_client(tmp_path, 
         ' "target": {"workflow": "resolver"}}'
     )
     registry = MemoryRepositoryRegistry({"harness_v2": Path("/repos/harness_v2")})
+    checks = _process_check_factories(_process_args(), registry, client=None)
 
     with pytest.raises(ProcessValidationError) as exc:
-        _process_sources(
-            _process_args(),
+        _compile_processes(
             tmp_path,
-            registry,
-            clock=FakeClock("2026-07-23T10:00:00Z"),
+            checks=checks,
             known_targets={"resolver"},
-            client=None,
+            clock=FakeClock("2026-07-23T10:00:00Z"),
         )
     assert "GITHUB_TOKEN" in str(exc.value)
 
 
-def _slack_process_sources(tmp_path, sink_kind="slack"):
-    """Compiled process sources with one process declaring the given sink."""
-    from harness.drivers.memory import FakeClock
+def test_process_check_factories_stays_dependency_free_for_builtin_checks(tmp_path):
+    """`BUILTIN_CHECKS` itself is untouched by this factory — it only ever adds
+    the two externally-dependent kinds."""
+    registry = MemoryRepositoryRegistry({})
+    checks = _process_check_factories(_process_args(), registry, client=None)
 
+    assert set(checks) == {"github-issues", "github-conflicts"}
+
+
+def _write_sink_process(tmp_path, sink_kind="slack"):
     (tmp_path / "processes").mkdir(exist_ok=True)
     (tmp_path / "processes" / "notify.json").write_text(
         json.dumps(
@@ -1256,23 +1268,25 @@ def _slack_process_sources(tmp_path, sink_kind="slack"):
             }
         )
     )
-    registry = MemoryRepositoryRegistry({})
-    return _process_sources(
-        _process_args(),
-        tmp_path,
-        registry,
-        clock=FakeClock("2026-07-23T10:00:00Z"),
-        known_targets={"default"},
-        client=None,
-    )
+
+
+def test_declared_sink_kinds_reads_raw_json_with_no_compilation(tmp_path):
+    _write_sink_process(tmp_path, sink_kind="slack")
+
+    assert _declared_sink_kinds(tmp_path / "processes") == {"slack"}
+
+
+def test_declared_sink_kinds_empty_for_a_missing_processes_dir(tmp_path):
+    assert _declared_sink_kinds(tmp_path / "processes") == set()
 
 
 def test_slack_sinks_registers_one_sink_when_url_is_set(monkeypatch, tmp_path):
     from harness.drivers.slack_sink import SlackWebhookSink
 
     monkeypatch.setenv("SLACK_WEBHOOK_URL", "https://hooks.slack.example/x")
+    _write_sink_process(tmp_path, sink_kind="slack")
 
-    sinks = _slack_sinks(_slack_process_sources(tmp_path))
+    sinks = _slack_sinks(_declared_sink_kinds(tmp_path / "processes"))
 
     assert len(sinks) == 1
     assert isinstance(sinks[0], SlackWebhookSink)
@@ -1282,8 +1296,9 @@ def test_slack_sinks_warns_when_a_process_declares_slack_but_url_is_missing(
     monkeypatch, capsys, tmp_path
 ):
     monkeypatch.delenv("SLACK_WEBHOOK_URL", raising=False)
+    _write_sink_process(tmp_path, sink_kind="slack")
 
-    sinks = _slack_sinks(_slack_process_sources(tmp_path))
+    sinks = _slack_sinks(_declared_sink_kinds(tmp_path / "processes"))
 
     assert sinks == []
     assert "SLACK_WEBHOOK_URL" in capsys.readouterr().err
@@ -1293,8 +1308,9 @@ def test_slack_sinks_silent_when_no_process_declares_slack(
     monkeypatch, capsys, tmp_path
 ):
     monkeypatch.delenv("SLACK_WEBHOOK_URL", raising=False)
+    _write_sink_process(tmp_path, sink_kind="none")
 
-    sinks = _slack_sinks(_slack_process_sources(tmp_path, sink_kind="none"))
+    sinks = _slack_sinks(_declared_sink_kinds(tmp_path / "processes"))
 
     assert sinks == []
     assert capsys.readouterr().err == ""

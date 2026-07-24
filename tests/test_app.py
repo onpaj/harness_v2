@@ -954,6 +954,123 @@ def test_caller_supplied_finisher_registry_entry_is_used(tmp_path):
     assert by_actor["consumer:publish"]._behavior is recorder
 
 
+# --- ADR-0018: process compilation moved inside build() ---------------------
+
+
+def _write_process(tmp_path, name, body):
+    processes = tmp_path / "processes"
+    processes.mkdir(parents=True, exist_ok=True)
+    (processes / f"{name}.json").write_text(json.dumps(body), encoding="utf-8")
+
+
+def test_build_compiles_processes_root_targeting_a_served_workflow_by_name(tmp_path):
+    """architecture-02 §2.2's fix, made explicit and readable: `known_targets`
+    passed to `FilesystemProcessRepository.build()` must include served
+    *workflow* names, not just step names — a `{"workflow": "default"}`
+    target names the workflow itself, which is not one of DEFINITION's own
+    step names (plan/development/review/land). Before the fix this process
+    would fail `ProcessValidationError` at every `build()` call."""
+    seed_definition(tmp_path, DEFINITION)
+    _write_process(
+        tmp_path,
+        "nightly",
+        {
+            "trigger": {"interval": "1h"},
+            "action": {"check": "always"},
+            "target": {"workflow": "default"},
+            "sink": {"kind": "none"},
+        },
+    )
+
+    harness = build(tmp_path, "default", events=MemoryEventSink())
+
+    assert any(
+        getattr(poller, "_source", None) is not None for poller in harness.pollers
+    )
+    assert len(harness.pollers) == 1
+
+
+def test_build_processes_root_defaults_to_layout_processes(tmp_path):
+    """No `processes/` directory at all → no pollers, exactly as before this
+    capability existed (backward compatible)."""
+    seed_definition(tmp_path, DEFINITION)
+
+    harness = build(tmp_path, "default", events=MemoryEventSink())
+
+    assert harness.pollers == []
+
+
+def test_build_extra_checks_merge_over_builtin_checks(tmp_path):
+    """`extra_checks` (the dependency-bag shape `github-issues`/
+    `github-conflicts` use, wired from `cli.py`) is merged into the checks
+    dict `build()` uses to compile `processes/*.json` — alongside its own
+    unconditional `"failed-tasks"` entry, never replacing it."""
+    from harness.drivers.checks import AlwaysCheck
+
+    seed_definition(tmp_path, DEFINITION)
+    _write_process(
+        tmp_path,
+        "custom",
+        {
+            "trigger": {"interval": "1h"},
+            "action": {"check": "custom-check"},
+            "target": {"workflow": "default"},
+            "sink": {"kind": "none"},
+        },
+    )
+
+    harness = build(
+        tmp_path,
+        "default",
+        events=MemoryEventSink(),
+        extra_checks={"custom-check": lambda params: AlwaysCheck()},
+    )
+
+    assert len(harness.pollers) == 1
+
+
+def test_build_unknown_check_still_fails_fast(tmp_path):
+    from harness.drivers.fs_processes import ProcessValidationError
+
+    seed_definition(tmp_path, DEFINITION)
+    _write_process(
+        tmp_path,
+        "bogus",
+        {
+            "trigger": {"interval": "1h"},
+            "action": {"check": "does-not-exist"},
+            "target": {"workflow": "default"},
+        },
+    )
+
+    with pytest.raises(ProcessValidationError):
+        build(tmp_path, "default", events=MemoryEventSink())
+
+
+def test_build_processes_root_parameter_points_at_a_different_directory(tmp_path):
+    seed_definition(tmp_path, DEFINITION)
+    _write_process(
+        tmp_path / "elsewhere",
+        "nightly",
+        {
+            "trigger": {"interval": "1h"},
+            "action": {"check": "always"},
+            "target": {"workflow": "default"},
+            "sink": {"kind": "none"},
+        },
+    )
+
+    # The default location (tmp_path/"processes") has nothing in it.
+    default_location = build(tmp_path, "default", events=MemoryEventSink())
+    assert default_location.pollers == []
+
+    redirected = build(
+        tmp_path,
+        "default",
+        events=MemoryEventSink(),
+        processes_root=tmp_path / "elsewhere" / "processes",
+    )
+    assert len(redirected.pollers) == 1
 def test_finisher_factory_receives_step_config_and_a_lazy_inner_thunk(tmp_path):
     """The factory shape (step, config, inner) is what lets a finisher *wrap*
     the step's own agent behavior instead of only replacing it (ADR-0018).

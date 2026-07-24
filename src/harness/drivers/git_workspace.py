@@ -40,6 +40,14 @@ Every `git` invocation that may create a commit (`commit`, and the up-front
 identity check `merge` makes) carries the harness's own identity in the
 environment, so the driver works on a machine with no git identity configured.
 
+A task with no `repository` at all (`task.repository is None` — e.g. a `heal`
+task, ADR-0018) has no registered repo to derive a worktree from; `attach`
+checks this first and hands off to `_attach_repo_less`, which git-initializes a
+standalone scratch repo at the same `<worktrees_root>/<task_id>` path instead,
+with the same reset-on-reattach idempotence. Implicit contract: a repo-less
+task's workflow must end before any step that pushes — `push()` has no
+`origin` to push to there.
+
 Calls the system `git` via subprocess — no new production dependency.
 """
 
@@ -239,6 +247,13 @@ class GitWorkspace(Workspace):
         self._worktrees_root = Path(worktrees_root)
 
     def attach(self, task: Task) -> GitWorkspaceHandle:
+        # A repo-less task (`task.repository is None` — e.g. a `heal` task,
+        # ADR-0018) has no registered repo to derive a worktree from at all;
+        # `resolve` must never see `None`, so this is checked first, before
+        # `override`/`branch` are even computed.
+        if task.repository is None:
+            return self._attach_repo_less(task)
+
         # `task.data["branch"]` (resolver tasks) checks out an *existing* branch
         # instead of creating a fresh `harness/<task.id>` from HEAD — the
         # resolver fixes the same PR's branch, it doesn't open a new one.
@@ -323,6 +338,42 @@ class GitWorkspace(Workspace):
             # uncommitted changes, `clean -fd` removes untracked files and
             # directories. Without `-x` — ignored files (e.g. `.artifacts/` if
             # they were gitignored) stay.
+            _git(["-C", str(worktree), "reset", "--hard", "HEAD"])
+            _git(["-C", str(worktree), "clean", "-fd"])
+        return GitWorkspaceHandle(worktree, branch)
+
+    def _attach_repo_less(self, task: Task) -> GitWorkspaceHandle:
+        """A standalone scratch repo for a task with no registered repository
+        (`task.repository is None` — e.g. `heal`, ADR-0018): the persona
+        reasons over a failure report, not a diff, so there is no base repo to
+        derive a worktree from. Mirrors the ordinary create/reattach shape
+        (`attach`, above) against its own root commit instead of a shared
+        repo's HEAD.
+
+        An empty repo has no HEAD commit yet — reset-on-reattach needs one to
+        reset *to* — so the create path commits an empty root commit right
+        away, making this idempotent on its own: a second `attach()` call
+        (crash-and-retry before anything was ever written) finds a repo that
+        already satisfies "has a HEAD", same as the registered-repo path
+        always did.
+
+        Implicit contract: `push()` is never called for a repo-less task — its
+        workflow must end before any step that pushes (there is no `origin`
+        here to push to).
+        """
+        branch = f"harness/{task.id}"
+        worktree = self._worktrees_root / task.id
+        if not worktree.exists():
+            worktree.mkdir(parents=True, exist_ok=True)
+            _git(["init", "-q", "--initial-branch", branch, str(worktree)])
+            _git(
+                ["-C", str(worktree), "commit", "--allow-empty", "-q", "-m", "root"],
+                env_extra=_IDENTITY,
+            )
+        else:
+            # Same reset-on-reattach primitive as the ordinary create path,
+            # just against this repo's own root commit instead of a shared
+            # repo's HEAD.
             _git(["-C", str(worktree), "reset", "--hard", "HEAD"])
             _git(["-C", str(worktree), "clean", "-fd"])
         return GitWorkspaceHandle(worktree, branch)

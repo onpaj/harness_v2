@@ -23,15 +23,16 @@ from harness.drivers.fs_workflows import (
 from harness.drivers.memory import (
     MemoryArtifactStore,
     MemoryForge,
-    MemoryIssueTracker,
     MemoryWorkspace,
 )
+from harness.drivers.checks import BUILTIN_CHECKS
+from harness.drivers.failed_tasks_check import FailedTasksCheck
+from harness.drivers.fs_processes import FilesystemProcessRepository
 from harness.drivers.projection_events import ProjectionSink
 from harness.drivers.source_reflector import SourceReflectorSink
 from harness.drivers.stage_output import StageOutputProjection
 from harness.drivers.stdout_events import StdoutEventSink
 from harness.drivers.system_clock import SystemClock
-from harness.healer import Healer
 from harness.models import FinisherBinding, Workflow
 from harness.ports.agent import AgentCatalog, AgentRunner
 from harness.ports.artifacts import ArtifactStore, ArtifactView
@@ -40,11 +41,11 @@ from harness.ports.clock import Clock
 from harness.ports.events import EventSink
 from harness.ports.forge import Forge
 from harness.ports.issue_state import IssueChecker
-from harness.ports.issues import IssueTracker
 from harness.ports.logs import StageOutputView
 from harness.ports.merge import MergeChecker
 from harness.ports.queue import TaskQueue
 from harness.ports.source import TaskSource
+from harness.ports.triggers import CheckFactory
 from harness.ports.workflows import WorkflowNotFound
 from harness.ports.workspace import Workspace
 from harness.projection import BoardProjection
@@ -63,21 +64,6 @@ landing exactly as it always did (ADR-0016)."""
 RESOLVE_STEP = "resolve"
 """The step to which the wiring assigns ResolveConflictBehavior, when a catalog
 is configured — the resolver workflow's first step."""
-
-
-@dataclass(frozen=True)
-class HealConfig:
-    """Enables the healer: an agent assigned to the `failed/` queue.
-
-    `repository` is the slug the issue is opened on (the harness's own repo);
-    `spec_name` names the persona in the catalog; `labels` are added to the
-    opened issue. Absent → no healer, `failed/` stays a dead-end terminal.
-    """
-
-    repository: str
-    spec_name: str = "healer"
-    labels: tuple[str, ...] = ("harness:self-heal",)
-    timeout: float = 1800.0
 
 
 @dataclass(frozen=True)
@@ -111,10 +97,6 @@ class HarnessLayout:
     @property
     def healed(self) -> Path:
         return self.root / "healed"
-
-    @property
-    def heal_scratch(self) -> Path:
-        return self.root / "heal"
 
     @property
     def worktrees(self) -> Path:
@@ -156,7 +138,6 @@ class Harness:
         pr_watcher: PrWatcher | None = None,
         reconciler: MergeReconciler | None = None,
         issue_reconciler: IssueReconciler | None = None,
-        healer: Healer | None = None,
         healed: TaskQueue | None = None,
     ) -> None:
         self.layout = layout
@@ -165,7 +146,6 @@ class Harness:
         self.consumers = consumers
         self.pollers = pollers or []
         self.pr_watcher = pr_watcher
-        self.healer = healer
         self.projection = projection
         self.artifacts = artifacts
         self.stage_output = stage_output
@@ -189,12 +169,12 @@ class Harness:
         # a task in done/.processing/, invisible to both done.list() and
         # hydrate(). Recovering an idle queue is a no-op, so this is free when
         # neither claimer is wired.
-        queues = [self._inbox, *self._step_queues.values(), self._done]
-        # With a healer wired, `failed/` is a consumed queue too — a crash mid-heal
-        # leaves the task in `failed/.processing/`, so it must be recovered like any
-        # other. Without a healer, `failed/` is never claimed and this is a no-op.
-        if self.healer is not None:
-            queues.append(self._failed)
+        # `failed/` is included unconditionally too: the `failed-tasks` check
+        # (when a process drives it) claims out of it just like PrWatcher/the
+        # MergeReconciler claim out of `done/`, so a crash mid-claim would
+        # otherwise strand a task in `failed/.processing/`. With no such
+        # process configured, `failed/` is never claimed and this is a no-op.
+        queues = [self._inbox, *self._step_queues.values(), self._done, self._failed]
         total = sum(queue.recover() for queue in queues)
         if total:
             self._events.emit("recovered", count=total)
@@ -264,7 +244,6 @@ class Harness:
                 if self.issue_reconciler is not None
                 else []
             ),
-            *([self._heal_loop(poll_interval, stop)] if self.healer is not None else []),
         ]
         if pr_poll_interval > 0 and self.pr_watcher is not None:
             loops.append(self._pr_watcher_loop(pr_poll_interval, stop))
@@ -340,15 +319,6 @@ class Harness:
             else:
                 await asyncio.sleep(0)
 
-    async def _heal_loop(self, poll_interval: float, stop: asyncio.Event) -> None:
-        assert self.healer is not None
-        while not stop.is_set():
-            if not await self.healer.tick():
-                await asyncio.sleep(poll_interval)
-            else:
-                await asyncio.sleep(0)
-
-
 def build(
     root: Path,
     workflows: str | Sequence[str] | None = None,
@@ -373,8 +343,8 @@ def build(
     | None = None,
     delay: float = 5.0,
     request_changes_once_at: str | None = None,
-    issue_tracker: IssueTracker | None = None,
-    heal: HealConfig | None = None,
+    extra_checks: dict[str, CheckFactory] | None = None,
+    processes_root: Path | None = None,
 ) -> Harness:
     layout = HarnessLayout(Path(root))
     events = events or StdoutEventSink()
@@ -434,7 +404,6 @@ def build(
     projection = BoardProjection(
         steps=steps,
         workflows=list(discovered.values()),
-        include_healed=heal is not None,
     )
     stage_output = StageOutputProjection()
     # The reflector comes after ProjectionSink: the outward projection must not
@@ -451,6 +420,10 @@ def build(
     failed = FilesystemTaskQueue(name="failed", root=layout.failed, events=events)
     done = FilesystemTaskQueue(name="done", root=layout.done, events=events)
     archived = FilesystemTaskQueue(name="archived", root=layout.archived, events=events)
+    # `healed/` is the never-consumed terminal `failed/` drains into once a
+    # `failed-tasks`-driving process is configured (invariant 24); it is
+    # unconditional, like `done`/`archived` — an idle terminal costs nothing.
+    healed_queue = FilesystemTaskQueue(name="healed", root=layout.healed, events=events)
     inbox = FilesystemTaskQueue(
         name="tasks", root=layout.tasks, events=events, quarantine=failed
     )
@@ -634,8 +607,42 @@ def build(
         for step, queue in step_queues.items()
     ]
 
+    # Processes (`processes/*.json`) are the operator's top-level authoring
+    # aggregate; each compiles into a `ScheduledTrigger` (ADR-0015). Compiled
+    # here, inside `build()`, rather than by `cli.py` (as `github-issues`/
+    # `github-conflicts` still are, folded in via `extra_checks`) because the
+    # `failed-tasks` check (ADR-0018) needs the harness's own live
+    # `failed`/`healed_queue`/`events` — ports only `build()` itself
+    # constructs, not something `cli.py` can hand it independently.
+    checks: dict[str, CheckFactory] = {
+        **BUILTIN_CHECKS,
+        **(extra_checks or {}),
+        "failed-tasks": lambda params: FailedTasksCheck(
+            failed=failed, healed=healed_queue, events=events, clock=clock
+        ),
+    }
+    # `known_targets` must include served *workflow* names too, not just step
+    # names — a `{"workflow": ...}` process target (e.g. the autoheal process
+    # targeting `heal`, or the pre-existing `github-issues`/`github-conflicts`
+    # processes targeting `default`/`resolver`) validates against the workflow
+    # name itself, not its steps.
+    known_targets = set(known_steps) | set(resolved)
+    process_repo = FilesystemProcessRepository(processes_root or layout.processes)
+    process_sources = process_repo.build(
+        clock=clock,
+        checks=checks,
+        repository=None,
+        worktree_root=str(layout.worktrees),
+        known_targets=known_targets,
+    )
+    # `all_sources` feeds `pollers` ONLY — never `SourceReflectorSink`, which
+    # was already constructed above, over the caller's own `sources`. Safe:
+    # every `Trigger` (including `ScheduledTrigger`) inherits
+    # `report_progress`/`finish` as no-ops (invariant #36); a caller-supplied
+    # `SlackWebhookSink` (not a `Trigger`) is already in `sources` itself.
+    all_sources = [*sources, *process_sources]
     pollers = [
-        SourcePoller(source=source, inbox=inbox, events=events) for source in sources
+        SourcePoller(source=source, inbox=inbox, events=events) for source in all_sources
     ]
 
     # Cheap and side-effect-free until ticked (nothing starts its loop unless
@@ -649,37 +656,6 @@ def build(
         inbox=inbox, step_queues=step_queues, done=done, failed=failed,
         events=events, clock=clock,
     )
-
-    # The healer: an agent assigned to the `failed/` queue. It reads a failed
-    # task, drafts + files an issue on the harness repo, and settles the task
-    # onto the terminal `healed/`. It reuses the agent runner/catalog (persona as
-    # data) — so it needs both; the issue tracker defaults to the in-memory fake
-    # (offline / tests), swapped for GitHub by `cli._run`.
-    healed_queue: TaskQueue | None = None
-    healer: Healer | None = None
-    if heal is not None:
-        if runner is None or catalog is None:
-            raise ValueError(
-                "self-healing needs an agent runner and a catalog "
-                "(pass runner= and catalog=, or leave heal=None)"
-            )
-        healed_queue = FilesystemTaskQueue(
-            name="healed", root=layout.healed, events=events
-        )
-        healer = Healer(
-            failed=failed,
-            healed=healed_queue,
-            runner=runner,
-            spec=catalog.get(heal.spec_name),
-            tracker=issue_tracker or MemoryIssueTracker(),
-            repo=heal.repository,
-            scratch_root=layout.heal_scratch,
-            strategy=strategy,
-            events=events,
-            clock=clock,
-            labels=heal.labels,
-            timeout=heal.timeout,
-        )
 
     return Harness(
         layout=layout,
@@ -701,6 +677,5 @@ def build(
         pr_watcher=pr_watcher,
         reconciler=reconciler,
         issue_reconciler=issue_reconciler,
-        healer=healer,
         healed=healed_queue,
     )

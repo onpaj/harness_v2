@@ -314,36 +314,40 @@ per `dirty` PR, deduped per conflicted head commit.
 By default a task that fails comes to rest in `failed/` and stays there — an
 operator has to notice, read its history, and decide whether the harness itself
 was at fault. `--heal-repo <owner/repo>` turns `failed/` into a queue that
-drains, by assigning a **healer** agent to it:
+drains, by wiring up an **autoheal Process** (ADR-0018):
 
 ```sh
 harness run --root ~/harness-root --agent claude --heal-repo onpaj/harness_v2
 ```
 
-The healer is **not a workflow** — not a step, and not a workflow of its own. It
-is a loop assigned to the `failed/` queue, the same way each workflow step has an
-agent behind it (so there is no `healer` workflow file to find). It claims one
-failed task at a time, reads a **failure report** built from that task's reason
-and history — no worktree, no git — and decides whether the failure points at a
-fixable bug in the harness itself (a driver contract, a wiring gap, a missing
-workflow edge) as opposed to an external or expected failure (a flaky network, a
-task whose request was simply wrong). When it judges it a harness bug, the healer
-opens a diagnostic **issue** on the repo you named, with a diagnosis and a
-concrete proposed change. Either way the task then settles onto a new terminal
-`healed/` queue and leaves `failed/`.
+Self-healing is an ordinary Process, not bespoke machinery. `--heal-repo` writes
+a `processes/autoheal.json` whose `failed-tasks` action drains `failed/`: on each
+tick it claims one failed task, settles the original to a new terminal `healed/`
+queue, and fires a fresh task through the two-step `heal` workflow
+(`workflows/heal.json`: `heal` → `file-issue`). The `heal` step reads a **failure
+report** built from that task's reason and history — no worktree, no git — and
+decides whether the failure points at a fixable bug in the harness itself (a
+driver contract, a wiring gap, a missing workflow edge) as opposed to an external
+or expected failure (a flaky network, a task whose request was simply wrong).
+When it judges it a harness bug, it drafts a diagnosis and a concrete proposed
+change and returns `done`; the `file-issue` step's **`open-issue` finisher** then
+opens the diagnostic **issue** on the repo you named. Otherwise it returns
+`request_changes` and no issue is filed.
 
-The healer only ever opens an *issue* — never a PR, never a new task — so nothing
-it does can re-enter `failed/` and loop; a failed heal (agent error, or the issue
-can't be opened) still settles to `healed/`, with the reason in the task's
-history. The issue is idempotent per failed task (a hidden marker in its body),
-so a restart mid-heal never files a second one.
+The heal step's persona only ever drafts an *issue* — never a PR, never a new
+task. Recursion is guarded by a marker: the check stamps `data.heal` on the heal
+task it produces, and a heal task that itself fails is board-visible in `failed/`
+once before the check retires it to `healed/` without re-observing it, so nothing
+loops. The issue is idempotent per original failed task (a hidden marker in its
+body), so a restart mid-heal never files a second one.
 
-`--heal-repo` needs `--agent claude` — the healer is a claude agent. Its persona
-lives in `agents/healer.json`, written by `harness init` alongside the step
-personas (data, not code). With a `GITHUB_TOKEN` present the issue is opened on
-GitHub; offline it falls back to an in-memory tracker so the loop still runs
-harmlessly. Without `--heal-repo`, `failed/` stays a dead-end terminal exactly as
-before.
+`--heal-repo` needs `--agent claude` — the heal step is a claude agent. Its
+persona lives in `agents/heal.json`, and `workflows/heal.json` is written by
+`harness init` alongside the step personas (data, not code); `autoheal.json`
+itself is written by `--heal-repo`, but only if absent — a hand-edited process is
+never clobbered. With a `GITHUB_TOKEN` present the issue is opened on GitHub;
+offline it falls back to an in-memory tracker so the finisher runs harmlessly.
+Without `--heal-repo`, `failed/` stays a dead-end terminal exactly as before.
 
 ## How work flows
 

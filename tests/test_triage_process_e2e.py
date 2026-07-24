@@ -71,7 +71,7 @@ def seed(tmp_path: Path) -> None:
 
 
 async def test_triage_process_claims_labels_and_hands_off_to_ingestion(tmp_path):
-    from harness.cli import _process_sources
+    from harness.cli import _process_check_factories
     import harness.drivers.github_issues_check as ghi_mod
 
     seed(tmp_path)
@@ -111,9 +111,11 @@ async def test_triage_process_claims_labels_and_hands_off_to_ingestion(tmp_path)
     try:
         clock = FakeClock("2026-07-23T10:00:00Z")
         args = argparse.Namespace(worktree_root=None, github_label="harness:todo")
-        (source,) = _process_sources(
-            args, tmp_path, registry, clock=clock, known_targets={"triage"}, client=client
-        )
+        # Process compilation happens inside `build()` now (ADR-0018); the
+        # github-issues check factory it can't build itself is supplied via
+        # `extra_checks`, exactly as `cli._process_check_factories` does in
+        # production. `build()` auto-discovers and compiles `tmp_path/processes`.
+        extra_checks = _process_check_factories(args, registry, client=client)
 
         # ScriptedBehavior stands in for the PM persona (a real deployment
         # would use a catalog agent instead): the first task through "triage"
@@ -130,9 +132,10 @@ async def test_triage_process_claims_labels_and_hands_off_to_ingestion(tmp_path)
             artifacts=MemoryArtifactStore(),
             forge=MemoryForge(),
             delay=0.0,
-            sources=[source],
+            extra_checks=extra_checks,
             finishers={"label-issue": finisher_factory},
         )
+        source = harness.pollers[0]._source
 
         await drive_until_quiet(harness)
 
