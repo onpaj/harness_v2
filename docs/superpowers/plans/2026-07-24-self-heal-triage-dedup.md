@@ -203,7 +203,7 @@ Clamp `_write_default_agents` so a custom-outcome step still writes a **loadable
 
 ## Post-merge deploy note (operator action, not part of the branch)
 
-The running service reads `~/harness-root/{workflows,agents,processes}`, not the source templates. After merge, update the four live files to match: `workflows/heal.json` (three-step), `agents/heal.json` (rewritten persona), new `agents/dedup.json`, `processes/autoheal.json` (add `params.repository: onpaj/harness_v2`), then restart the service. `HARNESS_HEAL_REPO` must equal that param.
+The running service reads `~/harness-root/{workflows,agents,processes}`, not the source templates. After merge, update the four live files to match: `workflows/heal.json` (three-step), `agents/heal.json` (rewritten persona), new `agents/dedup.json`, `processes/autoheal.json` (add `params.repository: onpaj/harness_v2`), then restart the service. `HARNESS_HEAL_REPO` must equal that param — and that same slug must also be registered in `repos.json`, or `GitWorkspace.attach` raises `RepositoryNotFound` for every heal task, which fails to attach a worktree, lands in `failed/`, and is silently retired to `healed/` by the recursion guard with no issue ever filed. `harness run`/`serve` now warns on stderr at startup if the configured `HARNESS_HEAL_REPO` isn't registered — check for that warning after restarting the service.
 
 ## Self-Review
 

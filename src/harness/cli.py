@@ -67,7 +67,7 @@ from harness.ports.behavior import ConsumerBehavior
 from harness.ports.clock import Clock
 from harness.ports.issue_state import IssueChecker
 from harness.ports.merge import MergeChecker
-from harness.ports.repos import RepositoryRegistry
+from harness.ports.repos import RepositoryNotFound, RepositoryRegistry
 from harness.ports.source import TaskSource
 from harness.ports.triggers import CheckFactory
 from harness.ports.workflows import WorkflowNotFound
@@ -1637,6 +1637,23 @@ def _run(args: argparse.Namespace) -> int:
             print(
                 "warning: HARNESS_HEAL_REPO is set but --agent is not claude; the"
                 " heal step cannot run and failed tasks will settle unhealed.",
+                file=sys.stderr,
+            )
+        # The `heal_repo` slug is also `task.repository` on every heal task
+        # (invariant #25) — `GitWorkspace.attach` resolves it through this same
+        # `registry`, and an unregistered slug raises `RepositoryNotFound` at
+        # attach time. That failure lands the heal task in `failed/`, which the
+        # recursion guard (invariant #25/#26) then retires straight to
+        # `healed/` with no issue filed — self-healing goes silently inert. Warn
+        # up front rather than let the operator discover it that way; this must
+        # never block startup (a WARNING, not an error).
+        try:
+            registry.resolve(heal_repo)
+        except RepositoryNotFound:
+            print(
+                f"warning: heal repo {heal_repo!r} is not registered in"
+                f" {layout.repos} — heal tasks will fail to attach a worktree"
+                " until it is added there, so self-healing will file nothing.",
                 file=sys.stderr,
             )
         if DEFAULT_HEAL_WORKFLOW not in served_names:

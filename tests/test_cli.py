@@ -259,6 +259,57 @@ def test_run_heal_repo_does_not_clobber_a_hand_edited_autoheal_process(monkeypat
     assert on_disk["trigger"]["interval"] == "5m"
 
 
+def test_run_heal_repo_warns_when_the_slug_is_not_registered(monkeypatch, tmp_path, capsys):
+    """`task.repository` is stamped with `heal_repo` on every heal task
+    (invariant #25), and `GitWorkspace.attach` resolves it through the same
+    `RepositoryRegistry` wired here — an unregistered slug raises
+    `RepositoryNotFound` at attach time, the heal task fails to attach a
+    worktree, and the recursion guard silently retires it to `healed/` with
+    no issue filed. `init` writes an empty `repos.json`, so `onpaj/harness_v2`
+    is unregistered here — the operator should be warned up front rather than
+    discover this via silent inaction."""
+    main(["init", "--root", str(tmp_path)])
+
+    monkeypatch.setattr("harness.cli.build", lambda *a, **k: object())
+
+    async def fake_serve(harness, port, poll_interval, source_interval=30.0, pr_poll_interval=0.0, reconcile_interval=300.0):
+        pass
+
+    monkeypatch.setattr("harness.cli.serve", fake_serve)
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+
+    assert main(["run", "--root", str(tmp_path), "--heal-repo", "onpaj/harness_v2"]) == 0
+
+    err = capsys.readouterr().err
+    assert "warning:" in err
+    assert "onpaj/harness_v2" in err
+    assert "repos.json" in err or str(tmp_path / "repos.json") in err
+
+
+def test_run_heal_repo_registered_emits_no_repo_warning(monkeypatch, tmp_path, capsys):
+    """The positive case: once `onpaj/harness_v2` is registered in
+    `repos.json`, the new fail-fast check finds it resolvable and stays
+    silent — a correctly configured operator sees no spurious warning."""
+    main(["init", "--root", str(tmp_path)])
+    (tmp_path / "repos.json").write_text(
+        json.dumps({"onpaj/harness_v2": str(tmp_path / "harness_v2")})
+    )
+
+    monkeypatch.setattr("harness.cli.build", lambda *a, **k: object())
+
+    async def fake_serve(harness, port, poll_interval, source_interval=30.0, pr_poll_interval=0.0, reconcile_interval=300.0):
+        pass
+
+    monkeypatch.setattr("harness.cli.serve", fake_serve)
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+
+    assert main(["run", "--root", str(tmp_path), "--heal-repo", "onpaj/harness_v2"]) == 0
+
+    err = capsys.readouterr().err
+    assert "not registered" not in err
+    assert "onpaj/harness_v2" not in err
+
+
 def test_run_registers_label_issue_finisher_only_with_a_token(monkeypatch, tmp_path):
     main(["init", "--root", str(tmp_path)])
     captured = {}

@@ -139,9 +139,11 @@ def _render_failure_report(task: Task) -> str:
     lines += [
         "",
         "Decide whether this failure points at a fixable bug in the harness "
-        "itself (a driver contract, a wiring gap, a missing workflow edge) — as "
-        "opposed to an external or expected failure (a flaky network, a task "
-        "that was simply wrong).",
+        "itself (a driver contract, a wiring gap, a missing workflow edge) or "
+        "an operational/tuning problem worth filing (e.g. a step that ran out "
+        "of its per-agent timeout) — as opposed to a genuinely external or "
+        "transient failure (a flaky network) or a task whose own request was "
+        "simply wrong or impossible.",
     ]
     return "\n".join(lines)
 

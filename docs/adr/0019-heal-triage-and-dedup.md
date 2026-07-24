@@ -115,6 +115,16 @@ here as one shape:
   would then attach a worktree in one repo while the drafted issue is filed
   against another. This is an operator-authored-file risk, not something the
   harness validates today.
+- **That same slug must also be registered in `repos.json`, or heal tasks
+  never attach a worktree.** The `repository` stamp (invariant #25) is only
+  meaningful once `GitWorkspace.attach` can resolve it via
+  `RepositoryRegistry` — an unregistered `HARNESS_HEAL_REPO` slug makes
+  `resolve()` raise `RepositoryNotFound` for every heal task, which then
+  fails to attach, lands in `failed/`, and is retired to `healed/` by the
+  recursion guard (invariant #25) with no issue ever filed: self-healing
+  goes silently inert. `cli._run` now checks this at startup and prints a
+  `warning:` to stderr (never a hard error — the rest of the harness still
+  starts) when the configured `heal_repo` isn't in the registry.
 - The invariant #24–#27 prose in `CLAUDE.md` is refined (not renumbered) to
   describe the three-step `heal → dedup → file-issue` shape and the
   `repository`-carrying check.
