@@ -743,6 +743,56 @@ def _github_reflectors(
     return sources
 
 
+def _issue_import_factory(
+    args: argparse.Namespace,
+    root: Path,
+    registry: RepositoryRegistry,
+    *,
+    client: GithubClient | None = None,
+):
+    """The Ahanas board's manual "Add issue" write port, as an
+    `IssueImportFactory` (invariant #43) — the same "cli.py closes over the
+    external dependency, build() supplies the live queues once they exist"
+    shape as `extra_checks`/`finishers`. `None` without a client (no
+    `GITHUB_TOKEN`), so `build()` falls back to its own `NullIssueImport`.
+
+    Reuses `--github-workflow`/`--github-step` — the same target the
+    automatic `github-issues` ingestion uses (`_github_sources`'s identical
+    defaulting) — and the same `worktree_root` computation, so a task created
+    via manual import gets a worktree path consistent with one created via
+    automatic ingestion.
+    """
+    if client is None:
+        return None
+
+    from harness.drivers.github_issue_import import GithubIssueImportService
+
+    worktree_root = args.worktree_root or str(root / "worktrees")
+    workflow = args.github_workflow
+    step = args.github_step
+    if workflow is None and step is None:
+        workflow = DEFAULT_WORKFLOW
+
+    def factory(*, inbox, step_queues, done, failed, healed, archived, events, clock):
+        return GithubIssueImportService(
+            client=client,
+            registry=registry,
+            inbox=inbox,
+            step_queues=step_queues,
+            done=done,
+            failed=failed,
+            healed=healed,
+            archived=archived,
+            events=events,
+            clock=clock,
+            workflow=workflow,
+            step=step,
+            worktree_root=worktree_root,
+        )
+
+    return factory
+
+
 def _scheduled_sources(
     args: argparse.Namespace,
     root: Path,
@@ -1812,6 +1862,13 @@ def _run(args: argparse.Namespace) -> int:
             inner=inner(), client=github_client, labels=config.get("labels", {})
         )
 
+    # The Ahanas board's manual "Add issue" write port (invariant #43): built
+    # inside `build()` from this factory once the harness's own live queues
+    # exist — `None` without a token, so `build()` falls back to
+    # `NullIssueImport` and the board still renders the button/dialog, just
+    # with every submit reporting "not configured".
+    issue_import_factory = _issue_import_factory(args, root, registry, client=github_client)
+
     try:
         harness = build(
             root,
@@ -1829,6 +1886,7 @@ def _run(args: argparse.Namespace) -> int:
             delay=args.delay,
             request_changes_once_at=args.request_changes_at,
             extra_checks=extra_checks,
+            issue_import_factory=issue_import_factory,
             repository_registry=registry,
         )
     except WorkflowNotFound as error:
@@ -1907,6 +1965,7 @@ async def serve(
             harness.layout.processes, checks=harness.process_checks, registry=registry
         ),
         updater=updater,
+        issue_import=harness.issue_import,
         version=version_string(),
         build_time=build_timestamp(),
     )

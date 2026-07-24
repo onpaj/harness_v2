@@ -1,0 +1,17 @@
+{% if empty %}
+<p class="hint">no refs given</p>
+{% else %}
+<ul class="issue-import-results">
+  {% for result in results %}
+  <li class="{{ 'ok' if result.ok else 'error' }}">
+    {% if result.ok and result.already_queued %}
+    ✓ {{ result.ref }} — already queued as {{ result.task_id }}
+    {% elif result.ok %}
+    ✓ {{ result.ref }} — queued as {{ result.task_id }}
+    {% else %}
+    ✗ {{ result.ref }} — {{ result.error }}
+    {% endif %}
+  </li>
+  {% endfor %}
+</ul>
+{% endif %}

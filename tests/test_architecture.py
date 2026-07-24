@@ -213,6 +213,17 @@ def test_issue_reconciler_imports_only_ports_and_models():
     ), f"issue_reconciler.py imports outside ports/models/ids: {imports}"
 
 
+def test_orchestration_does_not_import_issue_import_port():
+    """`IssueImport` (the Ahanas board's manual "Add issue" write port,
+    invariant #43) is unknown to dispatcher/consumer — touched only by
+    `api/routes.py` and `build()`'s own wiring, mirroring `TaskControl`/
+    `MergeChecker`/`IssueChecker` (invariants #23/#32/#34)."""
+    for name in ("dispatcher.py", "consumer.py"):
+        assert "harness.ports.issue_import" not in imported_modules(SOURCE / name), (
+            f"{name} imports ports.issue_import"
+        )
+
+
 def test_orchestration_does_not_import_issue_state_port():
     """IssueChecker is unknown to dispatcher/consumer. Only IssueReconciler
     (core) and app.py/cli.py (wiring) reach for it — mirroring MergeChecker."""

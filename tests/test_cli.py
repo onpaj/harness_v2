@@ -18,6 +18,7 @@ from harness.cli import (
     _declared_sink_kinds,
     _github_reflectors,
     _github_sources,
+    _issue_import_factory,
     _process_check_factories,
     _slack_sinks,
     main,
@@ -29,6 +30,7 @@ from harness.drivers.jira_client import FakeJiraClient
 from harness.drivers.memory import MemoryArtifactStore, MemoryRepositoryRegistry
 from harness.drivers.stage_output import StageOutputProjection
 from harness.models import DONE, END, REQUEST_CHANGES, Task, Transition, Workflow
+from harness.ports.issue_import import NullIssueImport
 from harness.projection import BoardProjection
 from tests.fakes import FakeTaskControl
 
@@ -332,6 +334,80 @@ def test_run_registers_label_issue_finisher_only_with_a_token(monkeypatch, tmp_p
     monkeypatch.setenv("GITHUB_TOKEN", "tok")
     assert main(["run", "--root", str(tmp_path)]) == 0
     assert set(captured["finishers"]) == {"label-issue"}
+
+
+def test_run_passes_issue_import_factory_to_build_only_with_a_token(monkeypatch, tmp_path):
+    main(["init", "--root", str(tmp_path)])
+    captured = {}
+
+    def fake_build(*args, **kwargs):
+        captured["issue_import_factory"] = kwargs.get("issue_import_factory")
+        return object()
+
+    async def fake_serve(harness, port, poll_interval, source_interval=30.0, pr_poll_interval=0.0, reconcile_interval=300.0, registry=None):
+        pass
+
+    monkeypatch.setattr("harness.cli.build", fake_build)
+    monkeypatch.setattr("harness.cli.serve", fake_serve)
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+
+    assert main(["run", "--root", str(tmp_path)]) == 0
+    assert captured["issue_import_factory"] is None
+
+    monkeypatch.setenv("GITHUB_TOKEN", "tok")
+    assert main(["run", "--root", str(tmp_path)]) == 0
+    assert captured["issue_import_factory"] is not None
+
+
+async def test_serve_passes_the_harness_issue_import_into_create_app(monkeypatch, tmp_path):
+    """`serve()` threads `harness.issue_import` into `create_app` unchanged —
+    never `None`, mirroring `harness.control`."""
+    from harness.ports.issue_import import IssueImportResult
+
+    class SentinelIssueImport(NullIssueImport):
+        def add(self, ref):
+            return IssueImportResult(ref=ref, ok=True, task_id="tsk_sentinel")
+
+    sentinel = SentinelIssueImport()
+    captured = {}
+
+    real_create_app = __import__("harness.api.app", fromlist=["create_app"]).create_app
+
+    def capturing_create_app(**kwargs):
+        captured.update(kwargs)
+        return real_create_app(**kwargs)
+
+    class FakeUvicornServer:
+        def __init__(self, config):
+            pass
+
+        async def serve(self):
+            return
+
+    monkeypatch.setattr("harness.cli.create_app", capturing_create_app)
+    monkeypatch.setattr("harness.cli.uvicorn.Server", FakeUvicornServer)
+
+    class FakeHarness:
+        def __init__(self):
+            self.layout = HarnessLayout(tmp_path)
+            self.projection = BoardProjection(
+                SERVE_TEST_WORKFLOW.steps(), (SERVE_TEST_WORKFLOW,)
+            )
+            self.artifacts = MemoryArtifactStore()
+            self.stage_output = StageOutputProjection()
+            self.control = FakeTaskControl()
+            self.process_checks = None
+            self.issue_import = sentinel
+
+        async def run(
+            self, poll_interval, source_interval=30.0, pr_poll_interval=0.0, reconcile_interval=300.0, stop=None
+        ):
+            while not stop.is_set():
+                await asyncio.sleep(0.01)
+
+    await asyncio.wait_for(serve(FakeHarness(), 8000, 0.01), timeout=2.0)
+
+    assert captured["issue_import"] is sentinel
 
 
 def test_run_label_issue_finisher_wraps_inner_and_applies_the_mapped_label(
@@ -1178,6 +1254,91 @@ def test_github_sources_empty_without_token(monkeypatch, tmp_path):
     assert _github_sources(_github_args(), tmp_path, registry) == []
 
 
+def test_issue_import_factory_none_without_a_client(tmp_path):
+    """No token/client -> None, so `build()` falls back to its own
+    `NullIssueImport`."""
+    registry = MemoryRepositoryRegistry({"heblo": Path("/repos/heblo")})
+
+    assert _issue_import_factory(_github_args(), tmp_path, registry, client=None) is None
+
+
+def test_issue_import_factory_builds_a_service_from_the_harness_queues(tmp_path):
+    from harness.drivers.github_issue_import import GithubIssueImportService
+    from harness.drivers.memory import FakeClock, MemoryEventSink, MemoryTaskQueue
+
+    registry = MemoryRepositoryRegistry({"heblo": Path("/repos/heblo")})
+    factory = _issue_import_factory(
+        _github_args(), tmp_path, registry, client=FakeGithubClient()
+    )
+    assert factory is not None
+
+    service = factory(
+        inbox=MemoryTaskQueue("tasks"),
+        step_queues={},
+        done=MemoryTaskQueue("done"),
+        failed=MemoryTaskQueue("failed"),
+        healed=MemoryTaskQueue("healed"),
+        archived=MemoryTaskQueue("archived"),
+        events=MemoryEventSink(),
+        clock=FakeClock(),
+    )
+
+    assert isinstance(service, GithubIssueImportService)
+    assert service._workflow == "default"
+    assert service._step is None
+
+
+def test_issue_import_factory_defaults_to_default_workflow_when_neither_flag_given(tmp_path):
+    from harness.drivers.memory import FakeClock, MemoryEventSink, MemoryTaskQueue
+
+    registry = MemoryRepositoryRegistry({"heblo": Path("/repos/heblo")})
+    factory = _issue_import_factory(
+        _github_args(github_workflow=None), tmp_path, registry, client=FakeGithubClient()
+    )
+
+    service = factory(
+        inbox=MemoryTaskQueue("tasks"),
+        step_queues={},
+        done=MemoryTaskQueue("done"),
+        failed=MemoryTaskQueue("failed"),
+        healed=MemoryTaskQueue("healed"),
+        archived=MemoryTaskQueue("archived"),
+        events=MemoryEventSink(),
+        clock=FakeClock(),
+    )
+
+    assert service._workflow == DEFAULT_WORKFLOW
+    assert service._step is None
+
+
+def test_issue_import_factory_worktree_root_matches_github_sources(tmp_path):
+    """A task created via manual import must land in the same worktree root a
+    `GithubTaskSource`-created task would — both derive it from
+    `args.worktree_root or root / "worktrees"`."""
+    from harness.drivers.memory import FakeClock, MemoryEventSink, MemoryTaskQueue
+
+    registry = MemoryRepositoryRegistry({"heblo": Path("/repos/heblo")})
+    factory = _issue_import_factory(
+        _github_args(worktree_root="/custom/worktrees"),
+        tmp_path,
+        registry,
+        client=FakeGithubClient(),
+    )
+
+    service = factory(
+        inbox=MemoryTaskQueue("tasks"),
+        step_queues={},
+        done=MemoryTaskQueue("done"),
+        failed=MemoryTaskQueue("failed"),
+        healed=MemoryTaskQueue("healed"),
+        archived=MemoryTaskQueue("archived"),
+        events=MemoryEventSink(),
+        clock=FakeClock(),
+    )
+
+    assert service._worktree_root == "/custom/worktrees"
+
+
 def test_github_reflectors_builds_one_per_github_repo(monkeypatch, tmp_path):
     """One reflector per repos.json repo with a GitHub origin, mirroring
     `_github_sources`'s enumeration."""
@@ -1752,6 +1913,7 @@ async def test_serve_returns_when_uvicorn_stops_before_the_loop(monkeypatch, tmp
             self.stage_output = StageOutputProjection()
             self.control = FakeTaskControl()
             self.process_checks = None
+            self.issue_import = NullIssueImport()
             self.stop_seen: asyncio.Event | None = None
 
         async def run(
@@ -1822,6 +1984,7 @@ async def test_serve_wires_the_filesystem_process_admin(monkeypatch, tmp_path):
                 **BUILTIN_CHECKS,
                 "github-issues": lambda params: AlwaysCheck(),
             }
+            self.issue_import = NullIssueImport()
 
         async def run(
             self, poll_interval, source_interval=30.0, pr_poll_interval=0.0, reconcile_interval=300.0, stop=None
@@ -1873,6 +2036,7 @@ async def test_serve_wires_the_registry_into_the_filesystem_process_admin(
             self.stage_output = StageOutputProjection()
             self.control = FakeTaskControl()
             self.process_checks = None
+            self.issue_import = NullIssueImport()
 
         async def run(
             self, poll_interval, source_interval=30.0, pr_poll_interval=0.0, reconcile_interval=300.0, stop=None
