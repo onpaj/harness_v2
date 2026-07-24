@@ -18,6 +18,8 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any
 
+from harness.ports.triggers import CheckSpec
+
 
 @dataclass(frozen=True)
 class ProcessFields:
@@ -92,6 +94,16 @@ class ProcessAdmin(ABC):
         plus wiring-time extras like the GitHub-backed actions), so the form
         never offers less than a hand-edited file may name; `api/` reads them
         through this port so the UI never imports a driver (invariant #5)."""
+
+    @abstractmethod
+    def check_specs(self) -> tuple[CheckSpec, ...]:
+        """The full declarative definition of every action the form offers,
+        sorted by name — the richer counterpart of `check_names()`. Each
+        `CheckSpec` carries the action's label, description and parameter
+        definitions, so the UI renders each action's form from data alone with
+        nothing hardcoded per action. A wiring-registered check that carries no
+        spec (a bare factory) still yields a generic spec (name only, no
+        params), never disappearing from the form."""
 
     @abstractmethod
     def sink_kinds(self) -> tuple[str, ...]:

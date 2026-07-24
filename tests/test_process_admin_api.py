@@ -163,6 +163,34 @@ def test_new_process_page_populates_dropdowns(client):
     assert "default" in body
 
 
+def test_process_form_embeds_action_definitions_as_data(client):
+    """The action definitions (labels + parameters) are served as JSON the
+    script interprets — the form has nothing hardcoded per action. The old
+    template baked a `PARAM_SPECS` object and a `check_meta` map into the page;
+    now those come from the port."""
+    import json
+
+    body = client.get("/admin/processes/new").text
+
+    # the embedded, machine-readable definitions the script builds its fields from
+    assert 'id="check-specs-data"' in body
+    marker = 'id="check-specs-data">'
+    start = body.index(marker) + len(marker)
+    end = body.index("</script>", start)
+    specs = json.loads(body[start:end])
+
+    by_name = {spec["name"]: spec for spec in specs}
+    disk = by_name["disk-threshold"]
+    assert disk["label"] == "Disk threshold"
+    assert {param["key"] for param in disk["params"]} == {"path", "percent"}
+    percent = next(p for p in disk["params"] if p["key"] == "percent")
+    assert percent["type"] == "number"
+
+    # the hardcoded structures the template used to carry are gone
+    assert "var PARAM_SPECS = {\n" not in body
+    assert "check_meta" not in body
+
+
 def test_create_process_via_form(client, admin):
     response = client.post("/admin/processes", data=_valid_form())
 
@@ -283,6 +311,29 @@ def test_delete_process_via_form_redirects(client, admin):
     assert response.status_code == 303
     assert response.headers["location"] == "/admin/processes"
     assert admin.list() == ()
+
+
+def test_edit_page_renders_a_check_absent_from_the_registry(client, admin, tmp_path):
+    """A hand-written process naming a check the running registry doesn't know
+    still renders — with a generic prepended card and the raw-JSON editor for
+    its params — so editing never hides the current definition."""
+    import json
+
+    (admin._root / "mystery.json").write_text(
+        json.dumps(
+            {
+                "trigger": {"interval": "1h"},
+                "action": {"check": "custom-thing", "params": {"foo": "bar"}},
+                "target": {"workflow": "default"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    body = client.get("/admin/processes/mystery").text
+
+    assert body.count("value=\"custom-thing\"") == 1  # the prepended card
+    assert "always" in body  # the real registry options are still offered
 
 
 def test_nav_includes_processes_link(client):

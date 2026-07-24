@@ -15,7 +15,14 @@ import subprocess
 from pathlib import Path
 from typing import Any, Callable
 
-from harness.ports.triggers import Check, CheckFactory, Observation
+from harness.ports.triggers import (
+    Check,
+    CheckDefinition,
+    CheckFactory,
+    CheckSpec,
+    Observation,
+    ParamSpec,
+)
 
 
 class AlwaysCheck(Check):
@@ -138,15 +145,79 @@ class CommandCheck(Check):
         ]
 
 
+# Each built-in is an action *definition* — a declarative `CheckSpec` (what the
+# UI renders) bundled with the factory (what runs it). The spec is the single
+# source of truth for the action's parameters; the form has nothing hardcoded.
 BUILTIN_CHECKS: dict[str, CheckFactory] = {
-    "always": lambda params: AlwaysCheck(),
-    "disk-threshold": lambda params: DiskThresholdCheck(
-        path=params["path"], percent=params["percent"]
+    "always": CheckDefinition(
+        spec=CheckSpec(
+            name="always",
+            label="Always",
+            description="Fires every interval, unconditionally.",
+        ),
+        factory=lambda params: AlwaysCheck(),
     ),
-    "fs-files": lambda params: FileGlobCheck(
-        path=params["path"], pattern=params.get("pattern", "*")
+    "disk-threshold": CheckDefinition(
+        spec=CheckSpec(
+            name="disk-threshold",
+            label="Disk threshold",
+            description="Fires while a disk is at or above a usage percentage.",
+            params=(
+                ParamSpec(
+                    key="path", label="Path to watch", required=True, placeholder="/"
+                ),
+                ParamSpec(
+                    key="percent",
+                    label="Fire at usage (%)",
+                    type="number",
+                    required=True,
+                    placeholder="90",
+                ),
+            ),
+        ),
+        factory=lambda params: DiskThresholdCheck(
+            path=params["path"], percent=params["percent"]
+        ),
     ),
-    "command": lambda params: CommandCheck(
-        command=params["command"], timeout=params.get("timeout", 30.0)
+    "fs-files": CheckDefinition(
+        spec=CheckSpec(
+            name="fs-files",
+            label="Files in a folder",
+            description="Fires once per file matching a glob pattern.",
+            params=(
+                ParamSpec(
+                    key="path", label="Directory", required=True, placeholder="/var/drop"
+                ),
+                ParamSpec(key="pattern", label="Glob pattern", placeholder="*"),
+            ),
+        ),
+        factory=lambda params: FileGlobCheck(
+            path=params["path"], pattern=params.get("pattern", "*")
+        ),
+    ),
+    "command": CheckDefinition(
+        spec=CheckSpec(
+            name="command",
+            label="Shell command",
+            description="Runs a command; every non-empty output line becomes a task.",
+            params=(
+                ParamSpec(
+                    key="command",
+                    label="Command",
+                    required=True,
+                    placeholder="e.g. find /drop -name '*.job'",
+                    hint="Runs in a shell; each non-empty stdout line becomes one task.",
+                ),
+                ParamSpec(
+                    key="timeout",
+                    label="Timeout (seconds)",
+                    type="number",
+                    placeholder="30",
+                ),
+            ),
+        ),
+        factory=lambda params: CommandCheck(
+            command=params["command"], timeout=params.get("timeout", 30.0)
+        ),
     ),
 }

@@ -19,7 +19,29 @@ from __future__ import annotations
 from harness.drivers.git_remote import github_slug
 from harness.drivers.github_client import GithubClient
 from harness.ports.repos import RepositoryRegistry
-from harness.ports.triggers import Check, Observation
+from harness.ports.triggers import Check, CheckSpec, Observation, ParamSpec
+
+SPEC = CheckSpec(
+    name="github-issues",
+    label="GitHub issues",
+    description="Ingests labelled issues across the registered repos.",
+    params=(
+        ParamSpec(
+            key="label",
+            label="Issue label",
+            placeholder="harness:todo",
+            hint="Issues carrying this label are claimed and become tasks.",
+        ),
+        ParamSpec(
+            key="claimed_label",
+            label="Claimed label",
+            placeholder="harness:queued",
+            hint="Each claimed issue is relabelled to this so it is ingested only once.",
+        ),
+    ),
+)
+"""The action definition for `github-issues`. `cli.py` bundles it with the
+factory that closes over a `GithubClient` + the repo registry."""
 
 
 class GithubIssuesCheck(Check):
