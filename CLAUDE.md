@@ -230,14 +230,17 @@ Dependencies flow strictly downward, no cycles.
   consumes — with one exception: when an autoheal Process is wired, `failed/` gets
   exactly one reader (the `failed-tasks` Check), and `healed/` becomes the
   never-consumed terminal (invariant 24).
-- **Self-healing is a Process** (opt-in), not a bespoke loop (ADR-0018). Its action,
-  the `failed-tasks` Check, drains `failed/`: it claims each failed task, settles it
-  to `healed/`, and fires a fresh task through the two-step `heal` workflow. The
-  `heal` step runs the `heal` persona over the failure report (reason + history, no
-  worktree); if it judges the failure a fixable harness bug it drafts an issue and
-  returns `done`, and the `file-issue` step's `open-issue` finisher opens it on the
-  harness repo via `IssueTracker`. `harness init` ships `workflows/heal.json` +
-  `agents/heal.json`. Enabled by naming a heal repo, either `--heal-repo
+- **Self-healing is a Process** (opt-in), not a bespoke loop (ADR-0018/ADR-0019). Its
+  action, the `failed-tasks` Check, drains `failed/`: it claims each failed task,
+  settles it to `healed/`, and fires a fresh task through the three-step `heal`
+  workflow. The `heal` step runs the `heal` persona over the failure report (reason +
+  history, no worktree) and triages it, returning `file` (a fixable harness bug —
+  drafts an issue and routes to `dedup`) or `skip` (nothing to file). `dedup` reads
+  the harness repo's open issues and returns `unique` (routes to `file-issue`) or
+  `duplicate` (settles silently — no issue). Only the `unique` path's `file-issue`
+  step's `open-issue` finisher opens the drafted issue on the harness repo via
+  `IssueTracker`. `harness init` ships `workflows/heal.json` + `agents/heal.json` +
+  `agents/dedup.json`. Enabled by naming a heal repo, either `--heal-repo
   <owner/repo>` (interactive) or the `HARNESS_HEAL_REPO` env var (the flag-free
   path for the launchd service, mirroring how `SLACK_WEBHOOK_URL` gates the slack
   sink) — needs `--agent claude`; either serves `heal`, registers the `open-issue`
