@@ -1,6 +1,15 @@
 # CHANGELOG
 
 
+## v0.18.1 (2026-07-24)
+
+### Bug Fixes
+
+- **board**: Actually render times in the client's local timezone
+  ([#116](https://github.com/onpaj/harness_v2/pull/116),
+  [`8b1b889`](https://github.com/onpaj/harness_v2/commit/8b1b88971331fe6ed0baa3cf461ecf4c04c05fb4))
+
+
 ## v0.18.0 (2026-07-24)
 
 ### Features
