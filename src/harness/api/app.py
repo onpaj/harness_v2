@@ -22,6 +22,7 @@ from harness.ports.process_admin import (
     ProcessFields,
     ProcessNotFound,
 )
+from harness.ports.triggers import CheckSpec
 from harness.ports.updater import Updater, UpdateError
 from harness.ports.workflow_admin import WorkflowAdmin, WorkflowValidationError
 from harness.ports.workflows import WorkflowNotFound
@@ -116,6 +117,9 @@ class _EmptyProcessAdmin(ProcessAdmin):
         return False
 
     def check_names(self) -> tuple[str, ...]:
+        return ()
+
+    def check_specs(self) -> tuple[CheckSpec, ...]:
         return ()
 
     def sink_kinds(self) -> tuple[str, ...]:

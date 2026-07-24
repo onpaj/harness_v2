@@ -318,7 +318,7 @@ def _process_form_context(
     is_new: bool,
     fields: ProcessFields,
     params_text: str | None,
-    check_names: tuple[str, ...],
+    check_specs: tuple,
     sink_kinds: tuple[str, ...],
     workflow_options: list[str],
     step_options: list[str],
@@ -328,6 +328,12 @@ def _process_form_context(
 ) -> dict:
     if params_text is None:
         params_text = json.dumps(fields.params, indent=2) if fields.params else ""
+    # The declarative action definitions the form renders from — nothing about
+    # an action is hardcoded in the template. Serialized to plain dicts so the
+    # same list drives both the server-rendered cards and the client-side param
+    # fields (embedded as JSON). `check_specs_json` is the exact JSON the script
+    # parses; it never contains a `</script>` sequence (spec text is our own).
+    specs = [spec.to_dict() for spec in check_specs]
     return {
         "name": name,
         "is_new": is_new,
@@ -341,7 +347,8 @@ def _process_form_context(
         "sink_kind": fields.sink_kind,
         "dedup": fields.dedup,
         "repository": fields.repository,
-        "check_names": list(check_names),
+        "check_specs": specs,
+        "check_specs_json": json.dumps(specs),
         "sink_kinds": list(sink_kinds),
         "workflow_options": workflow_options,
         "step_options": step_options,
@@ -876,7 +883,7 @@ def build_html_router(
                 is_new=is_new,
                 fields=fields,
                 params_text=params_text,
-                check_names=process_admin.check_names(),
+                check_specs=process_admin.check_specs(),
                 sink_kinds=process_admin.sink_kinds(),
                 workflow_options=workflow_options,
                 step_options=step_options,

@@ -12,18 +12,17 @@
 </head>
 <body>
   {% include "_nav.html" %}
-  {# Display metadata for the known checks. A check the port doesn't list (a
+  {# Every action's metadata and parameters come from its definition
+     (`check_specs`, served through the ProcessAdmin port) — nothing about an
+     action is hardcoded here. A check the port doesn't list (a
      runtime-registered one found in a hand-written file) still renders as a
-     generic card, so editing never hides the current value. #}
-  {% set check_meta = {
-    "always": ("Always", "Fires every interval, unconditionally."),
-    "command": ("Shell command", "Runs a command; every non-empty output line becomes a task."),
-    "disk-threshold": ("Disk threshold", "Fires while a disk is at or above a usage percentage."),
-    "fs-files": ("Files in a folder", "Fires once per file matching a glob pattern."),
-    "github-issues": ("GitHub issues", "Ingests labelled issues across the registered repos."),
-    "github-conflicts": ("GitHub conflicts", "Detects harness PRs with merge conflicts."),
-  } %}
-  {% set all_checks = check_names if (not check or check in check_names) else [check] + check_names %}
+     generic card, so editing never hides the current value; its parameters
+     fall back to the raw-JSON editor since its definition is unknown. #}
+  {% set spec_names = check_specs | map(attribute='name') | list %}
+  {% set all_specs = check_specs if (not check or check in spec_names)
+     else [{"name": check, "label": check,
+            "description": "Custom check — configure its settings below.",
+            "params": []}] + check_specs %}
   {% set all_repository_options = repository_options if (not repository or repository in repository_options) else [repository] + repository_options %}
   <main class="page page--editor">
     <a class="hint" href="/admin/processes">&larr; back to processes</a>
@@ -116,14 +115,13 @@
           <p class="hint">What the process checks each time it runs.</p>
         </header>
         <div class="option-cards" role="radiogroup" aria-label="Check">
-          {% for option in all_checks %}
-          {% set meta = check_meta.get(option, (option, "Custom check — configure its settings below.")) %}
+          {% for spec in all_specs %}
           <label class="option-card">
-            <input type="radio" name="check" value="{{ option }}"
-                   {{ 'checked' if option == check or (not check and loop.first) }}>
-            <span class="option-card__title">{{ meta[0] }}</span>
-            <span class="option-card__desc">{{ meta[1] }}</span>
-            <span class="option-card__kind">{{ option }}</span>
+            <input type="radio" name="check" value="{{ spec.name }}"
+                   {{ 'checked' if spec.name == check or (not check and loop.first) }}>
+            <span class="option-card__title">{{ spec.label }}</span>
+            <span class="option-card__desc">{{ spec.description or "Custom check — configure its settings below." }}</span>
+            <span class="option-card__kind">{{ spec.name }}</span>
           </label>
           {% endfor %}
         </div>
@@ -284,39 +282,30 @@
     {% endif %}
   </main>
 
+  {# The action definitions, verbatim from the ProcessAdmin port. The script
+     builds its per-check parameter map from this — the UI has nothing hardcoded
+     for any action, it just interprets the definitions. A check absent here (a
+     hand-written one the running registry doesn't know) has no entry, so it
+     falls back to the raw-JSON editor. #}
+  <script type="application/json" id="check-specs-data">{{ check_specs_json | safe }}</script>
   <script>
     (function () {
       "use strict";
       var form = document.getElementById('process-form');
 
-      /* Structured settings per known check. `key` is the params JSON key;
-       * `type: 'number'` values are written as JSON numbers. An unknown check
-       * falls back to the raw-JSON editor only. */
-      var PARAM_SPECS = {
-        "always": [],
-        "command": [
-          { key: "command", label: "Command", type: "text", required: true,
-            placeholder: "e.g. find /drop -name '*.job'",
-            hint: "Runs in a shell; each non-empty stdout line becomes one task." },
-          { key: "timeout", label: "Timeout (seconds)", type: "number", placeholder: "30" }
-        ],
-        "disk-threshold": [
-          { key: "path", label: "Path to watch", type: "text", required: true, placeholder: "/" },
-          { key: "percent", label: "Fire at usage (%)", type: "number", required: true, placeholder: "90" }
-        ],
-        "fs-files": [
-          { key: "path", label: "Directory", type: "text", required: true, placeholder: "/var/drop" },
-          { key: "pattern", label: "Glob pattern", type: "text", placeholder: "*" }
-        ],
-        "github-issues": [
-          { key: "label", label: "Issue label", type: "text", placeholder: "harness:todo",
-            hint: "Issues carrying this label are claimed and become tasks." }
-        ],
-        "github-conflicts": [
-          { key: "head_prefix", label: "Branch prefix", type: "text", placeholder: "harness/",
-            hint: "Only PRs whose head branch starts with this prefix are watched." }
-        ]
-      };
+      /* Structured settings per action, built from each action's own
+       * definition (served through the ProcessAdmin port). `key` is the params
+       * JSON key; `type: 'number'` values are written as JSON numbers. A check
+       * with no entry falls back to the raw-JSON editor only. */
+      var PARAM_SPECS = {};
+      (function () {
+        var el = document.getElementById('check-specs-data');
+        var specs = [];
+        try { specs = JSON.parse(el.textContent || '[]'); } catch (e) { specs = []; }
+        specs.forEach(function (spec) {
+          PARAM_SPECS[spec.name] = spec.params || [];
+        });
+      })();
 
       function esc(text) {
         var div = document.createElement('div');

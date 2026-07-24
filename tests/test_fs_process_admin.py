@@ -306,6 +306,45 @@ def test_check_names_and_sink_kinds(tmp_path: Path) -> None:
     assert admin.sink_kinds() == ("github", "none", "slack")
 
 
+# --- action definitions (check_specs) ---------------------------------------
+
+
+def test_check_specs_carry_labels_and_declared_params(tmp_path: Path) -> None:
+    admin = FilesystemProcessAdmin(tmp_path)
+
+    by_name = {spec.name: spec for spec in admin.check_specs()}
+
+    # every registered action surfaces, sorted, one spec each
+    assert tuple(spec.name for spec in admin.check_specs()) == admin.check_names()
+
+    # a parameterful action declares its inputs as data
+    disk = by_name["disk-threshold"]
+    assert disk.label == "Disk threshold"
+    keys = {param.key: param for param in disk.params}
+    assert set(keys) == {"path", "percent"}
+    assert keys["percent"].type == "number"
+    assert keys["path"].required is True
+
+    # a parameterless action is fully defined too — an empty tuple, not "unknown"
+    assert by_name["always"].params == ()
+
+
+def test_check_specs_synthesizes_a_generic_spec_for_a_bare_factory(tmp_path: Path) -> None:
+    """A wiring-registered check that carries no spec (a bare factory) still
+    surfaces — with a generic, parameterless spec — so it never disappears from
+    the form."""
+    from harness.drivers.checks import BUILTIN_CHECKS, AlwaysCheck
+
+    admin = FilesystemProcessAdmin(
+        tmp_path,
+        checks={**BUILTIN_CHECKS, "mystery": lambda params: AlwaysCheck()},
+    )
+
+    by_name = {spec.name: spec for spec in admin.check_specs()}
+    assert by_name["mystery"].name == "mystery"
+    assert by_name["mystery"].params == ()
+
+
 # --- the wired registry (checks beyond the built-ins) ------------------------
 
 
