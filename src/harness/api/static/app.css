@@ -341,6 +341,7 @@ td.wrap, th.wrap { white-space: normal; }
   white-space: pre-wrap; word-break: break-word;
   font: 12.5px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
   -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
 }
 
 .status-bar {

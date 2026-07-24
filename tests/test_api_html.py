@@ -108,6 +108,23 @@ def test_index_renders_board_shell(client):
     assert "width=device-width" in body
 
 
+def test_index_has_viewport_meta_and_scrollable_dialog(client):
+    body = client.get("/").text
+
+    assert (
+        '<meta name="viewport" '
+        'content="width=device-width, initial-scale=1, viewport-fit=cover">'
+    ) in body
+    assert "/static/app.css" in body
+
+    css = client.get("/static/app.css").text
+    dialog_rule = css[css.index("dialog#detail {") : css.index("}", css.index("dialog#detail {"))]
+    assert "max-height" in dialog_rule
+    terminal_rule = css[css.index(".terminal {") : css.index("}", css.index(".terminal {"))]
+    assert "overflow: auto" in terminal_rule
+    assert "overscroll-behavior: contain" in terminal_rule
+
+
 def test_index_contains_columns(client):
     body = client.get("/").text
 
