@@ -1,6 +1,56 @@
 # CHANGELOG
 
 
+## v0.17.0 (2026-07-24)
+
+### Documentation
+
+- Spec and plan for workflow-defined outcomes ([#102](https://github.com/onpaj/harness_v2/pull/102),
+  [`5bb19e9`](https://github.com/onpaj/harness_v2/commit/5bb19e91a3b6042394a9f2fd4b5bbeebfbcf8844))
+
+- **site**: Redesign the architecture explorer as a port-first catalogue
+  ([#101](https://github.com/onpaj/harness_v2/pull/101),
+  [`e4485d6`](https://github.com/onpaj/harness_v2/commit/e4485d6ccbd20231a38909b163a23c1bcef62cd9))
+
+### Features
+
+- Convert self-healing from a bespoke loop into an autoheal Process
+  ([`87de623`](https://github.com/onpaj/harness_v2/commit/87de6231456fdc2862b7fb787f0fc5f18b47ceb0))
+
+The Healer was a bespoke core loop (`healer.py`, `HealConfig`, `Harness._heal_loop`) — the single
+  reader of `failed/`, with its own config surface and outbound path, predating the Process idiom
+  (ADR-0015). Re-express it in the one general idiom:
+
+- `failed-tasks` Check (`drivers/failed_tasks_check.py`) drains `failed/`: claims each failed task,
+  settles it to `healed/`, emits one Observation carrying the rendered failure report; recursion
+  guarded by a `data.heal` marker, not by construction. - two-step `heal` workflow (`heal` ->
+  `file-issue`), target `{"workflow": "heal"}` so `file-issue` actually runs. - `open-issue`
+  finisher (`behaviors/open_issue.py`) opens the drafted issue via `IssueTracker`, idempotent by the
+  original failed-task id — a generic finisher future processes reuse. - process compilation moves
+  into `app.build()` (the check must close over the live `events`/`failed`/`healed` queues);
+  `build()` gains `extra_checks` / `processes_root`, loses `heal` / `issue_tracker`. - `--heal-repo`
+  survives as a thin generator: registers the `open-issue` finisher and writes
+  `processes/autoheal.json` (only if absent).
+
+Removes `healer.py`, `HealConfig`, `_heal_loop`. Rewrites invariants 24-27, adds ADR-0018, updates
+  the architecture model, CLAUDE.md and README. Migrates the healer tests to the Process path.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+
+- Enable autoheal flag-free via HARNESS_HEAL_REPO env var
+  ([`e73ef9f`](https://github.com/onpaj/harness_v2/commit/e73ef9f763b4271721e3826c8341ef1a37cde8f4))
+
+`--heal-repo` was the only way to name the repo heal issues are filed on, so the launchd service
+  could not self-heal without a CLI flag. Add `HARNESS_HEAL_REPO` as an equivalent enablement,
+  mirroring how `SLACK_WEBHOOK_URL` gates the slack sink: set it in the service env and the run
+  serves `heal`, registers the `open-issue` finisher on that repo, and writes
+  `processes/autoheal.json` if absent — no run flag. `--heal-repo` stays as the interactive
+  convenience. A non-claude agent with a heal repo set now warns instead of hard-failing (so an
+  env-configured service never crash-loops).
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+
+
 ## v0.16.0 (2026-07-23)
 
 ### Features
