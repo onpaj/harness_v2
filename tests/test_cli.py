@@ -43,7 +43,9 @@ SERVE_TEST_WORKFLOW = Workflow(
 def test_init_creates_layout_and_default_workflow(tmp_path):
     assert main(["init", "--root", str(tmp_path)]) == 0
 
-    definition = json.loads((tmp_path / "workflows" / "default.json").read_text())
+    definition = json.loads(
+        (tmp_path / "workflows" / f"{DEFAULT_WORKFLOW}.json").read_text()
+    )
     assert definition["start"] == "plan"
     assert {"from": "review", "on": "request_changes", "to": "development"} in definition["transitions"]
     assert (tmp_path / "tasks").is_dir()
@@ -191,14 +193,86 @@ def test_run_accepts_explicit_agent_timeout(monkeypatch, tmp_path):
 
 def test_init_is_idempotent_and_keeps_edits(tmp_path):
     main(["init", "--root", str(tmp_path)])
-    (tmp_path / "workflows" / "default.json").write_text(
-        json.dumps({"name": "default", "start": "plan", "transitions": []})
+    (tmp_path / "workflows" / f"{DEFAULT_WORKFLOW}.json").write_text(
+        json.dumps({"name": DEFAULT_WORKFLOW, "start": "plan", "transitions": []})
     )
 
     assert main(["init", "--root", str(tmp_path)]) == 0
 
-    definition = json.loads((tmp_path / "workflows" / "default.json").read_text())
+    definition = json.loads(
+        (tmp_path / "workflows" / f"{DEFAULT_WORKFLOW}.json").read_text()
+    )
     assert definition["transitions"] == []
+
+
+def test_init_migrates_legacy_default_workflow_preserving_edits(tmp_path):
+    """A pre-upgrade deployment has workflows/default.json (no development.json
+    yet). `harness init` with no --workflow must copy the legacy content
+    forward to development.json, verbatim, and leave default.json untouched —
+    an operator's custom edits to the legacy file must survive the upgrade."""
+    (tmp_path / "workflows").mkdir(parents=True)
+    custom = {"name": "default", "start": "plan", "transitions": [
+        {"from": "plan", "on": "done", "to": "end"}
+    ]}
+    (tmp_path / "workflows" / "default.json").write_text(json.dumps(custom))
+
+    assert main(["init", "--root", str(tmp_path)]) == 0
+
+    migrated = json.loads(
+        (tmp_path / "workflows" / f"{DEFAULT_WORKFLOW}.json").read_text()
+    )
+    assert migrated == custom
+    legacy = json.loads((tmp_path / "workflows" / "default.json").read_text())
+    assert legacy == custom
+
+
+def test_run_migrates_legacy_default_workflow_without_prior_init(tmp_path, monkeypatch):
+    """The launchd service restarts straight into `harness run`, with no
+    `harness init` in between. A root that only has a legacy default.json
+    (created by a pre-upgrade `harness init`) must still come up under the new
+    default name, and a task queued under the legacy name must still be able
+    to dispatch through it (not just build() succeeding)."""
+    assert main(["init", "--root", str(tmp_path), "--workflow", "default"]) == 0
+    assert (tmp_path / "workflows" / "default.json").exists()
+    assert not (tmp_path / "workflows" / f"{DEFAULT_WORKFLOW}.json").exists()
+
+    assert main(
+        [
+            "submit",
+            "--root",
+            str(tmp_path),
+            "--workflow",
+            "default",
+            "--data",
+            "{}",
+        ]
+    ) == 0
+
+    async def fake_serve(
+        harness,
+        port,
+        poll_interval,
+        source_interval=30.0,
+        pr_poll_interval=0.0,
+        reconcile_interval=300.0,
+    ):
+        harness.dispatcher.tick()
+
+    monkeypatch.setattr("harness.cli.serve", fake_serve)
+
+    assert main(
+        ["run", "--root", str(tmp_path), "--api-port", "0", "--agent", "dummy"]
+    ) == 0
+
+    migrated = json.loads(
+        (tmp_path / "workflows" / f"{DEFAULT_WORKFLOW}.json").read_text()
+    )
+    legacy = json.loads((tmp_path / "workflows" / "default.json").read_text())
+    assert migrated == legacy
+
+    assert list((tmp_path / "tasks").glob("*.json")) == []
+    dispatched = list((tmp_path / "queues" / "plan").glob("*.json"))
+    assert len(dispatched) == 1
 
 
 def test_review_persona_syncs_with_base_branch_before_checking_conformance():
@@ -584,13 +658,13 @@ def test_run_serves_multiple_workflows_with_repeated_flag(monkeypatch, tmp_path)
             "--root",
             str(tmp_path),
             "--workflow",
-            "default",
+            "development",
             "--workflow",
             "hotfix",
         ]
     ) == 0
     # The scaffolded resolver workflow is served whenever its file exists.
-    assert set(captured["harness"].workflows) == {"default", "hotfix", "resolver"}
+    assert set(captured["harness"].workflows) == {"development", "hotfix", "resolver"}
 
 
 def test_run_with_no_workflow_flag_serves_default_and_resolver(monkeypatch, tmp_path):
@@ -607,7 +681,7 @@ def test_run_with_no_workflow_flag_serves_default_and_resolver(monkeypatch, tmp_
     # `hotfix` isn't served (not selected), but the scaffolded `resolver` is —
     # its definition exists, so it rides alongside the default (decoupled from
     # the mergeability watcher flag).
-    assert set(captured["harness"].workflows) == {"default", "resolver"}
+    assert set(captured["harness"].workflows) == {"development", "resolver"}
 
 
 def test_run_all_workflows_serves_every_definition_found(monkeypatch, tmp_path):
@@ -622,7 +696,7 @@ def test_run_all_workflows_serves_every_definition_found(monkeypatch, tmp_path):
 
     assert main(["run", "--root", str(tmp_path), "--all-workflows"]) == 0
     # `init` also scaffolds the resolver workflow, so `--all-workflows` serves it too.
-    assert set(captured["harness"].workflows) == {"default", "hotfix", "resolver"}
+    assert set(captured["harness"].workflows) == {"development", "hotfix", "resolver"}
 
 
 def test_run_rejects_workflow_and_all_workflows_together(tmp_path, capsys):
@@ -1124,9 +1198,10 @@ def _parse_run(argv):
 
 def test_run_resolves_default_workflow_when_omitted(tmp_path, monkeypatch):
     """Plain `harness run` (no --workflow) against an ordinarily-initialized
-    harness serves `default` — the same effective default as before --workflow's
-    argparse default became None to support --no-workflow harnesses. The
-    scaffolded `resolver` workflow is appended because its definition exists."""
+    harness serves `development` — the same effective default as before
+    --workflow's argparse default became None to support --no-workflow
+    harnesses. The scaffolded `resolver` workflow is appended because its
+    definition exists."""
     main(["init", "--root", str(tmp_path)])
     seen = {}
 
@@ -1139,7 +1214,7 @@ def test_run_resolves_default_workflow_when_omitted(tmp_path, monkeypatch):
     with pytest.raises(SystemExit):
         main(["run", "--root", str(tmp_path), "--api-port", "0"])
 
-    assert list(seen["served"]) == ["default", "resolver"]
+    assert list(seen["served"]) == ["development", "resolver"]
 
 
 def test_run_with_no_workflow_harness_defaults_to_none(tmp_path, monkeypatch):

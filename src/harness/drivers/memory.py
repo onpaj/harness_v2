@@ -230,7 +230,7 @@ class MemoryTaskSource(TaskSource):
         self,
         *,
         clock: Clock,
-        workflow: str = "default",
+        workflow: str = "development",
         repository: str | None = None,
         worktree_root: str = "/memory/worktrees",
     ) -> None:

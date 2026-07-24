@@ -99,7 +99,7 @@ class GithubTaskSource(TaskSource):
         client: GithubClient,
         clock: Clock,
         repo: str,
-        workflow: str | None = "default",
+        workflow: str | None = "development",
         step: str | None = None,
         repository: str,
         worktree_root: str,
