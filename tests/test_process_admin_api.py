@@ -67,13 +67,13 @@ def test_list_processes_empty(client):
 
 
 def test_list_processes_returns_names(client, admin):
-    admin.write("nightly", ProcessFields("1h", "always", "workflow", "default"))
+    admin.write("nightly", ProcessFields(interval="1h", check="always", target_kind="workflow", target="default"))
 
     assert client.get("/api/processes").json()["processes"] == ["nightly"]
 
 
 def test_get_process_returns_fields(client, admin):
-    admin.write("nightly", ProcessFields("1h", "always", "workflow", "default"))
+    admin.write("nightly", ProcessFields(interval="1h", check="always", target_kind="workflow", target="default"))
 
     body = client.get("/api/processes/nightly").json()
 
@@ -119,7 +119,7 @@ def test_put_process_bad_interval_returns_422_and_writes_nothing(client, admin):
 
 
 def test_delete_process(client, admin):
-    admin.write("nightly", ProcessFields("1h", "always", "workflow", "default"))
+    admin.write("nightly", ProcessFields(interval="1h", check="always", target_kind="workflow", target="default"))
 
     assert client.delete("/api/processes/nightly").status_code == 204
     assert admin.list() == ()
@@ -137,7 +137,7 @@ def test_processes_list_page_shows_empty_state(client):
 
 
 def test_processes_list_page_lists_names(client, admin):
-    admin.write("nightly", ProcessFields("1h", "always", "workflow", "default"))
+    admin.write("nightly", ProcessFields(interval="1h", check="always", target_kind="workflow", target="default"))
 
     body = client.get("/admin/processes").text
 
@@ -180,7 +180,7 @@ def test_create_process_needs_a_name(client, admin):
 
 
 def test_create_process_with_existing_name_is_rejected(client, admin):
-    admin.write("nightly", ProcessFields("1h", "always", "workflow", "default"))
+    admin.write("nightly", ProcessFields(interval="1h", check="always", target_kind="workflow", target="default"))
 
     response = client.post("/admin/processes", data=_valid_form(name="nightly"))
 
@@ -200,6 +200,30 @@ def test_create_process_bad_interval_shows_field_error_and_writes_nothing(
     assert admin.list() == ()
 
 
+def test_create_cron_process_via_form(client, admin):
+    response = client.post(
+        "/admin/processes",
+        data=_valid_form(name="weekly-review", cadence="cron", cron="0 6 * * 1"),
+    )
+
+    assert response.status_code == 200
+    assert "saved" in response.text
+    fields = admin.read("weekly-review")
+    assert fields.cadence == "cron"
+    assert fields.cron == "0 6 * * 1"
+
+
+def test_create_process_bad_cron_shows_field_error_and_writes_nothing(client, admin):
+    response = client.post(
+        "/admin/processes",
+        data=_valid_form(name="bad-cron", cadence="cron", cron="0 6 31 2 *"),
+    )
+
+    assert response.status_code == 200
+    assert "field-error" in response.text
+    assert admin.list() == ()
+
+
 def test_create_process_bad_params_json_shows_field_error(client, admin):
     response = client.post(
         "/admin/processes",
@@ -212,7 +236,7 @@ def test_create_process_bad_params_json_shows_field_error(client, admin):
 
 
 def test_edit_process_page_shows_current_values(client, admin):
-    admin.write("nightly", ProcessFields("2h", "always", "step", "cleanup"))
+    admin.write("nightly", ProcessFields(interval="2h", check="always", target_kind="step", target="cleanup"))
 
     body = client.get("/admin/processes/nightly").text
 
@@ -220,8 +244,26 @@ def test_edit_process_page_shows_current_values(client, admin):
     assert "Process: nightly" in body
 
 
+def test_edit_process_page_shows_cron_value_and_no_disabled_inputs(client, admin):
+    admin.write(
+        "weekly-review",
+        ProcessFields(
+            cadence="cron", cron="0 6 * * 1", check="always", target_kind="workflow", target="default"
+        ),
+    )
+
+    body = client.get("/admin/processes/weekly-review").text
+
+    assert 'value="0 6 * * 1"' in body
+    assert 'name="cadence" value="cron"\n                   checked' in body
+    # Both cadence panels must always submit — neither input may be `disabled`,
+    # only visually hidden via the wrapping div, or the hidden panel's value
+    # would silently drop from the POST body on a toggle-then-submit.
+    assert "disabled" not in body
+
+
 def test_update_process_via_form(client, admin):
-    admin.write("nightly", ProcessFields("1h", "always", "workflow", "default"))
+    admin.write("nightly", ProcessFields(interval="1h", check="always", target_kind="workflow", target="default"))
 
     response = client.post(
         "/admin/processes/nightly", data=_valid_form(interval="6h")
@@ -232,7 +274,7 @@ def test_update_process_via_form(client, admin):
 
 
 def test_delete_process_via_form_redirects(client, admin):
-    admin.write("nightly", ProcessFields("1h", "always", "workflow", "default"))
+    admin.write("nightly", ProcessFields(interval="1h", check="always", target_kind="workflow", target="default"))
 
     response = client.post(
         "/admin/processes/nightly/delete", follow_redirects=False

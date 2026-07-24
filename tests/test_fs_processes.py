@@ -370,6 +370,91 @@ def test_unknown_trigger_kind_raises_naming_the_file(tmp_path: Path) -> None:
     assert excinfo.value.field == "trigger"
 
 
+def test_valid_cron_process_builds_a_working_trigger(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "weekly-review",
+        {
+            "trigger": {"cron": "0 6 * * 1"},
+            "action": {"check": "always"},
+            "target": {"workflow": "wf"},
+        },
+    )
+
+    (trigger,) = _build(tmp_path)
+
+    assert trigger.kind == "scheduled:weekly-review"
+    assert trigger._interval is None
+    assert trigger._cron is not None
+    (task,) = trigger.poll()
+    assert task.workflow_template == "wf"
+
+
+def test_bad_cron_raises_naming_the_file(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "bad-cron",
+        {
+            "trigger": {"cron": "0 6 31 2 *"},
+            "action": {"check": "always"},
+            "target": {"workflow": "wf"},
+        },
+    )
+
+    with pytest.raises(ProcessValidationError) as excinfo:
+        _build(tmp_path)
+    assert "bad-cron" in str(excinfo.value)
+    assert excinfo.value.field == "cron"
+
+
+def test_both_interval_and_cron_raises_naming_the_file(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "both-cadences",
+        {
+            "trigger": {"interval": "1h", "cron": "0 6 * * 1"},
+            "action": {"check": "always"},
+            "target": {"workflow": "wf"},
+        },
+    )
+
+    with pytest.raises(ProcessValidationError) as excinfo:
+        _build(tmp_path)
+    assert "both-cadences" in str(excinfo.value)
+    assert excinfo.value.field == "trigger"
+
+
+def test_neither_interval_nor_cron_raises_naming_the_file(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "no-cadence",
+        {
+            "trigger": {},
+            "action": {"check": "always"},
+            "target": {"workflow": "wf"},
+        },
+    )
+
+    with pytest.raises(ProcessValidationError) as excinfo:
+        _build(tmp_path)
+    assert "no-cadence" in str(excinfo.value)
+    assert excinfo.value.field == "trigger"
+
+
+def test_cron_trigger_kind_schedule_is_accepted(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "explicit-kind",
+        {
+            "trigger": {"kind": "schedule", "cron": "0 6 * * 1"},
+            "action": {"check": "always"},
+            "target": {"workflow": "wf"},
+        },
+    )
+
+    assert len(_build(tmp_path)) == 1
+
+
 def test_disk_threshold_missing_params_raises_process_error_not_keyerror(
     tmp_path: Path,
 ) -> None:

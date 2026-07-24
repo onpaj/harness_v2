@@ -311,3 +311,21 @@ The feature is done when:
 5. Architecture tests still pass: `dispatcher`/`consumer` import neither
    `ports.source` nor `ports.triggers`; `fs_processes.py` is touched only by
    `cli.py`; `scheduled_trigger.py` still imports only ports/models/ids.
+
+## Addendum (2026-07-23): cron cadence
+
+A Process's `trigger` block now accepts `{"cron": "0 6 * * 1"}` as an
+alternative to `{"interval": "1h"}` — exactly one of the two, same as generic
+triggers (see the parallel addendum in `2026-07-22-generic-triggers-design.md`
+and ADR-0018 for the full design). `compile_process`'s cadence parsing
+generalizes from a single `_parse_interval` to `_parse_cadence`, returning
+`(interval, cron)` with exactly one non-`None`; the error taxonomy in this
+spec's "field" enum gains `cron` (a present-but-invalid cron expression) and
+extends `trigger`'s existing meaning (an unsupported `trigger.kind`) to also
+cover the block carrying both/neither cadence — one field, "the trigger block
+itself is malformed," distinct from `interval`/`cron` meaning "this one value
+is malformed." `ProcessFields` gains a `cadence` discriminator
+(`"interval"`/`"cron"`) plus a `cron` value field; the admin form's Schedule
+section gains a cadence toggle. UTC-only, fire-once-on-catchup — same as the
+generic-triggers addendum. No change to the Process authoring aggregate's
+other roles (action/target/sink) or to `Check`/`Observation`.

@@ -85,6 +85,35 @@ def test_disk_threshold_step_round_trips(tmp_path: Path) -> None:
     _compiles(tmp_path)
 
 
+def test_cron_cadence_round_trips(tmp_path: Path) -> None:
+    admin = FilesystemProcessAdmin(tmp_path)
+
+    written = admin.write(
+        "weekly-review",
+        ProcessFields(
+            cadence="cron",
+            cron="0 6 * * 1",
+            check="always",
+            target_kind="workflow",
+            target="wf",
+        ),
+    )
+
+    assert written == ProcessFields(
+        cadence="cron",
+        cron="0 6 * * 1",
+        interval="",
+        check="always",
+        target_kind="workflow",
+        target="wf",
+        params={},
+        sink_kind="none",
+        dedup="per-interval",
+    )
+    assert admin.read("weekly-review") == written
+    _compiles(tmp_path)
+
+
 def test_slack_sink_round_trips(tmp_path: Path) -> None:
     admin = FilesystemProcessAdmin(tmp_path)
 
@@ -151,6 +180,7 @@ def _valid(**overrides) -> ProcessFields:
         (_valid(dedup="per-eternity"), "dedup"),
         (_valid(sink_kind="teams"), "sink"),
         (_valid(target_kind="banana"), "target"),
+        (_valid(cadence="cron", cron="0 6 31 2 *"), "cron"),
     ],
 )
 def test_write_maps_a_compile_failure_to_the_right_field(
@@ -163,6 +193,19 @@ def test_write_maps_a_compile_failure_to_the_right_field(
 
     assert field in excinfo.value.errors
     assert not (tmp_path / "bad.json").exists()
+
+
+def test_cron_cadence_with_blank_box_maps_to_cron_not_interval(tmp_path: Path) -> None:
+    # The explicit `cadence` discriminator, not "whichever field is non-blank":
+    # toggling to cron but leaving the box empty must report against
+    # `errors.cron`, never `errors.interval`.
+    admin = FilesystemProcessAdmin(tmp_path)
+
+    with pytest.raises(ProcessAdminValidationError) as excinfo:
+        admin.write("bad", _valid(cadence="cron", cron=""))
+
+    assert "cron" in excinfo.value.errors
+    assert "interval" not in excinfo.value.errors
 
 
 def test_write_invalid_name_is_rejected(tmp_path: Path) -> None:
