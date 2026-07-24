@@ -1481,6 +1481,7 @@ async def test_serve_returns_when_uvicorn_stops_before_the_loop(monkeypatch, tmp
             self.artifacts = MemoryArtifactStore()
             self.stage_output = StageOutputProjection()
             self.control = FakeTaskControl()
+            self.process_checks = None
             self.stop_seen: asyncio.Event | None = None
 
         async def run(
@@ -1513,7 +1514,11 @@ def test_layout_processes_property(tmp_path):
 async def test_serve_wires_the_filesystem_process_admin(monkeypatch, tmp_path):
     """`serve()` passes a real `FilesystemProcessAdmin(layout.processes)` into
     `create_app`, beside the agent/workflow admins — the driver is wired only
-    here (invariant #33)."""
+    here (invariant #33) — and hands it the harness's own effective check
+    registry (`harness.process_checks`), so the dashboard's process form
+    offers the wiring-time actions (`github-issues`, ...) too, not just the
+    built-ins."""
+    from harness.drivers.checks import BUILTIN_CHECKS, AlwaysCheck
     from harness.drivers.fs_processes import FilesystemProcessAdmin
 
     captured = {}
@@ -1543,6 +1548,10 @@ async def test_serve_wires_the_filesystem_process_admin(monkeypatch, tmp_path):
             self.artifacts = MemoryArtifactStore()
             self.stage_output = StageOutputProjection()
             self.control = FakeTaskControl()
+            self.process_checks = {
+                **BUILTIN_CHECKS,
+                "github-issues": lambda params: AlwaysCheck(),
+            }
 
         async def run(
             self, poll_interval, source_interval=30.0, pr_poll_interval=0.0, reconcile_interval=300.0, stop=None
@@ -1554,6 +1563,8 @@ async def test_serve_wires_the_filesystem_process_admin(monkeypatch, tmp_path):
 
     admin = captured["process_admin"]
     assert isinstance(admin, FilesystemProcessAdmin)
+    assert "github-issues" in admin.check_names()
+    assert "always" in admin.check_names()
 
 
 # --- harness service -------------------------------------------------------

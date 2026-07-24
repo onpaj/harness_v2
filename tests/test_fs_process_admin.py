@@ -297,3 +297,66 @@ def test_check_names_and_sink_kinds(tmp_path: Path) -> None:
     assert "always" in admin.check_names()
     assert "disk-threshold" in admin.check_names()
     assert admin.sink_kinds() == ("github", "none", "slack")
+
+
+# --- the wired registry (checks beyond the built-ins) ------------------------
+
+
+def test_check_names_reflects_the_wired_registry(tmp_path: Path) -> None:
+    from harness.drivers.checks import BUILTIN_CHECKS, AlwaysCheck
+
+    admin = FilesystemProcessAdmin(
+        tmp_path,
+        checks={**BUILTIN_CHECKS, "github-issues": lambda params: AlwaysCheck()},
+    )
+
+    assert "github-issues" in admin.check_names()
+    assert "always" in admin.check_names()
+
+
+def test_write_validates_against_the_wired_registry(tmp_path: Path) -> None:
+    """A check the wiring registered beyond the built-ins (the GitHub-backed
+    actions, `failed-tasks`) is writable through the admin — the same registry
+    drives the dropdown and the save-time compile, so the dashboard accepts
+    exactly what the runtime would. The default (built-ins-only) admin still
+    rejects the same name."""
+    from harness.drivers.checks import BUILTIN_CHECKS, AlwaysCheck
+
+    admin = FilesystemProcessAdmin(
+        tmp_path,
+        checks={**BUILTIN_CHECKS, "github-issues": lambda params: AlwaysCheck()},
+    )
+
+    written = admin.write("ingest", _valid(check="github-issues"))
+
+    assert written.check == "github-issues"
+    assert admin.read("ingest") == written
+
+    with pytest.raises(ProcessAdminValidationError) as excinfo:
+        FilesystemProcessAdmin(tmp_path / "plain").write(
+            "ingest", _valid(check="github-issues")
+        )
+    assert "check" in excinfo.value.errors
+
+
+def test_write_maps_a_wired_factory_failure_onto_its_field(tmp_path: Path) -> None:
+    """A wired factory that raises `ProcessValidationError` itself (the
+    no-`GITHUB_TOKEN` github factories do, with `field="check"`) surfaces as
+    that form-field error — never a crash, never a written file."""
+    from harness.drivers.checks import BUILTIN_CHECKS
+    from harness.drivers.fs_processes import ProcessValidationError
+
+    def factory(params):
+        raise ProcessValidationError(
+            "github-issues action requires GITHUB_TOKEN", field="check"
+        )
+
+    admin = FilesystemProcessAdmin(
+        tmp_path, checks={**BUILTIN_CHECKS, "github-issues": factory}
+    )
+
+    with pytest.raises(ProcessAdminValidationError) as excinfo:
+        admin.write("ingest", _valid(check="github-issues"))
+
+    assert "check" in excinfo.value.errors
+    assert not (tmp_path / "ingest.json").exists()

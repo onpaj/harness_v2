@@ -1029,6 +1029,28 @@ def test_build_extra_checks_merge_over_builtin_checks(tmp_path):
     assert len(harness.pollers) == 1
 
 
+def test_build_exposes_the_effective_process_check_registry(tmp_path):
+    """`harness.process_checks` is the very registry `build()` compiled
+    `processes/*.json` against — built-ins, `extra_checks` and the internal
+    `failed-tasks` — so `serve()` can hand it to `FilesystemProcessAdmin` and
+    the dashboard's process form offers and validates exactly what this run
+    accepts, never a narrower admin-only subset."""
+    from harness.drivers.checks import BUILTIN_CHECKS, AlwaysCheck
+
+    seed_definition(tmp_path, DEFINITION)
+
+    harness = build(
+        tmp_path,
+        "default",
+        events=MemoryEventSink(),
+        extra_checks={"custom-check": lambda params: AlwaysCheck()},
+    )
+
+    assert set(BUILTIN_CHECKS) <= set(harness.process_checks)
+    assert "custom-check" in harness.process_checks
+    assert "failed-tasks" in harness.process_checks
+
+
 def test_build_unknown_check_still_fails_fast(tmp_path):
     from harness.drivers.fs_processes import ProcessValidationError
 

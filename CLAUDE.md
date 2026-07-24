@@ -191,7 +191,15 @@ Dependencies flow strictly downward, no cycles.
   `FilesystemProcessRepository`, for the admin UI): `list`/`read`/`write`/`delete`
   over the structured `ProcessFields`, plus `check_names()`/`sink_kinds()` so the
   form's dropdowns are populated through the port (`api/` imports no driver);
-  `ProcessNotFound`/`ProcessAdminValidationError` mirror the agent admin's
+  `ProcessNotFound`/`ProcessAdminValidationError` mirror the agent admin's.
+  `FilesystemProcessAdmin` takes the *effective* check registry: `build()`
+  exposes the merged dict it compiled processes with (built-ins +
+  `extra_checks` + `failed-tasks`) as `harness.process_checks`, and `serve()`
+  hands it to the admin — so the dashboard offers and validates exactly the
+  actions this run accepts (`github-issues`/`github-conflicts` included), not
+  a built-ins-only subset; without a `GITHUB_TOKEN` the GitHub names still
+  list, but saving one fails on the `check` field via the factory's own
+  fail-fast
 - `behaviors/resolve_conflict.py` — `ResolveConflictBehavior`: merges the base
   into the attached branch; a clean merge commits without spending an agent
   call, a real conflict runs the `resolve` persona then the worker commits

@@ -847,12 +847,11 @@ def _ensure_autoheal_process(layout: HarnessLayout) -> None:
     unless one already exists — never clobbering an operator's hand-edited
     file. Written directly (like `_init`'s `HEAL_DEFINITION`/
     `RESOLVER_DEFINITION`), **not** through `FilesystemProcessAdmin.write`:
-    that write path validates via `compile_process`'s *default* `checks`
-    (`BUILTIN_CHECKS`, dependency-free) with no way to pass the merged dict
-    `app.build()` assembles — so it would reject `"failed-tasks"` as an
-    unknown check, even though the file is genuinely valid once `build()`
-    compiles it for real. The real validation this file needs to pass happens
-    at that point, not at write time.
+    validating `"failed-tasks"` needs the merged registry `app.build()`
+    assembles (`harness.process_checks` — which `serve()` *does* hand the
+    dashboard's admin), and at this point in `_run` no harness exists yet.
+    The real validation this file needs to pass happens when `build()`
+    compiles it moments later, not at write time.
     """
     path = layout.processes / "autoheal.json"
     if path.exists():
@@ -1741,7 +1740,13 @@ async def serve(
         clock=SystemClock(),
         agent_admin=FilesystemAgentAdmin(harness.layout.agents),
         workflow_admin=FilesystemWorkflowAdmin(harness.layout.workflows),
-        process_admin=FilesystemProcessAdmin(harness.layout.processes),
+        # The harness's own effective registry (built-ins + `extra_checks` +
+        # `failed-tasks`), so the process form offers and validates exactly
+        # the checks this run compiles — a GitHub-backed process is authorable
+        # in the dashboard, not only by hand-editing `processes/*.json`.
+        process_admin=FilesystemProcessAdmin(
+            harness.layout.processes, checks=harness.process_checks
+        ),
         updater=updater,
         version=version_string(),
         build_time=build_timestamp(),
