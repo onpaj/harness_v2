@@ -203,3 +203,77 @@ def test_target_outside_known_targets_raises_naming_the_file(tmp_path: Path) -> 
     with pytest.raises(TriggerValidationError) as excinfo:
         _build(tmp_path, known_targets={"wf"})
     assert "unknown-wf" in str(excinfo.value)
+
+
+# --- cron cadence -------------------------------------------------------------
+
+
+def test_valid_cron_file_builds_one_trigger(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "weekly-review",
+        {
+            "kind": "scheduled",
+            "cron": "0 6 * * 1",
+            "check": "always",
+            "target": {"workflow": "wf"},
+        },
+    )
+
+    (trigger,) = FilesystemTriggerRepository(tmp_path).build(clock=SystemClock())
+
+    assert trigger.kind == "scheduled:weekly-review"
+    assert trigger._interval is None
+    assert trigger._cron is not None
+    assert trigger._workflow == "wf"
+
+
+def test_bad_cron_raises_naming_the_file(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "bad-cron",
+        {
+            "kind": "scheduled",
+            "cron": "0 6 31 2 *",
+            "check": "always",
+            "target": {"workflow": "wf"},
+        },
+    )
+
+    with pytest.raises(TriggerValidationError) as excinfo:
+        _build(tmp_path)
+    assert "bad-cron" in str(excinfo.value)
+
+
+def test_both_interval_and_cron_raises_naming_the_file(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "both-cadences",
+        {
+            "kind": "scheduled",
+            "interval": "1h",
+            "cron": "0 6 * * 1",
+            "check": "always",
+            "target": {"workflow": "wf"},
+        },
+    )
+
+    with pytest.raises(TriggerValidationError) as excinfo:
+        _build(tmp_path)
+    assert "both-cadences" in str(excinfo.value)
+
+
+def test_neither_interval_nor_cron_raises_naming_the_file(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "no-cadence",
+        {
+            "kind": "scheduled",
+            "check": "always",
+            "target": {"workflow": "wf"},
+        },
+    )
+
+    with pytest.raises(TriggerValidationError) as excinfo:
+        _build(tmp_path)
+    assert "no-cadence" in str(excinfo.value)

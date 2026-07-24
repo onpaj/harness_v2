@@ -1,12 +1,13 @@
 """Triggers as data: `<root>/<name>.json` → `ScheduledTrigger`s.
 
 Symmetric to `FilesystemAgentCatalog`/`FilesystemWorkflowRepository`: a trigger
-is a small JSON file naming a `kind` (`"scheduled"` only, in v1), an `interval`,
-a `check` (resolved against a factory registry, params passed in) and a `target`
-that is exactly one of `{"workflow": ...}` / `{"step": ...}`. `build()` reads the
-directory once, validates every file up front and fails fast — like a missing
-agent spec — raising `TriggerValidationError` (naming the offending file) rather
-than letting a malformed trigger fire silently at runtime.
+is a small JSON file naming a `kind` (`"scheduled"` only, in v1), a cadence
+(exactly one of `interval` or `cron`), a `check` (resolved against a factory
+registry, params passed in) and a `target` that is exactly one of
+`{"workflow": ...}` / `{"step": ...}`. `build()` reads the directory once,
+validates every file up front and fails fast — like a missing agent spec —
+raising `TriggerValidationError` (naming the offending file) rather than
+letting a malformed trigger fire silently at runtime.
 """
 
 from __future__ import annotations
@@ -17,7 +18,7 @@ from pathlib import Path
 from harness.drivers.checks import BUILTIN_CHECKS
 from harness.drivers.scheduled_trigger import ScheduledTrigger
 from harness.ports.clock import Clock
-from harness.ports.triggers import CheckFactory, parse_interval
+from harness.ports.triggers import CheckFactory, parse_cron, parse_interval
 
 
 class TriggerValidationError(Exception):
@@ -83,14 +84,28 @@ class FilesystemTriggerRepository:
                 f"(only 'scheduled' is supported)"
             )
 
-        if "interval" not in raw:
-            raise TriggerValidationError(f"trigger {path.name} has no interval")
-        try:
-            interval = parse_interval(raw["interval"])
-        except (ValueError, TypeError) as error:
+        has_interval = "interval" in raw
+        has_cron = "cron" in raw
+        if has_interval == has_cron:
             raise TriggerValidationError(
-                f"trigger {path.name} has an invalid interval: {error}"
-            ) from None
+                f"trigger {path.name} must have exactly one of interval/cron"
+            )
+        if has_cron:
+            try:
+                cron = parse_cron(raw["cron"])
+            except (ValueError, TypeError) as error:
+                raise TriggerValidationError(
+                    f"trigger {path.name} has an invalid cron expression: {error}"
+                ) from None
+            interval = None
+        else:
+            try:
+                interval = parse_interval(raw["interval"])
+            except (ValueError, TypeError) as error:
+                raise TriggerValidationError(
+                    f"trigger {path.name} has an invalid interval: {error}"
+                ) from None
+            cron = None
 
         check_name = raw.get("check")
         if check_name not in checks:
@@ -112,6 +127,7 @@ class FilesystemTriggerRepository:
             name=name,
             clock=clock,
             interval=interval,
+            cron=cron,
             check=check,
             workflow=workflow,
             step=step,
