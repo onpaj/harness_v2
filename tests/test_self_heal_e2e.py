@@ -45,16 +45,17 @@ HEAL_SPEC = AgentSpec(
 MAX_STEPS = 1000
 
 
-def seed(tmp_path, *, interval="1s") -> None:
+def seed(tmp_path, *, interval="1s", repository=None) -> None:
     layout = HarnessLayout(tmp_path)
     layout.workflows.mkdir(parents=True, exist_ok=True)
     (layout.workflows / "heal.json").write_text(json.dumps(HEAL_DEFINITION))
     layout.processes.mkdir(parents=True, exist_ok=True)
+    params = {"repository": repository} if repository is not None else {}
     (layout.processes / "autoheal.json").write_text(
         json.dumps(
             {
                 "trigger": {"interval": interval},
-                "action": {"check": "failed-tasks", "params": {}},
+                "action": {"check": "failed-tasks", "params": params},
                 "target": {"workflow": "heal"},
                 "dedup": "per-state",
                 "sink": {"kind": "none"},
@@ -241,3 +242,41 @@ async def test_no_autoheal_process_leaves_the_task_in_failed(tmp_path):
     assert len(list((tmp_path / "failed").glob("*.json"))) == 1
     assert list((tmp_path / "healed").glob("*.json")) == []
     assert tracker.opened == []
+
+
+async def test_autoheal_process_repository_is_stamped_on_the_fired_heal_task(
+    tmp_path,
+):
+    """A repo-configured autoheal process stamps its `repository` param onto
+    the fired heal task (`Observation.repository` -> `ScheduledTrigger._task_for`),
+    so the heal step gets a worktree."""
+    seed(tmp_path, repository="onpaj/harness_v2")
+    put_failed_task(tmp_path)
+    runner = FakeAgentRunner(runs={"heal": AgentRun(DONE, "Add the missing edge")})
+    harness, tracker = build_harness(tmp_path, runner=runner, clock=FakeClock())
+
+    await drive_until_quiet(harness)
+
+    done_files = list((tmp_path / "done").glob("*.json"))
+    assert len(done_files) == 1
+    heal_task = Task.from_dict(json.loads(done_files[0].read_text()))
+    assert heal_task.status == "end"
+    assert heal_task.repository == "onpaj/harness_v2"
+
+
+async def test_autoheal_process_without_repository_leaves_it_unset(tmp_path):
+    """Back-compat: an autoheal process with no `repository` param (the
+    module's existing default, `params: {}`) fires a heal task with no
+    repository — unchanged behavior."""
+    seed(tmp_path)
+    put_failed_task(tmp_path)
+    runner = FakeAgentRunner(runs={"heal": AgentRun(DONE, "Add the missing edge")})
+    harness, tracker = build_harness(tmp_path, runner=runner, clock=FakeClock())
+
+    await drive_until_quiet(harness)
+
+    done_files = list((tmp_path / "done").glob("*.json"))
+    assert len(done_files) == 1
+    heal_task = Task.from_dict(json.loads(done_files[0].read_text()))
+    assert heal_task.status == "end"
+    assert heal_task.repository is None

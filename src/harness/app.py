@@ -627,7 +627,11 @@ def build(
         **BUILTIN_CHECKS,
         **(extra_checks or {}),
         "failed-tasks": lambda params: FailedTasksCheck(
-            failed=failed, healed=healed_queue, events=events, clock=clock
+            failed=failed,
+            healed=healed_queue,
+            events=events,
+            clock=clock,
+            repository=params.get("repository"),
         ),
     }
     # `known_targets` must include served *workflow* names too, not just step

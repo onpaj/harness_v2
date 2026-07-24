@@ -842,7 +842,7 @@ real `Workflow` in scope on the *second* `route()` call, which only happens
 when `task.workflow_template` is set (ADR-0018)."""
 
 
-def _ensure_autoheal_process(layout: HarnessLayout) -> None:
+def _ensure_autoheal_process(layout: HarnessLayout, heal_repo: str) -> None:
     """`--heal-repo`'s thin-generator half: write `processes/autoheal.json`
     unless one already exists — never clobbering an operator's hand-edited
     file. Written directly (like `_init`'s `HEAL_DEFINITION`/
@@ -857,8 +857,12 @@ def _ensure_autoheal_process(layout: HarnessLayout) -> None:
     if path.exists():
         return
     layout.processes.mkdir(parents=True, exist_ok=True)
+    definition = {
+        **AUTOHEAL_PROCESS_DEFINITION,
+        "action": {"check": "failed-tasks", "params": {"repository": heal_repo}},
+    }
     path.write_text(
-        json.dumps(AUTOHEAL_PROCESS_DEFINITION, indent=2, ensure_ascii=False),
+        json.dumps(definition, indent=2, ensure_ascii=False),
         encoding="utf-8",
     )
 
@@ -1607,7 +1611,7 @@ def _run(args: argparse.Namespace) -> int:
             artifacts=artifact_view,
             clock=SystemClock(),
         )
-        _ensure_autoheal_process(layout)
+        _ensure_autoheal_process(layout, heal_repo)
 
     # Scheduled triggers (`triggers/*.json`) are `TaskSource`s that ride the
     # existing `sources` list — no new loop, no `build()` parameter. A trigger's
