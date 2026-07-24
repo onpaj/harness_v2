@@ -126,6 +126,39 @@ def test_run_heal_repo_wires_open_issue_finisher_and_tracker(monkeypatch, tmp_pa
     assert process["action"]["check"] == "failed-tasks"
 
 
+def test_run_heal_via_env_var_wires_everything_without_a_flag(monkeypatch, tmp_path):
+    """The flag-free path: `HARNESS_HEAL_REPO` (config in the service env, not a
+    run flag) enables healing exactly as `--heal-repo` does — serves `heal`,
+    registers the `open-issue` finisher on that repo, and materializes
+    `processes/autoheal.json` so the failed-tasks check has a target. This is
+    what lets the launchd service self-heal with no CLI flag (ADR-0018)."""
+    from harness.behaviors.open_issue import OpenIssueBehavior
+
+    main(["init", "--root", str(tmp_path)])
+    captured = {}
+
+    def fake_build(*args, **kwargs):
+        captured["served_names"] = args[1]
+        captured["finishers"] = kwargs.get("finishers")
+        return object()
+
+    async def fake_serve(harness, port, poll_interval, source_interval=30.0, pr_poll_interval=0.0, reconcile_interval=300.0):
+        pass
+
+    monkeypatch.setattr("harness.cli.build", fake_build)
+    monkeypatch.setattr("harness.cli.serve", fake_serve)
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    monkeypatch.setenv("HARNESS_HEAL_REPO", "onpaj/harness_v2")
+
+    # No --heal-repo anywhere on the command line.
+    assert main(["run", "--root", str(tmp_path)]) == 0
+    assert DEFAULT_HEAL_WORKFLOW in captured["served_names"]
+    behavior = captured["finishers"]["open-issue"]("file-issue", {}, lambda: None)
+    assert isinstance(behavior, OpenIssueBehavior)
+    assert behavior._repo == "onpaj/harness_v2"
+    assert (tmp_path / "processes" / "autoheal.json").is_file()
+
+
 def test_run_heal_repo_uses_github_tracker_with_a_token(monkeypatch, tmp_path):
     from harness.drivers.github_issues import GithubIssueTracker
 

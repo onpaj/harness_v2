@@ -1611,23 +1611,33 @@ def _run(args: argparse.Namespace) -> int:
     if resolver_defined and args.resolver_workflow not in served_names:
         served_names = [*served_names, args.resolver_workflow]
 
-    # Self-healing (ADR-0018): enabled by `--heal-repo <owner/repo>` (where the
-    # `open-issue` finisher files issues). This must run *before* `known_targets`
-    # is computed below — the autoheal process's `{"workflow": "heal"}` target
-    # (and any bare trigger naming it) needs "heal" in the served set to
-    # validate. It reuses the claude agent, so it needs `--agent claude`;
-    # offline (no GITHUB_TOKEN) it falls back to the in-memory tracker so the
-    # loop still runs harmlessly.
+    # Self-healing (ADR-0018): enabled by a heal repo — `--heal-repo
+    # <owner/repo>` OR the `HARNESS_HEAL_REPO` env var, the flag-free path that
+    # mirrors how `SLACK_WEBHOOK_URL` gates the slack sink (config in the
+    # service's env, never a run flag). Either way the `open-issue` finisher
+    # files heal issues on that repo. This must run *before* `known_targets` is
+    # computed below — the autoheal process's `{"workflow": "heal"}` target (and
+    # any bare trigger naming it) needs "heal" in the served set to validate. It
+    # reuses the claude agent, so it needs `--agent claude`; offline (no
+    # GITHUB_TOKEN) it falls back to the in-memory tracker so the loop still
+    # runs harmlessly.
     finishers: dict[
         str, Callable[[str, dict, Callable[[], ConsumerBehavior]], ConsumerBehavior]
     ] = {}
-    if args.heal_repo:
-        if not use_agent:
+    heal_repo = args.heal_repo or os.environ.get("HARNESS_HEAL_REPO")
+    if heal_repo:
+        if args.heal_repo and not use_agent:
             print(
                 "error: --heal-repo needs --agent claude (the healer is a claude agent)",
                 file=sys.stderr,
             )
             return 2
+        if not use_agent:
+            print(
+                "warning: HARNESS_HEAL_REPO is set but --agent is not claude; the"
+                " heal step cannot run and failed tasks will settle unhealed.",
+                file=sys.stderr,
+            )
         if DEFAULT_HEAL_WORKFLOW not in served_names:
             served_names = [*served_names, DEFAULT_HEAL_WORKFLOW]
         token = os.environ.get("GITHUB_TOKEN")
@@ -1641,7 +1651,7 @@ def _run(args: argparse.Namespace) -> int:
         # factory, per the finisher registry contract (invariant #41).
         finishers["open-issue"] = lambda step, config, inner: OpenIssueBehavior(
             tracker=issue_tracker,
-            repo=args.heal_repo,
+            repo=heal_repo,
             artifacts=artifact_view,
             clock=SystemClock(),
         )

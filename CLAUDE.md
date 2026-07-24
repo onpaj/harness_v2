@@ -229,10 +229,13 @@ Dependencies flow strictly downward, no cycles.
   worktree); if it judges the failure a fixable harness bug it drafts an issue and
   returns `done`, and the `file-issue` step's `open-issue` finisher opens it on the
   harness repo via `IssueTracker`. `harness init` ships `workflows/heal.json` +
-  `agents/heal.json`; `harness run --heal-repo <owner/repo>` (needs `--agent claude`)
-  registers the `open-issue` finisher and writes `processes/autoheal.json` (only if
-  absent — a hand-edited process is never clobbered). Recursion is guarded by the
-  `data.heal` marker, not by construction (invariant 25).
+  `agents/heal.json`. Enabled by naming a heal repo, either `--heal-repo
+  <owner/repo>` (interactive) or the `HARNESS_HEAL_REPO` env var (the flag-free
+  path for the launchd service, mirroring how `SLACK_WEBHOOK_URL` gates the slack
+  sink) — needs `--agent claude`; either serves `heal`, registers the `open-issue`
+  finisher and writes `processes/autoheal.json` if absent (a hand-edited process is
+  never clobbered). Recursion is guarded by the `data.heal` marker, not by
+  construction (invariant 25).
 - **`claim()`** is an atomic `rename` into `<queue>/.processing/`. A single operation
   handles the lease, idempotency and provenance after a crash.
 - **A step's concurrency is workflow config, not wiring.** `Workflow.max_parallel`

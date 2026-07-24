@@ -313,15 +313,25 @@ per `dirty` PR, deduped per conflicted head commit.
 
 By default a task that fails comes to rest in `failed/` and stays there — an
 operator has to notice, read its history, and decide whether the harness itself
-was at fault. `--heal-repo <owner/repo>` turns `failed/` into a queue that
-drains, by wiring up an **autoheal Process** (ADR-0018):
+was at fault. Point the harness at a repo to file heal issues on and `failed/`
+becomes a queue that drains, via an **autoheal Process** (ADR-0018). Two ways to
+name that repo:
 
 ```sh
+# one-off / interactive: the flag also writes processes/autoheal.json for you
 harness run --root ~/harness-root --agent claude --heal-repo onpaj/harness_v2
+
+# unattended service: config in the env, no run flag (mirrors SLACK_WEBHOOK_URL)
+HARNESS_HEAL_REPO=onpaj/harness_v2 harness run --root ~/harness-root --agent claude
 ```
 
-Self-healing is an ordinary Process, not bespoke machinery. `--heal-repo` writes
-a `processes/autoheal.json` whose `failed-tasks` action drains `failed/`: on each
+`HARNESS_HEAL_REPO` is the flag-free path — set it in the service's env
+(`secrets.env`) and the launchd service self-heals with no CLI flag at all. Both
+paths do the same thing: serve the `heal` workflow, register the `open-issue`
+finisher on that repo, and materialize `processes/autoheal.json` if it's absent.
+
+Self-healing is an ordinary Process, not bespoke machinery. The
+`processes/autoheal.json` whose `failed-tasks` action drains `failed/`: on each
 tick it claims one failed task, settles the original to a new terminal `healed/`
 queue, and fires a fresh task through the two-step `heal` workflow
 (`workflows/heal.json`: `heal` → `file-issue`). The `heal` step reads a **failure
