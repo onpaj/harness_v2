@@ -35,13 +35,13 @@ def test_workflow_lookup():
     assert board.workflow("nonexistent") is None
 
 
-def test_default_tab_prefers_default_then_alphabetical_then_none():
+def test_default_tab_prefers_development_then_alphabetical_then_none():
     # workflows is expected pre-sorted (BoardProjection.snapshot()'s contract);
     # default_tab() itself does not re-sort.
     assert Board(revision=0, workflows=(
-        BoardTab(name="default", columns=()),
+        BoardTab(name="development", columns=()),
         BoardTab(name="hotfix", columns=()),
-    )).default_tab() == "default"
+    )).default_tab() == "development"
     assert Board(revision=0, workflows=(
         BoardTab(name="alpha", columns=()),
         BoardTab(name="hotfix", columns=()),

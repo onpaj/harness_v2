@@ -99,11 +99,12 @@ class Board:
         return None
 
     def default_tab(self) -> str | None:
-        """"default" if present, else the first tab alphabetically, else None
-        (an empty board — no workflow definitions and no orphaned tasks)."""
+        """The primary workflow `"development"` if present, else the first tab
+        alphabetically, else None (an empty board — no workflow definitions and
+        no orphaned tasks)."""
         names = [tab.name for tab in self.workflows]
-        if "default" in names:
-            return "default"
+        if "development" in names:
+            return "development"
         return names[0] if names else None
 
     def to_dict(self) -> dict[str, Any]:

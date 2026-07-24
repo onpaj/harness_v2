@@ -145,29 +145,6 @@ def _root(value: str | None) -> Path:
     return Path(os.environ.get("HARNESS_HOME", "~/.harness")).expanduser()
 
 
-def _migrate_legacy_workflow(layout: HarnessLayout, workflow_name: str) -> None:
-    """Copy workflows/default.json forward to workflows/development.json.
-
-    Fires only when the caller is resolving the *default* workflow name (not
-    an operator's explicit --workflow default), the new file doesn't exist
-    yet, and the legacy file does. The legacy file is left in place,
-    untouched — a task created before the upgrade still resolves it by name.
-
-    default.json and development.json must keep matching step sets for as
-    long as any legacy task might still be in flight: the dispatcher resolves
-    a task's workflow per-tick by its own workflow_template, while the step
-    queues are fixed at harness startup from the CLI's own --workflow value.
-    A byte-for-byte copy guarantees this at migration time.
-    """
-    if workflow_name != DEFAULT_WORKFLOW:
-        return
-    legacy = layout.workflows / "default.json"
-    current = layout.workflows / f"{DEFAULT_WORKFLOW}.json"
-    if current.exists() or not legacy.exists():
-        return
-    current.write_text(legacy.read_text(encoding="utf-8"), encoding="utf-8")
-
-
 def _init(args: argparse.Namespace) -> int:
     root = _root(args.root)
     layout = HarnessLayout(root)
@@ -187,7 +164,6 @@ def _init(args: argparse.Namespace) -> int:
         return 2
 
     layout.workflows.mkdir(parents=True, exist_ok=True)
-    _migrate_legacy_workflow(layout, args.workflow)
 
     definition_path = layout.workflows / f"{args.workflow}.json"
     if not definition_path.exists():
@@ -1292,10 +1268,10 @@ def _resolve_served_workflows(
         return names
     if args.workflows:
         return tuple(args.workflows)
-    # Neither --workflow nor --all-workflows: probe for the default workflow.
-    # Present (a normal `harness init`) → serve it, the unchanged default.
+    # Neither --workflow nor --all-workflows: probe for the primary workflow.
+    # Present (a normal `harness init`) → serve `development`.
     # Absent → workflow-less (FR-6): serve no workflow and run the catalog
-    # agents directly, rather than failing on a missing `default.json`.
+    # agents directly, rather than failing on a missing `development.json`.
     if (layout.workflows / f"{DEFAULT_WORKFLOW}.json").is_file():
         return (DEFAULT_WORKFLOW,)
     return ()
@@ -1537,32 +1513,9 @@ def _build_issue_checker(args: argparse.Namespace) -> IssueChecker | None:
 def _run(args: argparse.Namespace) -> int:
     root = _root(args.root)
     layout = HarnessLayout(root)
-    # `--workflow` is now repeatable (`args.workflows`); the migration applies
-    # whenever the default name is the one that will actually be resolved —
-    # either implicitly (neither --workflow nor --all-workflows given) or
-    # because the operator named it explicitly among --workflow values.
-    migrating_default = not args.all_workflows and (
-        not args.workflows or DEFAULT_WORKFLOW in args.workflows
-    )
-    if migrating_default:
-        _migrate_legacy_workflow(layout, DEFAULT_WORKFLOW)
-
     served_names = _resolve_served_workflows(args, layout)
     if served_names is None:
         return 2
-
-    # A legacy deployment's already-in-flight tasks may still carry the old
-    # `workflow_template` ("default"); serve it alongside the migrated
-    # `development` copy so `ServedWorkflowRepository` doesn't fail them —
-    # `_migrate_legacy_workflow` keeps default.json/development.json
-    # topologically identical for exactly this reason.
-    legacy_definition = layout.workflows / "default.json"
-    if (
-        migrating_default
-        and "default" not in served_names
-        and legacy_definition.is_file()
-    ):
-        served_names = (*served_names, "default")
 
     # `--github-workflow` defaults to `None` (not `DEFAULT_WORKFLOW`) so this
     # check only fires when the operator actually named a workflow for GitHub
@@ -1855,7 +1808,7 @@ def main(argv: list[str] | None = None) -> int:
         action="append",
         dest="workflows",
         default=None,
-        help="workflow to serve (repeatable); unset serves 'default' when it "
+        help="workflow to serve (repeatable); unset serves 'development' when it "
         "exists, otherwise runs workflow-less on the catalog agents",
     )
     run.add_argument(
@@ -1909,7 +1862,7 @@ def main(argv: list[str] | None = None) -> int:
     github_target.add_argument(
         "--github-workflow",
         default=None,
-        help="workflow assigned to GitHub-sourced tasks (default: 'default'); "
+        help="workflow assigned to GitHub-sourced tasks (default: 'development'); "
         "an explicit value must be in the served set",
     )
     github_target.add_argument(
