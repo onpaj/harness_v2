@@ -16,7 +16,6 @@ from harness.cli import (
     _agent_definition_template,
     _github_reflectors,
     _github_sources,
-    _mergeability_sources,
     _process_sources,
     _slack_sinks,
     main,
@@ -1236,56 +1235,6 @@ def test_run_with_no_workflow_harness_defaults_to_none(tmp_path, monkeypatch):
     assert seen["served"] == ()
 
 
-def _mergeability_args(**overrides):
-    base = dict(worktree_root=None, resolver_workflow="resolver")
-    base.update(overrides)
-    return argparse.Namespace(**base)
-
-
-def test_mergeability_sources_builds_one_per_github_repo(monkeypatch, tmp_path):
-    monkeypatch.setenv("GITHUB_TOKEN", "t0ken")
-    registry = MemoryRepositoryRegistry(
-        {"heblo": Path("/repos/heblo"), "harness_v2": Path("/repos/harness_v2")}
-    )
-    slugs = {
-        Path("/repos/heblo"): "onpaj/Anela.Heblo",
-        Path("/repos/harness_v2"): "onpaj/harness_v2",
-    }
-
-    sources = _mergeability_sources(
-        _mergeability_args(),
-        tmp_path,
-        registry,
-        slug_of=slugs.get,
-        client=FakeGithubClient(),
-    )
-
-    assert {s._repository for s in sources} == {"heblo", "harness_v2"}
-    assert {s._repo for s in sources} == {"onpaj/Anela.Heblo", "onpaj/harness_v2"}
-    assert all(s._resolver_workflow == "resolver" for s in sources)
-
-
-def test_mergeability_sources_skips_repo_without_github_origin(monkeypatch, tmp_path):
-    monkeypatch.setenv("GITHUB_TOKEN", "t0ken")
-    registry = MemoryRepositoryRegistry(
-        {"heblo": Path("/repos/heblo"), "local": Path("/repos/local")}
-    )
-    slugs = {Path("/repos/heblo"): "onpaj/Anela.Heblo", Path("/repos/local"): None}
-
-    sources = _mergeability_sources(
-        _mergeability_args(), tmp_path, registry, slug_of=slugs.get, client=FakeGithubClient()
-    )
-
-    assert [s._repository for s in sources] == ["heblo"]
-
-
-def test_mergeability_sources_empty_without_token(monkeypatch, tmp_path):
-    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
-    registry = MemoryRepositoryRegistry({"heblo": Path("/repos/heblo")})
-
-    assert _mergeability_sources(_mergeability_args(), tmp_path, registry) == []
-
-
 def test_init_also_writes_resolver_workflow_and_resolve_agent(tmp_path):
     assert main(["init", "--root", str(tmp_path)]) == 0
 
@@ -1314,28 +1263,10 @@ def test_init_is_idempotent_for_resolver_workflow(tmp_path):
     assert resolver["transitions"] == []
 
 
-def test_run_watch_mergeability_defaults_on_and_can_be_disabled(monkeypatch, tmp_path):
-    main(["init", "--root", str(tmp_path)])
-    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
-    captured = {}
-
-    async def fake_serve(harness, port, poll_interval, source_interval=30.0, pr_poll_interval=0.0, reconcile_interval=300.0):
-        captured["harness"] = harness
-
-    monkeypatch.setattr("harness.cli.serve", fake_serve)
-
-    assert main(["run", "--root", str(tmp_path), "--no-watch-mergeability"]) == 0
-    # No token either way, so no observable source either way — this just
-    # exercises that the flag parses and the run completes.
-    assert "harness" in captured
-
-
-def test_run_serves_resolver_workflow_when_its_file_exists_without_watch_mergeability(
-    monkeypatch, tmp_path
-):
+def test_run_serves_resolver_workflow_when_its_file_exists(monkeypatch, tmp_path):
     # The resolver workflow must be served (its own step queues + a valid target
     # for a `github-conflicts` process) whenever `workflows/resolver.json`
-    # exists — not only when the mergeability watcher is on.
+    # exists.
     main(["init", "--root", str(tmp_path)])  # scaffolds resolver.json
     monkeypatch.delenv("GITHUB_TOKEN", raising=False)
     captured = {}
@@ -1345,7 +1276,7 @@ def test_run_serves_resolver_workflow_when_its_file_exists_without_watch_mergeab
 
     monkeypatch.setattr("harness.cli.serve", fake_serve)
 
-    assert main(["run", "--root", str(tmp_path), "--no-watch-mergeability"]) == 0
+    assert main(["run", "--root", str(tmp_path)]) == 0
     assert "resolver" in captured["harness"].workflows
 
 

@@ -181,18 +181,6 @@ MODEL = ArchitectureModel(
                     ),
                 ),
                 Driver(
-                    id="mergeability-watcher",
-                    name="GithubMergeabilityWatcher",
-                    tagline="A dirty harness PR becomes a resolver task.",
-                    description=(
-                        "Watches harness-owned pull requests: a PR merely behind "
-                        "its base is updated server-side (a side effect, no "
-                        "task), while a conflicted one is queued as a resolver "
-                        "task on the same branch, deduped per head commit."
-                    ),
-                    sources=("src/harness/drivers/mergeability_watcher.py",),
-                ),
-                Driver(
                     id="slack-sink",
                     name="SlackWebhookSink",
                     tagline="Outbound only: posts task progress to Slack.",

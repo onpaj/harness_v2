@@ -38,7 +38,6 @@ from harness.drivers.github_forge import GithubForge
 from harness.drivers.github_issue_checker import GithubIssueChecker
 from harness.drivers.github_merge_checker import GithubMergeChecker
 from harness.drivers.github_source import GithubLabelReflector, GithubTaskSource
-from harness.drivers.mergeability_watcher import GithubMergeabilityWatcher
 from harness.drivers.slack_sink import SlackWebhookSink
 from harness.drivers.uv_updater import UvUpdater
 from harness.drivers.launchd import (
@@ -696,42 +695,6 @@ def _github_reflectors(
                 client=client,
                 repo=slug,
                 step_labels=DEFAULT_STEP_LABELS,
-            )
-        )
-    return sources
-
-
-def _mergeability_sources(
-    args: argparse.Namespace,
-    root: Path,
-    registry: RepositoryRegistry,
-    *,
-    slug_of=github_slug,
-    client: GithubClient | None = None,
-) -> list[TaskSource]:
-    """One `GithubMergeabilityWatcher` per repo in `repos.json` with a GitHub
-    origin — mirrors `_github_sources` exactly: no token (and no injected
-    client) → no sources, a repo with no GitHub origin is skipped."""
-    if client is None:
-        token = os.environ.get("GITHUB_TOKEN")
-        if not token:
-            return []
-        client = HttpGithubClient(token)
-
-    worktree_root = args.worktree_root or str(root / "worktrees")
-    sources: list[TaskSource] = []
-    for name in registry.names():
-        slug = slug_of(registry.resolve(name))
-        if slug is None:
-            continue  # already warned about by _github_sources for the same repo
-        sources.append(
-            GithubMergeabilityWatcher(
-                client=client,
-                clock=SystemClock(),
-                repo=slug,
-                repository=name,
-                worktree_root=worktree_root,
-                resolver_workflow=args.resolver_workflow,
             )
         )
     return sources
@@ -1561,20 +1524,19 @@ def _run(args: argparse.Namespace) -> int:
     workspace = GitWorkspace(registry, layout.worktrees)
     artifact_view = WorktreeArtifactView(layout.worktrees)
     forge = _build_forge(args.forge, root, registry)
-    mergeability = _mergeability_sources(args, root, registry) if args.watch_mergeability else []
     github = [] if args.no_github_source else _github_sources(args, root, registry)
     # The outbound reflector is registered only when classic ingestion is off
     # (`--no-github-source`) — never alongside `GithubTaskSource` for the same
     # repo, which already reflects via its own composed reflector.
     reflectors = _github_reflectors(args, root, registry) if args.no_github_source else []
-    sources = github + reflectors + mergeability
+    sources = github + reflectors
     merge_checker = _build_merge_checker(args)
     issue_checker = _build_issue_checker(args)
     # The resolver workflow rides alongside the primary one so its tasks — queued
-    # by the mergeability watcher *or* the `github-conflicts` process — get their
-    # own step queues and board columns. Served whenever its definition exists,
-    # decoupled from the watcher flag: a process-only detection path still needs a
-    # served target (a process targeting an unserved workflow fails to compile).
+    # by a `github-conflicts` process — get their own step queues and board
+    # columns. Served whenever its definition exists: a process-only detection
+    # path still needs a served target (a process targeting an unserved
+    # workflow fails to compile).
     resolver_defined = (layout.workflows / f"{args.resolver_workflow}.json").is_file()
     if resolver_defined and args.resolver_workflow not in served_names:
         served_names = [*served_names, args.resolver_workflow]
@@ -1863,18 +1825,11 @@ def main(argv: list[str] | None = None) -> int:
         help="where landing proposes the change (default: real GitHub)",
     )
     run.add_argument(
-        "--watch-mergeability",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        dest="watch_mergeability",
-        help="auto-update 'behind' PRs and queue 'dirty' ones to the resolver "
-        "workflow (no GITHUB_TOKEN → no-op, same as GitHub issue ingestion)",
-    )
-    run.add_argument(
         "--resolver-workflow",
         default=DEFAULT_RESOLVER_WORKFLOW,
         dest="resolver_workflow",
-        help="workflow template used for tasks the mergeability watcher queues",
+        help="workflow the 'resolver' PR-conflict tasks (e.g. from a "
+        "github-conflicts process) are served under",
     )
     run.set_defaults(handler=_run)
 

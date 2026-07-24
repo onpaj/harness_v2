@@ -240,9 +240,9 @@ def test_attach_with_branch_override_creates_from_origin_when_no_local_copy(tmp_
 
 
 def test_attach_with_branch_override_reconciles_stale_local_ref_with_origin(tmp_path):
-    """`GithubMergeabilityWatcher.update_branch` advances a PR branch entirely
-    server-side (merges base into head via the GitHub API) — no local git
-    operation touches it. Simulate that by advancing `origin/<branch>` through
+    """`GithubConflictsCheck`'s `update_branch` call advances a PR branch
+    entirely server-side (merges base into head via the GitHub API) — no local
+    git operation touches it. Simulate that by advancing `origin/<branch>` through
     a *second* clone that never shares the base repo's local refs, mirroring
     the real `behind` -> `update_branch` -> `dirty` -> resolver sequence.
     `attach`'s branch-override path must reconcile the reused local ref with
@@ -318,7 +318,7 @@ def test_attach_reattach_with_override_reconciles_with_origin_after_server_side_
     workspace.attach(resolver_task)
 
     # Now the branch advances server-side, independently of any local ref —
-    # as `GithubMergeabilityWatcher.update_branch` does via the GitHub API.
+    # as `GithubConflictsCheck`'s `update_branch` call does via the GitHub API.
     other_clone = tmp_path / "other_clone"
     _git(["clone", str(remote), str(other_clone)], tmp_path)
     _git(["checkout", "harness/tsk_original"], other_clone)
