@@ -144,5 +144,5 @@ def test_task_detail_history_table_is_wrapped_in_a_scroll_container(client):
 def test_task_detail_shows_short_time_with_full_iso_in_title(client):
     body = client.get("/fragment/task/tsk_1").text
 
-    assert 'title="2026-07-19T10:00:05Z"' in body
+    assert 'title="2026-07-19T10:00:05Z UTC"' in body
     assert "Jul 19, 10:00" in body

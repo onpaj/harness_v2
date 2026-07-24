@@ -11,6 +11,7 @@
   <link rel="stylesheet" href="/static/app.css">
   <script src="/static/htmx.min.js"></script>
   <script src="/static/sse.js"></script>
+  <script src="/static/format-local-time.js"></script>
 </head>
 <body hx-ext="sse" sse-connect="/api/events">
   {% include "_nav.html" %}
@@ -49,9 +50,11 @@
       applyActiveTab(boardEl);
     });
     applyActiveTab(document.getElementById('board'));
+    localizeTimes();
 
     document.body.addEventListener('htmx:afterSwap', function (event) {
       if (event.detail.target.id === 'board') { applyActiveTab(event.detail.target); }
+      localizeTimes(event.detail.target);
       if (event.detail.target.id !== 'detail') { return; }
       var detail = document.getElementById('detail');
       if (detail.innerHTML.trim() === '') {
