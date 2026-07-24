@@ -1,6 +1,15 @@
 # CHANGELOG
 
 
+## v0.19.0 (2026-07-24)
+
+### Features
+
+- **admin**: Actions declare their parameters as data, consolidating failed-tasks
+  ([#117](https://github.com/onpaj/harness_v2/pull/117),
+  [`20a7ad6`](https://github.com/onpaj/harness_v2/commit/20a7ad61ff1188766fe21dec1bcc04fd69969a06))
+
+
 ## v0.18.1 (2026-07-24)
 
 ### Bug Fixes
