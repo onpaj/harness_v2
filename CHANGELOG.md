@@ -1,6 +1,59 @@
 # CHANGELOG
 
 
+## v0.21.0 (2026-07-24)
+
+### Bug Fixes
+
+- Kill the whole process group on verify command timeout
+  ([`c963dfa`](https://github.com/onpaj/harness_v2/commit/c963dfa54c01fb0de10ee225f3c31497a92d7354))
+
+process.kill() only signalled the shell PID; a compound verify command's children (e.g. pytest-xdist
+  workers) survived the timeout. Run the shell in its own session (start_new_session=True) and, on
+  timeout, kill the whole process group before falling back to process.kill(), both wrapped against
+  ProcessLookupError once the group/process is already gone.
+
+### Documentation
+
+- Implementation plan for the verify gate (increment 1)
+  ([`4848f1f`](https://github.com/onpaj/harness_v2/commit/4848f1f715372bf0d94724ca4a5c65ebef5e3788))
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+
+- Regenerate-persona operator step, persona paragraph fix, verify_command JSON test
+  ([`8ca5141`](https://github.com/onpaj/harness_v2/commit/8ca51415a9c6cae24cce44ec8cf60fdc954fae29))
+
+- Add a post-merge checklist step to regenerate the development agent (harness agent init
+  development --force) so an already-initialized root picks up the new verify-run persona sentence.
+  - Move the verify-run sentence in _DEVELOPMENT_PERSONA to extend the revision-round paragraph
+  instead of being glued to the closing instruction paragraph. - Add a direct test: malformed
+  repos.json JSON -> verify_command() is None.
+
+- Spec for development-flow hardening (verify gate, loop caps, early gates)
+  ([`3d14825`](https://github.com/onpaj/harness_v2/commit/3d14825f42d35398e21444b2582bcede8b6c0eeb))
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+
+### Features
+
+- Commandrunner port with subprocess driver and memory fake
+  ([`63b3dd8`](https://github.com/onpaj/harness_v2/commit/63b3dd8326cbe9e00fb73e583997fa27741a53cd))
+
+- Verifybehavior — deterministic verify step over CommandRunner
+  ([`d8424c1`](https://github.com/onpaj/harness_v2/commit/d8424c14e9a05edf10edc88f41ba94e4e0f05676))
+
+- Wire the verify gate — finisher kind, cli injection, default workflow
+  ([`b994cfb`](https://github.com/onpaj/harness_v2/commit/b994cfb899cbcacfa4b7ea89a0f765ebfc87ed98))
+
+- **repos**: Optional object-form entries with a verify command
+  ([`d2d2519`](https://github.com/onpaj/harness_v2/commit/d2d2519031e8020c0b9100e21e1bc988fea5080f))
+
+### Testing
+
+- E2e for the verify gate's request_changes loop
+  ([`adaa5e6`](https://github.com/onpaj/harness_v2/commit/adaa5e64c667252a69c20e137bfb2f0e43771732))
+
+
 ## v0.20.0 (2026-07-24)
 
 ### Features
