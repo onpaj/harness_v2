@@ -6,6 +6,8 @@ as test_smoke_git.py for git: this is the only live coverage of the driver.
 
 from __future__ import annotations
 
+import os
+
 import pytest
 
 from harness.drivers.memory import MemoryCommandRunner
@@ -38,6 +40,31 @@ async def test_timeout_kills_and_raises(tmp_path):
     runner = SubprocessCommandRunner()
     with pytest.raises(CommandTimeout):
         await runner.run("sleep 5", cwd=tmp_path, timeout=0.2)
+
+
+async def test_timeout_kills_process_group_including_children(tmp_path):
+    # A compound command (like a verify command spawning pytest-xdist
+    # workers) runs a background child under the same shell. `process.kill()`
+    # alone only signals the shell PID and leaves the child running; the
+    # fix kills the whole process group. Prove both: the specific child pid
+    # is gone, and the group itself no longer exists.
+    runner = SubprocessCommandRunner()
+    pgid_file = tmp_path / "pgid"
+    child_pid_file = tmp_path / "child_pid"
+    command = f"echo $$ > {pgid_file}; sleep 5 & echo $! > {child_pid_file}; wait"
+
+    with pytest.raises(CommandTimeout):
+        await runner.run(command, cwd=tmp_path, timeout=0.2)
+
+    # start_new_session=True makes the shell its own session/group leader,
+    # so its own pid (`$$`) is also the process group id.
+    pgid = int(pgid_file.read_text().strip())
+    child_pid = int(child_pid_file.read_text().strip())
+
+    with pytest.raises(ProcessLookupError):
+        os.kill(child_pid, 0)
+    with pytest.raises(ProcessLookupError):
+        os.killpg(pgid, 0)
 
 
 async def test_memory_runner_scripts_results(tmp_path):
