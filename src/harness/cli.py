@@ -743,8 +743,11 @@ def _process_check_factories(
     harness's own live `failed`/`healed` queues, not an external client).
     """
     from harness.drivers.fs_processes import ProcessValidationError
+    from harness.drivers.github_conflicts_check import SPEC as GITHUB_CONFLICTS_SPEC
     from harness.drivers.github_conflicts_check import GithubConflictsCheck
+    from harness.drivers.github_issues_check import SPEC as GITHUB_ISSUES_SPEC
     from harness.drivers.github_issues_check import GithubIssuesCheck
+    from harness.ports.triggers import CheckDefinition
 
     if client is None:
         token = os.environ.get("GITHUB_TOKEN")
@@ -780,9 +783,15 @@ def _process_check_factories(
             head_prefix=params.get("head_prefix", "harness/"),
         )
 
+    # Bundle each factory with its declarative spec so the process form renders
+    # these actions' parameters from data, exactly like the built-ins.
     return {
-        "github-issues": github_issues_factory,
-        "github-conflicts": github_conflicts_factory,
+        "github-issues": CheckDefinition(
+            spec=GITHUB_ISSUES_SPEC, factory=github_issues_factory
+        ),
+        "github-conflicts": CheckDefinition(
+            spec=GITHUB_CONFLICTS_SPEC, factory=github_conflicts_factory
+        ),
     }
 
 
