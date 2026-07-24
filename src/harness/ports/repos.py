@@ -24,3 +24,12 @@ class RepositoryRegistry(ABC):
     def names(self) -> list[str]:
         """All repo names in the registry. A missing/unreadable registry yields
         an empty list — enumeration is lenient where `resolve` is strict."""
+
+    def verify_command(self, name: str) -> str | None:
+        """The repo's verify command (test suite), or None when it has none.
+
+        Lenient like `names()`: an unknown name or an unreadable registry is
+        None, never an exception — a repo without a verify command is a normal,
+        supported state (the verify step no-ops on it).
+        """
+        return None
