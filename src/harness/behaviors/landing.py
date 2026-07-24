@@ -6,7 +6,7 @@ The last step before `end`. It's a normal behavior — it can fail and drop into
 
 from __future__ import annotations
 
-from harness.models import BehaviorResult, Outcome, Task
+from harness.models import DONE, BehaviorResult, Task
 from harness.ports.artifacts import ArtifactView
 from harness.ports.behavior import ConsumerBehavior
 from harness.ports.clock import Clock
@@ -82,7 +82,7 @@ class LandingBehavior(ConsumerBehavior):
                 "to reconcile"
             )
         return BehaviorResult(
-            Outcome.DONE,
+            DONE,
             summary,
             data={
                 "pr": {

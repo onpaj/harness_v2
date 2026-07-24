@@ -115,6 +115,34 @@
         lastRevision = revision;
       });
     })();
+
+    // Copy-task-id button: delegated from #detail (the only static ancestor
+    // that survives every fragment swap) since the button itself is
+    // destroyed/recreated on each open. Only one .copy-id-btn can ever be in
+    // the DOM at a time (one task detail open at once), so a single closure
+    // variable tracks the pending revert timer instead of a per-button map.
+    (function () {
+      var detail = document.getElementById('detail');
+      var revertTimer = null;
+
+      detail.addEventListener('click', function (event) {
+        var btn = event.target.closest('.copy-id-btn');
+        if (!btn) { return; }
+        navigator.clipboard.writeText(btn.dataset.copyId).then(function () {
+          if (revertTimer) { clearTimeout(revertTimer); }
+          btn.textContent = '✓';
+          btn.classList.add('copied');
+          revertTimer = setTimeout(function () {
+            btn.textContent = '📋';
+            btn.classList.remove('copied');
+            revertTimer = null;
+          }, 1500);
+        }).catch(function () {
+          // Clipboard write failed (insecure context, permission denied, …).
+          // No confirmation shown; no error surfaced.
+        });
+      });
+    })();
   </script>
 </body>
 </html>

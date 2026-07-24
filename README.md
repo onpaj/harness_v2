@@ -368,7 +368,7 @@ tasks/ ──dispatcher──> queues/<step>/ ──consumer──> tasks/ ─�
 
 ```json
 {
-  "name": "default",
+  "name": "development",
   "start": "plan",
   "transitions": [
     {"from": "plan", "on": "done", "to": "design"},

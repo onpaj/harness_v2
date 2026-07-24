@@ -1,11 +1,12 @@
 from harness.models import (
+    DONE,
     END,
+    REQUEST_CHANGES,
     BehaviorResult,
     Failed,
     Finished,
     HistoryEntry,
     MoveTo,
-    Outcome,
     Task,
     Transition,
     Workflow,
@@ -14,22 +15,22 @@ from harness.models import (
 
 
 def test_behavior_result_carries_outcome_and_summary():
-    result = BehaviorResult(Outcome.DONE, summary="added retry with backoff")
+    result = BehaviorResult(DONE, summary="added retry with backoff")
 
-    assert result.outcome is Outcome.DONE
+    assert result.outcome == DONE
     assert result.summary == "added retry with backoff"
 
 
 def test_behavior_result_summary_defaults_empty():
-    assert BehaviorResult(Outcome.REQUEST_CHANGES).summary == ""
+    assert BehaviorResult(REQUEST_CHANGES).summary == ""
 
 
 def test_behavior_result_data_defaults_none():
-    assert BehaviorResult(Outcome.DONE).data is None
+    assert BehaviorResult(DONE).data is None
 
 
 def test_behavior_result_carries_data():
-    result = BehaviorResult(Outcome.DONE, data={"pr": {"number": 1}})
+    result = BehaviorResult(DONE, data={"pr": {"number": 1}})
 
     assert result.data == {"pr": {"number": 1}}
 
@@ -243,8 +244,77 @@ def test_workflow_finisher_for_reads_configured_kind():
 
 
 def test_outcome_values():
-    assert Outcome.DONE.value == "done"
-    assert Outcome.REQUEST_CHANGES.value == "request_changes"
+    assert DONE == "done"
+    assert REQUEST_CHANGES == "request_changes"
+
+
+def test_transition_hint_defaults_to_empty_string():
+    transition = Transition(from_step="plan", on="done", to_step=END)
+
+    assert transition.hint == ""
+
+
+def test_transition_hint_can_be_set():
+    transition = Transition(from_step="plan", on="done", to_step=END, hint="ship it")
+
+    assert transition.hint == "ship it"
+
+
+def test_workflow_outcomes_for_preserves_definition_order_and_collapses_duplicates():
+    workflow = Workflow(
+        name="default",
+        start="plan",
+        transitions=(
+            Transition(from_step="plan", on="backend", to_step="development"),
+            Transition(from_step="plan", on="ui", to_step="designer"),
+            Transition(from_step="plan", on="backend", to_step="development"),
+            Transition(from_step="review", on="done", to_step=END),
+        ),
+    )
+
+    assert workflow.outcomes_for("plan") == ("backend", "ui")
+
+
+def test_workflow_outcomes_for_step_with_no_outgoing_transitions_is_empty():
+    workflow = Workflow(
+        name="default",
+        start="plan",
+        transitions=(Transition(from_step="plan", on="done", to_step=END),),
+    )
+
+    assert workflow.outcomes_for("end") == ()
+
+
+def test_workflow_outcomes_for_unknown_step_is_empty():
+    workflow = Workflow(
+        name="default",
+        start="plan",
+        transitions=(Transition(from_step="plan", on="done", to_step=END),),
+    )
+
+    assert workflow.outcomes_for("unknown") == ()
+
+
+def test_workflow_description_for_absent_step_is_none():
+    workflow = Workflow(
+        name="default",
+        start="plan",
+        transitions=(Transition(from_step="plan", on="done", to_step=END),),
+    )
+
+    assert workflow.description_for("plan") is None
+
+
+def test_workflow_description_for_returns_configured_text():
+    workflow = Workflow(
+        name="default",
+        start="plan",
+        transitions=(Transition(from_step="plan", on="done", to_step=END),),
+        descriptions={"plan": "Write the implementation plan."},
+    )
+
+    assert workflow.description_for("plan") == "Write the implementation plan."
+    assert workflow.description_for("unknown") is None
 
 
 def test_decisions_carry_their_payload():

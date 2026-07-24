@@ -172,6 +172,22 @@ file), mirroring `FilesystemTriggerRepository`:
 > 3's stateful create-then-update handle (and the `Reflector` port) remains
 > open.
 
+> **Update 2026-07-23 — routing unified.** Bullet 1's defaulting is no longer
+> just a stated intention: `ports/source.py::effective_sink_kind(task)` is the
+> one shared routing rule (`data.sink.kind` if present, else
+> `data.source.kind`), and both `GithubLabelReflector` and `SlackWebhookSink`
+> route their `_mine` through it. `github` is now an accepted `sink.kind`
+> alongside `none`/`slack` — but it remains the *degenerate, same-as-origin*
+> case, not an independent destination the way `slack` is: `GithubLabelReflector`
+> can only ever target a task's origin issue (`data.source.issue`), so a
+> Process-declared `{"sink": {"kind": "github"}}` is schema-valid and stamped
+> onto every fired task, but stays inert unless the task's `data.source`
+> already carries a matching GitHub repo/issue (as the `github-issues` check's
+> observations do today). See ADR-0018 for the boundary this unification makes
+> newly worth stating explicitly: a sink only reflects and can never fail or
+> route a task, which is why `github`-as-sink (labels) stays a world apart
+> from `open-pr` (PR creation, a finisher) even though both call GitHub.
+
 The whole point of the `sink` field is to keep **source ≠ destination** open —
 today a Process's origin and its reflection target are the same medium (or, in
 v1, there is no reflection at all), but tomorrow a Process should ingest from
@@ -295,3 +311,21 @@ The feature is done when:
 5. Architecture tests still pass: `dispatcher`/`consumer` import neither
    `ports.source` nor `ports.triggers`; `fs_processes.py` is touched only by
    `cli.py`; `scheduled_trigger.py` still imports only ports/models/ids.
+
+## Addendum (2026-07-23): cron cadence
+
+A Process's `trigger` block now accepts `{"cron": "0 6 * * 1"}` as an
+alternative to `{"interval": "1h"}` — exactly one of the two, same as generic
+triggers (see the parallel addendum in `2026-07-22-generic-triggers-design.md`
+and ADR-0018 for the full design). `compile_process`'s cadence parsing
+generalizes from a single `_parse_interval` to `_parse_cadence`, returning
+`(interval, cron)` with exactly one non-`None`; the error taxonomy in this
+spec's "field" enum gains `cron` (a present-but-invalid cron expression) and
+extends `trigger`'s existing meaning (an unsupported `trigger.kind`) to also
+cover the block carrying both/neither cadence — one field, "the trigger block
+itself is malformed," distinct from `interval`/`cron` meaning "this one value
+is malformed." `ProcessFields` gains a `cadence` discriminator
+(`"interval"`/`"cron"`) plus a `cron` value field; the admin form's Schedule
+section gains a cadence toggle. UTC-only, fire-once-on-catchup — same as the
+generic-triggers addendum. No change to the Process authoring aggregate's
+other roles (action/target/sink) or to `Check`/`Observation`.

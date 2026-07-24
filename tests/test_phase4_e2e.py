@@ -71,7 +71,9 @@ def build_harness(tmp_path, source):
 
 
 async def test_task_from_source_reaches_done_and_is_projected_out(tmp_path):
-    source = MemoryTaskSource(clock=FakeClock(), repository="app-backend")
+    source = MemoryTaskSource(
+        clock=FakeClock(), workflow="default", repository="app-backend"
+    )
     issue = source.submit("Fix bug")
     harness = build_harness(tmp_path, source)
 

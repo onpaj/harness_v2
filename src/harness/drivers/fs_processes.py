@@ -47,18 +47,28 @@ from harness.ports.process_admin import (
     ProcessFields,
     ProcessNotFound,
 )
-from harness.ports.triggers import CheckFactory, parse_interval
+from harness.ports.triggers import CheckFactory, CronSchedule, parse_cron, parse_interval
 
-_ACCEPTED_SINK_KINDS = {"none", "slack"}
-"""The accepted sink kinds. A new destination adds a kind here plus a driver."""
+_ACCEPTED_SINK_KINDS = {"none", "slack", "github"}
+"""The accepted sink kinds. A new destination adds a kind here plus a driver.
+
+`github` is the degenerate, same-as-origin case (`GithubLabelReflector` can
+only ever target a task's origin issue) — schema-valid here, but only
+*functional* for a task whose `data.source` actually carries a GitHub repo/
+issue (e.g. one produced by the `github-issues` check); a Process using any
+other action stamps `data.sink` with no matching `data.source` to resolve an
+issue from, so the sink is accepted but inert for it."""
 
 
 class ProcessValidationError(Exception):
     """A process file is malformed. The message names the offending file; the
-    optional `field` (one of ``interval|check|params|target|dedup|sink|trigger``
-    or ``None`` for a whole-file problem like broken JSON) lets the admin map
-    the failure onto a form field. `str()` is unchanged — still just the
-    message."""
+    optional `field` (one of
+    ``interval|cron|check|params|target|dedup|sink|trigger`` or ``None`` for a
+    whole-file problem like broken JSON) lets the admin map the failure onto a
+    form field. `trigger` covers a malformed trigger *block* (missing/not-a-
+    dict, both/neither of interval+cron present, or an unsupported
+    `trigger.kind`); `interval`/`cron` cover a present-but-invalid cadence
+    *value*. `str()` is unchanged — still just the message."""
 
     def __init__(self, message: str, field: str | None = None) -> None:
         self.field = field
@@ -101,10 +111,10 @@ def compile_process(
     startup) and the admin (validate one submission before writing). `where`
     (defaults to `name`) is the label used in messages. Each failure raises
     `ProcessValidationError(msg, field=...)` with `field` one of
-    ``interval|check|params|target|dedup|sink|trigger``.
+    ``interval|cron|check|params|target|dedup|sink|trigger``.
     """
     where = where or name
-    interval = _parse_interval(where, raw.get("trigger"))
+    interval, cron = _parse_cadence(where, raw.get("trigger"))
     _check_trigger_kind(where, raw.get("trigger"))
     check = _parse_action(where, raw.get("action"), checks)
     workflow, step = _parse_target(where, raw.get("target"), known_targets)
@@ -115,6 +125,7 @@ def compile_process(
         name=name,
         clock=clock,
         interval=interval,
+        cron=cron,
         check=check,
         workflow=workflow,
         step=step,
@@ -125,13 +136,35 @@ def compile_process(
     )
 
 
-def _parse_interval(where: str, trigger: object) -> float:
-    if not isinstance(trigger, dict) or "interval" not in trigger:
+def _parse_cadence(where: str, trigger: object) -> tuple[float | None, CronSchedule | None]:
+    """Read the trigger block's cadence — exactly one of `interval`/`cron`.
+
+    A missing/malformed trigger block, or one carrying both/neither, is a
+    `field="trigger"` error (the block itself is malformed); a present but
+    unparseable value is `field="interval"`/`field="cron"` (that one value is
+    malformed) — see `ProcessValidationError`'s docstring for the full split.
+    """
+    if not isinstance(trigger, dict):
         raise ProcessValidationError(
-            f"process {where} must have a trigger with an interval", field="interval"
+            f"process {where} must have a trigger object", field="trigger"
         )
+    has_interval = "interval" in trigger
+    has_cron = "cron" in trigger
+    if has_interval == has_cron:
+        raise ProcessValidationError(
+            f"process {where} trigger must have exactly one of interval/cron",
+            field="trigger",
+        )
+    if has_cron:
+        try:
+            return None, parse_cron(trigger["cron"])
+        except (ValueError, TypeError) as error:
+            raise ProcessValidationError(
+                f"process {where} has an invalid cron expression: {error}",
+                field="cron",
+            ) from None
     try:
-        return parse_interval(trigger["interval"])
+        return parse_interval(trigger["interval"]), None
     except (ValueError, TypeError) as error:
         raise ProcessValidationError(
             f"process {where} has an invalid interval: {error}", field="interval"
@@ -193,7 +226,7 @@ def _check_trigger_kind(where: str, trigger: object) -> None:
     # Forward-compat reservation, the same zero-cost move `sink` got: the
     # trigger object may carry a `kind`, but only `"schedule"` exists — a
     # future condition-driven trigger adds a kind here plus a compile path,
-    # never a schema change. `_parse_interval` has already established that
+    # never a schema change. `_parse_cadence` has already established that
     # `trigger` is a dict.
     kind = trigger.get("kind", "schedule") if isinstance(trigger, dict) else "schedule"
     if kind != "schedule":
@@ -206,9 +239,10 @@ def _check_trigger_kind(where: str, trigger: object) -> None:
 
 def _parse_sink(where: str, sink: object) -> dict | None:
     # The destination half of invariant #40: the accepted kinds are `none`
-    # (fire-and-forget) and `slack` (`SlackWebhookSink` routes on the stamped
-    # `data.sink`). A new destination adds an accepted kind here and a driver
-    # — no schema change.
+    # (fire-and-forget), `slack` (`SlackWebhookSink` routes on the stamped
+    # `data.sink`) and `github` (`GithubLabelReflector`, the degenerate
+    # same-as-origin case). A new destination adds an accepted kind here and
+    # a driver — no schema change.
     if sink is None:
         return None
     if not isinstance(sink, dict) or sink.get("kind") not in _ACCEPTED_SINK_KINDS:
@@ -358,7 +392,7 @@ class FilesystemProcessAdmin(ProcessAdmin):
         return tuple(sorted(BUILTIN_CHECKS))
 
     def sink_kinds(self) -> tuple[str, ...]:
-        return ("none", "slack")
+        return tuple(sorted(_ACCEPTED_SINK_KINDS))
 
     def _write(self, path: Path, raw: dict) -> None:
         # Same idiom as `FilesystemAgentAdmin._write` (drivers/fs_agents.py):
@@ -379,9 +413,14 @@ def _raw_from_fields(fields: ProcessFields) -> dict:
     """Assemble the nested `processes/*.json` shape from the flat form fields.
     `name` is never written — the file's stem is the name (like agents). Nor is
     `trigger.kind`: the reservation is read-tolerated (`_fields_from_raw` simply
-    ignores it), not an editable field, so the admin never emits it."""
+    ignores it), not an editable field, so the admin never emits it.
+
+    `fields.cadence` picks which value field is authoritative — a submission
+    that toggled to "cron" writes `{"cron": ...}` even if `fields.interval`
+    still holds a stale value from before the toggle, and vice versa."""
+    trigger = {"cron": fields.cron} if fields.cadence == "cron" else {"interval": fields.interval}
     return {
-        "trigger": {"interval": fields.interval},
+        "trigger": trigger,
         "action": {"check": fields.check, "params": dict(fields.params)},
         "target": {fields.target_kind: fields.target},
         "dedup": fields.dedup,
@@ -403,8 +442,14 @@ def _fields_from_raw(raw: dict) -> ProcessFields:
     else:
         raise KeyError("target names neither a workflow nor a step")
     sink_kind = (raw.get("sink") or {}).get("kind", "none")
+    if "cron" in trigger:
+        cadence, interval, cron = "cron", "", trigger["cron"]
+    else:
+        cadence, interval, cron = "interval", trigger["interval"], ""
     return ProcessFields(
-        interval=trigger["interval"],
+        cadence=cadence,
+        interval=interval,
+        cron=cron,
         check=action["check"],
         target_kind=target_kind,
         target=target_value,

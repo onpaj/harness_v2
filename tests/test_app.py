@@ -13,7 +13,7 @@ from harness.drivers.memory import (
     MemoryEventSink,
     MemoryForge,
 )
-from harness.models import ARCHIVED, BehaviorResult, Outcome, Task
+from harness.models import ARCHIVED, DONE, BehaviorResult, Task
 from harness.ports.agent import AgentRun, AgentSpec
 from harness.ports.behavior import ConsumerBehavior
 from harness.ports.board import UNKNOWN_WORKFLOW
@@ -161,7 +161,7 @@ async def test_resolver_task_flows_through_resolve_and_land_to_done(tmp_path):
             "resolve": AgentSpec(name="resolve", prompt="p"),
         }
     )
-    runner = FakeAgentRunner(default=AgentRun(Outcome.DONE, "done"))
+    runner = FakeAgentRunner(default=AgentRun(DONE, "done"))
     workspace = MemoryWorkspace()
     events = MemoryEventSink()
 
@@ -340,7 +340,7 @@ class ConcurrencyProbeBehavior(ConsumerBehavior):
         self.max_seen[step] = max(self.max_seen.get(step, 0), self.current[step])
         await asyncio.sleep(self._hold)
         self.current[step] -= 1
-        return BehaviorResult(Outcome.DONE, summary="probed")
+        return BehaviorResult(DONE, summary="probed")
 
 
 async def test_max_parallel_bounds_concurrent_runs_per_step(tmp_path):
@@ -853,7 +853,7 @@ class RecordingFinisher(ConsumerBehavior):
 
     async def run(self, task: Task) -> BehaviorResult:
         self.finished.append(task.id)
-        return BehaviorResult(Outcome.DONE, summary="recorded")
+        return BehaviorResult(DONE, summary="recorded")
 
 
 async def test_custom_step_bound_to_open_pr_lands_through_the_forge(tmp_path):

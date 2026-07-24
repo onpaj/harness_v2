@@ -22,6 +22,21 @@ from dataclasses import dataclass
 from harness.models import Task
 
 
+def effective_sink_kind(task: Task) -> str | None:
+    """The destination a sink routes on: `data.sink.kind` if the task carries
+    an explicit sink, else `data.source.kind` (the degenerate case where the
+    destination coincides with the origin). `None` when neither is present.
+
+    Every reflecting `TaskSource` (`GithubLabelReflector`, `SlackWebhookSink`)
+    compares this against its own `kind` in `_mine` — one routing rule for all
+    outbound reflection, invariant #40.
+    """
+    sink = task.data.get("sink")
+    if isinstance(sink, dict) and sink.get("kind"):
+        return sink["kind"]
+    return task.data.get("source", {}).get("kind")
+
+
 def dedup_key(kind: str, *parts: object) -> str:
     """The stable identity of a source item, as stamped onto `Task.dedup_key`.
 
@@ -56,8 +71,9 @@ class TaskSource(ABC):
     """A source of tasks and a target for projecting their state.
 
     `kind` is the key for projection routing: the reflector calls only the
-    adapter whose `kind` matches `task.data.source.kind`. A foreign task the
-    adapter silently ignores.
+    adapter whose `kind` matches the task's *effective sink kind*
+    (`effective_sink_kind` — `data.sink.kind`, falling back to
+    `data.source.kind`). A foreign task the adapter silently ignores.
     """
 
     kind: str

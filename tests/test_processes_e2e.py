@@ -27,7 +27,7 @@ from harness.drivers.memory import (
     MemoryWorkspace,
     ScriptedBehavior,
 )
-from harness.models import Outcome, Task
+from harness.models import DONE, Task
 from harness.ports.agent import AgentRun, AgentSpec
 
 DEFINITION = {
@@ -401,8 +401,8 @@ def build_autoresolver_harness(tmp_path, client, workspace):
         }
     )
     runner = FakeAgentRunner(
-        default=AgentRun(Outcome.DONE, "done"),
-        runs={"resolve": AgentRun(Outcome.DONE, "resolve: fixed conflict")},
+        default=AgentRun(DONE, "done"),
+        runs={"resolve": AgentRun(DONE, "resolve: fixed conflict")},
     )
     harness = build(
         tmp_path,
