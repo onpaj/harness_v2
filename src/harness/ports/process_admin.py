@@ -45,6 +45,11 @@ class ProcessFields:
     params: dict[str, Any] = field(default_factory=dict)
     sink_kind: str = "none"
     dedup: str = "per-interval"
+    repository: str = ""
+    """The repository name a produced task's worktree attaches to, or "" for
+    "all repositories" (no process-level default — an observation's own
+    repository, or none at all, applies unchanged). Validated as a name
+    against RepositoryRegistry wherever one is available to the caller."""
 
 
 class ProcessNotFound(Exception):
@@ -99,3 +104,12 @@ class ProcessAdmin(ABC):
         "slack")` — the outbound destinations a Process may declare (invariant
         #40). A new destination is a new kind plus a sink driver, surfaced
         here."""
+
+    @abstractmethod
+    def repository_names(self) -> tuple[str, ...]:
+        """The repository names the form offers for "Specific repository",
+        sorted — mirrors check_names()/sink_kinds(). Backed by
+        RepositoryRegistry.names() where the driver was given one; empty when
+        none was configured, in which case only "All repositories" is offered
+        and repository validation at write() falls back to lenient (matching
+        every other known_*=None escape hatch)."""

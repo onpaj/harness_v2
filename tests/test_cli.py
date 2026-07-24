@@ -153,7 +153,7 @@ def test_run_heal_repo_wires_open_issue_finisher_and_tracker(monkeypatch, tmp_pa
         captured["finishers"] = kwargs.get("finishers")
         return object()
 
-    async def fake_serve(harness, port, poll_interval, source_interval=30.0, pr_poll_interval=0.0, reconcile_interval=300.0):
+    async def fake_serve(harness, port, poll_interval, source_interval=30.0, pr_poll_interval=0.0, reconcile_interval=300.0, registry=None):
         pass
 
     monkeypatch.setattr("harness.cli.build", fake_build)
@@ -194,7 +194,7 @@ def test_run_heal_via_env_var_wires_everything_without_a_flag(monkeypatch, tmp_p
         captured["finishers"] = kwargs.get("finishers")
         return object()
 
-    async def fake_serve(harness, port, poll_interval, source_interval=30.0, pr_poll_interval=0.0, reconcile_interval=300.0):
+    async def fake_serve(harness, port, poll_interval, source_interval=30.0, pr_poll_interval=0.0, reconcile_interval=300.0, registry=None):
         pass
 
     monkeypatch.setattr("harness.cli.build", fake_build)
@@ -221,7 +221,7 @@ def test_run_heal_repo_uses_github_tracker_with_a_token(monkeypatch, tmp_path):
         captured["finishers"] = kwargs.get("finishers")
         return object()
 
-    async def fake_serve(harness, port, poll_interval, source_interval=30.0, pr_poll_interval=0.0, reconcile_interval=300.0):
+    async def fake_serve(harness, port, poll_interval, source_interval=30.0, pr_poll_interval=0.0, reconcile_interval=300.0, registry=None):
         pass
 
     monkeypatch.setattr("harness.cli.build", fake_build)
@@ -247,7 +247,7 @@ def test_run_heal_repo_does_not_clobber_a_hand_edited_autoheal_process(monkeypat
 
     monkeypatch.setattr("harness.cli.build", lambda *a, **k: object())
 
-    async def fake_serve(harness, port, poll_interval, source_interval=30.0, pr_poll_interval=0.0, reconcile_interval=300.0):
+    async def fake_serve(harness, port, poll_interval, source_interval=30.0, pr_poll_interval=0.0, reconcile_interval=300.0, registry=None):
         pass
 
     monkeypatch.setattr("harness.cli.serve", fake_serve)
@@ -272,7 +272,7 @@ def test_run_heal_repo_warns_when_the_slug_is_not_registered(monkeypatch, tmp_pa
 
     monkeypatch.setattr("harness.cli.build", lambda *a, **k: object())
 
-    async def fake_serve(harness, port, poll_interval, source_interval=30.0, pr_poll_interval=0.0, reconcile_interval=300.0):
+    async def fake_serve(harness, port, poll_interval, source_interval=30.0, pr_poll_interval=0.0, reconcile_interval=300.0, registry=None):
         pass
 
     monkeypatch.setattr("harness.cli.serve", fake_serve)
@@ -297,7 +297,7 @@ def test_run_heal_repo_registered_emits_no_repo_warning(monkeypatch, tmp_path, c
 
     monkeypatch.setattr("harness.cli.build", lambda *a, **k: object())
 
-    async def fake_serve(harness, port, poll_interval, source_interval=30.0, pr_poll_interval=0.0, reconcile_interval=300.0):
+    async def fake_serve(harness, port, poll_interval, source_interval=30.0, pr_poll_interval=0.0, reconcile_interval=300.0, registry=None):
         pass
 
     monkeypatch.setattr("harness.cli.serve", fake_serve)
@@ -318,7 +318,7 @@ def test_run_registers_label_issue_finisher_only_with_a_token(monkeypatch, tmp_p
         captured["finishers"] = kwargs.get("finishers")
         return object()
 
-    async def fake_serve(harness, port, poll_interval, source_interval=30.0, pr_poll_interval=0.0, reconcile_interval=300.0):
+    async def fake_serve(harness, port, poll_interval, source_interval=30.0, pr_poll_interval=0.0, reconcile_interval=300.0, registry=None):
         pass
 
     monkeypatch.setattr("harness.cli.build", fake_build)
@@ -347,7 +347,7 @@ def test_run_label_issue_finisher_wraps_inner_and_applies_the_mapped_label(
         captured["finishers"] = kwargs.get("finishers")
         return object()
 
-    async def fake_serve(harness, port, poll_interval, source_interval=30.0, pr_poll_interval=0.0, reconcile_interval=300.0):
+    async def fake_serve(harness, port, poll_interval, source_interval=30.0, pr_poll_interval=0.0, reconcile_interval=300.0, registry=None):
         pass
 
     monkeypatch.setattr("harness.cli.build", fake_build)
@@ -375,7 +375,7 @@ def test_run_without_heal_repo_wires_no_open_issue_finisher(monkeypatch, tmp_pat
         captured["served_names"] = args[1]
         return object()
 
-    async def fake_serve(harness, port, poll_interval, source_interval=30.0, pr_poll_interval=0.0, reconcile_interval=300.0):
+    async def fake_serve(harness, port, poll_interval, source_interval=30.0, pr_poll_interval=0.0, reconcile_interval=300.0, registry=None):
         pass
 
     monkeypatch.setattr("harness.cli.build", fake_build)
@@ -384,6 +384,33 @@ def test_run_without_heal_repo_wires_no_open_issue_finisher(monkeypatch, tmp_pat
     assert main(["run", "--root", str(tmp_path)]) == 0
     assert captured["finishers"] is None
     assert DEFAULT_HEAL_WORKFLOW not in captured["served_names"]
+
+
+def test_run_wires_the_registry_into_build_and_serve(monkeypatch, tmp_path):
+    """`_run()` already constructs `registry = FilesystemRepositoryRegistry(...)`
+    for forge/worktree resolution; it must forward the *same* instance into
+    both `build(repository_registry=...)` and `serve(registry=...)` so
+    repository validation and the process form's dropdown see exactly the
+    repos this run resolves worktrees with."""
+    from harness.drivers.fs_repos import FilesystemRepositoryRegistry
+
+    main(["init", "--root", str(tmp_path)])
+    captured = {}
+
+    def fake_build(*args, **kwargs):
+        captured["repository_registry"] = kwargs.get("repository_registry")
+        return object()
+
+    async def fake_serve(harness, port, poll_interval, source_interval=30.0, pr_poll_interval=0.0, reconcile_interval=300.0, registry=None):
+        captured["serve_registry"] = registry
+
+    monkeypatch.setattr("harness.cli.build", fake_build)
+    monkeypatch.setattr("harness.cli.serve", fake_serve)
+
+    assert main(["run", "--root", str(tmp_path)]) == 0
+
+    assert isinstance(captured["repository_registry"], FilesystemRepositoryRegistry)
+    assert captured["serve_registry"] is captured["repository_registry"]
 
 
 def test_run_heal_repo_needs_claude_agent(monkeypatch, tmp_path):
@@ -408,7 +435,7 @@ def test_run_defaults_agent_timeout_to_1800(monkeypatch, tmp_path):
         captured["agent_timeout"] = kwargs["agent_timeout"]
         return object()
 
-    async def fake_serve(harness, port, poll_interval, source_interval=30.0, pr_poll_interval=0.0, reconcile_interval=300.0):
+    async def fake_serve(harness, port, poll_interval, source_interval=30.0, pr_poll_interval=0.0, reconcile_interval=300.0, registry=None):
         pass
 
     monkeypatch.setattr("harness.cli.build", fake_build)
@@ -426,7 +453,7 @@ def test_run_accepts_explicit_agent_timeout(monkeypatch, tmp_path):
         captured["agent_timeout"] = kwargs["agent_timeout"]
         return object()
 
-    async def fake_serve(harness, port, poll_interval, source_interval=30.0, pr_poll_interval=0.0, reconcile_interval=300.0):
+    async def fake_serve(harness, port, poll_interval, source_interval=30.0, pr_poll_interval=0.0, reconcile_interval=300.0, registry=None):
         pass
 
     monkeypatch.setattr("harness.cli.build", fake_build)
@@ -858,7 +885,7 @@ def test_run_serves_multiple_workflows_with_repeated_flag(monkeypatch, tmp_path)
     (tmp_path / "workflows" / "hotfix.json").write_text(json.dumps(HOTFIX_DEFINITION))
     captured = {}
 
-    async def fake_serve(harness, port, poll_interval, source_interval=30.0, pr_poll_interval=0.0, reconcile_interval=300.0):
+    async def fake_serve(harness, port, poll_interval, source_interval=30.0, pr_poll_interval=0.0, reconcile_interval=300.0, registry=None):
         captured["harness"] = harness
 
     monkeypatch.setattr("harness.cli.serve", fake_serve)
@@ -883,7 +910,7 @@ def test_run_with_no_workflow_flag_serves_default_and_resolver(monkeypatch, tmp_
     (tmp_path / "workflows" / "hotfix.json").write_text(json.dumps(HOTFIX_DEFINITION))
     captured = {}
 
-    async def fake_serve(harness, port, poll_interval, source_interval=30.0, pr_poll_interval=0.0, reconcile_interval=300.0):
+    async def fake_serve(harness, port, poll_interval, source_interval=30.0, pr_poll_interval=0.0, reconcile_interval=300.0, registry=None):
         captured["harness"] = harness
 
     monkeypatch.setattr("harness.cli.serve", fake_serve)
@@ -900,7 +927,7 @@ def test_run_all_workflows_serves_every_definition_found(monkeypatch, tmp_path):
     (tmp_path / "workflows" / "hotfix.json").write_text(json.dumps(HOTFIX_DEFINITION))
     captured = {}
 
-    async def fake_serve(harness, port, poll_interval, source_interval=30.0, pr_poll_interval=0.0, reconcile_interval=300.0):
+    async def fake_serve(harness, port, poll_interval, source_interval=30.0, pr_poll_interval=0.0, reconcile_interval=300.0, registry=None):
         captured["harness"] = harness
 
     monkeypatch.setattr("harness.cli.serve", fake_serve)
@@ -985,7 +1012,7 @@ def test_run_single_custom_workflow_ignores_github_workflow_default(
     (tmp_path / "workflows" / "hotfix.json").write_text(json.dumps(HOTFIX_DEFINITION))
     captured = {}
 
-    async def fake_serve(harness, port, poll_interval, source_interval=30.0, pr_poll_interval=0.0, reconcile_interval=300.0):
+    async def fake_serve(harness, port, poll_interval, source_interval=30.0, pr_poll_interval=0.0, reconcile_interval=300.0, registry=None):
         captured["harness"] = harness
 
     monkeypatch.setattr("harness.cli.serve", fake_serve)
@@ -1215,7 +1242,7 @@ def test_run_gates_github_sources_and_reflectors_mutually_exclusively(monkeypatc
 
     async def fake_serve(
         harness, port, poll_interval, source_interval=30.0,
-        pr_poll_interval=0.0, reconcile_interval=300.0,
+        pr_poll_interval=0.0, reconcile_interval=300.0, registry=None,
     ):
         pass
 
@@ -1523,7 +1550,7 @@ def test_run_serves_resolver_workflow_when_its_file_exists(monkeypatch, tmp_path
     monkeypatch.delenv("GITHUB_TOKEN", raising=False)
     captured = {}
 
-    async def fake_serve(harness, port, poll_interval, source_interval=30.0, pr_poll_interval=0.0, reconcile_interval=300.0):
+    async def fake_serve(harness, port, poll_interval, source_interval=30.0, pr_poll_interval=0.0, reconcile_interval=300.0, registry=None):
         captured["harness"] = harness
 
     monkeypatch.setattr("harness.cli.serve", fake_serve)
@@ -1537,7 +1564,8 @@ def test_run_accepts_api_port(monkeypatch, tmp_path):
     captured = {}
 
     async def fake_serve(
-        harness, port, poll_interval, source_interval=30.0, pr_poll_interval=0.0, reconcile_interval=300.0
+        harness, port, poll_interval, source_interval=30.0, pr_poll_interval=0.0, reconcile_interval=300.0,
+        registry=None,
     ):
         captured["port"] = port
         captured["source_interval"] = source_interval
@@ -1556,7 +1584,8 @@ def test_run_forwards_source_poll(monkeypatch, tmp_path):
     captured = {}
 
     async def fake_serve(
-        harness, port, poll_interval, source_interval=30.0, pr_poll_interval=0.0, reconcile_interval=300.0
+        harness, port, poll_interval, source_interval=30.0, pr_poll_interval=0.0, reconcile_interval=300.0,
+        registry=None,
     ):
         captured["source_interval"] = source_interval
 
@@ -1572,7 +1601,7 @@ def test_run_forwards_pr_poll(monkeypatch, tmp_path):
 
     async def fake_serve(
         harness, port, poll_interval, source_interval=30.0,
-        pr_poll_interval=0.0, reconcile_interval=300.0
+        pr_poll_interval=0.0, reconcile_interval=300.0, registry=None,
     ):
         captured["pr_poll_interval"] = pr_poll_interval
 
@@ -1588,7 +1617,7 @@ def test_run_forwards_reconcile_poll(monkeypatch, tmp_path):
 
     async def fake_serve(
         harness, port, poll_interval, source_interval=30.0,
-        pr_poll_interval=0.0, reconcile_interval=300.0
+        pr_poll_interval=0.0, reconcile_interval=300.0, registry=None,
     ):
         captured["reconcile_interval"] = reconcile_interval
 
@@ -1704,6 +1733,59 @@ async def test_serve_wires_the_filesystem_process_admin(monkeypatch, tmp_path):
     assert isinstance(admin, FilesystemProcessAdmin)
     assert "github-issues" in admin.check_names()
     assert "always" in admin.check_names()
+
+
+async def test_serve_wires_the_registry_into_the_filesystem_process_admin(
+    monkeypatch, tmp_path
+):
+    """`serve(..., registry=...)` reaches `FilesystemProcessAdmin` alongside
+    `checks=` — so the process form's repository dropdown/validation see the
+    same `RepositoryRegistry` a real run resolves worktrees with."""
+    from harness.drivers.fs_processes import FilesystemProcessAdmin
+    from harness.drivers.memory import MemoryRepositoryRegistry
+
+    captured = {}
+    real_create_app = __import__("harness.api.app", fromlist=["create_app"]).create_app
+
+    def capturing_create_app(**kwargs):
+        captured.update(kwargs)
+        return real_create_app(**kwargs)
+
+    class FakeUvicornServer:
+        def __init__(self, config):
+            pass
+
+        async def serve(self):
+            return
+
+    monkeypatch.setattr("harness.cli.create_app", capturing_create_app)
+    monkeypatch.setattr("harness.cli.uvicorn.Server", FakeUvicornServer)
+
+    class FakeHarness:
+        def __init__(self):
+            self.layout = HarnessLayout(tmp_path)
+            self.projection = BoardProjection(
+                SERVE_TEST_WORKFLOW.steps(), (SERVE_TEST_WORKFLOW,)
+            )
+            self.artifacts = MemoryArtifactStore()
+            self.stage_output = StageOutputProjection()
+            self.control = FakeTaskControl()
+            self.process_checks = None
+
+        async def run(
+            self, poll_interval, source_interval=30.0, pr_poll_interval=0.0, reconcile_interval=300.0, stop=None
+        ):
+            while not stop.is_set():
+                await asyncio.sleep(0.01)
+
+    registry = MemoryRepositoryRegistry({"harness_v2": tmp_path / "repo"})
+    await asyncio.wait_for(
+        serve(FakeHarness(), 8000, 0.01, registry=registry), timeout=2.0
+    )
+
+    admin = captured["process_admin"]
+    assert isinstance(admin, FilesystemProcessAdmin)
+    assert admin.repository_names() == ("harness_v2",)
 
 
 # --- harness service -------------------------------------------------------

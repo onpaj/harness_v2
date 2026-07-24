@@ -18,12 +18,19 @@ from harness.drivers.fs_processes import (
     FilesystemProcessAdmin,
     FilesystemProcessRepository,
 )
+from harness.drivers.fs_repos import FilesystemRepositoryRegistry
 from harness.drivers.system_clock import SystemClock
 from harness.ports.process_admin import (
     ProcessAdminValidationError,
     ProcessFields,
     ProcessNotFound,
 )
+
+
+def _registry(tmp_path: Path, *names: str) -> FilesystemRepositoryRegistry:
+    config = tmp_path / "repos.json"
+    config.write_text(json.dumps({name: f"/repos/{name}" for name in names}), encoding="utf-8")
+    return FilesystemRepositoryRegistry(config)
 
 
 def _compiles(root: Path) -> None:
@@ -360,3 +367,67 @@ def test_write_maps_a_wired_factory_failure_onto_its_field(tmp_path: Path) -> No
 
     assert "check" in excinfo.value.errors
     assert not (tmp_path / "ingest.json").exists()
+
+
+# --- repository field (per-process target repository) ------------------------
+
+
+def test_repository_round_trips(tmp_path: Path) -> None:
+    admin = FilesystemProcessAdmin(tmp_path)
+
+    written = admin.write("with-repo", _valid(repository="harness_v2"))
+
+    assert written.repository == "harness_v2"
+    assert admin.read("with-repo") == written
+    _compiles(tmp_path)
+
+
+def test_absent_repository_round_trips_to_empty_string(tmp_path: Path) -> None:
+    admin = FilesystemProcessAdmin(tmp_path)
+
+    written = admin.write("no-repo", _valid())
+
+    assert written.repository == ""
+    assert admin.read("no-repo") == written
+    raw = json.loads((tmp_path / "no-repo.json").read_text(encoding="utf-8"))
+    assert "repository" not in raw
+
+
+def test_repository_names_reflects_the_wired_registry(tmp_path: Path) -> None:
+    admin = FilesystemProcessAdmin(
+        tmp_path / "processes",
+        registry=_registry(tmp_path, "harness_v2", "nanoclaw"),
+    )
+
+    assert admin.repository_names() == ("harness_v2", "nanoclaw")
+
+
+def test_repository_names_is_empty_when_no_registry_wired(tmp_path: Path) -> None:
+    admin = FilesystemProcessAdmin(tmp_path)
+
+    assert admin.repository_names() == ()
+
+
+def test_write_validates_repository_against_the_wired_registry(tmp_path: Path) -> None:
+    admin = FilesystemProcessAdmin(
+        tmp_path / "processes", registry=_registry(tmp_path, "harness_v2")
+    )
+
+    written = admin.write("with-repo", _valid(repository="harness_v2"))
+    assert written.repository == "harness_v2"
+
+    with pytest.raises(ProcessAdminValidationError) as excinfo:
+        admin.write("bad-repo", _valid(repository="ghost"))
+    assert "repository" in excinfo.value.errors
+    assert not (tmp_path / "processes" / "bad-repo.json").exists()
+
+
+def test_write_accepts_any_repository_when_no_registry_wired(tmp_path: Path) -> None:
+    """No registry configured (`registry=None`) is lenient, matching every
+    other `known_*=None` escape hatch — an admin-time typo isn't catchable
+    without `repos.json` to check against."""
+    admin = FilesystemProcessAdmin(tmp_path)
+
+    written = admin.write("with-repo", _valid(repository="whatever"))
+
+    assert written.repository == "whatever"

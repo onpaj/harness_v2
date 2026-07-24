@@ -61,6 +61,7 @@ from harness.ports.process_admin import (
     ProcessFields,
     ProcessNotFound,
 )
+from harness.ports.repos import RepositoryRegistry
 from harness.ports.triggers import CheckFactory, CronSchedule, parse_cron, parse_interval
 
 _ACCEPTED_SINK_KINDS = {"none", "slack", "github"}
@@ -77,12 +78,12 @@ issue from, so the sink is accepted but inert for it."""
 class ProcessValidationError(Exception):
     """A process file is malformed. The message names the offending file; the
     optional `field` (one of
-    ``interval|cron|check|params|target|dedup|sink|trigger`` or ``None`` for a
-    whole-file problem like broken JSON) lets the admin map the failure onto a
-    form field. `trigger` covers a malformed trigger *block* (missing/not-a-
-    dict, both/neither of interval+cron present, or an unsupported
-    `trigger.kind`); `interval`/`cron` cover a present-but-invalid cadence
-    *value*. `str()` is unchanged — still just the message."""
+    ``interval|cron|check|params|target|dedup|sink|trigger|repository`` or
+    ``None`` for a whole-file problem like broken JSON) lets the admin map the
+    failure onto a form field. `trigger` covers a malformed trigger *block*
+    (missing/not-a-dict, both/neither of interval+cron present, or an
+    unsupported `trigger.kind`); `interval`/`cron` cover a present-but-invalid
+    cadence *value*. `str()` is unchanged — still just the message."""
 
     def __init__(self, message: str, field: str | None = None) -> None:
         self.field = field
@@ -117,6 +118,7 @@ def compile_process(
     repository: str | None = None,
     worktree_root: str | None = None,
     known_targets: set[str] | None = None,
+    known_repositories: set[str] | None = None,
     where: str | None = None,
 ) -> ScheduledTrigger:
     """Validate one process definition and compile it into a `ScheduledTrigger`.
@@ -125,7 +127,15 @@ def compile_process(
     startup) and the admin (validate one submission before writing). `where`
     (defaults to `name`) is the label used in messages. Each failure raises
     `ProcessValidationError(msg, field=...)` with `field` one of
-    ``interval|cron|check|params|target|dedup|sink|trigger``.
+    ``interval|cron|check|params|target|dedup|sink|trigger|repository``.
+
+    `repository` is a fallback default (the caller's own wiring-time value,
+    e.g. a global `--repository`); the file's own `"repository"` key, when
+    present, takes precedence over it. Either way, an observation the check
+    itself produces with its own `repository` (e.g. `github-issues` stamping
+    each issue's own repo) still wins — that composition happens inside
+    `ScheduledTrigger._task_for` via `obs.repository or self._repository`,
+    unchanged by this function.
     """
     where = where or name
     interval, cron = _parse_cadence(where, raw.get("trigger"))
@@ -134,6 +144,7 @@ def compile_process(
     workflow, step = _parse_target(where, raw.get("target"), known_targets)
     dedup = _parse_dedup(where, raw.get("dedup", "per-interval"))
     sink = _parse_sink(where, raw.get("sink"))
+    file_repository = _parse_repository(where, raw.get("repository"), known_repositories)
 
     return ScheduledTrigger(
         name=name,
@@ -143,7 +154,7 @@ def compile_process(
         check=check,
         workflow=workflow,
         step=step,
-        repository=repository,
+        repository=file_repository or repository,
         worktree_root=worktree_root,
         dedup=dedup,
         sink=sink,
@@ -236,6 +247,31 @@ def _parse_dedup(where: str, dedup: object) -> str:
     return dedup
 
 
+def _parse_repository(
+    where: str, repository: object, known_repositories: set[str] | None
+) -> str | None:
+    """None (the key is absent) is valid and means "no process-level
+    default". A present value must be a non-empty string; when
+    `known_repositories` is given it must also be a member of it — an
+    unrecognized name is a `field="repository"` error, same as an unknown
+    `target`. `known_repositories=None` (no registry reachable) is lenient,
+    matching every other `known_*=None` escape hatch in this module."""
+    if repository is None:
+        return None
+    if not isinstance(repository, str) or not repository:
+        raise ProcessValidationError(
+            f"process {where} has an invalid repository: {repository!r}",
+            field="repository",
+        )
+    if known_repositories is not None and repository not in known_repositories:
+        raise ProcessValidationError(
+            f"process {where} names repository {repository!r}, which is not "
+            "in the repository registry",
+            field="repository",
+        )
+    return repository
+
+
 def _check_trigger_kind(where: str, trigger: object) -> None:
     # Forward-compat reservation, the same zero-cost move `sink` got: the
     # trigger object may carry a `kind`, but only `"schedule"` exists — a
@@ -281,6 +317,7 @@ class FilesystemProcessRepository:
         repository: str | None = None,
         worktree_root: str | None = None,
         known_targets: set[str] | None = None,
+        known_repositories: set[str] | None = None,
         default_github_issues_label: str = "harness:todo",
     ) -> list[ScheduledTrigger]:
         if not self._root.exists():
@@ -297,6 +334,7 @@ class FilesystemProcessRepository:
                     repository=repository,
                     worktree_root=worktree_root,
                     known_targets=known_targets,
+                    known_repositories=known_repositories,
                 )
             )
             self._check_github_issues_collision(
@@ -343,6 +381,7 @@ class FilesystemProcessRepository:
         repository: str | None,
         worktree_root: str | None,
         known_targets: set[str] | None,
+        known_repositories: set[str] | None,
     ) -> ScheduledTrigger:
         try:
             raw = json.loads(path.read_text(encoding="utf-8"))
@@ -366,6 +405,7 @@ class FilesystemProcessRepository:
             repository=repository,
             worktree_root=worktree_root,
             known_targets=known_targets,
+            known_repositories=known_repositories,
             where=path.name,
         )
 
@@ -384,14 +424,26 @@ class FilesystemProcessAdmin(ProcessAdmin):
     GitHub-backed actions closed over a client in `cli._process_checks`), so
     the form's dropdown and save-time validation see exactly the checks a
     `harness run` would accept. `None` falls back to `BUILTIN_CHECKS`, the
-    client-free subset."""
+    client-free subset.
+
+    `registry` is the same `RepositoryRegistry` (`repos.json`) the real run
+    resolves repository names with — machine-local, static config, available
+    at both compile sites (unlike the served-workflow set `known_targets`
+    depends on). `None` means no registry was wired: `repository_names()`
+    returns `()` and `write()` validates any repository name leniently
+    (matching every other `known_*=None` escape hatch)."""
 
     def __init__(
-        self, root: Path, *, checks: dict[str, CheckFactory] | None = None
+        self,
+        root: Path,
+        *,
+        checks: dict[str, CheckFactory] | None = None,
+        registry: RepositoryRegistry | None = None,
     ) -> None:
         self._root = Path(root)
         self._root.mkdir(parents=True, exist_ok=True)
         self._checks = checks if checks is not None else BUILTIN_CHECKS
+        self._registry = registry
 
     def list(self) -> tuple[str, ...]:
         return tuple(
@@ -428,9 +480,15 @@ class FilesystemProcessAdmin(ProcessAdmin):
             raise ProcessAdminValidationError({"name": f"invalid process name: {name!r}"})
 
         raw = _raw_from_fields(fields)
+        known_repositories = set(self._registry.names()) if self._registry else None
         try:
             compile_process(
-                name, raw, clock=_LocalClock(), checks=self._checks, known_targets=None
+                name,
+                raw,
+                clock=_LocalClock(),
+                checks=self._checks,
+                known_targets=None,
+                known_repositories=known_repositories,
             )
         except ProcessValidationError as error:
             raise ProcessAdminValidationError({error.field or "_": str(error)}) from None
@@ -454,6 +512,9 @@ class FilesystemProcessAdmin(ProcessAdmin):
 
     def sink_kinds(self) -> tuple[str, ...]:
         return tuple(sorted(_ACCEPTED_SINK_KINDS))
+
+    def repository_names(self) -> tuple[str, ...]:
+        return tuple(sorted(self._registry.names())) if self._registry else ()
 
     def _write(self, path: Path, raw: dict) -> None:
         # Same idiom as `FilesystemAgentAdmin._write` (drivers/fs_agents.py):
@@ -480,13 +541,16 @@ def _raw_from_fields(fields: ProcessFields) -> dict:
     that toggled to "cron" writes `{"cron": ...}` even if `fields.interval`
     still holds a stale value from before the toggle, and vice versa."""
     trigger = {"cron": fields.cron} if fields.cadence == "cron" else {"interval": fields.interval}
-    return {
+    raw = {
         "trigger": trigger,
         "action": {"check": fields.check, "params": dict(fields.params)},
         "target": {fields.target_kind: fields.target},
         "dedup": fields.dedup,
         "sink": {"kind": fields.sink_kind},
     }
+    if fields.repository:
+        raw["repository"] = fields.repository
+    return raw
 
 
 def _fields_from_raw(raw: dict) -> ProcessFields:
@@ -517,4 +581,5 @@ def _fields_from_raw(raw: dict) -> ProcessFields:
         params=dict(action.get("params", {})),
         sink_kind=sink_kind,
         dedup=raw.get("dedup", "per-interval"),
+        repository=raw.get("repository") or "",
     )

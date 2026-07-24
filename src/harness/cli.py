@@ -1739,6 +1739,7 @@ def _run(args: argparse.Namespace) -> int:
             delay=args.delay,
             request_changes_once_at=args.request_changes_at,
             extra_checks=extra_checks,
+            repository_registry=registry,
         )
     except WorkflowNotFound as error:
         print(f"error: {error}", file=sys.stderr)
@@ -1759,6 +1760,7 @@ def _run(args: argparse.Namespace) -> int:
                 args.source_poll,
                 args.pr_poll,
                 args.reconcile_poll,
+                registry=registry,
             )
         )
     except KeyboardInterrupt:
@@ -1773,6 +1775,7 @@ async def serve(
     source_interval: float = 30.0,
     pr_poll_interval: float = 0.0,
     reconcile_interval: float = 300.0,
+    registry: RepositoryRegistry | None = None,
 ) -> None:
     """The loop and the board in a single event loop."""
     stop = asyncio.Event()
@@ -1811,7 +1814,7 @@ async def serve(
         # the checks this run compiles — a GitHub-backed process is authorable
         # in the dashboard, not only by hand-editing `processes/*.json`.
         process_admin=FilesystemProcessAdmin(
-            harness.layout.processes, checks=harness.process_checks
+            harness.layout.processes, checks=harness.process_checks, registry=registry
         ),
         updater=updater,
         version=version_string(),

@@ -121,6 +121,9 @@ class _EmptyProcessAdmin(ProcessAdmin):
     def sink_kinds(self) -> tuple[str, ...]:
         return ("none",)
 
+    def repository_names(self) -> tuple[str, ...]:
+        return ()
+
 
 class _NullUpdater(Updater):
     """No-op updater for a board wired without one (tests, or a from-source

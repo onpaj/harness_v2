@@ -44,6 +44,7 @@ from harness.ports.issue_state import IssueChecker
 from harness.ports.logs import StageOutputView
 from harness.ports.merge import MergeChecker
 from harness.ports.queue import TaskQueue
+from harness.ports.repos import RepositoryRegistry
 from harness.ports.source import TaskSource
 from harness.ports.triggers import CheckFactory
 from harness.ports.workflows import WorkflowNotFound
@@ -354,6 +355,7 @@ def build(
     request_changes_once_at: str | None = None,
     extra_checks: dict[str, CheckFactory] | None = None,
     processes_root: Path | None = None,
+    repository_registry: RepositoryRegistry | None = None,
 ) -> Harness:
     layout = HarnessLayout(Path(root))
     events = events or StdoutEventSink()
@@ -640,6 +642,9 @@ def build(
     # processes targeting `default`/`resolver`) validates against the workflow
     # name itself, not its steps.
     known_targets = set(known_steps) | set(resolved)
+    known_repositories = (
+        set(repository_registry.names()) if repository_registry is not None else None
+    )
     process_repo = FilesystemProcessRepository(processes_root or layout.processes)
     process_sources = process_repo.build(
         clock=clock,
@@ -647,6 +652,7 @@ def build(
         repository=None,
         worktree_root=str(layout.worktrees),
         known_targets=known_targets,
+        known_repositories=known_repositories,
     )
     # `all_sources` feeds `pollers` ONLY — never `SourceReflectorSink`, which
     # was already constructed above, over the caller's own `sources`. Safe:
