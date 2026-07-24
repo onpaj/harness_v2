@@ -48,8 +48,18 @@ not by convenience.
   companion to a future outbound `JiraReflector`, not this increment.
 - **Selection: JQL wins over `project`+`label`.** Both are supported —
   `jql` when given, else a compiled `project = {project} AND labels =
-  "{label}"`. `project` is required whenever `jql` is absent, checked in the
-  factory (build time), not in `evaluate()` (runtime).
+  "{label}" AND statusCategory != Done`. `project` is required whenever
+  `jql` is absent, checked in the factory (build time), not in `evaluate()`
+  (runtime). The status-category clause is deliberate, not decorative:
+  without it, a resolved/closed issue that still carries the select label
+  (labels on Jira issues routinely outlive the workflow status — nothing
+  requires an operator to strip a label on close) would be re-ingested as a
+  fresh task on every tick for as long as the label sticks around, with no
+  equivalent to GitHub's `list_issues(..., state="open")` filter. An
+  explicit `jql` override is trusted as-is and gets **no** implicit status
+  clause appended — an operator handing a raw JQL string owns its
+  correctness completely, the same way `github-issues`'s `label` param is
+  trusted without a hidden second filter layered on top.
 - **Deviation 1 — one `repository` param per Process, not a per-issue slug
   derivation.** A GitHub issue is intrinsically scoped to the repo it lives
   in (`github_slug()` derives it from the registry); a Jira issue carries no

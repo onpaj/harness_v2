@@ -115,3 +115,21 @@ def test_requires_jql_or_project():
 
     with pytest.raises(ValueError):
         JiraIssuesCheck(client=client, repository="my-service")
+
+
+def test_convenience_form_jql_excludes_done_issues():
+    client = FakeJiraClient()
+    check = JiraIssuesCheck(client=client, repository="my-service", project="PROJ")
+
+    assert check._jql == (
+        'project = PROJ AND labels = "harness-todo" AND statusCategory != Done'
+    )
+
+
+def test_explicit_jql_is_not_augmented_with_a_status_filter():
+    client = FakeJiraClient()
+    check = JiraIssuesCheck(
+        client=client, repository="my-service", jql='labels = "harness-todo"'
+    )
+
+    assert check._jql == 'labels = "harness-todo"'

@@ -6,6 +6,12 @@ each matching issue by swapping the select label for the claimed one, and
 returns one `Observation` per issue carrying `data.source` provenance
 (`kind: "jira"`) so downstream code recognises the task's origin.
 
+The `project`+`label` convenience form appends `AND statusCategory != Done`
+so a resolved/closed issue still carrying the select label isn't
+re-ingested on every tick — the Jira-side equivalent of GitHub's
+`list_issues(..., state="open")` filter. An explicit `jql` override is
+trusted as given and gets no implicit status clause.
+
 Unlike a GitHub issue, a Jira issue carries no intrinsic repo axis, so every
 observation this check emits is stamped with the single `repository`
 configured at construction — the same mechanism `--heal-repo` uses to give a
@@ -39,7 +45,10 @@ class JiraIssuesCheck(Check):
         self._repository = repository
         self._label = label
         self._claimed_label = claimed_label
-        self._jql = jql or f'project = {project} AND labels = "{label}"'
+        self._jql = (
+            jql
+            or f'project = {project} AND labels = "{label}" AND statusCategory != Done'
+        )
         # In-process ledger of already-claimed issue keys — the label swap
         # gives at-most-once across restarts, but `search_issues` reads with
         # the same read-after-write lag GitHub's `list_issues` has, so a fast
