@@ -934,7 +934,7 @@ def test_build_with_conflicting_finisher_bindings_fails_at_build(tmp_path):
             tmp_path,
             ["default", "other"],
             events=MemoryEventSink(),
-            finishers={"record": RecordingFinisher()},
+            finishers={"record": lambda step, config, inner: RecordingFinisher()},
         )
 
 
@@ -947,8 +947,95 @@ def test_caller_supplied_finisher_registry_entry_is_used(tmp_path):
         tmp_path,
         "default",
         events=MemoryEventSink(),
-        finishers={"record": recorder},
+        finishers={"record": lambda step, config, inner: recorder},
     )
 
     by_actor = {consumer.actor: consumer for consumer in harness.consumers}
     assert by_actor["consumer:publish"]._behavior is recorder
+
+
+def test_finisher_factory_receives_step_config_and_a_lazy_inner_thunk(tmp_path):
+    """The factory shape (step, config, inner) is what lets a finisher *wrap*
+    the step's own agent behavior instead of only replacing it (ADR-0018).
+    `inner` is a zero-arg thunk, not an already-built behavior — resolving it
+    eagerly for every bound step would call `catalog.get(step)` even for a
+    step (like `land`) that is never expected to have a catalog agent."""
+    definition = {
+        **PUBLISH_DEFINITION,
+        "finishers": {"publish": {"kind": "record", "note": "hello"}},
+    }
+    seed_definition(tmp_path, definition)
+    seen = {}
+
+    def factory(step, config, inner):
+        seen["step"] = step
+        seen["config"] = config
+        seen["inner"] = inner()
+        return RecordingFinisher()
+
+    build(
+        tmp_path,
+        "default",
+        events=MemoryEventSink(),
+        finishers={"record": factory},
+    )
+
+    assert seen["step"] == "publish"
+    assert seen["config"] == {"note": "hello"}
+    assert isinstance(seen["inner"], ConsumerBehavior)
+
+
+def test_finisher_that_never_calls_inner_never_triggers_catalog_lookup(tmp_path):
+    """A step exclusively finished by a factory that ignores `inner` (like
+    "open-pr") must not force a catalog lookup for that step — the landing
+    step normally has no catalog agent at all (`_write_default_agents` skips
+    it), so eagerly resolving inner for every bound step would break the most
+    common deployment shape."""
+    definition = {
+        "name": "default",
+        "start": "plan",
+        "transitions": [
+            {"from": "plan", "on": "done", "to": "land"},
+            {"from": "land", "on": "done", "to": "end"},
+        ],
+    }
+    seed_definition(tmp_path, definition)
+    catalog = MemoryAgentCatalog(
+        {"plan": AgentSpec(name="plan", prompt="plan it", allowed_outcomes=(DONE,))}
+    )
+
+    harness = build(
+        tmp_path,
+        "default",
+        events=MemoryEventSink(),
+        catalog=catalog,
+        runner=object(),
+    )
+
+    by_actor = {consumer.actor: consumer for consumer in harness.consumers}
+    assert isinstance(by_actor["consumer:land"]._behavior, LandingBehavior)
+
+
+def test_conflicting_finisher_bindings_with_same_kind_but_different_config_fails(
+    tmp_path,
+):
+    """Two served workflows binding the same step to the same kind but
+    different config is still a build-time conflict — the comparison covers
+    the whole binding, not just the kind string."""
+    layout = seed_definition(
+        tmp_path, {**PUBLISH_DEFINITION, "finishers": {"publish": {"kind": "record", "labels": {"done": "a"}}}}
+    )
+    other = {
+        **PUBLISH_DEFINITION,
+        "name": "other",
+        "finishers": {"publish": {"kind": "record", "labels": {"done": "b"}}},
+    }
+    (layout.workflows / "other.json").write_text(json.dumps(other))
+
+    with pytest.raises(ValueError, match="conflicting"):
+        build(
+            tmp_path,
+            ["default", "other"],
+            events=MemoryEventSink(),
+            finishers={"record": lambda step, config, inner: RecordingFinisher()},
+        )

@@ -169,12 +169,21 @@ class Transition:
 
 
 @dataclass(frozen=True)
+class FinisherBinding:
+    """A step's bound finisher: a kind plus that kind's own config, opaque to
+    everything except the finisher factory that reads it at build time."""
+
+    kind: str
+    config: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
 class Workflow:
     name: str
     start: str
     transitions: tuple[Transition, ...]
     max_parallel: dict[str, int] = field(default_factory=dict)
-    finishers: dict[str, str] = field(default_factory=dict)
+    finishers: dict[str, FinisherBinding] = field(default_factory=dict)
     descriptions: dict[str, str] = field(default_factory=dict)
 
     def target(self, status: str, outcome: str) -> str | None:
@@ -199,8 +208,8 @@ class Workflow:
         """The configured concurrency limit for a step. Absent entries default to 1."""
         return self.max_parallel.get(step, 1)
 
-    def finisher_for(self, step: str) -> str | None:
-        """The finisher kind bound to a step, or None when the step has none."""
+    def finisher_for(self, step: str) -> FinisherBinding | None:
+        """The finisher binding for a step, or None when the step has none."""
         return self.finishers.get(step)
 
     def outcomes_for(self, step: str) -> tuple[str, ...]:

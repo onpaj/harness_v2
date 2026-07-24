@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pytest
 
+from harness.drivers.checks import BUILTIN_CHECKS, AlwaysCheck
 from harness.drivers.fs_processes import (
     FilesystemProcessRepository,
     ProcessValidationError,
@@ -195,6 +196,162 @@ def test_trigger_kind_schedule_is_accepted(tmp_path: Path) -> None:
 
 def test_missing_directory_returns_empty_list(tmp_path: Path) -> None:
     assert _build(tmp_path / "does-not-exist") == []
+
+
+# --- github-issues cross-process label collision (FR-2) ---------------------
+#
+# A real `github-issues` check factory needs a GithubClient (cli.py's
+# concern); these tests only exercise the collision guard in `build()`, so a
+# trivial stand-in factory (AlwaysCheck ignores its params) is registered
+# under the "github-issues" name.
+
+_GITHUB_ISSUES_CHECKS = {**BUILTIN_CHECKS, "github-issues": lambda params: AlwaysCheck()}
+
+
+def _build_with_github_issues(root: Path, **kwargs) -> list[ScheduledTrigger]:
+    return FilesystemProcessRepository(root).build(
+        clock=SystemClock(), checks=_GITHUB_ISSUES_CHECKS, **kwargs
+    )
+
+
+def test_two_processes_sharing_a_label_fail_the_build(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "harness-todo",
+        {
+            "trigger": {"interval": "30s"},
+            "action": {"check": "github-issues", "params": {"label": "harness:todo"}},
+            "target": {"workflow": "default"},
+            "dedup": "per-state",
+        },
+    )
+    _write(
+        tmp_path,
+        "triage",
+        {
+            "trigger": {"interval": "5m"},
+            "action": {
+                "check": "github-issues",
+                "params": {"label": "harness:triage", "claimed_label": "harness:todo"},
+            },
+            "target": {"workflow": "triage"},
+            "dedup": "per-state",
+        },
+    )
+
+    with pytest.raises(ProcessValidationError) as exc:
+        _build_with_github_issues(tmp_path)
+    message = str(exc.value)
+    assert "harness-todo.json" in message
+    assert "triage.json" in message
+    assert "harness:todo" in message
+
+
+def test_two_processes_sharing_a_claimed_label_fail_the_build(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "one",
+        {
+            "trigger": {"interval": "30s"},
+            "action": {
+                "check": "github-issues",
+                "params": {"label": "harness:a", "claimed_label": "harness:queued"},
+            },
+            "target": {"workflow": "default"},
+            "dedup": "per-state",
+        },
+    )
+    _write(
+        tmp_path,
+        "two",
+        {
+            "trigger": {"interval": "30s"},
+            "action": {
+                "check": "github-issues",
+                "params": {"label": "harness:b", "claimed_label": "harness:queued"},
+            },
+            "target": {"workflow": "default"},
+            "dedup": "per-state",
+        },
+    )
+
+    with pytest.raises(ProcessValidationError):
+        _build_with_github_issues(tmp_path)
+
+
+def test_triage_process_with_no_collision_builds_cleanly(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "harness-todo",
+        {
+            "trigger": {"interval": "30s"},
+            "action": {"check": "github-issues", "params": {"label": "harness:todo"}},
+            "target": {"workflow": "default"},
+            "dedup": "per-state",
+        },
+    )
+    _write(
+        tmp_path,
+        "triage",
+        {
+            "trigger": {"interval": "5m"},
+            "action": {
+                "check": "github-issues",
+                "params": {
+                    "label": "harness:triage",
+                    "claimed_label": "harness:validating",
+                },
+            },
+            "target": {"workflow": "triage"},
+            "dedup": "per-state",
+        },
+    )
+
+    triggers = _build_with_github_issues(tmp_path)
+
+    assert len(triggers) == 2
+
+
+def test_collision_check_honours_the_default_github_issues_label(tmp_path: Path) -> None:
+    """A file omitting `label` defaults to `default_github_issues_label`
+    (threaded from the CLI's `--github-label`), not a hardcoded literal —
+    otherwise this guard would be silently wrong for any deployment that
+    overrides the flag (architecture review Correction 3)."""
+    _write(
+        tmp_path,
+        "ingestion",
+        {
+            "trigger": {"interval": "30s"},
+            "action": {"check": "github-issues"},  # no explicit label
+            "target": {"workflow": "default"},
+            "dedup": "per-state",
+        },
+    )
+    _write(
+        tmp_path,
+        "triage",
+        {
+            "trigger": {"interval": "5m"},
+            "action": {
+                "check": "github-issues",
+                "params": {
+                    "label": "harness:custom-default",
+                    "claimed_label": "harness:validating",
+                },
+            },
+            "target": {"workflow": "triage"},
+            "dedup": "per-state",
+        },
+    )
+
+    with pytest.raises(ProcessValidationError):
+        _build_with_github_issues(
+            tmp_path, default_github_issues_label="harness:custom-default"
+        )
+
+    # With the (different) built-in default instead, no collision.
+    triggers = _build_with_github_issues(tmp_path)
+    assert len(triggers) == 2
 
 
 # --- fail-fast validation ---------------------------------------------------

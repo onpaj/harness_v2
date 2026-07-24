@@ -122,6 +122,62 @@ def test_run_heal_repo_uses_github_tracker_with_a_token(monkeypatch, tmp_path):
     assert isinstance(captured["issue_tracker"], GithubIssueTracker)
 
 
+def test_run_registers_label_issue_finisher_only_with_a_token(monkeypatch, tmp_path):
+    main(["init", "--root", str(tmp_path)])
+    captured = {}
+
+    def fake_build(*args, **kwargs):
+        captured["finishers"] = kwargs.get("finishers")
+        return object()
+
+    async def fake_serve(harness, port, poll_interval, source_interval=30.0, pr_poll_interval=0.0, reconcile_interval=300.0):
+        pass
+
+    monkeypatch.setattr("harness.cli.build", fake_build)
+    monkeypatch.setattr("harness.cli.serve", fake_serve)
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+
+    assert main(["run", "--root", str(tmp_path)]) == 0
+    assert captured["finishers"] is None
+
+    monkeypatch.setenv("GITHUB_TOKEN", "tok")
+    assert main(["run", "--root", str(tmp_path)]) == 0
+    assert set(captured["finishers"]) == {"label-issue"}
+
+
+def test_run_label_issue_finisher_wraps_inner_and_applies_the_mapped_label(
+    monkeypatch, tmp_path
+):
+    from harness.drivers.label_issue import LabelIssueBehavior
+    from harness.models import DONE, BehaviorResult, Task
+    from harness.ports.behavior import ConsumerBehavior
+
+    main(["init", "--root", str(tmp_path)])
+    captured = {}
+
+    def fake_build(*args, **kwargs):
+        captured["finishers"] = kwargs.get("finishers")
+        return object()
+
+    async def fake_serve(harness, port, poll_interval, source_interval=30.0, pr_poll_interval=0.0, reconcile_interval=300.0):
+        pass
+
+    monkeypatch.setattr("harness.cli.build", fake_build)
+    monkeypatch.setattr("harness.cli.serve", fake_serve)
+    monkeypatch.setenv("GITHUB_TOKEN", "tok")
+
+    assert main(["run", "--root", str(tmp_path)]) == 0
+    factory = captured["finishers"]["label-issue"]
+
+    class StubInner(ConsumerBehavior):
+        async def run(self, task):
+            return BehaviorResult(DONE, summary="ok")
+
+    built = factory("triage", {"labels": {"done": "harness:todo"}}, lambda: StubInner())
+
+    assert isinstance(built, LabelIssueBehavior)
+
+
 def test_run_without_heal_repo_wires_no_healer(monkeypatch, tmp_path):
     main(["init", "--root", str(tmp_path)])
     captured = {}
@@ -1030,6 +1086,84 @@ def test_process_sources_builds_a_github_issues_process(tmp_path):
 
     assert len(sources) == 1
     assert sources[0].kind == "scheduled:harness-todo"
+
+
+def test_process_sources_github_issues_threads_claimed_label(tmp_path):
+    """A triage process scans a different label and claims into a different
+    one than the ingestion process's harness:queued default (FR-1)."""
+    from harness.drivers.memory import FakeClock
+
+    (tmp_path / "processes").mkdir()
+    (tmp_path / "processes" / "triage.json").write_text(
+        '{"trigger": {"interval": "30s"},'
+        ' "action": {"check": "github-issues", "params": '
+        '{"label": "harness:triage", "claimed_label": "harness:validating"}},'
+        ' "target": {"workflow": "triage"}, "dedup": "per-state",'
+        ' "sink": {"kind": "none"}}'
+    )
+    registry = MemoryRepositoryRegistry({"heblo": Path("/repos/heblo")})
+
+    (sources_trigger,) = _process_sources(
+        _process_args(),
+        tmp_path,
+        registry,
+        clock=FakeClock("2026-07-22T10:00:00Z"),
+        known_targets={"triage"},
+        client=FakeGithubClient(),
+    )
+
+    check = sources_trigger._check
+    assert check._label == "harness:triage"
+    assert check._claimed_label == "harness:validating"
+
+
+def test_process_sources_github_issues_claimed_label_defaults_to_queued(tmp_path):
+    from harness.drivers.memory import FakeClock
+
+    (tmp_path / "processes").mkdir()
+    (tmp_path / "processes" / "harness-todo.json").write_text(
+        '{"trigger": {"interval": "30s"},'
+        ' "action": {"check": "github-issues", "params": {"label": "harness:todo"}},'
+        ' "target": {"workflow": "default"}, "dedup": "per-state",'
+        ' "sink": {"kind": "none"}}'
+    )
+    registry = MemoryRepositoryRegistry({"heblo": Path("/repos/heblo")})
+
+    (sources_trigger,) = _process_sources(
+        _process_args(),
+        tmp_path,
+        registry,
+        clock=FakeClock("2026-07-22T10:00:00Z"),
+        known_targets={"default"},
+        client=FakeGithubClient(),
+    )
+
+    assert sources_trigger._check._claimed_label == "harness:queued"
+
+
+def test_process_sources_github_issues_rejects_non_string_claimed_label(tmp_path):
+    from harness.drivers.fs_processes import ProcessValidationError
+    from harness.drivers.memory import FakeClock
+
+    (tmp_path / "processes").mkdir()
+    (tmp_path / "processes" / "triage.json").write_text(
+        '{"trigger": {"interval": "30s"},'
+        ' "action": {"check": "github-issues", "params": {"claimed_label": 7}},'
+        ' "target": {"workflow": "default"}, "dedup": "per-state",'
+        ' "sink": {"kind": "none"}}'
+    )
+    registry = MemoryRepositoryRegistry({"heblo": Path("/repos/heblo")})
+
+    with pytest.raises(ProcessValidationError, match="label/claimed_label") as exc:
+        _process_sources(
+            _process_args(),
+            tmp_path,
+            registry,
+            clock=FakeClock("2026-07-22T10:00:00Z"),
+            known_targets={"default"},
+            client=FakeGithubClient(),
+        )
+    assert exc.value.field == "params"
 
 
 def test_process_sources_github_issues_fails_fast_without_a_client(tmp_path, monkeypatch):
