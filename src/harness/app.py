@@ -630,8 +630,12 @@ def build(
         **BUILTIN_CHECKS,
         **(extra_checks or {}),
         # A `CheckDefinition`, not a bare lambda: it carries `failed-tasks`'
-        # declarative spec (no parameters) alongside the factory, so the process
-        # form treats it as a fully-defined action rather than an unknown one.
+        # declarative spec (no user-facing parameters) alongside the factory, so
+        # the process form treats it as a fully-defined action rather than an
+        # unknown one. `repository` is still accepted at call time — it isn't a
+        # form field; it's the `--heal-repo`/`HARNESS_HEAL_REPO` value the
+        # autoheal process wiring stamps into `action.params` directly
+        # (invariant #25/#39), never entered by an operator through the UI.
         "failed-tasks": CheckDefinition(
             spec=FAILED_TASKS_SPEC,
             factory=lambda params: FailedTasksCheck(
