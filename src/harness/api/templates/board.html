@@ -2,6 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>harness board</title>
   <script src="/static/htmx.min.js"></script>
   <script src="/static/sse.js"></script>
@@ -20,7 +21,12 @@
     .badge.done { background: #e3fcef; color: #006644; }
     .badge.request_changes { background: #fffae6; color: #974f0c; }
     .badge.working { background: #deebff; color: #0747a6; }
-    dialog { border: none; border-radius: 6px; padding: 16px; max-width: 640px; width: 90%; }
+    dialog {
+      border: none; border-radius: 6px; padding: 16px;
+      max-width: 640px; width: 90%;
+      max-height: 85vh; max-height: 85dvh;
+      overflow-y: auto;
+    }
     table { border-collapse: collapse; width: 100%; font-size: 13px; }
     td, th { text-align: left; padding: 4px 8px; border-bottom: 1px solid #ebecf0; vertical-align: top; }
   </style>

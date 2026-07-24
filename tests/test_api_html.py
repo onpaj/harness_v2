@@ -89,6 +89,15 @@ def test_index_renders_board_shell(client):
     assert "https://" not in body
 
 
+def test_index_has_viewport_meta_and_scrollable_dialog(client):
+    body = client.get("/").text
+
+    assert '<meta name="viewport" content="width=device-width, initial-scale=1">' in body
+    dialog_rule = body[body.index("dialog {") : body.index("}", body.index("dialog {"))]
+    assert "max-height" in dialog_rule
+    assert "overflow-y: auto" in dialog_rule
+
+
 def test_index_contains_columns(client):
     body = client.get("/").text
 
