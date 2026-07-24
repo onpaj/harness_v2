@@ -438,3 +438,38 @@ def test_served_repository_names_returns_served_set_not_inners(tmp_path):
     served = ServedWorkflowRepository(inner, ["default"])
 
     assert served.names() == ("default",)
+
+
+def test_heal_definition_has_dedup_step_with_own_outcome_vocabulary(tmp_path):
+    """`heal`'s custom outcomes (`file`/`skip`) and `dedup`'s (`unique`/
+    `duplicate`) live in the workflow JSON, not in any persona's
+    `allowed_outcomes` — `Workflow.outcomes_for` is the live authority
+    (invariant #42)."""
+    from harness.cli import HEAL_DEFINITION
+
+    (tmp_path / "heal.json").write_text(json.dumps(HEAL_DEFINITION))
+    repository = FilesystemWorkflowRepository(tmp_path)
+
+    workflow = repository.get("heal")
+
+    assert workflow.outcomes_for("heal") == ("file", "skip")
+    assert workflow.outcomes_for("dedup") == ("unique", "duplicate")
+
+    assert workflow.description_for("dedup")
+    assert workflow.description_for("heal")
+
+    assert workflow.target("heal", "file") == "dedup"
+    assert workflow.target("heal", "skip") == END
+    assert workflow.target("dedup", "unique") == "file-issue"
+    assert workflow.target("dedup", "duplicate") == END
+    assert workflow.target("file-issue", "done") == END
+
+    heal_to_dedup = next(
+        t for t in workflow.transitions if t.from_step == "heal" and t.on == "file"
+    )
+    assert heal_to_dedup.hint
+
+    dedup_to_file_issue = next(
+        t for t in workflow.transitions if t.from_step == "dedup" and t.on == "unique"
+    )
+    assert dedup_to_file_issue.hint

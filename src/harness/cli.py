@@ -62,7 +62,7 @@ from harness.drivers.launchd import (
 from harness.drivers.system_clock import SystemClock
 from harness.drivers.worktree_artifacts import WorktreeArtifactView
 from harness.ids import new_task_id
-from harness.models import Task
+from harness.models import DONE, REQUEST_CHANGES, Task
 from harness.ports.behavior import ConsumerBehavior
 from harness.ports.clock import Clock
 from harness.ports.issue_state import IssueChecker
@@ -131,10 +131,20 @@ HEAL_DEFINITION = {
     "name": "heal",
     "start": "heal",
     "transitions": [
-        {"from": "heal", "on": "done", "to": "file-issue"},
-        {"from": "heal", "on": "request_changes", "to": "end"},
+        {"from": "heal", "on": "file", "to": "dedup",
+         "hint": "a harness bug, or an operational/tuning problem worth filing"},
+        {"from": "heal", "on": "skip", "to": "end",
+         "hint": "external/transient, or the task's own request was impossible — nothing to file"},
+        {"from": "dedup", "on": "unique", "to": "file-issue",
+         "hint": "nothing similar is open in the harness repo"},
+        {"from": "dedup", "on": "duplicate", "to": "end",
+         "hint": "a correlated issue is already open — settle silently"},
         {"from": "file-issue", "on": "done", "to": "end"},
     ],
+    "descriptions": {
+        "heal": "diagnose the failed task from its report; decide whether it warrants a GitHub issue",
+        "dedup": "read the harness repo's open issues; decide whether the drafted issue is new",
+    },
     "finishers": {"file-issue": "open-issue"},
 }
 
@@ -393,24 +403,44 @@ _RESOLVE_PERSONA = (
 _HEALER_PERSONA = (
     "You are the harness healer. A task in the orchestration harness has failed "
     "and landed in the `failed/` queue; your job is to read the failure report "
-    "you are given and diagnose it.\n\n"
-    "Decide whether the failure points at a fixable bug in the HARNESS ITSELF — "
-    "a driver contract that was violated, a wiring gap, a missing workflow edge, "
-    "an unhandled error path — as opposed to an external or expected failure (a "
-    "flaky network, an unauthenticated tool, a task whose own request was simply "
-    "wrong or impossible). Be conservative: only propose a change when there is a "
-    "concrete, plausible harness fix.\n\n"
-    "When it IS a fixable harness bug: write a proposed GitHub issue to the file "
-    "the harness told you to write your output to above. Its first line must be "
-    "a title `# <concise title>`; then a short diagnosis (what failed and why), "
-    "and a concrete proposed change (which module/contract, and what to do). "
-    "Finish with the verdict `done`.\n\n"
-    "When there is nothing actionable for the harness: do not write a file, and "
-    "finish with the verdict `request_changes` — its summary saying briefly why "
-    "the failure is not a harness bug.\n\n"
-    "You are working from the failure report alone; you do not have the task's "
-    "own worktree. Do not attempt to run or fix code — your deliverable is the "
-    "issue."
+    "you are given and triage it.\n\n"
+    "Classify the failure into one of three kinds:\n"
+    "- A fixable bug in the HARNESS ITSELF — a driver contract that was "
+    "violated, a wiring gap, a missing workflow edge, an unhandled error "
+    "path.\n"
+    "- An operational or tuning problem — a step that ran out of its "
+    "per-agent `timeout`, or hit a resource limit, but the harness itself "
+    "behaved correctly.\n"
+    "- An external or transient failure — a flaky network, an unauthenticated "
+    "tool, or the task's own request being simply wrong or impossible.\n\n"
+    "Be conservative: only propose a change when there is a concrete, "
+    "plausible one.\n\n"
+    "For a harness bug or an operational/tuning problem, draft a proposed "
+    "GitHub issue to the file the harness told you to write your output to "
+    "above. Its first line must be a title `# <concise title>`; then a short "
+    "diagnosis (what failed and why), and a concrete proposed change. For an "
+    "operational/tuning problem, recommend diagnostically rather than "
+    "prescriptively: name the exceeded budget and the two levers available — "
+    "raising the step's per-agent `timeout`, or decomposing the step into "
+    "smaller ones — without prescribing a specific number. Then finish with "
+    "the outcome that files it.\n\n"
+    "For an external or transient failure, write nothing and finish with the "
+    "outcome that skips — its summary saying briefly why there is nothing to "
+    "file.\n\n"
+    "You are working from the failure report alone; you do not have the "
+    "task's own worktree. Do not attempt to run or fix code — your "
+    "deliverable is the issue draft."
+)
+
+_DEDUP_PERSONA = (
+    "You decide whether a drafted GitHub issue duplicates one already open. "
+    "Read the drafted `issue.md` in `.artifacts/<task>/heal/…`. List the "
+    "repo's open issues with `gh issue list --state open --limit 100` and "
+    "read the bodies of any that look related. If a currently-open issue "
+    "describes the same underlying problem (a strong correlate, not just the "
+    "same area), finish with the outcome that treats this as a duplicate and "
+    "name the issue number in your summary. Otherwise finish with the "
+    "outcome that treats it as new."
 )
 
 
@@ -427,6 +457,7 @@ AGENT_PERSONAS: dict[str, tuple[str, list[str]]] = {
     "review": (_REVIEW_PERSONA, ["Read", "Grep", "Glob", "Bash"]),
     "resolve": (_RESOLVE_PERSONA, ["Read", "Edit", "Bash", "Grep", "Glob"]),
     "heal": (_HEALER_PERSONA, ["Read", "Write"]),
+    "dedup": (_DEDUP_PERSONA, ["Read", "Bash"]),
 }
 
 
@@ -449,6 +480,7 @@ AGENT_MODELS: dict[str, str] = {
     "review": "sonnet",
     "resolve": "sonnet",
     "heal": "opus",
+    "dedup": "opus",
 }
 
 
@@ -517,7 +549,15 @@ def _write_default_agents(layout: HarnessLayout, workflow) -> None:
         path = layout.agents / f"{step}.json"
         if path.exists():
             continue
-        definition = _agent_definition_template(step, list(workflow.outcomes_for(step)))
+        # `allowed_outcomes` written here is only the workflow-less fallback
+        # (invariant #42); a step with a custom outcome vocabulary (e.g.
+        # `heal`'s file/skip, `dedup`'s unique/duplicate) would otherwise
+        # write a persona file `fs_agents._parse_agent_spec` can't load, since
+        # it restricts the field to {done, request_changes}. Clamp to that
+        # loadable subset here, falling back to `[DONE]` when the workflow's
+        # own outcomes don't intersect it at all.
+        fallback = [o for o in workflow.outcomes_for(step) if o in (DONE, REQUEST_CHANGES)] or [DONE]
+        definition = _agent_definition_template(step, fallback)
         path.write_text(
             json.dumps(definition, indent=2, ensure_ascii=False), encoding="utf-8"
         )

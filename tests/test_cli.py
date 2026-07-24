@@ -67,16 +67,34 @@ def test_init_writes_heal_workflow_and_agent(tmp_path):
 
     workflow = json.loads((tmp_path / "workflows" / "heal.json").read_text())
     assert workflow["start"] == "heal"
-    assert {"from": "heal", "on": "done", "to": "file-issue"} in workflow["transitions"]
+    heal_to_dedup = next(
+        t for t in workflow["transitions"] if t["from"] == "heal" and t["on"] == "file"
+    )
+    assert heal_to_dedup["to"] == "dedup"
+    assert heal_to_dedup["hint"]
     assert workflow["finishers"] == {"file-issue": "open-issue"}
 
+    # `heal`'s custom outcomes (file/skip) mean the fallback written into
+    # agents/heal.json is clamped to a loadable subset — not the workflow's
+    # own vocabulary (invariant #42's persona/workflow split).
     definition = json.loads((tmp_path / "agents" / "heal.json").read_text())
-    assert definition["allowed_outcomes"] == ["done", "request_changes"]
+    assert definition["allowed_outcomes"] == ["done"]
 
-    # it parses to a valid AgentSpec with both outcomes
+    # it parses to a valid, loadable AgentSpec despite the workflow using a
+    # custom outcome vocabulary
     spec = FilesystemAgentCatalog(tmp_path / "agents").get("heal")
-    assert spec.allowed_outcomes == (DONE, REQUEST_CHANGES)
+    assert spec.allowed_outcomes == (DONE,)
     assert spec.prompt
+
+    # `dedup` is a real agent step with its own persona/tools/model and a
+    # likewise-clamped, loadable allowed_outcomes fallback.
+    dedup_definition = json.loads((tmp_path / "agents" / "dedup.json").read_text())
+    assert dedup_definition["allowed_outcomes"] == ["done"]
+    dedup_spec = FilesystemAgentCatalog(tmp_path / "agents").get("dedup")
+    assert dedup_spec.allowed_outcomes == (DONE,)
+    assert dedup_spec.allowed_tools == ("Read", "Bash")
+    assert dedup_spec.model == "opus"
+    assert dedup_spec.prompt
 
     # `file-issue` is bound to a finisher kind, not an agent persona — no
     # agents/file-issue.json, mirroring how `land` never gets one either
@@ -87,6 +105,40 @@ def test_init_writes_heal_workflow_and_agent(tmp_path):
     # a bare `harness init` has no repo to file issues against — the process
     # that actually drives healing stays gated behind `--heal-repo`.
     assert not (tmp_path / "processes" / "autoheal.json").exists()
+
+
+def test_heal_workflow_transitions_and_descriptions(tmp_path):
+    """The full transition graph including the new `dedup` step, and that its
+    per-transition hints and step description survive the round trip through
+    the filesystem repository (not just json.dumps(HEAL_DEFINITION))."""
+    from harness.drivers.fs_workflows import FilesystemWorkflowRepository
+
+    assert main(["init", "--root", str(tmp_path)]) == 0
+
+    repository = FilesystemWorkflowRepository(tmp_path / "workflows")
+    workflow = repository.get(DEFAULT_HEAL_WORKFLOW)
+
+    assert workflow.outcomes_for("heal") == ("file", "skip")
+    assert workflow.outcomes_for("dedup") == ("unique", "duplicate")
+    assert workflow.target("heal", "file") == "dedup"
+    assert workflow.target("heal", "skip") == END
+    assert workflow.target("dedup", "unique") == "file-issue"
+    assert workflow.target("dedup", "duplicate") == END
+    assert workflow.description_for("dedup")
+    assert workflow.description_for("heal")
+
+
+def test_ensure_autoheal_process_writes_repository_param(tmp_path):
+    from harness.app import HarnessLayout
+    from harness.cli import _ensure_autoheal_process
+
+    assert main(["init", "--root", str(tmp_path)]) == 0
+    layout = HarnessLayout(tmp_path)
+
+    _ensure_autoheal_process(layout, "onpaj/harness_v2")
+
+    process = json.loads((tmp_path / "processes" / "autoheal.json").read_text())
+    assert process["action"]["params"]["repository"] == "onpaj/harness_v2"
 
 
 def test_run_heal_repo_wires_open_issue_finisher_and_tracker(monkeypatch, tmp_path):
