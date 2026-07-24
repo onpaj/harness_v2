@@ -23,6 +23,7 @@
      else [{"name": check, "label": check,
             "description": "Custom check — configure its settings below.",
             "params": []}] + check_specs %}
+  {% set all_repository_options = repository_options if (not repository or repository in repository_options) else [repository] + repository_options %}
   <main class="page page--editor">
     <a class="hint" href="/admin/processes">&larr; back to processes</a>
     <div class="page-header">
@@ -175,9 +176,40 @@
         </div>
       </section>
 
+      <section class="form-section {{ 'error' if errors.repository }}">
+        <header class="form-section__head">
+          <h2><span class="form-section__num">{{ 5 if is_new else 4 }}</span> Repository</h2>
+          <p class="hint">Which repo a produced task's worktree attaches to — an
+            observation with its own repo (e.g. GitHub issues) still wins.</p>
+        </header>
+        <div class="seg" role="radiogroup" aria-label="Repository scope">
+          <label class="seg__option">
+            <input type="radio" name="repo_scope" value="all" {{ 'checked' if not repository }}>
+            <span>All repositories</span>
+          </label>
+          <label class="seg__option">
+            <input type="radio" name="repo_scope" value="specific"
+                   {{ 'checked' if repository }} {{ 'disabled' if not all_repository_options }}>
+            <span>Specific repository</span>
+          </label>
+        </div>
+        <div class="field {{ 'error' if errors.repository }}" id="repository-field">
+          <label for="repository">Repository</label>
+          <select id="repository" name="repository" {{ 'disabled' if not repository }}>
+            {% for option in all_repository_options %}
+            <option value="{{ option }}" {{ 'selected' if option == repository }}>{{ option }}</option>
+            {% endfor %}
+          </select>
+          {% if not all_repository_options %}
+          <div class="hint">No repositories registered in <code>repos.json</code> — add one to target a specific repo.</div>
+          {% endif %}
+          {% if errors.repository %}<div class="field-error">{{ errors.repository }}</div>{% endif %}
+        </div>
+      </section>
+
       <section class="form-section {{ 'error' if errors.dedup or errors.sink }}">
         <header class="form-section__head">
-          <h2><span class="form-section__num">{{ 5 if is_new else 4 }}</span> Options</h2>
+          <h2><span class="form-section__num">{{ 6 if is_new else 5 }}</span> Options</h2>
         </header>
 
         <div class="field {{ 'error' if errors.dedup }}">
@@ -455,6 +487,24 @@
         });
       target.addEventListener('input', updateSummary);
 
+      /* --- Repository: the scope toggle enables/disables the select -------- */
+      var repoScopeInputs = form.querySelectorAll('input[name="repo_scope"]');
+      var repositorySelect = document.getElementById('repository');
+      function currentRepoScope() {
+        var checked = form.querySelector('input[name="repo_scope"]:checked');
+        return checked ? checked.value : 'all';
+      }
+      function syncRepoScope() {
+        repositorySelect.disabled = currentRepoScope() !== 'specific';
+      }
+      Array.prototype.forEach.call(repoScopeInputs, function (radio) {
+        radio.addEventListener('change', function () {
+          syncRepoScope();
+          updateSummary();
+        });
+      });
+      repositorySelect.addEventListener('change', updateSummary);
+
       /* --- Live summary ----------------------------------------------------- */
       var summary = document.getElementById('live-summary');
       function checkedValue(name) {
@@ -474,6 +524,9 @@
         if (checkedValue('dedup') === 'per-state') text += ', once per distinct result';
         var sink = checkedValue('sink_kind');
         if (sink && sink !== 'none') text += ', reporting to <strong>' + esc(sink) + '</strong>';
+        if (currentRepoScope() === 'specific' && repositorySelect.value) {
+          text += ', targeting repo <strong>' + esc(repositorySelect.value) + '</strong>';
+        }
         summary.innerHTML = text + '.';
         summary.hidden = false;
       }
@@ -484,6 +537,7 @@
       renderParamFields();
       syncTargetKind();
       syncCadence();
+      syncRepoScope();
       updateSummary();
 
       /* Bring the first server-reported error into view. */

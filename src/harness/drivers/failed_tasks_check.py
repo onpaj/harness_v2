@@ -46,12 +46,19 @@ settings needed"), never as a raw-JSON blob."""
 
 class FailedTasksCheck(Check):
     def __init__(
-        self, *, failed: TaskQueue, healed: TaskQueue, events: EventSink, clock: Clock
+        self,
+        *,
+        failed: TaskQueue,
+        healed: TaskQueue,
+        events: EventSink,
+        clock: Clock,
+        repository: str | None = None,
     ) -> None:
         self._failed = failed
         self._healed = healed
         self._events = events
         self._clock = clock
+        self._repository = repository
 
     def evaluate(self) -> list[Observation]:
         observations: list[Observation] = []
@@ -83,7 +90,7 @@ class FailedTasksCheck(Check):
         source = task.data.get("source")
         if source is not None:
             data["source"] = source
-        return Observation(state_key=task.id, data=data)
+        return Observation(state_key=task.id, data=data, repository=self._repository)
 
     def _settle(self, task: Task, note: str) -> None:
         entry = HistoryEntry(
@@ -142,9 +149,11 @@ def _render_failure_report(task: Task) -> str:
     lines += [
         "",
         "Decide whether this failure points at a fixable bug in the harness "
-        "itself (a driver contract, a wiring gap, a missing workflow edge) — as "
-        "opposed to an external or expected failure (a flaky network, a task "
-        "that was simply wrong).",
+        "itself (a driver contract, a wiring gap, a missing workflow edge) or "
+        "an operational/tuning problem worth filing (e.g. a step that ran out "
+        "of its per-agent timeout) — as opposed to a genuinely external or "
+        "transient failure (a flaky network) or a task whose own request was "
+        "simply wrong or impossible.",
     ]
     return "\n".join(lines)
 

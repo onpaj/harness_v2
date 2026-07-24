@@ -1,5 +1,13 @@
 # Workflow-defined outcomes — implementation plan (2026-07-23)
 
+> **Status: IMPLEMENTED and shipped (0.18.0).** All packages A–D and the docs
+> pass are done: `Outcome` is a plain-string constant pair (`models.py`),
+> `Workflow.outcomes_for`/`Transition.hint`/`Workflow.descriptions` exist,
+> `ClaudeCliBehavior` derives the live set (`behaviors/agent.py`), ADR-0018
+> (`0018-workflow-owns-outcome-vocabulary.md`) and CLAUDE.md invariant #42 are
+> written, and `tests/test_workflow_outcomes_e2e.py` passes. This document is
+> retained for history — do not re-execute it.
+
 Implements `docs/superpowers/specs/2026-07-23-workflow-defined-outcomes-design.md`.
 Four packages (A–D) plus a docs pass. A is the type-level foundation the rest
 build on, so it lands first; B/C are file-disjoint and can run in parallel after

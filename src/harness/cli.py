@@ -62,12 +62,12 @@ from harness.drivers.launchd import (
 from harness.drivers.system_clock import SystemClock
 from harness.drivers.worktree_artifacts import WorktreeArtifactView
 from harness.ids import new_task_id
-from harness.models import Task
+from harness.models import DONE, REQUEST_CHANGES, Task
 from harness.ports.behavior import ConsumerBehavior
 from harness.ports.clock import Clock
 from harness.ports.issue_state import IssueChecker
 from harness.ports.merge import MergeChecker
-from harness.ports.repos import RepositoryRegistry
+from harness.ports.repos import RepositoryNotFound, RepositoryRegistry
 from harness.ports.source import TaskSource
 from harness.ports.triggers import CheckFactory
 from harness.ports.workflows import WorkflowNotFound
@@ -131,10 +131,20 @@ HEAL_DEFINITION = {
     "name": "heal",
     "start": "heal",
     "transitions": [
-        {"from": "heal", "on": "done", "to": "file-issue"},
-        {"from": "heal", "on": "request_changes", "to": "end"},
+        {"from": "heal", "on": "file", "to": "dedup",
+         "hint": "a harness bug, or an operational/tuning problem worth filing"},
+        {"from": "heal", "on": "skip", "to": "end",
+         "hint": "external/transient, or the task's own request was impossible — nothing to file"},
+        {"from": "dedup", "on": "unique", "to": "file-issue",
+         "hint": "nothing similar is open in the harness repo"},
+        {"from": "dedup", "on": "duplicate", "to": "end",
+         "hint": "a correlated issue is already open — settle silently"},
         {"from": "file-issue", "on": "done", "to": "end"},
     ],
+    "descriptions": {
+        "heal": "diagnose the failed task from its report; decide whether it warrants a GitHub issue",
+        "dedup": "read the harness repo's open issues; decide whether the drafted issue is new",
+    },
     "finishers": {"file-issue": "open-issue"},
 }
 
@@ -393,24 +403,44 @@ _RESOLVE_PERSONA = (
 _HEALER_PERSONA = (
     "You are the harness healer. A task in the orchestration harness has failed "
     "and landed in the `failed/` queue; your job is to read the failure report "
-    "you are given and diagnose it.\n\n"
-    "Decide whether the failure points at a fixable bug in the HARNESS ITSELF — "
-    "a driver contract that was violated, a wiring gap, a missing workflow edge, "
-    "an unhandled error path — as opposed to an external or expected failure (a "
-    "flaky network, an unauthenticated tool, a task whose own request was simply "
-    "wrong or impossible). Be conservative: only propose a change when there is a "
-    "concrete, plausible harness fix.\n\n"
-    "When it IS a fixable harness bug: write a proposed GitHub issue to the file "
-    "the harness told you to write your output to above. Its first line must be "
-    "a title `# <concise title>`; then a short diagnosis (what failed and why), "
-    "and a concrete proposed change (which module/contract, and what to do). "
-    "Finish with the verdict `done`.\n\n"
-    "When there is nothing actionable for the harness: do not write a file, and "
-    "finish with the verdict `request_changes` — its summary saying briefly why "
-    "the failure is not a harness bug.\n\n"
-    "You are working from the failure report alone; you do not have the task's "
-    "own worktree. Do not attempt to run or fix code — your deliverable is the "
-    "issue."
+    "you are given and triage it.\n\n"
+    "Classify the failure into one of three kinds:\n"
+    "- A fixable bug in the HARNESS ITSELF — a driver contract that was "
+    "violated, a wiring gap, a missing workflow edge, an unhandled error "
+    "path.\n"
+    "- An operational or tuning problem — a step that ran out of its "
+    "per-agent `timeout`, or hit a resource limit, but the harness itself "
+    "behaved correctly.\n"
+    "- An external or transient failure — a flaky network, an unauthenticated "
+    "tool, or the task's own request being simply wrong or impossible.\n\n"
+    "Be conservative: only propose a change when there is a concrete, "
+    "plausible one.\n\n"
+    "For a harness bug or an operational/tuning problem, draft a proposed "
+    "GitHub issue to the file the harness told you to write your output to "
+    "above. Its first line must be a title `# <concise title>`; then a short "
+    "diagnosis (what failed and why), and a concrete proposed change. For an "
+    "operational/tuning problem, recommend diagnostically rather than "
+    "prescriptively: name the exceeded budget and the two levers available — "
+    "raising the step's per-agent `timeout`, or decomposing the step into "
+    "smaller ones — without prescribing a specific number. Then finish with "
+    "the outcome that files it.\n\n"
+    "For an external or transient failure, write nothing and finish with the "
+    "outcome that skips — its summary saying briefly why there is nothing to "
+    "file.\n\n"
+    "You are working from the failure report alone; you do not have the "
+    "task's own worktree. Do not attempt to run or fix code — your "
+    "deliverable is the issue draft."
+)
+
+_DEDUP_PERSONA = (
+    "You decide whether a drafted GitHub issue duplicates one already open. "
+    "Read the drafted `issue.md` in `.artifacts/<task>/heal/…`. List the "
+    "repo's open issues with `gh issue list --state open --limit 100` and "
+    "read the bodies of any that look related. If a currently-open issue "
+    "describes the same underlying problem (a strong correlate, not just the "
+    "same area), finish with the outcome that treats this as a duplicate and "
+    "name the issue number in your summary. Otherwise finish with the "
+    "outcome that treats it as new."
 )
 
 
@@ -427,6 +457,7 @@ AGENT_PERSONAS: dict[str, tuple[str, list[str]]] = {
     "review": (_REVIEW_PERSONA, ["Read", "Grep", "Glob", "Bash"]),
     "resolve": (_RESOLVE_PERSONA, ["Read", "Edit", "Bash", "Grep", "Glob"]),
     "heal": (_HEALER_PERSONA, ["Read", "Write"]),
+    "dedup": (_DEDUP_PERSONA, ["Read", "Bash"]),
 }
 
 
@@ -449,6 +480,7 @@ AGENT_MODELS: dict[str, str] = {
     "review": "sonnet",
     "resolve": "sonnet",
     "heal": "opus",
+    "dedup": "opus",
 }
 
 
@@ -517,7 +549,15 @@ def _write_default_agents(layout: HarnessLayout, workflow) -> None:
         path = layout.agents / f"{step}.json"
         if path.exists():
             continue
-        definition = _agent_definition_template(step, list(workflow.outcomes_for(step)))
+        # `allowed_outcomes` written here is only the workflow-less fallback
+        # (invariant #42); a step with a custom outcome vocabulary (e.g.
+        # `heal`'s file/skip, `dedup`'s unique/duplicate) would otherwise
+        # write a persona file `fs_agents._parse_agent_spec` can't load, since
+        # it restricts the field to {done, request_changes}. Clamp to that
+        # loadable subset here, falling back to `[DONE]` when the workflow's
+        # own outcomes don't intersect it at all.
+        fallback = [o for o in workflow.outcomes_for(step) if o in (DONE, REQUEST_CHANGES)] or [DONE]
+        definition = _agent_definition_template(step, fallback)
         path.write_text(
             json.dumps(definition, indent=2, ensure_ascii=False), encoding="utf-8"
         )
@@ -604,9 +644,14 @@ def _agent_init(args: argparse.Namespace) -> int:
         print(text)
         return 0
 
-    definition = _agent_definition_template(
-        args.step, list(workflow.outcomes_for(args.step))
-    )
+    # Same clamp as `_write_default_agents`: `allowed_outcomes` written here
+    # is only the workflow-less fallback (invariant #42), and `fs_agents`
+    # restricts it to {done, request_changes} — an unclamped custom-outcome
+    # step (e.g. `heal`'s file/skip, `dedup`'s unique/duplicate) would write
+    # a persona file that fails to load, and `app.build()` loads agents
+    # eagerly, so the next `harness run` would crash at startup.
+    fallback = [o for o in workflow.outcomes_for(args.step) if o in (DONE, REQUEST_CHANGES)] or [DONE]
+    definition = _agent_definition_template(args.step, fallback)
     text = json.dumps(definition, indent=2, ensure_ascii=False)
     path.write_text(text, encoding="utf-8")
     print(str(path))
@@ -851,7 +896,7 @@ real `Workflow` in scope on the *second* `route()` call, which only happens
 when `task.workflow_template` is set (ADR-0018)."""
 
 
-def _ensure_autoheal_process(layout: HarnessLayout) -> None:
+def _ensure_autoheal_process(layout: HarnessLayout, heal_repo: str) -> None:
     """`--heal-repo`'s thin-generator half: write `processes/autoheal.json`
     unless one already exists — never clobbering an operator's hand-edited
     file. Written directly (like `_init`'s `HEAL_DEFINITION`/
@@ -866,8 +911,12 @@ def _ensure_autoheal_process(layout: HarnessLayout) -> None:
     if path.exists():
         return
     layout.processes.mkdir(parents=True, exist_ok=True)
+    definition = {
+        **AUTOHEAL_PROCESS_DEFINITION,
+        "action": {"check": "failed-tasks", "params": {"repository": heal_repo}},
+    }
     path.write_text(
-        json.dumps(AUTOHEAL_PROCESS_DEFINITION, indent=2, ensure_ascii=False),
+        json.dumps(definition, indent=2, ensure_ascii=False),
         encoding="utf-8",
     )
 
@@ -1599,6 +1648,23 @@ def _run(args: argparse.Namespace) -> int:
                 " heal step cannot run and failed tasks will settle unhealed.",
                 file=sys.stderr,
             )
+        # The `heal_repo` slug is also `task.repository` on every heal task
+        # (invariant #25) — `GitWorkspace.attach` resolves it through this same
+        # `registry`, and an unregistered slug raises `RepositoryNotFound` at
+        # attach time. That failure lands the heal task in `failed/`, which the
+        # recursion guard (invariant #25/#26) then retires straight to
+        # `healed/` with no issue filed — self-healing goes silently inert. Warn
+        # up front rather than let the operator discover it that way; this must
+        # never block startup (a WARNING, not an error).
+        try:
+            registry.resolve(heal_repo)
+        except RepositoryNotFound:
+            print(
+                f"warning: heal repo {heal_repo!r} is not registered in"
+                f" {layout.repos} — heal tasks will fail to attach a worktree"
+                " until it is added there, so self-healing will file nothing.",
+                file=sys.stderr,
+            )
         if DEFAULT_HEAL_WORKFLOW not in served_names:
             served_names = [*served_names, DEFAULT_HEAL_WORKFLOW]
         token = os.environ.get("GITHUB_TOKEN")
@@ -1616,7 +1682,7 @@ def _run(args: argparse.Namespace) -> int:
             artifacts=artifact_view,
             clock=SystemClock(),
         )
-        _ensure_autoheal_process(layout)
+        _ensure_autoheal_process(layout, heal_repo)
 
     # Scheduled triggers (`triggers/*.json`) are `TaskSource`s that ride the
     # existing `sources` list — no new loop, no `build()` parameter. A trigger's
@@ -1682,6 +1748,7 @@ def _run(args: argparse.Namespace) -> int:
             delay=args.delay,
             request_changes_once_at=args.request_changes_at,
             extra_checks=extra_checks,
+            repository_registry=registry,
         )
     except WorkflowNotFound as error:
         print(f"error: {error}", file=sys.stderr)
@@ -1702,6 +1769,7 @@ def _run(args: argparse.Namespace) -> int:
                 args.source_poll,
                 args.pr_poll,
                 args.reconcile_poll,
+                registry=registry,
             )
         )
     except KeyboardInterrupt:
@@ -1716,6 +1784,7 @@ async def serve(
     source_interval: float = 30.0,
     pr_poll_interval: float = 0.0,
     reconcile_interval: float = 300.0,
+    registry: RepositoryRegistry | None = None,
 ) -> None:
     """The loop and the board in a single event loop."""
     stop = asyncio.Event()
@@ -1754,7 +1823,7 @@ async def serve(
         # the checks this run compiles — a GitHub-backed process is authorable
         # in the dashboard, not only by hand-editing `processes/*.json`.
         process_admin=FilesystemProcessAdmin(
-            harness.layout.processes, checks=harness.process_checks
+            harness.layout.processes, checks=harness.process_checks, registry=registry
         ),
         updater=updater,
         version=version_string(),
