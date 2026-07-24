@@ -247,6 +247,18 @@ def test_static_files_are_served(client):
     assert client.get("/static/format-local-time.js").status_code == 200
 
 
+def test_local_time_js_never_mixes_style_and_component_options(client):
+    """ECMA-402 forbids combining dateStyle/timeStyle with a component option
+    such as timeZoneName — `new Intl.DateTimeFormat` then throws a TypeError,
+    which the script's swallowing try/catch turns into every timestamp
+    silently staying raw UTC (the #111 regression). timeStyle 'long' already
+    carries the timezone name, so the two families never need to meet."""
+    source = client.get("/static/format-local-time.js").text
+
+    uses_styles = "dateStyle" in source or "timeStyle" in source
+    assert not (uses_styles and "timeZoneName" in source)
+
+
 def test_no_endpoint_mutates(client):
     assert client.post("/api/board").status_code == 405
     assert client.delete("/api/tasks/tsk_1").status_code == 405

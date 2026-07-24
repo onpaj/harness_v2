@@ -25,7 +25,7 @@
          hx-get="/fragment/board" hx-trigger="sse:board" hx-swap="innerHTML">
       {% include "_columns.html" %}
     </div>
-    <footer class="status-bar">harness {{ version }} · built {{ build_time or "unknown" }}</footer>
+    <footer class="status-bar">harness {{ version }} · built {% if build_time %}<time datetime="{{ build_time }}" title="{{ build_time }} UTC">{{ build_time | shorttime }}</time>{% else %}unknown{% endif %}</footer>
   </main>
   <dialog id="detail"></dialog>
   <script>
