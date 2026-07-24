@@ -18,6 +18,8 @@
   <main class="page">
     <div class="page-header">
       <h1>Board</h1>
+      <button type="button" id="add-issue-open"
+              class="btn small primary page-header__action">+ Add issue</button>
     </div>
     <div id="board"
          data-revision="{{ board.revision }}"
@@ -28,6 +30,33 @@
     <footer class="status-bar">harness {{ version }} · built {{ build_time or "unknown" }}</footer>
   </main>
   <dialog id="detail"></dialog>
+  <dialog id="add-issue">
+    <div class="task-detail">
+      <header class="task-detail__header">
+        <h2>Add issue</h2>
+        <button type="button" class="task-detail__close" aria-label="close">✕</button>
+      </header>
+      <div class="tab-panels">
+        <section class="tab-panel active">
+          <form hx-post="/issues/import" hx-target="#add-issue-results" hx-swap="innerHTML">
+            <div class="field">
+              <label for="add-issue-refs">
+                Paste one or more GitHub issue refs, separated by commas, spaces or newlines:
+              </label>
+              <textarea id="add-issue-refs" name="refs" rows="4"
+                        placeholder="onpaj/harness_v2#42"></textarea>
+              <p class="hint">owner/repo#number or a full issue URL, one or more per line.</p>
+            </div>
+            <div class="form-actions">
+              <button type="button" class="btn" data-add-issue-close>Cancel</button>
+              <button type="submit" class="btn primary">Add issue</button>
+            </div>
+          </form>
+          <div id="add-issue-results"></div>
+        </section>
+      </div>
+    </div>
+  </dialog>
   <script>
     // Per-workflow tabs: the board renders one panel per workflow and a tab
     // strip to switch between them. Switching is a data-attribute + CSS
@@ -51,6 +80,17 @@
     });
     applyActiveTab(document.getElementById('board'));
     localizeTimes();
+
+    // "Add issue" dialog: plain showModal()/close(), no htmx round trip to
+    // open it — nothing to fetch until the operator submits. Mirrors #detail's
+    // delegated close idiom (backdrop click + explicit close button).
+    document.getElementById('add-issue-open').addEventListener('click', function () {
+      document.getElementById('add-issue').showModal();
+    });
+    document.getElementById('add-issue').addEventListener('click', function (event) {
+      if (event.target.id === 'add-issue') { event.target.close(); }
+      if (event.target.closest('[data-add-issue-close]')) { event.target.closest('dialog').close(); }
+    });
 
     document.body.addEventListener('htmx:afterSwap', function (event) {
       if (event.detail.target.id === 'board') { applyActiveTab(event.detail.target); }

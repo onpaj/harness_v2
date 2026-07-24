@@ -249,6 +249,18 @@ dialog#detail {
 dialog#detail::backdrop { background: rgba(0, 0, 0, .45); }
 dialog#detail[open] { display: flex; }
 
+/* "Add issue" dialog: the same full-screen-on-phone / centered-on-desktop
+ * sheet as #detail (below), a distinct rule (not a shared selector) so the
+ * existing #detail CSS assertions in tests keep matching the literal
+ * "dialog#detail {" rule text. */
+dialog#add-issue {
+  border: none; padding: 0; background: transparent;
+  max-width: 100vw; max-height: 100dvh; width: 100vw; height: 100dvh;
+  margin: 0;
+}
+dialog#add-issue::backdrop { background: rgba(0, 0, 0, .45); }
+dialog#add-issue[open] { display: flex; }
+
 .task-detail {
   flex: 1; min-height: 0; display: flex; flex-direction: column;
   background: var(--bg); color: var(--text); width: 100%;
@@ -369,12 +381,13 @@ td.wrap, th.wrap { white-space: normal; }
   .column__head { position: static; top: auto; background: none; margin-bottom: 10px; padding: 4px 6px; }
   .column--empty { opacity: .7; }
 
-  dialog#detail {
+  dialog#detail, dialog#add-issue {
     width: min(860px, 94vw); height: min(88vh, 900px);
     max-width: 94vw; max-height: 92vh;
     border-radius: var(--radius); overflow: hidden;
     box-shadow: var(--shadow-lg); margin: auto;
   }
+  dialog#add-issue { height: auto; }
   .task-detail__header { padding: 14px 18px; }
   .tabs .tab { flex: 0 0 auto; }
   .kv .k { flex-basis: 150px; }
@@ -438,6 +451,15 @@ input[type="text"]:focus, textarea:focus {
 /* --- Buttons: danger variant ------------------------------------------------- */
 
 .btn.danger { color: var(--failed-fg); border-color: var(--failed-fg); background: var(--surface); }
+
+/* --- Issue import results (the "Add issue" dialog) --------------------------- */
+
+.issue-import-results {
+  list-style: none; margin: 16px 0 0; padding: 0;
+  display: flex; flex-direction: column; gap: 6px; font-size: 14px;
+}
+.issue-import-results li.ok { color: var(--text); }
+.issue-import-results li.error { color: var(--failed-fg); }
 
 /* --- Page header action slot ------------------------------------------------- */
 

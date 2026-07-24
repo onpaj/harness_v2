@@ -1,6 +1,7 @@
 from harness.models import Task
 from harness.ports.board import AgentActivity, Board, BoardView
 from harness.ports.control import TaskControl
+from harness.ports.issue_import import IssueImport, IssueImportResult
 
 
 class FakeBoardView(BoardView):
@@ -58,3 +59,18 @@ class FakeTaskControl(TaskControl):
     def delete(self, task_id: str) -> bool:
         self.deleted.append(task_id)
         return self._delete_result
+
+
+class FakeIssueImport(IssueImport):
+    """Records `add()` calls; returns a scripted result per ref (falling back
+    to a generic success). Lets the API be tested without GitHub or queues."""
+
+    def __init__(self, results: dict[str, IssueImportResult] | None = None) -> None:
+        self._results = results or {}
+        self.calls: list[str] = []
+
+    def add(self, ref: str) -> IssueImportResult:
+        self.calls.append(ref)
+        if ref in self._results:
+            return self._results[ref]
+        return IssueImportResult(ref=ref, ok=True, task_id=f"tsk_{ref}")

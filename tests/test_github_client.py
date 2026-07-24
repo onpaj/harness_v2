@@ -128,6 +128,88 @@ def test_fake_close_issue_deleted_removes_it():
     assert client.get_issue_state("o/r", 1) is None
 
 
+# --- get_issue (point lookup by number, no label required), fake -----------
+
+
+def test_fake_get_issue_returns_issue_with_no_label_at_all():
+    client = FakeGithubClient([Issue(1, "A", "body", "u1", ())])
+
+    found = client.get_issue("o/r", 1)
+
+    assert found is not None
+    assert found.number == 1
+    assert found.title == "A"
+    assert found.labels == ()
+
+
+def test_fake_get_issue_returns_closed_issue_too():
+    client = FakeGithubClient([Issue(1, "A", "", "u1", ())])
+    client.close_issue(1)
+
+    found = client.get_issue("o/r", 1)
+
+    assert found is not None and found.number == 1
+
+
+def test_fake_get_issue_none_when_missing():
+    client = FakeGithubClient()
+
+    assert client.get_issue("o/r", 999) is None
+
+
+# --- get_issue, http ---------------------------------------------------------
+
+
+def test_http_get_issue_maps_fields():
+    payload = {
+        "number": 9,
+        "title": "No label",
+        "body": "details",
+        "html_url": "https://github.com/o/r/issues/9",
+        "labels": [],
+    }
+    opener = FakeOpener(payload)
+    client = HttpGithubClient("tok", opener=opener)
+
+    found = client.get_issue("o/r", 9)
+
+    assert found is not None
+    assert found.number == 9
+    assert found.title == "No label"
+    assert found.body == "details"
+    assert found.url == "https://github.com/o/r/issues/9"
+    assert found.labels == ()
+
+    req = opener.requests[0]
+    assert req.get_method() == "GET"
+    assert req.full_url == "https://api.github.com/repos/o/r/issues/9"
+
+
+def test_http_get_issue_404_is_none():
+    class NotFoundOpener:
+        def open(self, request):
+            raise urllib.error.HTTPError(
+                request.full_url, 404, "Not Found", {}, io.BytesIO(b"")
+            )
+
+    client = HttpGithubClient("tok", opener=NotFoundOpener())
+
+    assert client.get_issue("o/r", 9) is None
+
+
+def test_http_get_issue_other_error_propagates():
+    class ServerErrorOpener:
+        def open(self, request):
+            raise urllib.error.HTTPError(
+                request.full_url, 500, "Server Error", {}, io.BytesIO(b"")
+            )
+
+    client = HttpGithubClient("tok", opener=ServerErrorOpener())
+
+    with pytest.raises(urllib.error.HTTPError):
+        client.get_issue("o/r", 9)
+
+
 # --- HttpGithubClient with a fake opener -----------------------------------
 
 

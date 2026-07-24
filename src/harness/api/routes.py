@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import html
 import json
+import re
 from collections.abc import AsyncIterator
 from datetime import datetime
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Form, HTTPException, Request
 from fastapi.responses import (
     HTMLResponse,
     JSONResponse,
@@ -32,6 +33,7 @@ from harness.ports.board import (
 )
 from harness.ports.clock import Clock
 from harness.ports.control import TaskControl
+from harness.ports.issue_import import IssueImport, IssueImportResult
 from harness.ports.logs import StageOutputView
 from harness.ports.process_admin import (
     ProcessAdmin,
@@ -78,6 +80,11 @@ def _shorttime(value: str | None) -> str:
 
 
 TEMPLATES.env.filters["shorttime"] = _shorttime
+
+
+def _split_refs(text: str) -> list[str]:
+    """The textarea's raw text -> non-empty refs, comma/space/newline-separated."""
+    return [ref for ref in re.split(r"[,\s]+", text.strip()) if ref]
 
 
 async def board_event_stream(
@@ -489,6 +496,7 @@ def build_html_router(
     workflow_admin: WorkflowAdmin,
     process_admin: ProcessAdmin,
     updater: Updater,
+    issue_import: IssueImport,
     version: str,
     build_time: str | None,
 ) -> APIRouter:
@@ -544,6 +552,22 @@ def build_html_router(
         # "gone" signal board.html's afterSwap listener keys off to close #detail
         # instead of reopening it. The board redraws via the SSE revision bump.
         return HTMLResponse("")
+
+    @router.post("/issues/import", response_class=HTMLResponse)
+    def import_issues(request: Request, refs: str = Form("")) -> HTMLResponse:
+        parsed_refs = _split_refs(refs)
+        if not parsed_refs:
+            results: list[IssueImportResult] = []
+        else:
+            # Sequential, never gathered/threaded: a same-batch duplicate ref
+            # must see the first ref's task already in the inbox, so the
+            # second reports `already_queued` instead of a second task.
+            results = [issue_import.add(ref) for ref in parsed_refs]
+        return TEMPLATES.TemplateResponse(
+            request=request,
+            name="_issue_import_result.html",
+            context={"results": results, "empty": not parsed_refs},
+        )
 
     # Sync `def`, so FastAPI runs it in a threadpool: the blocking `uv` upgrade
     # never stalls the event loop the harness shares. A successful restart may

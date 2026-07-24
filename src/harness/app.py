@@ -40,6 +40,7 @@ from harness.ports.behavior import ConsumerBehavior
 from harness.ports.clock import Clock
 from harness.ports.events import EventSink
 from harness.ports.forge import Forge
+from harness.ports.issue_import import IssueImport, IssueImportFactory, NullIssueImport
 from harness.ports.issue_state import IssueChecker
 from harness.ports.logs import StageOutputView
 from harness.ports.merge import MergeChecker
@@ -140,6 +141,7 @@ class Harness:
         issue_reconciler: IssueReconciler | None = None,
         healed: TaskQueue | None = None,
         process_checks: dict[str, CheckFactory] | None = None,
+        issue_import: IssueImport | None = None,
     ) -> None:
         self.layout = layout
         self.workflows = workflows
@@ -151,6 +153,11 @@ class Harness:
         self.artifacts = artifacts
         self.stage_output = stage_output
         self.control = control
+        # UI-facing write port for the Ahanas board's manual "Add issue" button
+        # (invariant #43): always a concrete `IssueImport`, never `None`,
+        # mirroring `self.control` — `NullIssueImport` when no factory was
+        # supplied (no `GITHUB_TOKEN`).
+        self.issue_import = issue_import if issue_import is not None else NullIssueImport()
         self._inbox = inbox
         self._step_queues = step_queues
         self._done = done
@@ -354,6 +361,7 @@ def build(
     request_changes_once_at: str | None = None,
     extra_checks: dict[str, CheckFactory] | None = None,
     processes_root: Path | None = None,
+    issue_import_factory: IssueImportFactory | None = None,
 ) -> Harness:
     layout = HarnessLayout(Path(root))
     events = events or StdoutEventSink()
@@ -479,6 +487,27 @@ def build(
             events=events,
             clock=clock,
         )
+
+    # `IssueImport` (invariant #43): the Ahanas board's manual "Add issue"
+    # write port. Built here, not in cli.py, because it needs both an
+    # external dependency (GithubClient/RepositoryRegistry, cli.py's to build)
+    # and the harness's own live queues (which don't exist until now) — the
+    # same "live queue + external dependency" shape as `failed-tasks` above,
+    # with the GitHub-specific half arriving as a factory `cli.py` supplies.
+    issue_import: IssueImport = (
+        issue_import_factory(
+            inbox=inbox,
+            step_queues=step_queues,
+            done=done,
+            failed=failed,
+            healed=healed_queue,
+            archived=archived,
+            events=events,
+            clock=clock,
+        )
+        if issue_import_factory is not None
+        else NullIssueImport()
+    )
 
     # Read side of artifacts: when passed in (phase 3: `WorktreeArtifactView`),
     # both landing and `api/` get it; otherwise the write store (also an
@@ -692,4 +721,5 @@ def build(
         issue_reconciler=issue_reconciler,
         healed=healed_queue,
         process_checks=checks,
+        issue_import=issue_import,
     )
