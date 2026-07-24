@@ -12,6 +12,7 @@ from harness.drivers.memory import (
     MemoryAgentCatalog,
     MemoryEventSink,
     MemoryForge,
+    MemoryRepositoryRegistry,
 )
 from harness.models import ARCHIVED, DONE, BehaviorResult, Task
 from harness.ports.agent import AgentRun, AgentSpec
@@ -1051,6 +1052,22 @@ def test_build_exposes_the_effective_process_check_registry(tmp_path):
     assert "failed-tasks" in harness.process_checks
 
 
+def test_build_wires_failed_tasks_as_a_defined_action_with_a_spec(tmp_path):
+    """`failed-tasks` is wired as a full action definition, not a bare lambda:
+    it carries a declarative `CheckSpec` (label, no params), so the process
+    form renders it like any other action instead of falling back to raw JSON."""
+    from harness.ports.triggers import check_spec_of
+
+    seed_definition(tmp_path, DEFINITION)
+
+    harness = build(tmp_path, "default", events=MemoryEventSink())
+
+    spec = check_spec_of("failed-tasks", harness.process_checks["failed-tasks"])
+    assert spec.name == "failed-tasks"
+    assert spec.label == "Failed tasks"
+    assert spec.params == ()
+
+
 def test_build_unknown_check_still_fails_fast(tmp_path):
     from harness.drivers.fs_processes import ProcessValidationError
 
@@ -1093,6 +1110,53 @@ def test_build_processes_root_parameter_points_at_a_different_directory(tmp_path
         processes_root=tmp_path / "elsewhere" / "processes",
     )
     assert len(redirected.pollers) == 1
+
+
+def test_build_repository_registry_validates_the_process_repository_field(tmp_path):
+    """`repository_registry=` computes `known_repositories` for the internal
+    `FilesystemProcessRepository.build()` call — a process naming a repository
+    outside the registry fails fast, matching `known_targets`'s shape."""
+    from pathlib import Path
+
+    from harness.drivers.fs_processes import ProcessValidationError
+
+    seed_definition(tmp_path, DEFINITION)
+    _write_process(
+        tmp_path,
+        "nightly",
+        {
+            "trigger": {"interval": "1h"},
+            "action": {"check": "always"},
+            "target": {"workflow": "default"},
+            "repository": "ghost",
+        },
+    )
+    registry = MemoryRepositoryRegistry({"harness_v2": Path("/repos/harness_v2")})
+
+    with pytest.raises(ProcessValidationError):
+        build(tmp_path, "default", events=MemoryEventSink(), repository_registry=registry)
+
+
+def test_build_repository_registry_omitted_is_lenient(tmp_path):
+    """No `repository_registry` at all (the default) keeps behaving exactly as
+    before — a process naming any repository compiles, unvalidated."""
+    seed_definition(tmp_path, DEFINITION)
+    _write_process(
+        tmp_path,
+        "nightly",
+        {
+            "trigger": {"interval": "1h"},
+            "action": {"check": "always"},
+            "target": {"workflow": "default"},
+            "repository": "whatever",
+        },
+    )
+
+    harness = build(tmp_path, "default", events=MemoryEventSink())
+
+    assert len(harness.pollers) == 1
+
+
 def test_finisher_factory_receives_step_config_and_a_lazy_inner_thunk(tmp_path):
     """The factory shape (step, config, inner) is what lets a finisher *wrap*
     the step's own agent behavior instead of only replacing it (ADR-0018).

@@ -31,6 +31,14 @@
           <textarea class="editor" id="text" name="text" rows="20">{{ text }}</textarea>
         </div>
 
+        <div class="field workflow-preview">
+          <label>Preview</label>
+          <div class="workflow-preview__notice hint" id="workflow-preview-notice" hidden></div>
+          <div class="workflow-preview__scroll">
+            <svg class="workflow-preview__svg" id="workflow-preview-svg" xmlns="http://www.w3.org/2000/svg"></svg>
+          </div>
+        </div>
+
         <div class="actions">
           <button class="btn primary" type="submit">Save</button>
         </div>
@@ -52,5 +60,6 @@
     <div class="banner warning">{{ warning }}</div>
     {% endfor %}
   </main>
+  <script src="/static/workflow_preview.js" defer></script>
 </body>
 </html>
