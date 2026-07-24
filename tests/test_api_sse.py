@@ -29,7 +29,7 @@ def make_task(task_id="tsk_1") -> Task:
 
 
 async def test_stream_emits_current_revision_first():
-    projection = BoardProjection(WORKFLOW)
+    projection = BoardProjection(WORKFLOW.steps(), (WORKFLOW,))
     projection.apply("plan", make_task())
     stream = board_event_stream(projection, FakeClock(), 0.25)
 
@@ -40,7 +40,7 @@ async def test_stream_emits_current_revision_first():
 
 
 async def test_stream_emits_frame_per_change():
-    projection = BoardProjection(WORKFLOW)
+    projection = BoardProjection(WORKFLOW.steps(), (WORKFLOW,))
     stream = board_event_stream(projection, FakeClock(), 0.25)
     await anext(stream)
 
@@ -53,7 +53,7 @@ async def test_stream_emits_frame_per_change():
 
 async def test_stream_waits_between_frames_to_coalesce():
     clock = FakeClock()
-    projection = BoardProjection(WORKFLOW)
+    projection = BoardProjection(WORKFLOW.steps(), (WORKFLOW,))
     stream = board_event_stream(projection, clock, 0.25)
     await anext(stream)
 
@@ -65,7 +65,7 @@ async def test_stream_waits_between_frames_to_coalesce():
 
 
 def test_events_endpoint_is_registered():
-    projection = BoardProjection(WORKFLOW)
+    projection = BoardProjection(WORKFLOW.steps(), (WORKFLOW,))
     client = TestClient(create_app(view=projection, clock=FakeClock()))
 
     assert client.app.url_path_for("events") == "/api/events"
@@ -124,7 +124,7 @@ async def test_stage_output_stream_collapses_stray_newline_in_a_line():
 
 
 def test_task_output_endpoint_is_registered():
-    projection = BoardProjection(WORKFLOW)
+    projection = BoardProjection(WORKFLOW.steps(), (WORKFLOW,))
     client = TestClient(create_app(view=projection, clock=FakeClock()))
 
     assert (
@@ -136,7 +136,7 @@ def test_task_output_endpoint_is_registered():
 def test_task_output_endpoint_closes_for_finished_stage():
     """A GET after the stage ended must terminate (not hang) with an end event —
     the buffer is gone (live-only), so no lines are replayed."""
-    projection = BoardProjection(WORKFLOW)
+    projection = BoardProjection(WORKFLOW.steps(), (WORKFLOW,))
     output = StageOutputProjection()
     output.emit("claimed", task_id="t1")
     output.emit("stage_output", task_id="t1", line="hello")

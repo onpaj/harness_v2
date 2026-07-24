@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
-from enum import Enum
 from typing import Any, Union
 
 END = "end"
@@ -12,14 +11,29 @@ END = "end"
 FAILED = "failed"
 """Reserved terminal status of a task that ended up in the `failed/` queue.
 Like END it has no outgoing edges — it just additionally isn't known to any
-workflow as one of its steps."""
+workflow as one of its steps. Unlike a true terminal, `failed/` has exactly one
+reader: the `Healer` loop, which drains it into `healed/` (invariant 24)."""
 
+HEALED = "healed"
+"""Reserved terminal status of a task the healer has settled onto the `healed/`
+queue. This is the never-consumed terminal that `failed/` used to be — the
+healer reads `failed/` and moves a task here once, success or failure, so a
+failure can never be healed twice (invariant 25)."""
 
-class Outcome(str, Enum):
-    """The only values a ConsumerBehavior may return."""
+ARCHIVED = "archived"
+"""Reserved terminal status of a task whose PR resolved and was moved out of
+`done/` into `archived/`. Purely informational — nothing routes on it, since an
+archived task is never reintroduced to the inbox."""
 
-    DONE = "done"
-    REQUEST_CHANGES = "request_changes"
+DONE = "done"
+"""The outcome a step reports when its work is finished. Survives from the
+former closed `Outcome` enum as a plain string constant — the outcome type
+itself is now an open, validated string (any non-empty value), not a fixed
+pair; `DONE`/`REQUEST_CHANGES` are just the two names every behavior already
+used, kept so call sites refer to them by name rather than by literal."""
+
+REQUEST_CHANGES = "request_changes"
+"""The outcome a review-like step reports to send work back for another pass."""
 
 
 @dataclass(frozen=True)
@@ -28,10 +42,17 @@ class BehaviorResult:
 
     `outcome` is the control signal the dispatcher routes on. `summary` is a short
     terminal statement about the run — commit message, history line, PR body, board.
+    `data`, when present, is shallow-merged into `task.data` by the consumer — a way
+    for a behavior to attach structured facts about what it produced (e.g. landing's
+    PR identity). Not a general escape hatch: it exists for a behavior's own output,
+    not for reaching into unrelated keys.
     """
 
-    outcome: Outcome
+    outcome: str
     summary: str = ""
+    data: dict[str, Any] | None = None
+    """Extra fields the consumer merges into task.data on delivery. None (the
+    default) merges nothing — every existing behavior is unaffected."""
 
 
 @dataclass(frozen=True)
@@ -87,8 +108,9 @@ class Task:
     """
 
     id: str
-    workflow_template: str
     created: str
+    workflow_template: str | None = None
+    step: str | None = None
     repository: str | None = None
     worktree: str | None = None
     status: str | None = None
@@ -104,6 +126,7 @@ class Task:
             "repository": self.repository,
             "worktree": self.worktree,
             "workflowTemplate": self.workflow_template,
+            "step": self.step,
             "status": self.status,
             "lastOutcome": self.last_outcome,
             "lockId": self.lock_id,
@@ -117,7 +140,8 @@ class Task:
     def from_dict(cls, raw: dict[str, Any]) -> Task:
         return cls(
             id=raw["id"],
-            workflow_template=raw["workflowTemplate"],
+            workflow_template=raw.get("workflowTemplate"),
+            step=raw.get("step"),
             created=raw["created"],
             repository=raw.get("repository"),
             worktree=raw.get("worktree"),
@@ -139,6 +163,18 @@ class Transition:
     from_step: str
     on: str
     to_step: str
+    # Prompt-only descriptive text for this edge. Never read by route() — the
+    # router stays a pure function over (status, lastOutcome) (invariant #4).
+    hint: str = ""
+
+
+@dataclass(frozen=True)
+class FinisherBinding:
+    """A step's bound finisher: a kind plus that kind's own config, opaque to
+    everything except the finisher factory that reads it at build time."""
+
+    kind: str
+    config: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -146,6 +182,9 @@ class Workflow:
     name: str
     start: str
     transitions: tuple[Transition, ...]
+    max_parallel: dict[str, int] = field(default_factory=dict)
+    finishers: dict[str, FinisherBinding] = field(default_factory=dict)
+    descriptions: dict[str, str] = field(default_factory=dict)
 
     def target(self, status: str, outcome: str) -> str | None:
         """Target of the matching edge, or None when none matches."""
@@ -164,6 +203,32 @@ class Workflow:
         if self.start != END and self.start not in found:
             found.append(self.start)
         return tuple(found)
+
+    def max_parallel_for(self, step: str) -> int:
+        """The configured concurrency limit for a step. Absent entries default to 1."""
+        return self.max_parallel.get(step, 1)
+
+    def finisher_for(self, step: str) -> FinisherBinding | None:
+        """The finisher binding for a step, or None when the step has none."""
+        return self.finishers.get(step)
+
+    def outcomes_for(self, step: str) -> tuple[str, ...]:
+        """Unique outcomes of edges leaving `step`, in definition order.
+
+        This is the live, authoritative outcome vocabulary for a step — derived
+        from the graph itself rather than frozen once at `harness agent init`
+        time. Promoted from the former `cli._allowed_outcomes_for` free
+        function; same logic, now the one home for this derivation.
+        """
+        seen: list[str] = []
+        for transition in self.transitions:
+            if transition.from_step == step and transition.on not in seen:
+                seen.append(transition.on)
+        return tuple(seen)
+
+    def description_for(self, step: str) -> str | None:
+        """Free-text description of a step, or None when the step has none."""
+        return self.descriptions.get(step)
 
 
 @dataclass(frozen=True)

@@ -13,7 +13,6 @@ from harness.models import (
     FAILED,
     BehaviorResult,
     HistoryEntry,
-    Outcome,
     Task,
     append_history,
 )
@@ -47,6 +46,10 @@ class Consumer:
         self._clock = clock
 
     @property
+    def step(self) -> str:
+        return self._step
+
+    @property
     def actor(self) -> str:
         return f"consumer:{self._step}"
 
@@ -74,8 +77,10 @@ class Consumer:
             self._fail(task, f"behavior raised an exception: {error}")
             return True
 
-        if not isinstance(result, BehaviorResult) or not isinstance(
-            result.outcome, Outcome
+        if (
+            not isinstance(result, BehaviorResult)
+            or not isinstance(result.outcome, str)
+            or not result.outcome
         ):
             self._fail(task, f"behavior returned an invalid result: {result!r}")
             return True
@@ -89,18 +94,22 @@ class Consumer:
             actor=self.actor,
             from_step=self._step,
             to_step=None,
-            outcome=result.outcome.value,
+            outcome=result.outcome,
             summary=result.summary or None,
         )
+        merged_data = {**task.data, **(result.data or {})}
         updated = append_history(
-            replace(task, last_outcome=result.outcome.value, lock_id=None), entry
+            replace(
+                task, data=merged_data, last_outcome=result.outcome, lock_id=None
+            ),
+            entry,
         )
         self._queue.transfer(updated, self._inbox)
         self._events.emit(
             "consumed",
             task_id=task.id,
             step=self._step,
-            outcome=result.outcome.value,
+            outcome=result.outcome,
             summary=result.summary,
             queue=self._step,
             task=updated.to_dict(),

@@ -13,12 +13,15 @@ the consumer handles them via `_fail` and the task lands in `failed/`.
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 from harness.artifacts_layout import next_attempt
 from harness.models import BehaviorResult, Task
 from harness.ports.agent import AgentRunner, AgentSpec
 from harness.ports.behavior import ConsumerBehavior
 from harness.ports.clock import Clock
 from harness.ports.events import EventSink
+from harness.ports.workflows import WorkflowNotFound, WorkflowRepository
 from harness.ports.workspace import Workspace
 
 
@@ -31,7 +34,8 @@ class ClaudeCliBehavior(ConsumerBehavior):
         runner: AgentRunner,
         spec: AgentSpec,
         events: EventSink,
-        timeout: float = 600.0,
+        timeout: float = 1800.0,
+        workflows: WorkflowRepository | None = None,
     ) -> None:
         self._clock = clock
         self._workspace = workspace
@@ -39,6 +43,7 @@ class ClaudeCliBehavior(ConsumerBehavior):
         self._spec = spec
         self._events = events
         self._timeout = timeout
+        self._workflows = workflows
 
     async def run(self, task: Task) -> BehaviorResult:
         step = task.status or ""
@@ -49,8 +54,41 @@ class ClaudeCliBehavior(ConsumerBehavior):
         # number for this step.
         attempt, relpath = next_attempt(handle.path, task.id, step)
 
+        # The workflow is the live, authoritative source of a step's allowed
+        # outcomes (design doc §3) — `spec.allowed_outcomes` is only the
+        # fallback for a workflow-less task, an unresolvable workflow
+        # reference, or a step with no outgoing edges declared. This is
+        # prompt-only *and* enforcement-affecting: the resolved set is fed
+        # into `effective_spec` below, so the runner's own verdict check
+        # (invariant #13) binds against the same live set as the prompt.
+        outcomes = self._spec.allowed_outcomes
+        hints: dict[str, str] = {}
+        description: str | None = None
+        if self._workflows is not None and task.workflow_template:
+            try:
+                workflow = self._workflows.get(task.workflow_template)
+            except WorkflowNotFound:
+                workflow = None
+            if workflow is not None:
+                derived = workflow.outcomes_for(step)
+                if derived:
+                    outcomes = derived
+                    hints = {
+                        transition.on: transition.hint
+                        for transition in workflow.transitions
+                        if transition.from_step == step and transition.hint
+                    }
+                    description = workflow.description_for(step)
+
+        effective_spec = replace(self._spec, allowed_outcomes=tuple(outcomes))
+
         prompt = compose_prompt(
-            task, step=step, artifact_relpath=relpath, spec=self._spec
+            task,
+            step=step,
+            artifact_relpath=relpath,
+            outcomes=effective_spec.allowed_outcomes,
+            hints=hints,
+            description=description,
         )
 
         # Live stage output: the behavior is the only place that knows the task,
@@ -68,7 +106,7 @@ class ClaudeCliBehavior(ConsumerBehavior):
 
         run = await self._runner.run(
             prompt=prompt,
-            spec=self._spec,
+            spec=effective_spec,
             cwd=handle.path,
             timeout=self._timeout,
             on_output=on_output,
@@ -81,34 +119,68 @@ class ClaudeCliBehavior(ConsumerBehavior):
 
 
 def compose_prompt(
-    task: Task, *, step: str, artifact_relpath: str, spec: AgentSpec
+    task: Task,
+    *,
+    step: str,
+    artifact_relpath: str,
+    outcomes: tuple[str, ...],
+    hints: dict[str, str],
+    description: str | None = None,
 ) -> str:
     """Build the instruction for the step's agent.
 
     Concise and deterministic: what the task is (from `task.data`), that it
     should read the previous artifacts in its cwd, where to write its output,
     and how to finish with a machine-readable verdict whose outcome comes from
-    the allowed set.
+    `outcomes` — the live, workflow-derived set (or the workflow-less
+    fallback), never `spec.allowed_outcomes` read directly.
     """
     request = _request_of(task)
-    allowed = ", ".join(outcome.value for outcome in spec.allowed_outcomes)
+    body = _body_of(task)
+    allowed = ", ".join(outcomes)
     artifacts_dir = f".artifacts/{task.id}/"
 
     lines = [
         f"You are the agent for step '{step}' of task {task.id}.",
-        f"Task: {request}" if request else "The task has no further description.",
-        "",
-        f"You'll find the context from previous steps as files in the "
-        f"{artifacts_dir} directory in your working directory — read them "
-        f"before you start.",
-        f"Write your output for this step to the file {artifact_relpath}.",
-        "",
-        "When you're done, finish with exactly this machine-readable verdict "
-        "(and nothing after it):",
-        "```json",
-        '{"outcome": "<one of: ' + allowed + '>", "summary": "<short summary>"}',
-        "```",
     ]
+    if description:
+        lines.append(f"This step ({step}): {description}")
+    lines.extend(
+        [
+            f"Task: {request}" if request else "The task has no further description.",
+            "",
+        ]
+    )
+    if body and body != request:
+        lines.extend([body, ""])
+    lines.extend(
+        [
+            f"You'll find the context from previous steps as files in the "
+            f"{artifacts_dir} directory in your working directory — read them "
+            f"before you start.",
+            f"Write your output for this step to the file {artifact_relpath}.",
+            "",
+            "Finish by choosing exactly one outcome:",
+        ]
+    )
+    for outcome in outcomes:
+        hint = hints.get(outcome)
+        if hint:
+            lines.append(f'  - "{outcome}": {hint}')
+        else:
+            lines.append(f'  - "{outcome}"')
+    lines.extend(
+        [
+            "",
+            "The harness reads your result by machine, not by eye. Your final "
+            "message MUST end with exactly this fenced verdict block and nothing "
+            "after it — not a prose summary, even once the artifact is written and "
+            "the tests pass. A missing block fails the task:",
+            "```json",
+            '{"outcome": "<one of: ' + allowed + '>", "summary": "<short summary>"}',
+            "```",
+        ]
+    )
     return "\n".join(lines)
 
 
@@ -117,4 +189,11 @@ def _request_of(task: Task) -> str:
         value = task.data.get(key)
         if isinstance(value, str) and value.strip():
             return value.strip()
+    return ""
+
+
+def _body_of(task: Task) -> str:
+    value = task.data.get("body")
+    if isinstance(value, str) and value.strip():
+        return value.strip()
     return ""

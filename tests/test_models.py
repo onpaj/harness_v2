@@ -1,11 +1,13 @@
 from harness.models import (
+    DONE,
     END,
+    REQUEST_CHANGES,
     BehaviorResult,
     Failed,
+    FinisherBinding,
     Finished,
     HistoryEntry,
     MoveTo,
-    Outcome,
     Task,
     Transition,
     Workflow,
@@ -14,14 +16,24 @@ from harness.models import (
 
 
 def test_behavior_result_carries_outcome_and_summary():
-    result = BehaviorResult(Outcome.DONE, summary="added retry with backoff")
+    result = BehaviorResult(DONE, summary="added retry with backoff")
 
-    assert result.outcome is Outcome.DONE
+    assert result.outcome == DONE
     assert result.summary == "added retry with backoff"
 
 
 def test_behavior_result_summary_defaults_empty():
-    assert BehaviorResult(Outcome.REQUEST_CHANGES).summary == ""
+    assert BehaviorResult(REQUEST_CHANGES).summary == ""
+
+
+def test_behavior_result_data_defaults_none():
+    assert BehaviorResult(DONE).data is None
+
+
+def test_behavior_result_carries_data():
+    result = BehaviorResult(DONE, data={"pr": {"number": 1}})
+
+    assert result.data == {"pr": {"number": 1}}
 
 
 def test_history_entry_roundtrips_summary():
@@ -66,6 +78,47 @@ def test_task_roundtrips_through_camelcase_json():
     assert raw["lockId"] == "lck_1"
     assert raw["dedupKey"] == "github:o/r:42"
     assert Task.from_dict(raw) == task
+
+
+def test_workflow_less_task_roundtrips_through_json():
+    task = Task(
+        id="tsk_1",
+        workflow_template=None,
+        step="development",
+        created="2026-07-19T10:00:00Z",
+    )
+
+    raw = task.to_dict()
+
+    assert raw["workflowTemplate"] is None
+    assert raw["step"] == "development"
+    assert Task.from_dict(raw) == task
+
+
+def test_task_from_dict_defaults_step_when_absent():
+    """Backward compatibility: an existing task file on disk never carries a
+    `step` key. `from_dict` must default it to None, not raise KeyError."""
+    raw = {
+        "id": "tsk_1",
+        "workflowTemplate": "default",
+        "created": "2026-07-19T10:00:00Z",
+    }
+
+    task = Task.from_dict(raw)
+
+    assert task.step is None
+    assert task.workflow_template == "default"
+
+
+def test_task_from_dict_defaults_workflow_template_when_absent():
+    """A workflow-less task written before this change never had a
+    `workflowTemplate` key either — must default to None, not KeyError."""
+    raw = {"id": "tsk_1", "created": "2026-07-19T10:00:00Z"}
+
+    task = Task.from_dict(raw)
+
+    assert task.workflow_template is None
+    assert task.step is None
 
 
 def test_new_task_has_null_status_and_empty_history():
@@ -139,9 +192,130 @@ def test_workflow_steps_excludes_end():
     assert workflow.steps() == ("plan", "review")
 
 
+def test_workflow_max_parallel_for_defaults_to_one():
+    workflow = Workflow(
+        name="default",
+        start="plan",
+        transitions=(Transition(from_step="plan", on="done", to_step=END),),
+    )
+
+    assert workflow.max_parallel_for("plan") == 1
+    assert workflow.max_parallel_for("unknown") == 1
+
+
+def test_workflow_max_parallel_for_reads_configured_limit():
+    workflow = Workflow(
+        name="default",
+        start="plan",
+        transitions=(
+            Transition(from_step="plan", on="done", to_step="review"),
+            Transition(from_step="review", on="done", to_step=END),
+        ),
+        max_parallel={"review": 3},
+    )
+
+    assert workflow.max_parallel_for("review") == 3
+    assert workflow.max_parallel_for("plan") == 1
+
+
+def test_workflow_finisher_for_defaults_to_none():
+    workflow = Workflow(
+        name="default",
+        start="plan",
+        transitions=(Transition(from_step="plan", on="done", to_step=END),),
+    )
+
+    assert workflow.finisher_for("plan") is None
+    assert workflow.finisher_for("unknown") is None
+
+
+def test_workflow_finisher_for_reads_configured_kind():
+    workflow = Workflow(
+        name="default",
+        start="plan",
+        transitions=(
+            Transition(from_step="plan", on="done", to_step="publish"),
+            Transition(from_step="publish", on="done", to_step=END),
+        ),
+        finishers={"publish": FinisherBinding(kind="open-pr")},
+    )
+
+    assert workflow.finisher_for("publish") == FinisherBinding(kind="open-pr")
+    assert workflow.finisher_for("plan") is None
+
+
 def test_outcome_values():
-    assert Outcome.DONE.value == "done"
-    assert Outcome.REQUEST_CHANGES.value == "request_changes"
+    assert DONE == "done"
+    assert REQUEST_CHANGES == "request_changes"
+
+
+def test_transition_hint_defaults_to_empty_string():
+    transition = Transition(from_step="plan", on="done", to_step=END)
+
+    assert transition.hint == ""
+
+
+def test_transition_hint_can_be_set():
+    transition = Transition(from_step="plan", on="done", to_step=END, hint="ship it")
+
+    assert transition.hint == "ship it"
+
+
+def test_workflow_outcomes_for_preserves_definition_order_and_collapses_duplicates():
+    workflow = Workflow(
+        name="default",
+        start="plan",
+        transitions=(
+            Transition(from_step="plan", on="backend", to_step="development"),
+            Transition(from_step="plan", on="ui", to_step="designer"),
+            Transition(from_step="plan", on="backend", to_step="development"),
+            Transition(from_step="review", on="done", to_step=END),
+        ),
+    )
+
+    assert workflow.outcomes_for("plan") == ("backend", "ui")
+
+
+def test_workflow_outcomes_for_step_with_no_outgoing_transitions_is_empty():
+    workflow = Workflow(
+        name="default",
+        start="plan",
+        transitions=(Transition(from_step="plan", on="done", to_step=END),),
+    )
+
+    assert workflow.outcomes_for("end") == ()
+
+
+def test_workflow_outcomes_for_unknown_step_is_empty():
+    workflow = Workflow(
+        name="default",
+        start="plan",
+        transitions=(Transition(from_step="plan", on="done", to_step=END),),
+    )
+
+    assert workflow.outcomes_for("unknown") == ()
+
+
+def test_workflow_description_for_absent_step_is_none():
+    workflow = Workflow(
+        name="default",
+        start="plan",
+        transitions=(Transition(from_step="plan", on="done", to_step=END),),
+    )
+
+    assert workflow.description_for("plan") is None
+
+
+def test_workflow_description_for_returns_configured_text():
+    workflow = Workflow(
+        name="default",
+        start="plan",
+        transitions=(Transition(from_step="plan", on="done", to_step=END),),
+        descriptions={"plan": "Write the implementation plan."},
+    )
+
+    assert workflow.description_for("plan") == "Write the implementation plan."
+    assert workflow.description_for("unknown") is None
 
 
 def test_decisions_carry_their_payload():

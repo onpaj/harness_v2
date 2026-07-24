@@ -77,6 +77,65 @@ def test_orchestration_does_not_import_source_port():
         )
 
 
+def test_orchestration_does_not_import_triggers_port():
+    """The triggers port (Check/Observation) is not orchestration. A trigger is a
+    TaskSource behind SourcePoller — only the scheduled-trigger driver and the
+    wiring reach for it, never the dispatcher or consumer."""
+    for name in ("dispatcher.py", "consumer.py"):
+        assert "harness.ports.triggers" not in imported_modules(SOURCE / name), (
+            f"{name} imports ports.triggers"
+        )
+
+
+def test_scheduled_trigger_imports_only_ports_models_and_ids():
+    """ScheduledTrigger is a driver, but by design it binds to no sibling driver:
+    it composes only ports (source/clock/triggers), models and the base `ids`
+    module — like SourcePoller, wired in app.py/cli.py."""
+    imports = {
+        module
+        for module in imported_modules(SOURCE / "drivers" / "scheduled_trigger.py")
+        if module.startswith("harness")
+    }
+    assert all(
+        module in ("harness.models", "harness.ids")
+        or module.startswith("harness.ports")
+        for module in imports
+    ), f"scheduled_trigger.py imports outside ports/models/ids: {imports}"
+
+
+def test_fs_processes_is_a_thin_aggregate_over_the_trigger_drivers():
+    """FilesystemProcessRepository compiles processes/*.json into a
+    ScheduledTrigger. It is a driver, but by design it binds to nothing beyond
+    ports (clock/triggers), models/ids, and the two trigger drivers it composes
+    (checks, scheduled_trigger) — never orchestration, never a source/forge/agent
+    driver. This keeps a Process a compile-time concept (invariant #39)."""
+    allowed_drivers = {
+        "harness.drivers.checks",
+        "harness.drivers.scheduled_trigger",
+    }
+    imports = {
+        module
+        for module in imported_modules(SOURCE / "drivers" / "fs_processes.py")
+        if module.startswith("harness")
+    }
+    assert all(
+        module in ("harness.models", "harness.ids")
+        or module.startswith("harness.ports")
+        or module in allowed_drivers
+        for module in imports
+    ), f"fs_processes.py imports outside ports/models/ids/trigger-drivers: {imports}"
+
+
+def test_orchestration_does_not_name_process():
+    """"Process" is a compile-time authoring concept — the orchestration core
+    never learns it (invariant #39). Neither dispatcher nor consumer imports the
+    process repository."""
+    for name in ("dispatcher.py", "consumer.py"):
+        assert "harness.drivers.fs_processes" not in imported_modules(SOURCE / name), (
+            f"{name} imports fs_processes"
+        )
+
+
 def test_orchestration_does_not_import_control():
     """The operator-control port (TaskControl) is not orchestration. Only the
     task-control service, the API and the wiring reach for it — never the
@@ -98,6 +157,93 @@ def test_source_poller_imports_only_ports_and_models():
         module == "harness.models" or module.startswith("harness.ports")
         for module in imports
     ), f"source_poller.py imports outside ports/models: {imports}"
+
+
+def test_pr_watcher_imports_only_ports_and_models():
+    """PrWatcher is core: it knows only ports, models and the base `ids` module
+    (needed for the same reason dispatcher.py/consumer.py need it — claiming a
+    task requires a lock id) — never a driver."""
+    imports = {
+        module
+        for module in imported_modules(SOURCE / "pr_watcher.py")
+        if module.startswith("harness")
+    }
+    assert all(
+        module in ("harness.models", "harness.ids") or module.startswith("harness.ports")
+        for module in imports
+    ), f"pr_watcher.py imports outside ports/models/ids: {imports}"
+
+
+def test_reconciler_imports_only_ports_and_models():
+    """MergeReconciler is core: it knows only ports, models and the base `ids`
+    module (the same base layer dispatcher/consumer draw lock ids from), no
+    driver."""
+    imports = {
+        module
+        for module in imported_modules(SOURCE / "merge_reconciler.py")
+        if module.startswith("harness")
+    }
+    assert all(
+        module in ("harness.models", "harness.ids") or module.startswith("harness.ports")
+        for module in imports
+    ), f"merge_reconciler.py imports outside ports/models/ids: {imports}"
+
+
+def test_orchestration_does_not_import_merge_port():
+    """MergeChecker is unknown to dispatcher/consumer. Only MergeReconciler
+    (core) and app.py/cli.py (wiring) reach for it."""
+    for name in ("dispatcher.py", "consumer.py"):
+        assert "harness.ports.merge" not in imported_modules(SOURCE / name), (
+            f"{name} imports ports.merge"
+        )
+
+
+def test_issue_reconciler_imports_only_ports_and_models():
+    """IssueReconciler is core (sibling of PrWatcher/MergeReconciler): it knows
+    only ports, models and the base `ids` module (for the claim lock id), never a
+    driver."""
+    imports = {
+        module
+        for module in imported_modules(SOURCE / "issue_reconciler.py")
+        if module.startswith("harness")
+    }
+    assert all(
+        module in ("harness.models", "harness.ids") or module.startswith("harness.ports")
+        for module in imports
+    ), f"issue_reconciler.py imports outside ports/models/ids: {imports}"
+
+
+def test_orchestration_does_not_import_issue_state_port():
+    """IssueChecker is unknown to dispatcher/consumer. Only IssueReconciler
+    (core) and app.py/cli.py (wiring) reach for it — mirroring MergeChecker."""
+    for name in ("dispatcher.py", "consumer.py"):
+        assert "harness.ports.issue_state" not in imported_modules(SOURCE / name), (
+            f"{name} imports ports.issue_state"
+        )
+
+
+def test_healer_imports_only_ports_models_and_ids():
+    """The Healer loop is core (sibling of SourcePoller): it knows only ports,
+    models and ids — never a driver. Wiring lives in app.py."""
+    imports = {
+        module
+        for module in imported_modules(SOURCE / "healer.py")
+        if module.startswith("harness")
+    }
+    assert all(
+        module in ("harness.models", "harness.ids")
+        or module.startswith("harness.ports")
+        for module in imports
+    ), f"healer.py imports outside ports/models/ids: {imports}"
+
+
+def test_orchestration_does_not_import_issues_or_healer():
+    """The IssueTracker port and the Healer loop are unknown to the dispatcher and
+    consumer — only the healer/wiring reach for them (invariant 27)."""
+    for name in ("dispatcher.py", "consumer.py"):
+        imports = imported_modules(SOURCE / name)
+        assert "harness.ports.issues" not in imports, f"{name} imports ports.issues"
+        assert "harness.healer" not in imports, f"{name} imports healer"
 
 
 def test_orchestration_does_not_import_work_ports():
@@ -218,6 +364,17 @@ def _imported_names_from(path: Path, module: str) -> set[str]:
         if isinstance(node, ast.ImportFrom) and node.module == module:
             names.update(alias.name for alias in node.names)
     return names
+
+
+def test_api_does_not_import_cli():
+    """`create_app` receives version/build_time as already-computed strings —
+    it must not reach back into `cli.py` (or `importlib.metadata` directly) to
+    compute them itself, which would both cycle (`cli.py` imports
+    `create_app`) and leak how the harness is packaged/run into the UI layer."""
+    for path in (SOURCE / "api").rglob("*.py"):
+        imports = imported_modules(path)
+        assert "harness.cli" not in imports, f"{path.name} imports harness.cli"
+        assert "importlib.metadata" not in imports, f"{path.name} imports importlib.metadata"
 
 
 def test_api_reads_artifacts_only_through_view():

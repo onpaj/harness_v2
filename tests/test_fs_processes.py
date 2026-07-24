@@ -1,0 +1,633 @@
+"""`FilesystemProcessRepository`: `processes/*.json` → `ScheduledTrigger`s.
+
+A Process is a compile-time authoring aggregate — a nested
+trigger/action/target/sink shape — that compiles to the same `ScheduledTrigger`
+a bare `triggers/*.json` file does. These tests exercise the schema shape and
+its fail-fast validation; the trigger's runtime behaviour (clock-gate, dedup) is
+covered by `test_scheduled_trigger.py`.
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+
+from harness.drivers.checks import BUILTIN_CHECKS, AlwaysCheck
+from harness.drivers.fs_processes import (
+    FilesystemProcessRepository,
+    ProcessValidationError,
+)
+from harness.drivers.scheduled_trigger import ScheduledTrigger
+from harness.drivers.system_clock import SystemClock
+
+
+def _write(root: Path, name: str, body: dict) -> None:
+    root.mkdir(parents=True, exist_ok=True)
+    (root / f"{name}.json").write_text(json.dumps(body), encoding="utf-8")
+
+
+def _build(root: Path, **kwargs) -> list[ScheduledTrigger]:
+    return FilesystemProcessRepository(root).build(clock=SystemClock(), **kwargs)
+
+
+# --- happy paths ------------------------------------------------------------
+
+
+def test_valid_always_workflow_process_builds_one_trigger(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "nightly",
+        {
+            "trigger": {"interval": "1h"},
+            "action": {"check": "always"},
+            "target": {"workflow": "wf"},
+            "sink": {"kind": "none"},
+        },
+    )
+
+    triggers = _build(tmp_path)
+
+    assert len(triggers) == 1
+    (trigger,) = triggers
+    assert isinstance(trigger, ScheduledTrigger)
+    assert trigger.kind == "scheduled:nightly"
+    assert trigger._interval == 3600.0
+    assert trigger._workflow == "wf"
+    assert trigger._step is None
+    # It really produces a task on a fresh bucket, wired to the workflow.
+    (task,) = trigger.poll()
+    assert task.workflow_template == "wf"
+    assert task.step is None
+    assert "source" not in task.data  # a Process reflects nothing outward in v1
+
+
+def test_disk_threshold_step_process_builds_a_working_trigger(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "disk-pressure",
+        {
+            "trigger": {"interval": "1h"},
+            "action": {"check": "disk-threshold", "params": {"path": "/", "percent": 80}},
+            "target": {"step": "cleanup"},
+            "dedup": "per-state",
+        },
+    )
+
+    (trigger,) = _build(tmp_path)
+
+    assert trigger.kind == "scheduled:disk-pressure"
+    assert trigger._step == "cleanup"
+    assert trigger._workflow is None
+    assert trigger._dedup == "per-state"
+
+
+def test_name_key_overrides_file_stem(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "on-disk-stem",
+        {
+            "name": "chosen-name",
+            "trigger": {"interval": "30m"},
+            "action": {"check": "always"},
+            "target": {"workflow": "wf"},
+        },
+    )
+
+    (trigger,) = _build(tmp_path)
+
+    assert trigger.kind == "scheduled:chosen-name"
+
+
+def test_sink_absent_is_accepted(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "no-sink",
+        {
+            "trigger": {"interval": "1h"},
+            "action": {"check": "always"},
+            "target": {"workflow": "wf"},
+        },
+    )
+
+    assert len(_build(tmp_path)) == 1
+
+
+def test_sink_none_or_absent_stamps_no_data_sink(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "explicit-none",
+        {
+            "trigger": {"interval": "1h"},
+            "action": {"check": "always"},
+            "target": {"workflow": "wf"},
+            "sink": {"kind": "none"},
+        },
+    )
+    _write(
+        tmp_path,
+        "no-sink",
+        {
+            "trigger": {"interval": "1h"},
+            "action": {"check": "always"},
+            "target": {"workflow": "wf"},
+        },
+    )
+
+    for trigger in _build(tmp_path):
+        (task,) = trigger.poll()
+        assert "sink" not in task.data
+
+
+def test_slack_sink_is_accepted_and_stamped_onto_tasks(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "notify",
+        {
+            "trigger": {"interval": "1h"},
+            "action": {"check": "always"},
+            "target": {"workflow": "wf"},
+            "sink": {"kind": "slack"},
+        },
+    )
+
+    (trigger,) = _build(tmp_path)
+
+    assert trigger.sink == {"kind": "slack"}
+    (task,) = trigger.poll()
+    assert task.data["sink"] == {"kind": "slack"}
+    assert "source" not in task.data  # destination identity, no origin stamp
+
+
+def test_github_sink_is_accepted_and_stamped_onto_tasks(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "notify-github",
+        {
+            "trigger": {"interval": "1h"},
+            "action": {"check": "always"},
+            "target": {"workflow": "wf"},
+            "sink": {"kind": "github"},
+        },
+    )
+
+    (trigger,) = _build(tmp_path)
+
+    assert trigger.sink == {"kind": "github"}
+    (task,) = trigger.poll()
+    assert task.data["sink"] == {"kind": "github"}
+    assert "source" not in task.data  # destination identity, no origin stamp
+
+
+def test_trigger_kind_schedule_is_accepted(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "explicit-kind",
+        {
+            "trigger": {"kind": "schedule", "interval": "1h"},
+            "action": {"check": "always"},
+            "target": {"workflow": "wf"},
+        },
+    )
+
+    assert len(_build(tmp_path)) == 1
+
+
+def test_missing_directory_returns_empty_list(tmp_path: Path) -> None:
+    assert _build(tmp_path / "does-not-exist") == []
+
+
+# --- github-issues cross-process label collision (FR-2) ---------------------
+#
+# A real `github-issues` check factory needs a GithubClient (cli.py's
+# concern); these tests only exercise the collision guard in `build()`, so a
+# trivial stand-in factory (AlwaysCheck ignores its params) is registered
+# under the "github-issues" name.
+
+_GITHUB_ISSUES_CHECKS = {**BUILTIN_CHECKS, "github-issues": lambda params: AlwaysCheck()}
+
+
+def _build_with_github_issues(root: Path, **kwargs) -> list[ScheduledTrigger]:
+    return FilesystemProcessRepository(root).build(
+        clock=SystemClock(), checks=_GITHUB_ISSUES_CHECKS, **kwargs
+    )
+
+
+def test_two_processes_sharing_a_label_fail_the_build(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "harness-todo",
+        {
+            "trigger": {"interval": "30s"},
+            "action": {"check": "github-issues", "params": {"label": "harness:todo"}},
+            "target": {"workflow": "default"},
+            "dedup": "per-state",
+        },
+    )
+    _write(
+        tmp_path,
+        "triage",
+        {
+            "trigger": {"interval": "5m"},
+            "action": {
+                "check": "github-issues",
+                "params": {"label": "harness:triage", "claimed_label": "harness:todo"},
+            },
+            "target": {"workflow": "triage"},
+            "dedup": "per-state",
+        },
+    )
+
+    with pytest.raises(ProcessValidationError) as exc:
+        _build_with_github_issues(tmp_path)
+    message = str(exc.value)
+    assert "harness-todo.json" in message
+    assert "triage.json" in message
+    assert "harness:todo" in message
+
+
+def test_two_processes_sharing_a_claimed_label_fail_the_build(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "one",
+        {
+            "trigger": {"interval": "30s"},
+            "action": {
+                "check": "github-issues",
+                "params": {"label": "harness:a", "claimed_label": "harness:queued"},
+            },
+            "target": {"workflow": "default"},
+            "dedup": "per-state",
+        },
+    )
+    _write(
+        tmp_path,
+        "two",
+        {
+            "trigger": {"interval": "30s"},
+            "action": {
+                "check": "github-issues",
+                "params": {"label": "harness:b", "claimed_label": "harness:queued"},
+            },
+            "target": {"workflow": "default"},
+            "dedup": "per-state",
+        },
+    )
+
+    with pytest.raises(ProcessValidationError):
+        _build_with_github_issues(tmp_path)
+
+
+def test_triage_process_with_no_collision_builds_cleanly(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "harness-todo",
+        {
+            "trigger": {"interval": "30s"},
+            "action": {"check": "github-issues", "params": {"label": "harness:todo"}},
+            "target": {"workflow": "default"},
+            "dedup": "per-state",
+        },
+    )
+    _write(
+        tmp_path,
+        "triage",
+        {
+            "trigger": {"interval": "5m"},
+            "action": {
+                "check": "github-issues",
+                "params": {
+                    "label": "harness:triage",
+                    "claimed_label": "harness:validating",
+                },
+            },
+            "target": {"workflow": "triage"},
+            "dedup": "per-state",
+        },
+    )
+
+    triggers = _build_with_github_issues(tmp_path)
+
+    assert len(triggers) == 2
+
+
+def test_collision_check_honours_the_default_github_issues_label(tmp_path: Path) -> None:
+    """A file omitting `label` defaults to `default_github_issues_label`
+    (threaded from the CLI's `--github-label`), not a hardcoded literal —
+    otherwise this guard would be silently wrong for any deployment that
+    overrides the flag (architecture review Correction 3)."""
+    _write(
+        tmp_path,
+        "ingestion",
+        {
+            "trigger": {"interval": "30s"},
+            "action": {"check": "github-issues"},  # no explicit label
+            "target": {"workflow": "default"},
+            "dedup": "per-state",
+        },
+    )
+    _write(
+        tmp_path,
+        "triage",
+        {
+            "trigger": {"interval": "5m"},
+            "action": {
+                "check": "github-issues",
+                "params": {
+                    "label": "harness:custom-default",
+                    "claimed_label": "harness:validating",
+                },
+            },
+            "target": {"workflow": "triage"},
+            "dedup": "per-state",
+        },
+    )
+
+    with pytest.raises(ProcessValidationError):
+        _build_with_github_issues(
+            tmp_path, default_github_issues_label="harness:custom-default"
+        )
+
+    # With the (different) built-in default instead, no collision.
+    triggers = _build_with_github_issues(tmp_path)
+    assert len(triggers) == 2
+
+
+# --- fail-fast validation ---------------------------------------------------
+
+
+def test_broken_json_raises_naming_the_file(tmp_path: Path) -> None:
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    (tmp_path / "broken.json").write_text("{not json", encoding="utf-8")
+
+    with pytest.raises(ProcessValidationError) as excinfo:
+        _build(tmp_path)
+    assert "broken" in str(excinfo.value)
+
+
+def test_non_object_raises_naming_the_file(tmp_path: Path) -> None:
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    (tmp_path / "a-list.json").write_text("[]", encoding="utf-8")
+
+    with pytest.raises(ProcessValidationError) as excinfo:
+        _build(tmp_path)
+    assert "a-list" in str(excinfo.value)
+
+
+def test_missing_trigger_raises_naming_the_file(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "no-trigger",
+        {"action": {"check": "always"}, "target": {"workflow": "wf"}},
+    )
+
+    with pytest.raises(ProcessValidationError) as excinfo:
+        _build(tmp_path)
+    assert "no-trigger" in str(excinfo.value)
+
+
+def test_bad_interval_raises_naming_the_file(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "bad-interval",
+        {
+            "trigger": {"interval": "1x"},
+            "action": {"check": "always"},
+            "target": {"workflow": "wf"},
+        },
+    )
+
+    with pytest.raises(ProcessValidationError) as excinfo:
+        _build(tmp_path)
+    assert "bad-interval" in str(excinfo.value)
+
+
+def test_missing_action_raises_naming_the_file(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "no-action",
+        {"trigger": {"interval": "1h"}, "target": {"workflow": "wf"}},
+    )
+
+    with pytest.raises(ProcessValidationError) as excinfo:
+        _build(tmp_path)
+    assert "no-action" in str(excinfo.value)
+
+
+def test_unknown_check_raises_naming_the_file(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "bad-check",
+        {
+            "trigger": {"interval": "1h"},
+            "action": {"check": "nope"},
+            "target": {"workflow": "wf"},
+        },
+    )
+
+    with pytest.raises(ProcessValidationError) as excinfo:
+        _build(tmp_path)
+    assert "bad-check" in str(excinfo.value)
+
+
+def test_missing_target_raises_naming_the_file(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "no-target",
+        {"trigger": {"interval": "1h"}, "action": {"check": "always"}},
+    )
+
+    with pytest.raises(ProcessValidationError) as excinfo:
+        _build(tmp_path)
+    assert "no-target" in str(excinfo.value)
+
+
+def test_both_targets_raises_naming_the_file(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "both-targets",
+        {
+            "trigger": {"interval": "1h"},
+            "action": {"check": "always"},
+            "target": {"workflow": "wf", "step": "cleanup"},
+        },
+    )
+
+    with pytest.raises(ProcessValidationError) as excinfo:
+        _build(tmp_path)
+    assert "both-targets" in str(excinfo.value)
+
+
+def test_target_outside_known_targets_raises_naming_the_file(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "unknown-wf",
+        {
+            "trigger": {"interval": "1h"},
+            "action": {"check": "always"},
+            "target": {"workflow": "other"},
+        },
+    )
+
+    with pytest.raises(ProcessValidationError) as excinfo:
+        _build(tmp_path, known_targets={"wf"})
+    assert "unknown-wf" in str(excinfo.value)
+
+
+def test_unknown_dedup_raises_naming_the_file(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "bad-dedup",
+        {
+            "trigger": {"interval": "1h"},
+            "action": {"check": "always"},
+            "target": {"workflow": "wf"},
+            "dedup": "per-eternity",
+        },
+    )
+
+    with pytest.raises(ProcessValidationError) as excinfo:
+        _build(tmp_path)
+    assert "bad-dedup" in str(excinfo.value)
+
+
+def test_unknown_sink_raises_naming_the_file(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "teams-sink",
+        {
+            "trigger": {"interval": "1h"},
+            "action": {"check": "always"},
+            "target": {"workflow": "wf"},
+            "sink": {"kind": "teams"},
+        },
+    )
+
+    with pytest.raises(ProcessValidationError) as excinfo:
+        _build(tmp_path)
+    assert "teams-sink" in str(excinfo.value)
+    assert excinfo.value.field == "sink"
+
+
+def test_unknown_trigger_kind_raises_naming_the_file(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "webhook-trigger",
+        {
+            "trigger": {"kind": "webhook", "interval": "1h"},
+            "action": {"check": "always"},
+            "target": {"workflow": "wf"},
+        },
+    )
+
+    with pytest.raises(ProcessValidationError) as excinfo:
+        _build(tmp_path)
+    assert "webhook-trigger" in str(excinfo.value)
+    assert excinfo.value.field == "trigger"
+
+
+def test_valid_cron_process_builds_a_working_trigger(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "weekly-review",
+        {
+            "trigger": {"cron": "0 6 * * 1"},
+            "action": {"check": "always"},
+            "target": {"workflow": "wf"},
+        },
+    )
+
+    (trigger,) = _build(tmp_path)
+
+    assert trigger.kind == "scheduled:weekly-review"
+    assert trigger._interval is None
+    assert trigger._cron is not None
+    (task,) = trigger.poll()
+    assert task.workflow_template == "wf"
+
+
+def test_bad_cron_raises_naming_the_file(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "bad-cron",
+        {
+            "trigger": {"cron": "0 6 31 2 *"},
+            "action": {"check": "always"},
+            "target": {"workflow": "wf"},
+        },
+    )
+
+    with pytest.raises(ProcessValidationError) as excinfo:
+        _build(tmp_path)
+    assert "bad-cron" in str(excinfo.value)
+    assert excinfo.value.field == "cron"
+
+
+def test_both_interval_and_cron_raises_naming_the_file(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "both-cadences",
+        {
+            "trigger": {"interval": "1h", "cron": "0 6 * * 1"},
+            "action": {"check": "always"},
+            "target": {"workflow": "wf"},
+        },
+    )
+
+    with pytest.raises(ProcessValidationError) as excinfo:
+        _build(tmp_path)
+    assert "both-cadences" in str(excinfo.value)
+    assert excinfo.value.field == "trigger"
+
+
+def test_neither_interval_nor_cron_raises_naming_the_file(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "no-cadence",
+        {
+            "trigger": {},
+            "action": {"check": "always"},
+            "target": {"workflow": "wf"},
+        },
+    )
+
+    with pytest.raises(ProcessValidationError) as excinfo:
+        _build(tmp_path)
+    assert "no-cadence" in str(excinfo.value)
+    assert excinfo.value.field == "trigger"
+
+
+def test_cron_trigger_kind_schedule_is_accepted(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "explicit-kind",
+        {
+            "trigger": {"kind": "schedule", "cron": "0 6 * * 1"},
+            "action": {"check": "always"},
+            "target": {"workflow": "wf"},
+        },
+    )
+
+    assert len(_build(tmp_path)) == 1
+
+
+def test_disk_threshold_missing_params_raises_process_error_not_keyerror(
+    tmp_path: Path,
+) -> None:
+    # The `disk-threshold` factory reads `params["path"]`; a file missing it used
+    # to surface a raw KeyError from the factory. `compile_process` now wraps the
+    # factory call, so the build fails as a ProcessValidationError naming the file.
+    _write(
+        tmp_path,
+        "no-params",
+        {
+            "trigger": {"interval": "1h"},
+            "action": {"check": "disk-threshold"},
+            "target": {"step": "cleanup"},
+        },
+    )
+
+    with pytest.raises(ProcessValidationError) as excinfo:
+        _build(tmp_path)
+    assert "no-params" in str(excinfo.value)

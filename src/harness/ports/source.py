@@ -22,6 +22,21 @@ from dataclasses import dataclass
 from harness.models import Task
 
 
+def effective_sink_kind(task: Task) -> str | None:
+    """The destination a sink routes on: `data.sink.kind` if the task carries
+    an explicit sink, else `data.source.kind` (the degenerate case where the
+    destination coincides with the origin). `None` when neither is present.
+
+    Every reflecting `TaskSource` (`GithubLabelReflector`, `SlackWebhookSink`)
+    compares this against its own `kind` in `_mine` — one routing rule for all
+    outbound reflection, invariant #40.
+    """
+    sink = task.data.get("sink")
+    if isinstance(sink, dict) and sink.get("kind"):
+        return sink["kind"]
+    return task.data.get("source", {}).get("kind")
+
+
 def dedup_key(kind: str, *parts: object) -> str:
     """The stable identity of a source item, as stamped onto `Task.dedup_key`.
 
@@ -56,15 +71,25 @@ class TaskSource(ABC):
     """A source of tasks and a target for projecting their state.
 
     `kind` is the key for projection routing: the reflector calls only the
-    adapter whose `kind` matches `task.data.source.kind`. A foreign task the
-    adapter silently ignores.
+    adapter whose `kind` matches the task's *effective sink kind*
+    (`effective_sink_kind` — `data.sink.kind`, falling back to
+    `data.source.kind`). A foreign task the adapter silently ignores.
     """
 
     kind: str
 
     @abstractmethod
     def poll(self) -> list[Task]:
-        """Bring in new, not-yet-consumed tasks."""
+        """Bring in new, not-yet-consumed tasks.
+
+        An implementation may also perform an idempotent, side-effecting action
+        per polled item that produces no task (precedent: `GithubTaskSource.poll()`
+        swaps a label as part of claiming an issue). The same shape recurs one
+        layer down: a `Check` driving a `ScheduledTrigger` may do the same inside
+        `evaluate()` — `GithubConflictsCheck.evaluate()` calls GitHub's
+        update-branch API on a "behind" PR before `ScheduledTrigger.poll()` ever
+        returns. Any such action must be safe to repeat every tick.
+        """
 
     @abstractmethod
     def report_progress(self, task: Task, progress: Progress) -> None:
@@ -73,3 +98,26 @@ class TaskSource(ABC):
     @abstractmethod
     def finish(self, task: Task, result: FinishResult) -> None:
         """Project the terminal state outward. No-op for a foreign task."""
+
+
+class Trigger(TaskSource):
+    """A `TaskSource` that produces tasks but reflects nothing back outward.
+
+    A schedule- or condition-trigger has an inbound side only: it implements
+    `poll()` and nothing else. `report_progress`/`finish` are concrete no-ops
+    here, so a subclass supplying just `poll()` becomes fully concrete (`poll`
+    stays abstract, so `Trigger` itself cannot be instantiated).
+
+    It is still a `TaskSource`, wired the same way: `SourcePoller` ingests it,
+    and `SourceReflectorSink` lists it among the sinks and simply skips it — a
+    `Trigger` stamps no matching `data.source`, so no projection is ever routed
+    back to it.
+    """
+
+    def report_progress(self, task: Task, progress: Progress) -> None:
+        """A trigger reflects nothing outward: a no-op."""
+        return None
+
+    def finish(self, task: Task, result: FinishResult) -> None:
+        """A trigger reflects nothing outward: a no-op."""
+        return None

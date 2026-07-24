@@ -14,7 +14,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from harness.models import Outcome
+from harness.models import DONE
 
 
 @dataclass(frozen=True)
@@ -26,14 +26,15 @@ class AgentSpec:
     model: str | None = None
     fallback_model: str | None = None
     allowed_tools: tuple[str, ...] = ()
-    allowed_outcomes: tuple[Outcome, ...] = (Outcome.DONE,)
+    allowed_outcomes: tuple[str, ...] = (DONE,)
+    timeout: float | None = None
 
 
 @dataclass(frozen=True)
 class AgentRun:
     """Result of a single agent run: verdict, summary, and raw output."""
 
-    outcome: Outcome
+    outcome: str
     summary: str
     raw: str = ""
 
@@ -65,6 +66,10 @@ class AgentCatalog(ABC):
     @abstractmethod
     def get(self, name: str) -> AgentSpec:
         """Return the spec for the name, or raise `AgentNotFound`."""
+
+    @abstractmethod
+    def names(self) -> tuple[str, ...]:
+        """Every agent name discoverable without raising."""
 
 
 class AgentNotFound(Exception):

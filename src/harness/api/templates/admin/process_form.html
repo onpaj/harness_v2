@@ -1,0 +1,506 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#f8f8fa" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#141416" media="(prefers-color-scheme: dark)">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <title>harness board — process {{ name }}</title>
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+  {% include "_nav.html" %}
+  {# Display metadata for the known checks. A check the port doesn't list (a
+     runtime-registered one found in a hand-written file) still renders as a
+     generic card, so editing never hides the current value. #}
+  {% set check_meta = {
+    "always": ("Always", "Fires every interval, unconditionally."),
+    "command": ("Shell command", "Runs a command; every non-empty output line becomes a task."),
+    "disk-threshold": ("Disk threshold", "Fires while a disk is at or above a usage percentage."),
+    "fs-files": ("Files in a folder", "Fires once per file matching a glob pattern."),
+    "github-issues": ("GitHub issues", "Ingests labelled issues across the registered repos."),
+    "github-conflicts": ("GitHub conflicts", "Detects harness PRs with merge conflicts."),
+  } %}
+  {% set all_checks = check_names if (not check or check in check_names) else [check] + check_names %}
+  <main class="page page--editor">
+    <a class="hint" href="/admin/processes">&larr; back to processes</a>
+    <div class="page-header">
+      {% if is_new %}<h1>New process</h1>{% else %}<h1>Process: {{ name }}</h1>{% endif %}
+    </div>
+
+    {% if saved %}
+    <div class="banner success" role="status">saved — picked up on the next run, no restart</div>
+    {% endif %}
+    {% if errors._ %}
+    <div class="banner error" role="alert">{{ errors._ }}</div>
+    {% endif %}
+
+    <form id="process-form" method="post"
+          action="{{ '/admin/processes' if is_new else '/admin/processes/' + name }}">
+
+      <p class="summary-bar" id="live-summary" hidden aria-live="polite"></p>
+
+      {% if is_new %}
+      <section class="form-section {{ 'error' if errors.name }}">
+        <header class="form-section__head">
+          <h2><span class="form-section__num">1</span> Name</h2>
+          <p class="hint">Becomes the file <code>processes/&lt;name&gt;.json</code>.</p>
+        </header>
+        <div class="field {{ 'error' if errors.name }}">
+          <label for="name">Process name</label>
+          <input type="text" id="name" name="name" value="{{ name }}"
+                 placeholder="e.g. nightly-cleanup" autofocus autocomplete="off"
+                 autocapitalize="none" spellcheck="false">
+          {% if errors.name %}<div class="field-error">{{ errors.name }}</div>{% endif %}
+        </div>
+      </section>
+      {% endif %}
+
+      <section class="form-section {{ 'error' if errors.interval or errors.cron or errors.trigger }}">
+        <header class="form-section__head">
+          <h2><span class="form-section__num">{{ 2 if is_new else 1 }}</span> Schedule</h2>
+          <p class="hint">How often the check runs.</p>
+        </header>
+        {% if errors.trigger %}<div class="field-error">{{ errors.trigger }}</div>{% endif %}
+        <div class="seg" role="radiogroup" aria-label="Cadence">
+          <label class="seg__option">
+            <input type="radio" name="cadence" value="interval"
+                   {{ 'checked' if cadence != 'cron' }}>
+            <span>Interval</span>
+          </label>
+          <label class="seg__option">
+            <input type="radio" name="cadence" value="cron"
+                   {{ 'checked' if cadence == 'cron' }}>
+            <span>Cron</span>
+          </label>
+        </div>
+
+        <div id="cadence-interval">
+          <div class="chip-row" id="interval-chips" role="group" aria-label="Common intervals">
+            {% for preset in ["5m", "15m", "30m", "1h", "6h", "24h"] %}
+            <button type="button" class="chip" data-value="{{ preset }}">{{ preset }}</button>
+            {% endfor %}
+          </div>
+          <div class="field {{ 'error' if errors.interval }}">
+            <label for="interval">Interval</label>
+            <input type="text" id="interval" name="interval" value="{{ interval }}"
+                   placeholder="e.g. 30m or 1h" autocomplete="off" autocapitalize="none"
+                   spellcheck="false">
+            <div class="hint">A number with a unit: <code>s</code> seconds, <code>m</code> minutes, <code>h</code> hours.</div>
+            {% if errors.interval %}<div class="field-error">{{ errors.interval }}</div>{% endif %}
+          </div>
+        </div>
+
+        <div id="cadence-cron">
+          <div class="field {{ 'error' if errors.cron }}">
+            <label for="cron">Cron expression</label>
+            <input type="text" id="cron" name="cron" value="{{ cron }}"
+                   placeholder="e.g. 0 6 * * 1" autocomplete="off" autocapitalize="none"
+                   spellcheck="false">
+            <div class="hint">
+              <code>minute hour day-of-month month day-of-week</code>, evaluated in
+              <strong>UTC</strong>. e.g. <code>0 6 * * 1</code> = every Monday at 06:00 UTC —
+              not 06:00 local time; a per-trigger timezone isn't built yet.
+            </div>
+            {% if errors.cron %}<div class="field-error">{{ errors.cron }}</div>{% endif %}
+          </div>
+        </div>
+      </section>
+
+      <section class="form-section {{ 'error' if errors.check or errors.params }}">
+        <header class="form-section__head">
+          <h2><span class="form-section__num">{{ 3 if is_new else 2 }}</span> Action</h2>
+          <p class="hint">What the process checks each time it runs.</p>
+        </header>
+        <div class="option-cards" role="radiogroup" aria-label="Check">
+          {% for option in all_checks %}
+          {% set meta = check_meta.get(option, (option, "Custom check — configure its settings below.")) %}
+          <label class="option-card">
+            <input type="radio" name="check" value="{{ option }}"
+                   {{ 'checked' if option == check or (not check and loop.first) }}>
+            <span class="option-card__title">{{ meta[0] }}</span>
+            <span class="option-card__desc">{{ meta[1] }}</span>
+            <span class="option-card__kind">{{ option }}</span>
+          </label>
+          {% endfor %}
+        </div>
+        {% if errors.check %}<div class="field-error">{{ errors.check }}</div>{% endif %}
+
+        <div id="param-fields" class="param-fields" hidden></div>
+
+        <details id="raw-params" class="raw-params {{ 'error' if errors.params }}"
+                 {{ 'open' if errors.params }}>
+          <summary>Settings as raw JSON</summary>
+          <div class="field {{ 'error' if errors.params }}">
+            <textarea id="params" name="params" rows="5" class="editor"
+                      placeholder='{ }' spellcheck="false">{{ params }}</textarea>
+            {% if errors.params %}<div class="field-error">{{ errors.params }}</div>{% endif %}
+          </div>
+        </details>
+      </section>
+
+      <section class="form-section {{ 'error' if errors.target }}">
+        <header class="form-section__head">
+          <h2><span class="form-section__num">{{ 4 if is_new else 3 }}</span> Target</h2>
+          <p class="hint">Every result becomes a task placed here — the dispatcher does the routing.</p>
+        </header>
+        <div class="seg" role="radiogroup" aria-label="Target kind">
+          <label class="seg__option">
+            <input type="radio" name="target_kind" value="workflow"
+                   {{ 'checked' if target_kind == 'workflow' }}>
+            <span>Workflow</span>
+          </label>
+          <label class="seg__option">
+            <input type="radio" name="target_kind" value="step"
+                   {{ 'checked' if target_kind == 'step' }}>
+            <span>Single step</span>
+          </label>
+        </div>
+        <div class="field {{ 'error' if errors.target }}">
+          <label for="target" id="target-label">{{ 'Workflow' if target_kind != 'step' else 'Step' }}</label>
+          <input type="text" id="target" name="target" value="{{ target }}"
+                 list="{{ 'step-options' if target_kind == 'step' else 'workflow-options' }}"
+                 placeholder="start typing for suggestions" autocomplete="off"
+                 autocapitalize="none" spellcheck="false">
+          <datalist id="workflow-options">
+            {% for option in workflow_options %}<option value="{{ option }}"></option>{% endfor %}
+          </datalist>
+          <datalist id="step-options">
+            {% for option in step_options %}<option value="{{ option }}"></option>{% endfor %}
+          </datalist>
+          <div class="hint" id="target-hint">
+            {% if target_kind == 'step' %}Tasks are dropped straight into this step's queue.{% else %}Tasks start at the workflow's first step and follow its transitions.{% endif %}
+          </div>
+          {% if errors.target %}<div class="field-error">{{ errors.target }}</div>{% endif %}
+        </div>
+      </section>
+
+      <section class="form-section {{ 'error' if errors.dedup or errors.sink }}">
+        <header class="form-section__head">
+          <h2><span class="form-section__num">{{ 5 if is_new else 4 }}</span> Options</h2>
+        </header>
+
+        <div class="field {{ 'error' if errors.dedup }}">
+          <label>When are duplicate tasks avoided?</label>
+          <div class="option-cards option-cards--two" role="radiogroup" aria-label="Dedup">
+            <label class="option-card">
+              <input type="radio" name="dedup" value="per-interval"
+                     {{ 'checked' if dedup != 'per-state' }}>
+              <span class="option-card__title">Once per interval</span>
+              <span class="option-card__desc">At most one firing per period, even across restarts.</span>
+              <span class="option-card__kind">per-interval</span>
+            </label>
+            <label class="option-card">
+              <input type="radio" name="dedup" value="per-state"
+                     {{ 'checked' if dedup == 'per-state' }}>
+              <span class="option-card__title">Once per result</span>
+              <span class="option-card__desc">Each distinct result (a file, a PR, a line) fires only once.</span>
+              <span class="option-card__kind">per-state</span>
+            </label>
+          </div>
+          {% if errors.dedup %}<div class="field-error">{{ errors.dedup }}</div>{% endif %}
+        </div>
+
+        <div class="field {{ 'error' if errors.sink }}">
+          <label>Progress notifications</label>
+          <div class="option-cards option-cards--two" role="radiogroup" aria-label="Sink">
+            {% for option in sink_kinds %}
+            <label class="option-card">
+              <input type="radio" name="sink_kind" value="{{ option }}"
+                     {{ 'checked' if option == sink_kind }}>
+              {% if option == 'none' %}
+              <span class="option-card__title">Quiet</span>
+              <span class="option-card__desc">Tasks just appear on the board.</span>
+              {% elif option == 'slack' %}
+              <span class="option-card__title">Slack</span>
+              <span class="option-card__desc">Posts progress to the webhook in <code>SLACK_WEBHOOK_URL</code>.</span>
+              {% elif option == 'github' %}
+              <span class="option-card__title">GitHub labels</span>
+              <span class="option-card__desc">Reflects to the task's origin issue. No-op unless the action populates a GitHub source (e.g. github-issues).</span>
+              {% else %}
+              <span class="option-card__title">{{ option }}</span>
+              <span class="option-card__desc">Reflects progress to this destination.</span>
+              {% endif %}
+              <span class="option-card__kind">{{ option }}</span>
+            </label>
+            {% endfor %}
+          </div>
+          {% if errors.sink %}<div class="field-error">{{ errors.sink }}</div>{% endif %}
+        </div>
+      </section>
+
+      <div class="form-actions">
+        <button class="btn primary btn--wide" type="submit">
+          {{ 'Create process' if is_new else 'Save changes' }}
+        </button>
+      </div>
+    </form>
+
+    {% if not is_new %}
+    <section class="danger-zone">
+      <div class="danger-zone__text">
+        <strong>Delete this process</strong>
+        <span class="hint">Stops future runs; already-created tasks stay on the board.</span>
+      </div>
+      <form method="post" action="/admin/processes/{{ name }}/delete"
+            onsubmit="return confirm('Delete process {{ name }}?');">
+        <button class="btn danger" type="submit">Delete</button>
+      </form>
+    </section>
+    {% endif %}
+  </main>
+
+  <script>
+    (function () {
+      "use strict";
+      var form = document.getElementById('process-form');
+
+      /* Structured settings per known check. `key` is the params JSON key;
+       * `type: 'number'` values are written as JSON numbers. An unknown check
+       * falls back to the raw-JSON editor only. */
+      var PARAM_SPECS = {
+        "always": [],
+        "command": [
+          { key: "command", label: "Command", type: "text", required: true,
+            placeholder: "e.g. find /drop -name '*.job'",
+            hint: "Runs in a shell; each non-empty stdout line becomes one task." },
+          { key: "timeout", label: "Timeout (seconds)", type: "number", placeholder: "30" }
+        ],
+        "disk-threshold": [
+          { key: "path", label: "Path to watch", type: "text", required: true, placeholder: "/" },
+          { key: "percent", label: "Fire at usage (%)", type: "number", required: true, placeholder: "90" }
+        ],
+        "fs-files": [
+          { key: "path", label: "Directory", type: "text", required: true, placeholder: "/var/drop" },
+          { key: "pattern", label: "Glob pattern", type: "text", placeholder: "*" }
+        ],
+        "github-issues": [
+          { key: "label", label: "Issue label", type: "text", placeholder: "harness:todo",
+            hint: "Issues carrying this label are claimed and become tasks." }
+        ],
+        "github-conflicts": [
+          { key: "head_prefix", label: "Branch prefix", type: "text", placeholder: "harness/",
+            hint: "Only PRs whose head branch starts with this prefix are watched." }
+        ]
+      };
+
+      function esc(text) {
+        var div = document.createElement('div');
+        div.textContent = text;
+        return div.innerHTML;
+      }
+
+      /* --- Schedule: cadence toggle (interval <-> cron) --------------------- */
+      var cadenceInterval = document.getElementById('cadence-interval');
+      var cadenceCron = document.getElementById('cadence-cron');
+      function currentCadence() {
+        var checked = form.querySelector('input[name="cadence"]:checked');
+        return checked ? checked.value : 'interval';
+      }
+      function syncCadence() {
+        var cron = currentCadence() === 'cron';
+        cadenceInterval.hidden = cron;
+        cadenceCron.hidden = !cron;
+      }
+      Array.prototype.forEach.call(
+        form.querySelectorAll('input[name="cadence"]'),
+        function (radio) {
+          radio.addEventListener('change', function () {
+            syncCadence();
+            updateSummary();
+          });
+        });
+
+      /* --- Schedule: preset chips <-> the interval input ------------------- */
+      var interval = document.getElementById('interval');
+      var cron = document.getElementById('cron');
+      var chips = Array.prototype.slice.call(
+        document.querySelectorAll('#interval-chips .chip'));
+      function syncChips() {
+        chips.forEach(function (chip) {
+          chip.classList.toggle('active', chip.dataset.value === interval.value.trim());
+        });
+      }
+      chips.forEach(function (chip) {
+        chip.addEventListener('click', function () {
+          interval.value = chip.dataset.value;
+          syncChips();
+          updateSummary();
+        });
+      });
+      interval.addEventListener('input', function () { syncChips(); updateSummary(); });
+      cron.addEventListener('input', updateSummary);
+      syncChips();
+
+      /* --- Action: structured fields <-> the raw params JSON --------------- */
+      var paramsBox = document.getElementById('params');
+      var holder = document.getElementById('param-fields');
+      var rawDetails = document.getElementById('raw-params');
+
+      function currentCheck() {
+        var checked = form.querySelector('input[name="check"]:checked');
+        return checked ? checked.value : '';
+      }
+      function readParams() {
+        var text = paramsBox.value.trim();
+        if (!text) return {};
+        try { return JSON.parse(text); } catch (error) { return null; }
+      }
+      function writeParams(params) {
+        paramsBox.value = Object.keys(params).length
+          ? JSON.stringify(params, null, 2) : '';
+      }
+
+      /* On a check switch, drop keys that belong only to *other* known checks
+       * — otherwise the previous check's settings linger in the JSON. Keys the
+       * current spec claims (or custom keys from a hand-written file) stay. */
+      function pruneForeignParams() {
+        var params = readParams();
+        var spec = PARAM_SPECS[currentCheck()];
+        if (!params || !spec) return;
+        var mine = {};
+        spec.forEach(function (field) { mine[field.key] = true; });
+        var changed = false;
+        Object.keys(PARAM_SPECS).forEach(function (name) {
+          if (name === currentCheck()) return;
+          PARAM_SPECS[name].forEach(function (field) {
+            if (!mine[field.key] && field.key in params) {
+              delete params[field.key];
+              changed = true;
+            }
+          });
+        });
+        if (changed) writeParams(params);
+      }
+
+      function collectParams() {
+        var spec = PARAM_SPECS[currentCheck()] || [];
+        var params = readParams() || {};
+        spec.forEach(function (field) {
+          var input = holder.querySelector('[data-key="' + field.key + '"]');
+          if (!input) return;
+          var value = input.value.trim();
+          if (!value) { delete params[field.key]; return; }
+          params[field.key] = (field.type === 'number' && !isNaN(Number(value)))
+            ? Number(value) : value;
+        });
+        writeParams(params);
+        updateSummary();
+      }
+
+      function renderParamFields() {
+        var check = currentCheck();
+        var spec = PARAM_SPECS[check];
+        holder.innerHTML = '';
+        if (!spec) {
+          /* Unknown check: the raw JSON editor is the only surface. */
+          holder.hidden = true;
+          rawDetails.open = true;
+          return;
+        }
+        if (!spec.length) {
+          holder.hidden = false;
+          holder.innerHTML = '<p class="hint">No settings needed for this check.</p>';
+          return;
+        }
+        var params = readParams() || {};
+        spec.forEach(function (field) {
+          var wrap = document.createElement('div');
+          wrap.className = 'field';
+          var value = params[field.key];
+          wrap.innerHTML =
+            '<label>' + esc(field.label) + (field.required ? ' *' : '') + '</label>' +
+            '<input type="' + (field.type === 'number' ? 'number' : 'text') + '"' +
+            ' data-key="' + esc(field.key) + '"' +
+            (field.type === 'number' ? ' step="any" inputmode="decimal"' : '') +
+            ' placeholder="' + esc(field.placeholder || '') + '"' +
+            ' autocomplete="off" autocapitalize="none" spellcheck="false">' +
+            (field.hint ? '<div class="hint">' + esc(field.hint) + '</div>' : '');
+          var input = wrap.querySelector('input');
+          input.value = value === undefined || value === null ? '' : String(value);
+          input.addEventListener('input', collectParams);
+          holder.appendChild(wrap);
+        });
+        holder.hidden = false;
+      }
+
+      Array.prototype.forEach.call(
+        form.querySelectorAll('input[name="check"]'),
+        function (radio) {
+          radio.addEventListener('change', function () {
+            pruneForeignParams();
+            renderParamFields();
+            updateSummary();
+          });
+        });
+      paramsBox.addEventListener('change', function () {
+        if (readParams() !== null) renderParamFields();
+        updateSummary();
+      });
+
+      /* --- Target: the kind toggle filters the suggestion list ------------- */
+      var target = document.getElementById('target');
+      var targetLabel = document.getElementById('target-label');
+      var targetHint = document.getElementById('target-hint');
+      function currentKind() {
+        var checked = form.querySelector('input[name="target_kind"]:checked');
+        return checked ? checked.value : 'workflow';
+      }
+      function syncTargetKind() {
+        var step = currentKind() === 'step';
+        target.setAttribute('list', step ? 'step-options' : 'workflow-options');
+        targetLabel.textContent = step ? 'Step' : 'Workflow';
+        targetHint.textContent = step
+          ? "Tasks are dropped straight into this step's queue."
+          : "Tasks start at the workflow's first step and follow its transitions.";
+      }
+      Array.prototype.forEach.call(
+        form.querySelectorAll('input[name="target_kind"]'),
+        function (radio) {
+          radio.addEventListener('change', function () {
+            syncTargetKind();
+            updateSummary();
+          });
+        });
+      target.addEventListener('input', updateSummary);
+
+      /* --- Live summary ----------------------------------------------------- */
+      var summary = document.getElementById('live-summary');
+      function checkedValue(name) {
+        var checked = form.querySelector('input[name="' + name + '"]:checked');
+        return checked ? checked.value : '';
+      }
+      function updateSummary() {
+        var check = currentCheck() || '…';
+        var kind = currentKind();
+        var where = target.value.trim() || '…';
+        var schedule = currentCadence() === 'cron'
+          ? 'Every <strong>' + esc(cron.value.trim() || '…') + '</strong> (UTC)'
+          : 'Every <strong>' + esc(interval.value.trim() || '…') + '</strong>';
+        var text = schedule + ', run <strong>' +
+          esc(check) + '</strong> — each result becomes a task in ' +
+          esc(kind) + ' <strong>' + esc(where) + '</strong>';
+        if (checkedValue('dedup') === 'per-state') text += ', once per distinct result';
+        var sink = checkedValue('sink_kind');
+        if (sink && sink !== 'none') text += ', reporting to <strong>' + esc(sink) + '</strong>';
+        summary.innerHTML = text + '.';
+        summary.hidden = false;
+      }
+      Array.prototype.forEach.call(
+        form.querySelectorAll('input[name="dedup"], input[name="sink_kind"]'),
+        function (radio) { radio.addEventListener('change', updateSummary); });
+
+      renderParamFields();
+      syncTargetKind();
+      syncCadence();
+      updateSummary();
+
+      /* Bring the first server-reported error into view. */
+      var firstError = document.querySelector('.field.error input, .field.error textarea');
+      if (firstError) firstError.focus();
+    })();
+  </script>
+</body>
+</html>
