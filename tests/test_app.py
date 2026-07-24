@@ -1051,6 +1051,22 @@ def test_build_exposes_the_effective_process_check_registry(tmp_path):
     assert "failed-tasks" in harness.process_checks
 
 
+def test_build_wires_failed_tasks_as_a_defined_action_with_a_spec(tmp_path):
+    """`failed-tasks` is wired as a full action definition, not a bare lambda:
+    it carries a declarative `CheckSpec` (label, no params), so the process
+    form renders it like any other action instead of falling back to raw JSON."""
+    from harness.ports.triggers import check_spec_of
+
+    seed_definition(tmp_path, DEFINITION)
+
+    harness = build(tmp_path, "default", events=MemoryEventSink())
+
+    spec = check_spec_of("failed-tasks", harness.process_checks["failed-tasks"])
+    assert spec.name == "failed-tasks"
+    assert spec.label == "Failed tasks"
+    assert spec.params == ()
+
+
 def test_build_unknown_check_still_fails_fast(tmp_path):
     from harness.drivers.fs_processes import ProcessValidationError
 

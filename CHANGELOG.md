@@ -1,6 +1,33 @@
 # CHANGELOG
 
 
+## v0.20.0 (2026-07-24)
+
+### Features
+
+- **admin**: Actions declare their parameters as data, consolidating failed-tasks
+  ([#118](https://github.com/onpaj/harness_v2/pull/118),
+  [`d9a007a`](https://github.com/onpaj/harness_v2/commit/d9a007a2f2f066bfac03cb45c9134aae9673a6b7))
+
+
+## v0.19.0 (2026-07-24)
+
+### Features
+
+- **admin**: Actions declare their parameters as data, consolidating failed-tasks
+  ([#117](https://github.com/onpaj/harness_v2/pull/117),
+  [`20a7ad6`](https://github.com/onpaj/harness_v2/commit/20a7ad61ff1188766fe21dec1bcc04fd69969a06))
+
+
+## v0.18.1 (2026-07-24)
+
+### Bug Fixes
+
+- **board**: Actually render times in the client's local timezone
+  ([#116](https://github.com/onpaj/harness_v2/pull/116),
+  [`8b1b889`](https://github.com/onpaj/harness_v2/commit/8b1b88971331fe6ed0baa3cf461ecf4c04c05fb4))
+
+
 ## v0.18.0 (2026-07-24)
 
 ### Features

@@ -26,6 +26,7 @@ from harness.drivers.memory import (
     MemoryWorkspace,
 )
 from harness.drivers.checks import BUILTIN_CHECKS
+from harness.drivers.failed_tasks_check import SPEC as FAILED_TASKS_SPEC
 from harness.drivers.failed_tasks_check import FailedTasksCheck
 from harness.drivers.fs_processes import FilesystemProcessRepository
 from harness.drivers.projection_events import ProjectionSink
@@ -45,7 +46,7 @@ from harness.ports.logs import StageOutputView
 from harness.ports.merge import MergeChecker
 from harness.ports.queue import TaskQueue
 from harness.ports.source import TaskSource
-from harness.ports.triggers import CheckFactory
+from harness.ports.triggers import CheckDefinition, CheckFactory
 from harness.ports.workflows import WorkflowNotFound
 from harness.ports.workspace import Workspace
 from harness.projection import BoardProjection
@@ -626,12 +627,22 @@ def build(
     checks: dict[str, CheckFactory] = {
         **BUILTIN_CHECKS,
         **(extra_checks or {}),
-        "failed-tasks": lambda params: FailedTasksCheck(
-            failed=failed,
-            healed=healed_queue,
-            events=events,
-            clock=clock,
-            repository=params.get("repository"),
+        # A `CheckDefinition`, not a bare lambda: it carries `failed-tasks`'
+        # declarative spec (no user-facing parameters) alongside the factory, so
+        # the process form treats it as a fully-defined action rather than an
+        # unknown one. `repository` is still accepted at call time — it isn't a
+        # form field; it's the `--heal-repo`/`HARNESS_HEAL_REPO` value the
+        # autoheal process wiring stamps into `action.params` directly
+        # (invariant #25/#39), never entered by an operator through the UI.
+        "failed-tasks": CheckDefinition(
+            spec=FAILED_TASKS_SPEC,
+            factory=lambda params: FailedTasksCheck(
+                failed=failed,
+                healed=healed_queue,
+                events=events,
+                clock=clock,
+                repository=params.get("repository"),
+            ),
         ),
     }
     # `known_targets` must include served *workflow* names too, not just step

@@ -61,7 +61,14 @@ from harness.ports.process_admin import (
     ProcessFields,
     ProcessNotFound,
 )
-from harness.ports.triggers import CheckFactory, CronSchedule, parse_cron, parse_interval
+from harness.ports.triggers import (
+    CheckFactory,
+    CheckSpec,
+    CronSchedule,
+    check_spec_of,
+    parse_cron,
+    parse_interval,
+)
 
 _ACCEPTED_SINK_KINDS = {"none", "slack", "github"}
 """The accepted sink kinds. A new destination adds a kind here plus a driver.
@@ -451,6 +458,14 @@ class FilesystemProcessAdmin(ProcessAdmin):
 
     def check_names(self) -> tuple[str, ...]:
         return tuple(sorted(self._checks))
+
+    def check_specs(self) -> tuple[CheckSpec, ...]:
+        # `check_spec_of` reads the spec a `CheckDefinition` carries, or
+        # synthesizes a generic one for a bare factory — so every registered
+        # action surfaces to the form, whether or not it declared a spec.
+        return tuple(
+            check_spec_of(name, self._checks[name]) for name in sorted(self._checks)
+        )
 
     def sink_kinds(self) -> tuple[str, ...]:
         return tuple(sorted(_ACCEPTED_SINK_KINDS))
