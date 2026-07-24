@@ -838,8 +838,11 @@ def _process_check_factories(
     harness's own live `failed`/`healed` queues, not an external client).
     """
     from harness.drivers.fs_processes import ProcessValidationError
+    from harness.drivers.github_conflicts_check import SPEC as GITHUB_CONFLICTS_SPEC
     from harness.drivers.github_conflicts_check import GithubConflictsCheck
+    from harness.drivers.github_issues_check import SPEC as GITHUB_ISSUES_SPEC
     from harness.drivers.github_issues_check import GithubIssuesCheck
+    from harness.ports.triggers import CheckDefinition
 
     if client is None:
         token = os.environ.get("GITHUB_TOKEN")
@@ -875,9 +878,15 @@ def _process_check_factories(
             head_prefix=params.get("head_prefix", "harness/"),
         )
 
+    # Bundle each factory with its declarative spec so the process form renders
+    # these actions' parameters from data, exactly like the built-ins.
     return {
-        "github-issues": github_issues_factory,
-        "github-conflicts": github_conflicts_factory,
+        "github-issues": CheckDefinition(
+            spec=GITHUB_ISSUES_SPEC, factory=github_issues_factory
+        ),
+        "github-conflicts": CheckDefinition(
+            spec=GITHUB_CONFLICTS_SPEC, factory=github_conflicts_factory
+        ),
     }
 
 
@@ -1797,6 +1806,7 @@ def _run(args: argparse.Namespace) -> int:
             request_changes_once_at=args.request_changes_at,
             extra_checks=extra_checks,
             issue_import_factory=issue_import_factory,
+            repository_registry=registry,
         )
     except WorkflowNotFound as error:
         print(f"error: {error}", file=sys.stderr)
@@ -1817,6 +1827,7 @@ def _run(args: argparse.Namespace) -> int:
                 args.source_poll,
                 args.pr_poll,
                 args.reconcile_poll,
+                registry=registry,
             )
         )
     except KeyboardInterrupt:
@@ -1831,6 +1842,7 @@ async def serve(
     source_interval: float = 30.0,
     pr_poll_interval: float = 0.0,
     reconcile_interval: float = 300.0,
+    registry: RepositoryRegistry | None = None,
 ) -> None:
     """The loop and the board in a single event loop."""
     stop = asyncio.Event()
@@ -1869,7 +1881,7 @@ async def serve(
         # the checks this run compiles — a GitHub-backed process is authorable
         # in the dashboard, not only by hand-editing `processes/*.json`.
         process_admin=FilesystemProcessAdmin(
-            harness.layout.processes, checks=harness.process_checks
+            harness.layout.processes, checks=harness.process_checks, registry=registry
         ),
         updater=updater,
         issue_import=harness.issue_import,

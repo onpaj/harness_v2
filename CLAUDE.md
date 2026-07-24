@@ -190,8 +190,16 @@ Dependencies flow strictly downward, no cycles.
   over the file's exact text, plus `WorkflowValidationError`
 - `ports/process_admin.py` — `ProcessAdmin` (write-side counterpart of
   `FilesystemProcessRepository`, for the admin UI): `list`/`read`/`write`/`delete`
-  over the structured `ProcessFields`, plus `check_names()`/`sink_kinds()` so the
-  form's dropdowns are populated through the port (`api/` imports no driver);
+  over the structured `ProcessFields`, plus `check_names()`/`check_specs()`/`sink_kinds()`
+  so the form's dropdowns and per-action parameter fields are populated through
+  the port (`api/` imports no driver). `check_specs()` returns a `CheckSpec` per
+  action (label, description, `ParamSpec` list) — the single declarative
+  definition the UI interprets, so nothing about an action is hardcoded in a
+  template. An action carries its own `CheckSpec` by being registered as a
+  `CheckDefinition` (spec + factory, callable — still a `CheckFactory`), so
+  `failed-tasks`/`github-issues`/`github-conflicts` are as fully-defined as the
+  built-ins; a bare factory with no spec still surfaces via a generic
+  name-only fallback (`check_spec_of`).
   `ProcessNotFound`/`ProcessAdminValidationError` mirror the agent admin's.
   `FilesystemProcessAdmin` takes the *effective* check registry: `build()`
   exposes the merged dict it compiled processes with (built-ins +
@@ -241,7 +249,7 @@ Dependencies flow strictly downward, no cycles.
 - `drivers/github_issue_checker.py` — `GithubIssueChecker`: reads `repo`/`issue` straight off `task.data["source"]` at check time; a deleted issue (404) reads as "not open", one checker serves every repo the token can reach
 - `drivers/github_issues_check.py` — `GithubIssuesCheck(Check)`: the inbound `harness:todo` scan as a process `Check` — lists issues by label across the repo registry, claims each via the label swap (default `todo`→`queued`, both configurable per process as `label`/`claimed_label` — invariant #39), and emits one provenance-stamped `Observation` (`data.source`) per issue. Registered as the `github-issues` action by closing a `GithubClient` + registry into a factory in `cli._process_sources`; `BUILTIN_CHECKS` stays client-free. The inbound half of ADR-0015's action seam (the outbound half is a sink, e.g. `SlackWebhookSink`)
 - `drivers/github_conflicts_check.py` — `GithubConflictsCheck(Check)`: conflict detection as a process `Check`, the resolver's mirror of `GithubIssuesCheck`. Lists harness-authored open PRs across the registry; auto-updates a `behind` PR server-side (a side effect, no task) and emits one `Observation` per `dirty` PR carrying `data.branch`/`data.source.base` for the `resolver` workflow, keyed `slug:pr:head_sha` for per-state dedup. Registered as the `github-conflicts` action in `cli._process_sources`; the check-based replacement for the bespoke `mergeability_watcher` detection
-- `ports/triggers.py` — the `Check` (ABC) protocol (`evaluate() -> list[Observation]`), `Observation` (optional `state_key` + task `data`), `CheckFactory`, `parse_interval` (a duration string → seconds) and `parse_cron`/`CronSchedule` — a stdlib-only 5-field cron parser and occurrence function, the cron twin of `parse_interval`. A trigger's condition is code behind this port; the schedule is data
+- `ports/triggers.py` — the `Check` (ABC) protocol (`evaluate() -> list[Observation]`), `Observation` (optional `state_key` + task `data`), `CheckFactory`, and the declarative action definition (`ParamSpec`/`CheckSpec` — an action's UI-facing metadata + parameter schema, `CheckDefinition` — a callable `spec`+`factory` bundle that IS a `CheckFactory`, and `check_spec_of` — the spec for any registry entry, generic fallback for a bare factory), plus `parse_interval` (a duration string → seconds) and `parse_cron`/`CronSchedule` — a stdlib-only 5-field cron parser and occurrence function, the cron twin of `parse_interval`. A trigger's condition is code behind this port; the schedule and the parameter schema are data
 - `drivers/scheduled_trigger.py` — `ScheduledTrigger(Trigger)`: composes a cadence (an `interval` **or** a `cron`, data) × a `Check` (code) × a `target` (workflow **or** step) behind one occurrence seam serving both cadences. Cadence is a clock-gate on the occurrence identity (the interval bucket, or the cron occurrence timestamp); `dedup_key` is occurrence-keyed (`per-interval`) or state-keyed (`per-state`), never constant, for either cadence. A non-`none` `sink` is stamped into each fired task as `data.sink = {"kind": ...}` — after the observation merge, so a check can't clobber it; still no `data.source` (a trigger reflects nothing outward)
 - `drivers/checks.py` — the built-in `Check`s (`AlwaysCheck`, `DiskThresholdCheck`, `FileGlobCheck` as `fs-files` — one observation per file matching a glob, `CommandCheck` as `command` — one observation per non-empty stdout line of a shell command) and the `BUILTIN_CHECKS` registry mapping a check name → factory; a bespoke condition is a new factory registered by name. `command` is the data-only escape hatch: an operator can author a simple action without Python
 - `drivers/fs_triggers.py` — `FilesystemTriggerRepository`: reads `triggers/*.json` and builds one `ScheduledTrigger` per file, validating fast at load (`TriggerValidationError` on a bad cadence — exactly one of `interval`/`cron` must be present and valid — an unknown `check`, or a `target` naming neither a served workflow nor a known step) — exactly as `FilesystemAgentCatalog` reads `agents/*.json`

@@ -438,6 +438,29 @@ input[type="text"]:focus, textarea:focus {
 
 .actions { margin-top: 20px; display: flex; gap: 10px; }
 
+/* --- Workflow preview -------------------------------------------------------- */
+
+.workflow-preview__notice { margin: 0; }
+.workflow-preview__scroll {
+  overflow-x: auto; border: 1px solid var(--border); border-radius: var(--radius-sm);
+  background: var(--surface-2);
+}
+.workflow-preview__svg { display: block; }
+
+.wf-node rect { fill: var(--surface); stroke: var(--border-strong); stroke-width: 1; }
+.wf-node--start rect { fill: var(--accent-weak); stroke: var(--accent); stroke-width: 2; }
+.wf-node--end rect { fill: var(--surface-2); stroke: var(--border-strong); stroke-width: 1.5; stroke-dasharray: 4 3; }
+.wf-node__label { fill: var(--text); font-size: 13px; font-weight: 500; }
+.wf-node__badge-bg { fill: var(--accent); }
+.wf-node__badge-bg--end { fill: var(--text-3); }
+.wf-node__badge-text { fill: var(--on-accent); font-size: 10px; font-weight: 700; }
+.wf-node__finisher-dot { fill: var(--accent); }
+
+.wf-edge path { fill: none; stroke: var(--text-3); stroke-width: 1.5; }
+.wf-edge__arrowhead { fill: var(--text-3); }
+.wf-edge__label-bg { fill: var(--surface); }
+.wf-edge__label-text { fill: var(--text-2); font-size: 11px; }
+
 /* --- Banners ---------------------------------------------------------------- */
 
 .banner {
