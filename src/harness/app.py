@@ -10,6 +10,7 @@ from pathlib import Path
 from harness.behaviors.agent import ClaudeCliBehavior
 from harness.behaviors.landing import LandingBehavior
 from harness.behaviors.resolve_conflict import ResolveConflictBehavior
+from harness.behaviors.verify import VerifyBehavior
 from harness.consumer import Consumer
 from harness.dispatcher import Dispatcher
 from harness.drivers.composite_events import CompositeEventSink
@@ -22,6 +23,7 @@ from harness.drivers.fs_workflows import (
 )
 from harness.drivers.memory import (
     MemoryArtifactStore,
+    MemoryCommandRunner,
     MemoryForge,
     MemoryWorkspace,
 )
@@ -39,6 +41,7 @@ from harness.ports.agent import AgentCatalog, AgentRunner
 from harness.ports.artifacts import ArtifactStore, ArtifactView
 from harness.ports.behavior import ConsumerBehavior
 from harness.ports.clock import Clock
+from harness.ports.command import CommandRunner
 from harness.ports.events import EventSink
 from harness.ports.forge import Forge
 from harness.ports.issue_import import IssueImport, IssueImportFactory, NullIssueImport
@@ -365,6 +368,7 @@ def build(
     processes_root: Path | None = None,
     issue_import_factory: IssueImportFactory | None = None,
     repository_registry: RepositoryRegistry | None = None,
+    command_runner: CommandRunner | None = None,
 ) -> Harness:
     layout = HarnessLayout(Path(root))
     events = events or StdoutEventSink()
@@ -533,6 +537,12 @@ def build(
         forge=forge,
         copy_artifacts=artifact_view is None,
     )
+    command_runner = command_runner or MemoryCommandRunner()
+    verify = VerifyBehavior(
+        workspace=workspace,
+        registry=repository_registry,
+        runner=command_runner,
+    )
 
     # The finisher registry: kind → factory (ADR-0016/ADR-0018, mirroring the
     # persona catalog of ADR-0007). A factory takes the step name, that
@@ -552,7 +562,10 @@ def build(
     # finishing action is a registry entry, never a branch in behavior_for.
     finisher_registry: dict[
         str, Callable[[str, dict, Callable[[], ConsumerBehavior]], ConsumerBehavior]
-    ] = {"open-pr": lambda step, config, inner: landing}
+    ] = {
+        "open-pr": lambda step, config, inner: landing,
+        "verify": lambda step, config, inner: verify,
+    }
     finisher_registry.update(finishers or {})
 
     # The step → binding map is the union of every served workflow's

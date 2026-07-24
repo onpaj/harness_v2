@@ -42,6 +42,7 @@ from harness.drivers.github_merge_checker import GithubMergeChecker
 from harness.drivers.github_source import GithubLabelReflector, GithubTaskSource
 from harness.drivers.label_issue import LabelIssueBehavior
 from harness.drivers.slack_sink import SlackWebhookSink
+from harness.drivers.subprocess_command import SubprocessCommandRunner
 from harness.drivers.uv_updater import UvUpdater
 from harness.drivers.launchd import (
     DEFAULT_LABEL,
@@ -107,11 +108,14 @@ DEFAULT_DEFINITION = {
         {"from": "plan", "on": "done", "to": "design"},
         {"from": "design", "on": "done", "to": "architecture"},
         {"from": "architecture", "on": "done", "to": "development"},
-        {"from": "development", "on": "done", "to": "review"},
+        {"from": "development", "on": "done", "to": "verify"},
+        {"from": "verify", "on": "done", "to": "review"},
+        {"from": "verify", "on": "request_changes", "to": "development"},
         {"from": "review", "on": "done", "to": "land"},
         {"from": "land", "on": "done", "to": "end"},
         {"from": "review", "on": "request_changes", "to": "development"},
     ],
+    "finishers": {"verify": "verify"},
 }
 
 DEFAULT_RESOLVER_WORKFLOW = "resolver"
@@ -322,6 +326,9 @@ _DEVELOPMENT_PERSONA = (
     "When you're in a revision round (there's a review of the previous attempt "
     "among the artifacts), read it in full along with your previous "
     "implementation and address every point it raises.\n\n"
+    "A revision round may also be triggered by a failed verify run — a "
+    "verify-NN.md artifact with the test command's output. Read it and fix "
+    "the failures it shows.\n"
     "In your output artifact, summarize what was implemented, which files were "
     "created or changed, and how to verify it."
 )
@@ -1807,6 +1814,7 @@ def _run(args: argparse.Namespace) -> int:
             extra_checks=extra_checks,
             issue_import_factory=issue_import_factory,
             repository_registry=registry,
+            command_runner=SubprocessCommandRunner(),
         )
     except WorkflowNotFound as error:
         print(f"error: {error}", file=sys.stderr)

@@ -50,6 +50,10 @@ class Consumer:
         return self._step
 
     @property
+    def behavior(self) -> ConsumerBehavior:
+        return self._behavior
+
+    @property
     def actor(self) -> str:
         return f"consumer:{self._step}"
 
