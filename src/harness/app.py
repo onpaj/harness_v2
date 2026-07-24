@@ -139,6 +139,7 @@ class Harness:
         reconciler: MergeReconciler | None = None,
         issue_reconciler: IssueReconciler | None = None,
         healed: TaskQueue | None = None,
+        process_checks: dict[str, CheckFactory] | None = None,
     ) -> None:
         self.layout = layout
         self.workflows = workflows
@@ -161,6 +162,14 @@ class Harness:
         self.archived = archived
         self.reconciler = reconciler
         self.issue_reconciler = issue_reconciler
+        # The effective action registry this run compiles processes with —
+        # built-ins plus every wiring-time extra (`extra_checks`, the internal
+        # `failed-tasks`). `serve()` hands it to `FilesystemProcessAdmin`, so
+        # the dashboard's process form offers and validates exactly the checks
+        # `build()` itself accepts, never a narrower admin-only subset.
+        self.process_checks = (
+            process_checks if process_checks is not None else dict(BUILTIN_CHECKS)
+        )
 
     def recover(self) -> int:
         # `done` is included because it is the one write-into queue that also
@@ -678,4 +687,5 @@ def build(
         reconciler=reconciler,
         issue_reconciler=issue_reconciler,
         healed=healed_queue,
+        process_checks=checks,
     )

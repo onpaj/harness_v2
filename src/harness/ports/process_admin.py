@@ -87,8 +87,11 @@ class ProcessAdmin(ABC):
     @abstractmethod
     def check_names(self) -> tuple[str, ...]:
         """The action (`Check`) kinds the form offers as options, sorted. The
-        driver returns the built-in registry's names; `api/` reads them through
-        this port so the UI never imports a driver (invariant #5)."""
+        driver returns the names of the registry it was wired with — the same
+        effective registry the runtime compiles processes against (built-ins
+        plus wiring-time extras like the GitHub-backed actions), so the form
+        never offers less than a hand-edited file may name; `api/` reads them
+        through this port so the UI never imports a driver (invariant #5)."""
 
     @abstractmethod
     def sink_kinds(self) -> tuple[str, ...]:

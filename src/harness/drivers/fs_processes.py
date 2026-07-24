@@ -377,11 +377,21 @@ class FilesystemProcessAdmin(ProcessAdmin):
     `write` validates a submission with the *same* `compile_process` the
     repository runs at startup, so nothing is written unless it would compile;
     a `ProcessValidationError` (with its `field`) becomes a
-    `ProcessAdminValidationError({field: message})`."""
+    `ProcessAdminValidationError({field: message})`.
 
-    def __init__(self, root: Path) -> None:
+    `checks` is the same name → factory registry the runtime compiles processes
+    with — wiring passes the *extended* registry (built-ins plus the
+    GitHub-backed actions closed over a client in `cli._process_checks`), so
+    the form's dropdown and save-time validation see exactly the checks a
+    `harness run` would accept. `None` falls back to `BUILTIN_CHECKS`, the
+    client-free subset."""
+
+    def __init__(
+        self, root: Path, *, checks: dict[str, CheckFactory] | None = None
+    ) -> None:
         self._root = Path(root)
         self._root.mkdir(parents=True, exist_ok=True)
+        self._checks = checks if checks is not None else BUILTIN_CHECKS
 
     def list(self) -> tuple[str, ...]:
         return tuple(
@@ -419,7 +429,9 @@ class FilesystemProcessAdmin(ProcessAdmin):
 
         raw = _raw_from_fields(fields)
         try:
-            compile_process(name, raw, clock=_LocalClock(), known_targets=None)
+            compile_process(
+                name, raw, clock=_LocalClock(), checks=self._checks, known_targets=None
+            )
         except ProcessValidationError as error:
             raise ProcessAdminValidationError({error.field or "_": str(error)}) from None
 
@@ -438,7 +450,7 @@ class FilesystemProcessAdmin(ProcessAdmin):
         return True
 
     def check_names(self) -> tuple[str, ...]:
-        return tuple(sorted(BUILTIN_CHECKS))
+        return tuple(sorted(self._checks))
 
     def sink_kinds(self) -> tuple[str, ...]:
         return tuple(sorted(_ACCEPTED_SINK_KINDS))
