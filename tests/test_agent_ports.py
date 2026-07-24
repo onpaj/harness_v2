@@ -1,7 +1,7 @@
 import pytest
 
 from harness.drivers.memory import FakeAgentRunner, MemoryAgentCatalog
-from harness.models import Outcome, Task
+from harness.models import DONE, REQUEST_CHANGES, Task
 from harness.ports.agent import AgentNotFound, AgentRun, AgentSpec
 
 
@@ -22,7 +22,7 @@ def test_agent_spec_holds_fields_and_defaults():
     assert spec.model is None
     assert spec.fallback_model is None
     assert spec.allowed_tools == ()
-    assert spec.allowed_outcomes == (Outcome.DONE,)
+    assert spec.allowed_outcomes == (DONE,)
     assert spec.timeout is None
 
 
@@ -33,14 +33,14 @@ def test_agent_spec_accepts_overrides():
         model="opus",
         fallback_model="sonnet",
         allowed_tools=("Read", "Edit"),
-        allowed_outcomes=(Outcome.DONE, Outcome.REQUEST_CHANGES),
+        allowed_outcomes=(DONE, REQUEST_CHANGES),
         timeout=120.0,
     )
 
     assert spec.model == "opus"
     assert spec.fallback_model == "sonnet"
     assert spec.allowed_tools == ("Read", "Edit")
-    assert spec.allowed_outcomes == (Outcome.DONE, Outcome.REQUEST_CHANGES)
+    assert spec.allowed_outcomes == (DONE, REQUEST_CHANGES)
     assert spec.timeout == 120.0
 
 
@@ -68,7 +68,7 @@ def test_memory_catalog_names_lists_every_spec():
 
 async def test_fake_runner_returns_scripted_run_and_records_call(tmp_path):
     spec = AgentSpec(name="planner", prompt="p")
-    scripted = AgentRun(Outcome.DONE, "done", raw="{}")
+    scripted = AgentRun(DONE, "done", raw="{}")
     runner = FakeAgentRunner(runs={"planner": scripted})
 
     result = await runner.run(
@@ -86,7 +86,7 @@ async def test_fake_runner_returns_scripted_run_and_records_call(tmp_path):
 
 async def test_fake_runner_default_when_no_script(tmp_path):
     spec = AgentSpec(name="planner", prompt="p")
-    default = AgentRun(Outcome.REQUEST_CHANGES, "default run")
+    default = AgentRun(REQUEST_CHANGES, "default run")
     runner = FakeAgentRunner(default=default)
 
     result = await runner.run(prompt="x", spec=spec, cwd=tmp_path, timeout=1.0)
@@ -100,7 +100,7 @@ async def test_fake_runner_fallback_when_nothing_configured(tmp_path):
 
     result = await runner.run(prompt="x", spec=spec, cwd=tmp_path, timeout=1.0)
 
-    assert result.outcome is Outcome.DONE
+    assert result.outcome == DONE
     assert "planner" in result.summary
 
 

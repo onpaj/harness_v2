@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
-from enum import Enum
 from typing import Any, Union
 
 END = "end"
@@ -26,12 +25,15 @@ ARCHIVED = "archived"
 `done/` into `archived/`. Purely informational — nothing routes on it, since an
 archived task is never reintroduced to the inbox."""
 
+DONE = "done"
+"""The outcome a step reports when its work is finished. Survives from the
+former closed `Outcome` enum as a plain string constant — the outcome type
+itself is now an open, validated string (any non-empty value), not a fixed
+pair; `DONE`/`REQUEST_CHANGES` are just the two names every behavior already
+used, kept so call sites refer to them by name rather than by literal."""
 
-class Outcome(str, Enum):
-    """The only values a ConsumerBehavior may return."""
-
-    DONE = "done"
-    REQUEST_CHANGES = "request_changes"
+REQUEST_CHANGES = "request_changes"
+"""The outcome a review-like step reports to send work back for another pass."""
 
 
 @dataclass(frozen=True)
@@ -46,7 +48,7 @@ class BehaviorResult:
     not for reaching into unrelated keys.
     """
 
-    outcome: Outcome
+    outcome: str
     summary: str = ""
     data: dict[str, Any] | None = None
     """Extra fields the consumer merges into task.data on delivery. None (the
@@ -161,6 +163,9 @@ class Transition:
     from_step: str
     on: str
     to_step: str
+    # Prompt-only descriptive text for this edge. Never read by route() — the
+    # router stays a pure function over (status, lastOutcome) (invariant #4).
+    hint: str = ""
 
 
 @dataclass(frozen=True)
@@ -170,6 +175,7 @@ class Workflow:
     transitions: tuple[Transition, ...]
     max_parallel: dict[str, int] = field(default_factory=dict)
     finishers: dict[str, str] = field(default_factory=dict)
+    descriptions: dict[str, str] = field(default_factory=dict)
 
     def target(self, status: str, outcome: str) -> str | None:
         """Target of the matching edge, or None when none matches."""
@@ -196,6 +202,24 @@ class Workflow:
     def finisher_for(self, step: str) -> str | None:
         """The finisher kind bound to a step, or None when the step has none."""
         return self.finishers.get(step)
+
+    def outcomes_for(self, step: str) -> tuple[str, ...]:
+        """Unique outcomes of edges leaving `step`, in definition order.
+
+        This is the live, authoritative outcome vocabulary for a step — derived
+        from the graph itself rather than frozen once at `harness agent init`
+        time. Promoted from the former `cli._allowed_outcomes_for` free
+        function; same logic, now the one home for this derivation.
+        """
+        seen: list[str] = []
+        for transition in self.transitions:
+            if transition.from_step == step and transition.on not in seen:
+                seen.append(transition.on)
+        return tuple(seen)
+
+    def description_for(self, step: str) -> str | None:
+        """Free-text description of a step, or None when the step has none."""
+        return self.descriptions.get(step)
 
 
 @dataclass(frozen=True)

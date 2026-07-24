@@ -2,7 +2,7 @@ from dataclasses import replace
 
 from harness.drivers.dummy_behavior import DummyBehavior
 from harness.drivers.memory import FakeClock, MemoryArtifactStore, MemoryWorkspace
-from harness.models import Outcome, Task
+from harness.models import DONE, REQUEST_CHANGES, Task
 
 
 def make_task(status: str, task_id: str = "tsk_1") -> Task:
@@ -35,7 +35,7 @@ async def test_returns_done_and_waits():
 
     result = await behavior.run(make_task("design"))
 
-    assert result.outcome is Outcome.DONE
+    assert result.outcome == DONE
     assert result.summary
     assert clock.slept == [5.0]
 
@@ -62,9 +62,9 @@ async def test_configured_step_asks_for_changes_only_once():
     behavior, _, _ = build(delay=0.0, request_changes_once_at="review")
     task = make_task("review")
 
-    assert (await behavior.run(task)).outcome is Outcome.REQUEST_CHANGES
-    assert (await behavior.run(task)).outcome is Outcome.DONE
-    assert (await behavior.run(task)).outcome is Outcome.DONE
+    assert (await behavior.run(task)).outcome == REQUEST_CHANGES
+    assert (await behavior.run(task)).outcome == DONE
+    assert (await behavior.run(task)).outcome == DONE
 
 
 async def test_loop_produces_second_attempt():
@@ -82,7 +82,7 @@ async def test_loop_produces_second_attempt():
 async def test_other_steps_are_unaffected():
     behavior, _, _ = build(delay=0.0, request_changes_once_at="review")
 
-    assert (await behavior.run(make_task("design"))).outcome is Outcome.DONE
+    assert (await behavior.run(make_task("design"))).outcome == DONE
 
 
 async def test_request_changes_is_per_task():
@@ -90,9 +90,9 @@ async def test_request_changes_is_per_task():
     first = make_task("review")
     second = replace(first, id="tsk_2")
 
-    assert (await behavior.run(first)).outcome is Outcome.REQUEST_CHANGES
-    assert (await behavior.run(second)).outcome is Outcome.REQUEST_CHANGES
-    assert (await behavior.run(first)).outcome is Outcome.DONE
+    assert (await behavior.run(first)).outcome == REQUEST_CHANGES
+    assert (await behavior.run(second)).outcome == REQUEST_CHANGES
+    assert (await behavior.run(first)).outcome == DONE
 
 
 async def test_dummy_writes_into_the_versioned_artifacts_dir():

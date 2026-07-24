@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from harness.artifacts_layout import next_attempt
 from harness.behaviors.agent import compose_prompt
-from harness.models import BehaviorResult, Outcome, Task
+from harness.models import DONE, BehaviorResult, Task
 from harness.ports.agent import AgentRunner, AgentSpec
 from harness.ports.behavior import ConsumerBehavior
 from harness.ports.clock import Clock
@@ -49,11 +49,20 @@ class ResolveConflictBehavior(ConsumerBehavior):
             # race: the PR was updated by someone/something else in the
             # meantime) — commit the clean merge result, no agent call spent.
             handle.commit(f"[{step}] merge {base} — no conflicts")
-            return BehaviorResult(Outcome.DONE, f"merged {base} cleanly, no conflicts")
+            return BehaviorResult(DONE, f"merged {base} cleanly, no conflicts")
 
         attempt, relpath = next_attempt(handle.path, task.id, step)
+        # Out of Package C's scope: the resolver keeps sourcing its outcomes
+        # from `spec.allowed_outcomes` unconditionally (no `WorkflowRepository`
+        # threaded in here) — only the shared `compose_prompt` rendering
+        # changed underneath it.
         prompt = compose_prompt(
-            task, step=step, artifact_relpath=relpath, spec=self._spec
+            task,
+            step=step,
+            artifact_relpath=relpath,
+            outcomes=self._spec.allowed_outcomes,
+            hints={},
+            description=None,
         )
 
         def on_output(line: str) -> None:

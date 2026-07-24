@@ -29,10 +29,10 @@ from pathlib import Path
 
 from harness.ids import new_lock_id
 from harness.models import (
+    DONE,
     FAILED,
     HEALED,
     HistoryEntry,
-    Outcome,
     Task,
     append_history,
 )
@@ -111,7 +111,7 @@ class Healer:
             self._events.emit("heal_error", task_id=task.id, error=str(error))
             return f"heal-failed: agent error: {error}"
 
-        if run.outcome is not Outcome.DONE:
+        if run.outcome != DONE:
             # The agent found nothing actionable for the harness — settle cleanly.
             return f"no action: {run.summary}" if run.summary else "no action"
 
@@ -158,7 +158,7 @@ def heal_prompt(task: Task, *, spec: AgentSpec) -> str:
     the failure itself. The persona (how to decide, that it must write `issue.md`
     and close with a verdict) lives in `spec.prompt`; here we supply the facts.
     """
-    allowed = ", ".join(outcome.value for outcome in spec.allowed_outcomes)
+    allowed = ", ".join(spec.allowed_outcomes)
     lines = [
         f"A harness task failed. You are the healer for it (task {task.id}).",
         "",

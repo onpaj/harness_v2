@@ -579,6 +579,7 @@ def build(
                 spec=spec,
                 events=events,
                 timeout=effective_timeout,
+                workflows=served_workflows,
             )
         return work
 

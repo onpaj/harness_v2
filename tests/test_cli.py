@@ -14,7 +14,6 @@ from harness.cli import (
     DEFAULT_WORKFLOW,
     _REVIEW_PERSONA,
     _agent_definition_template,
-    _allowed_outcomes_for,
     _github_reflectors,
     _github_sources,
     _mergeability_sources,
@@ -27,7 +26,7 @@ from harness.drivers.fs_agents import FilesystemAgentCatalog
 from harness.drivers.github_client import FakeGithubClient
 from harness.drivers.memory import MemoryArtifactStore, MemoryRepositoryRegistry
 from harness.drivers.stage_output import StageOutputProjection
-from harness.models import END, Outcome, Task, Transition, Workflow
+from harness.models import DONE, END, REQUEST_CHANGES, Task, Transition, Workflow
 from harness.projection import BoardProjection
 from tests.fakes import FakeTaskControl
 
@@ -62,7 +61,6 @@ def test_init_writes_default_agents_with_null_timeout(tmp_path):
 
 def test_init_writes_healer_persona(tmp_path):
     from harness.drivers.fs_agents import FilesystemAgentCatalog
-    from harness.models import Outcome
 
     assert main(["init", "--root", str(tmp_path)]) == 0
 
@@ -73,7 +71,7 @@ def test_init_writes_healer_persona(tmp_path):
 
     # it parses to a valid AgentSpec with both outcomes
     spec = FilesystemAgentCatalog(tmp_path / "agents").get("healer")
-    assert spec.allowed_outcomes == (Outcome.DONE, Outcome.REQUEST_CHANGES)
+    assert spec.allowed_outcomes == (DONE, REQUEST_CHANGES)
     assert spec.prompt
 
 
@@ -223,7 +221,7 @@ def test_review_allowed_outcomes_unaffected_by_sync_instructions():
             Transition(from_step=t["from"], on=t["on"], to_step=t["to"]) for t in DEFAULT_DEFINITION["transitions"]
         ),
     )
-    assert _allowed_outcomes_for(workflow, "review") == ["done", "request_changes"]
+    assert workflow.outcomes_for("review") == ("done", "request_changes")
 
 
 def test_review_persona_checks_plan_and_adr_conformance():
@@ -250,7 +248,7 @@ def test_review_persona_tool_list_and_outcomes_unchanged_by_plan_adr_instruction
             Transition(from_step=t["from"], on=t["on"], to_step=t["to"]) for t in DEFAULT_DEFINITION["transitions"]
         ),
     )
-    assert _allowed_outcomes_for(workflow, "review") == ["done", "request_changes"]
+    assert workflow.outcomes_for("review") == ("done", "request_changes")
     assert AGENT_PERSONAS["review"][1] == ["Read", "Grep", "Glob", "Bash"]
 
 
@@ -471,7 +469,7 @@ def test_agent_init_round_trips_through_filesystem_agent_catalog(tmp_path):
     catalog = FilesystemAgentCatalog(tmp_path / "agents")
     spec = catalog.get("triage")
     assert "triage" in spec.prompt
-    assert spec.allowed_outcomes == (Outcome.DONE, Outcome.REQUEST_CHANGES)
+    assert spec.allowed_outcomes == (DONE, REQUEST_CHANGES)
 
 
 def test_submit_step_writes_a_workflow_less_task(tmp_path, capsys):

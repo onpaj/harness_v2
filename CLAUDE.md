@@ -82,6 +82,7 @@ swapped out later.
 39. **A Process is a compile-time authoring aggregate, never a runtime object.** `processes/*.json` bundles a trigger (cadence), an action (a named `Check`), a target (workflow **or** step) and a `sink`, and `FilesystemProcessRepository` **compiles each into a `ScheduledTrigger`** that joins the existing `sources` list. Nothing under orchestration (`dispatcher`/`consumer`/`router`/`source_poller`) imports or names "process"; it is `cli.py` wiring turned into data. `build()` gains no parameter, and `triggers/*.json` is unchanged — a Process compiles to the *same* `ScheduledTrigger` a bare trigger file does, so the two surfaces coexist. Guarded by `test_architecture.py`. See ADR-0015.
 40. **A Process's `sink` names the outbound reflection destination — `none` or `slack` — distinct from the inbound origin.** Source ≠ destination is real (GitHub in, Slack out): a non-`none` sink is stamped by the compiled trigger as `data.sink = {"kind": ...}` (after the observation merge, so a check can never clobber it) and routed by *destination* identity — `SlackWebhookSink` (an outbound-only `TaskSource`, `poll()` always `[]`, registered in `cli._run` only when `SLACK_WEBHOOK_URL` is set; the URL is a secret and never enters a JSON file) matches on `data.sink.kind`, never `data.source`, riding the existing `SourceReflectorSink` fan-out. The shipped sink is stateless — each report posts a fresh webhook message, deduped per-run by an in-process ledger (invariant #21); the stateful create-then-update refinement (a Slack message edited as progress advances, via a persistable handle, "no-op" → "convergent") stays open, and no `Reflector` port is built until it is needed. See ADR-0015.
 41. **A finisher is data, not a step name.** A step's finishing behavior is chosen via the workflow's `finishers` mapping (step → finisher kind, parsed like `maxParallel`) resolved against a registry wired in `build()` (`{"open-pr": landing}` by default, `Forge` being the driver behind the `open-pr` kind); `behavior_for` has no branch on a step's name for finishing. Conflicting bindings across served workflows and unknown kinds fail at build, never at consume time; a workflow with no `finishers` key defaults `landing_step` to `open-pr` and behaves exactly as before. See ADR-0016.
+42. **A step's outcome vocabulary is the workflow's, derived live.** `Workflow.outcomes_for(step)` — the unique `on` values of the edges leaving `step`, in definition order — is the single, authoritative declaration of what a step may report, computed from the graph itself on every run, never frozen. `AgentSpec.allowed_outcomes` is only the fallback for a workflow-less task (no `workflow_template`, an unresolvable one, or a step with no outgoing edges) and for any behavior with no `WorkflowRepository` wired at all — it is not the primary declaration once a workflow is driving the step. Two hints exist to steer an agent's choice and are BOTH prompt-only, read only by `ClaudeCliBehavior`'s prompt composition, and never touched by `route()` or the dispatcher: `Transition.hint` (per outcome) and `Workflow.descriptions` (per step). See ADR-0018.
 
 ## Working here
 
@@ -156,7 +157,7 @@ Dependencies flow strictly downward, no cycles.
 - `ports/forge.py` — `Forge.open_pull_request(...)` (landing proposes a PR) + `base_branch(task)` (the branch that PR targets, which landing syncs in first — ADR-0017)
 - `ports/agent.py` — `AgentRunner.run(...)`, `AgentCatalog.get(name)`, `AgentSpec` (persona as data)
 - `ports/repos.py` — `RepositoryRegistry.resolve(name) -> Path` (repo name → path)
-- `behaviors/agent.py` — `ClaudeCliBehavior`: attach worktree → allocate attempt → run the agent → the worker commits
+- `behaviors/agent.py` — `ClaudeCliBehavior`: attach worktree → allocate attempt → run the agent → the worker commits. Also resolves the task's workflow (via an optional `WorkflowRepository`) to derive the step's live outcome vocabulary, hints and description, falling back to the persona's `allowed_outcomes` when workflow-less (invariant #42, ADR-0018)
 - `ports/source.py` — the `TaskSource` port (`poll`/`report_progress`/`finish`) + `Progress`/`FinishResult`
 - `source_poller.py` — `SourcePoller`: the core that fills the inbox from the source (knows only ports)
 - `pr_watcher.py` — `PrWatcher`: the core loop that claims a landed task out of `done/` once its PR has resolved (merged or closed unmerged) and archives it into `archived/`, dropping it from the board while keeping it gettable by id (knows only ports/models/ids)
@@ -457,6 +458,12 @@ Dependencies flow strictly downward, no cycles.
   in `cli._process_sources` by closing a `GithubClient` + registry into a
   factory, exactly the dependency-bag shape the spec's action seam planned.
   See the spec's "sink seam" / "action seam" sections and their dated notes.
+- **`AgentSpec.allowed_outcomes` is now the workflow-less fallback, not the
+  primary declaration.** A workflow-backed step's real vocabulary comes from
+  `Workflow.outcomes_for`, derived live from its outgoing transitions — so
+  editing a workflow's edges is what changes what an agent may report, not
+  editing the persona file. The persona's `allowed_outcomes` only matters when
+  no workflow is present (or none resolves) to ask instead. See ADR-0018.
 
 ## Operator
 
