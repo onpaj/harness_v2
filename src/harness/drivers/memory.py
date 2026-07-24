@@ -478,14 +478,20 @@ class FakeAgentRunner(AgentRunner):
 class MemoryRepositoryRegistry(RepositoryRegistry):
     """Repository registry over a name → path dict."""
 
-    def __init__(self, repos: dict[str, Path]) -> None:
+    def __init__(
+        self, repos: dict[str, Path], *, verify: dict[str, str] | None = None
+    ) -> None:
         self._repos = repos
+        self._verify = verify or {}
 
     def resolve(self, name: str) -> Path:
         try:
             return self._repos[name]
         except KeyError:
             raise RepositoryNotFound(f"repo {name!r} is not in the registry") from None
+
+    def verify_command(self, name: str) -> str | None:
+        return self._verify.get(name)
 
     def names(self) -> list[str]:
         return list(self._repos)

@@ -90,3 +90,48 @@ def test_fs_names_broken_json_is_empty(tmp_path):
     registry = FilesystemRepositoryRegistry(config)
 
     assert registry.names() == []
+
+
+def test_object_form_entry_resolves_path(tmp_path):
+    config = tmp_path / "repos.json"
+    config.write_text(json.dumps({"app": {"path": "/srv/app", "verify": "pytest -q"}}))
+    registry = FilesystemRepositoryRegistry(config)
+    assert registry.resolve("app") == Path("/srv/app")
+    assert registry.names() == ["app"]
+
+
+def test_verify_command_object_form(tmp_path):
+    config = tmp_path / "repos.json"
+    config.write_text(json.dumps({"app": {"path": "/srv/app", "verify": "pytest -q"}}))
+    registry = FilesystemRepositoryRegistry(config)
+    assert registry.verify_command("app") == "pytest -q"
+
+
+def test_verify_command_string_form_is_none(tmp_path):
+    config = tmp_path / "repos.json"
+    config.write_text(json.dumps({"app": "/srv/app"}))
+    registry = FilesystemRepositoryRegistry(config)
+    assert registry.verify_command("app") is None
+
+
+def test_verify_command_unknown_or_missing_is_none(tmp_path):
+    config = tmp_path / "repos.json"
+    config.write_text(json.dumps({"app": "/srv/app"}))
+    registry = FilesystemRepositoryRegistry(config)
+    assert registry.verify_command("ghost") is None
+    assert FilesystemRepositoryRegistry(tmp_path / "absent.json").verify_command("app") is None
+
+
+def test_object_form_without_path_is_not_found(tmp_path):
+    config = tmp_path / "repos.json"
+    config.write_text(json.dumps({"app": {"verify": "pytest -q"}}))
+    registry = FilesystemRepositoryRegistry(config)
+    with pytest.raises(RepositoryNotFound):
+        registry.resolve("app")
+
+
+def test_memory_registry_verify_command(tmp_path):
+    registry = MemoryRepositoryRegistry({"app": tmp_path}, verify={"app": "make test"})
+    assert registry.verify_command("app") == "make test"
+    assert registry.verify_command("other") is None
+    assert MemoryRepositoryRegistry({"app": tmp_path}).verify_command("app") is None
