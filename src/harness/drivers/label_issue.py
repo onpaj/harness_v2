@@ -63,12 +63,12 @@ class LabelIssueBehavior(ConsumerBehavior):
                 summary=f"{result.summary} (no data.source — label not applied)",
             )
 
-        label = self._labels.get(result.outcome.value)
+        label = self._labels.get(result.outcome)
         if label is None:
             return replace_dataclass(
                 result,
                 summary=(
-                    f"{result.summary} (outcome {result.outcome.value!r} has no "
+                    f"{result.summary} (outcome {result.outcome!r} has no "
                     "mapped label — label not applied)"
                 ),
             )

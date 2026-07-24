@@ -3,7 +3,7 @@ import json
 import pytest
 
 from harness.drivers.fs_agents import FilesystemAgentCatalog
-from harness.models import Outcome
+from harness.models import DONE, REQUEST_CHANGES
 from harness.ports.agent import AgentNotFound
 
 
@@ -30,7 +30,7 @@ def test_roundtrip_reads_full_spec(tmp_path):
     assert spec.model == "opus"
     assert spec.fallback_model == "sonnet"
     assert spec.allowed_tools == ("Read", "Grep")
-    assert spec.allowed_outcomes == (Outcome.DONE, Outcome.REQUEST_CHANGES)
+    assert spec.allowed_outcomes == (DONE, REQUEST_CHANGES)
     assert spec.timeout == 300.0
 
 
@@ -45,7 +45,7 @@ def test_defaults_when_fields_missing(tmp_path):
     assert spec.model is None
     assert spec.fallback_model is None
     assert spec.allowed_tools == ()
-    assert spec.allowed_outcomes == (Outcome.DONE,)
+    assert spec.allowed_outcomes == (DONE,)
     assert spec.timeout is None
 
 

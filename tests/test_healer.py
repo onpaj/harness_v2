@@ -11,14 +11,14 @@ from harness.drivers.memory import (
     MemoryTaskQueue,
 )
 from harness.healer import Healer, heal_prompt
-from harness.models import FAILED, HEALED, HistoryEntry, Outcome, Task
+from harness.models import DONE, FAILED, HEALED, REQUEST_CHANGES, HistoryEntry, Task
 from harness.ports.agent import AgentRun, AgentSpec
 from harness.ports.issues import IssueError, IssueTracker
 
 HEALER_SPEC = AgentSpec(
     name="healer",
     prompt="persona",
-    allowed_outcomes=(Outcome.DONE, Outcome.REQUEST_CHANGES),
+    allowed_outcomes=(DONE, REQUEST_CHANGES),
 )
 
 
@@ -71,7 +71,7 @@ async def test_done_verdict_files_an_issue_and_settles_to_healed(tmp_path):
     failed.put(failed_task())
     tracker = MemoryIssueTracker()
     runner = FakeAgentRunner(
-        runs={"healer": AgentRun(Outcome.DONE, "Fix the driver")},
+        runs={"healer": AgentRun(DONE, "Fix the driver")},
         writes={"healer": {"issue.md": "# Fix the driver\n\nthe driver mis-handles X"}},
     )
     events = MemoryEventSink()
@@ -103,7 +103,7 @@ async def test_request_changes_settles_without_an_issue(tmp_path):
     failed.put(failed_task())
     tracker = MemoryIssueTracker()
     runner = FakeAgentRunner(
-        runs={"healer": AgentRun(Outcome.REQUEST_CHANGES, "external flake, not a bug")}
+        runs={"healer": AgentRun(REQUEST_CHANGES, "external flake, not a bug")}
     )
     events = MemoryEventSink()
     healer = make_healer(
@@ -153,7 +153,7 @@ async def test_issue_error_settles_to_healed_and_does_not_loop(tmp_path):
     healed = MemoryTaskQueue("healed")
     failed.put(failed_task())
     runner = FakeAgentRunner(
-        runs={"healer": AgentRun(Outcome.DONE, "Fix it")},
+        runs={"healer": AgentRun(DONE, "Fix it")},
         writes={"healer": {"issue.md": "# Fix it\n\nbody"}},
     )
     events = MemoryEventSink()
@@ -205,7 +205,7 @@ async def test_lost_claim_race_is_a_noop(tmp_path):
 async def test_second_heal_of_the_same_marker_returns_the_existing_issue(tmp_path):
     tracker = MemoryIssueTracker()
     runner = FakeAgentRunner(
-        runs={"healer": AgentRun(Outcome.DONE, "Fix it")},
+        runs={"healer": AgentRun(DONE, "Fix it")},
         writes={"healer": {"issue.md": "# Fix it\n\nbody"}},
     )
 

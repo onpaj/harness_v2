@@ -67,6 +67,7 @@ async def test_issue_flows_to_pr_open_and_done(tmp_path):
         client=client,
         clock=FakeClock(),
         repo="o/r",
+        workflow="default",
         repository="/repos/r",
         worktree_root="/wt",
         step_labels={

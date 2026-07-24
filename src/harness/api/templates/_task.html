@@ -1,6 +1,8 @@
 <div class="task-detail">
   <header class="task-detail__header">
     <h2>{{ task.data.title or task.id }}</h2>
+    <button type="button" class="copy-id-btn" data-copy-id="{{ task.id }}"
+            aria-label="Copy task id">📋</button>
     {% if task.status == "failed" %}
     <button class="btn small primary" hx-post="/tasks/{{ task.id }}/restart"
             hx-target="#detail"
@@ -30,7 +32,7 @@
         <li><span class="k">status</span><span class="v">{{ task.status or "—" }}</span></li>
         <li><span class="k">lastOutcome</span><span class="v">{{ task.last_outcome or "—" }}</span></li>
         <li><span class="k">lockId</span><span class="v">{{ task.lock_id or "—" }}</span></li>
-        <li><span class="k">created</span><span class="v" title="{{ task.created }}">{{ task.created | shorttime }}</span></li>
+        <li><span class="k">created</span><span class="v"><time datetime="{{ task.created }}" title="{{ task.created }} UTC">{{ task.created | shorttime }}</time></span></li>
         <li><span class="k">data</span><span class="v"><pre>{{ task.data }}</pre></span></li>
       </ul>
 
@@ -59,7 +61,7 @@
         <tr><th>time</th><th>actor</th><th>from</th><th>to</th><th>outcome</th><th class="wrap">reason</th></tr>
         {% for entry in task.history %}
         <tr>
-          <td title="{{ entry.at }}">{{ entry.at | shorttime }}</td>
+          <td><time datetime="{{ entry.at }}" title="{{ entry.at }} UTC">{{ entry.at | shorttime }}</time></td>
           <td>{{ entry.actor }}</td>
           <td>{{ entry.from_step or "—" }}</td>
           <td>{{ entry.to_step or "—" }}</td>

@@ -14,7 +14,7 @@ import asyncio
 import json
 
 from harness.app import build
-from harness.cli import main
+from harness.cli import DEFAULT_WORKFLOW, main
 from harness.models import Task
 
 RUNNER_TIMEOUT = 5.0
@@ -26,7 +26,7 @@ async def test_task_travels_from_submit_to_done(tmp_path, capsys):
     task_id = capsys.readouterr().out.strip().splitlines()[-1]
 
     harness = build(
-        tmp_path, "default", delay=0.0, request_changes_once_at="review"
+        tmp_path, DEFAULT_WORKFLOW, delay=0.0, request_changes_once_at="review"
     )
     stop = asyncio.Event()
     runner = asyncio.create_task(harness.run(poll_interval=0.01, stop=stop))
@@ -65,11 +65,11 @@ async def test_unknown_workflow_lands_in_failed_and_loop_survives(tmp_path):
     )
     (tmp_path / "tasks" / "tsk_broken.json").write_text(json.dumps(broken.to_dict()))
     healthy = Task(
-        id="tsk_ok", workflow_template="default", created="2026-07-19T10:00:01Z"
+        id="tsk_ok", workflow_template=DEFAULT_WORKFLOW, created="2026-07-19T10:00:01Z"
     )
     (tmp_path / "tasks" / "tsk_ok.json").write_text(json.dumps(healthy.to_dict()))
 
-    harness = build(tmp_path, "default", delay=0.0)
+    harness = build(tmp_path, DEFAULT_WORKFLOW, delay=0.0)
     stop = asyncio.Event()
     runner = asyncio.create_task(harness.run(poll_interval=0.01, stop=stop))
     for _ in range(600):

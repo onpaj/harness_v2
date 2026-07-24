@@ -7,7 +7,7 @@ from harness.drivers.memory import (
     MemoryTaskQueue,
     ScriptedBehavior,
 )
-from harness.models import FAILED, BehaviorResult, Outcome, Task
+from harness.models import DONE, FAILED, REQUEST_CHANGES, BehaviorResult, Task
 from harness.ports.behavior import ConsumerBehavior
 from harness.ports.strategy import EnqueueStrategy
 
@@ -19,7 +19,7 @@ class DataBehavior(ConsumerBehavior):
         self._data = data
 
     async def run(self, task: Task) -> BehaviorResult:
-        return BehaviorResult(Outcome.DONE, "done", data=self._data)
+        return BehaviorResult(DONE, "done", data=self._data)
 
 
 class FirstStrategy(EnqueueStrategy):
@@ -37,12 +37,20 @@ class BogusBehavior(ConsumerBehavior):
         return "something else"
 
 
+class EmptyOutcomeBehavior(ConsumerBehavior):
+    """Returns a well-formed BehaviorResult whose outcome is an empty string —
+    a non-string/empty outcome is still rejected under the open string type."""
+
+    async def run(self, task):
+        return BehaviorResult("", "no outcome given")
+
+
 class DataBehavior(ConsumerBehavior):
     def __init__(self, data: dict) -> None:
         self._data = data
 
     async def run(self, task):
-        return BehaviorResult(Outcome.DONE, "done with data", data=self._data)
+        return BehaviorResult(DONE, "done with data", data=self._data)
 
 
 def build(behavior, task: Task | None = None):
@@ -96,7 +104,7 @@ async def test_done_outcome_returns_task_to_inbox():
 
 
 async def test_request_changes_outcome_is_written_verbatim():
-    behavior = ScriptedBehavior({"design": [Outcome.REQUEST_CHANGES]})
+    behavior = ScriptedBehavior({"design": [REQUEST_CHANGES]})
     consumer, _, inbox, _, _ = build(behavior, make_task())
 
     await consumer.tick()
@@ -105,7 +113,7 @@ async def test_request_changes_outcome_is_written_verbatim():
 
 
 async def test_consumer_never_changes_status():
-    behavior = ScriptedBehavior({"design": [Outcome.REQUEST_CHANGES]})
+    behavior = ScriptedBehavior({"design": [REQUEST_CHANGES]})
     consumer, _, inbox, _, _ = build(behavior, make_task())
 
     await consumer.tick()
@@ -167,6 +175,16 @@ async def test_invalid_outcome_lands_in_failed():
 
 async def test_invalid_outcome_task_carries_terminal_failed_status():
     consumer, _, _, failed, _ = build(BogusBehavior(), make_task())
+
+    await consumer.tick()
+
+    assert failed.list()[0].status == FAILED
+
+
+async def test_empty_string_outcome_lands_in_failed():
+    """The open-string outcome guard is a shape check — non-empty string —
+    not an enum membership check; an empty outcome is still invalid."""
+    consumer, _, _, failed, _ = build(EmptyOutcomeBehavior(), make_task())
 
     await consumer.tick()
 

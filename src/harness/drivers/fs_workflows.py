@@ -34,6 +34,23 @@ def invalid_step_name(name: str) -> bool:
     return invalid_workflow_name(name) or name in _RESERVED_STEP_NAMES
 
 
+def _parse_transition(name: str, item: dict) -> Transition:
+    """Builds one `Transition`, including its optional prompt-only `hint`.
+
+    `item["from"]`/`item["on"]`/`item["to"]` are required (a missing one
+    raises `KeyError`/`TypeError`, caught by the caller and re-raised as a
+    `ValueError` naming the workflow). `hint` is optional and defaults to
+    `""`; when present it must be a string.
+    """
+    hint = item.get("hint", "")
+    if not isinstance(hint, str):
+        raise ValueError(
+            f"workflow {name!r} has an invalid transition hint: expected string, "
+            f"got {type(hint).__name__}"
+        )
+    return Transition(from_step=item["from"], on=item["on"], to_step=item["to"], hint=hint)
+
+
 def _parse_workflow(name: str, raw: dict) -> Workflow:
     """Raises ValueError for a non-dict body, a missing `start`, or a
     malformed transition — the single validation contract shared by the read
@@ -49,8 +66,7 @@ def _parse_workflow(name: str, raw: dict) -> Workflow:
 
     try:
         transitions = tuple(
-            Transition(from_step=item["from"], on=item["on"], to_step=item["to"])
-            for item in raw.get("transitions", [])
+            _parse_transition(name, item) for item in raw.get("transitions", [])
         )
     except (KeyError, TypeError) as error:
         raise ValueError(f"workflow {name!r} has an invalid transition: {error}") from None
@@ -118,12 +134,35 @@ def _parse_workflow(name: str, raw: dict) -> Workflow:
                 f"workflow {name!r} has an invalid finisher for step {step!r}: {raw_binding!r}"
             )
 
+    # `descriptions` maps a step name to free-text prompt-only description —
+    # validated exactly like `finishers`/`maxParallel`, so both the read path
+    # and the admin write path reject a bad entry through this one shared
+    # contract. Purely descriptive: never read by route() (invariant #4).
+    raw_descriptions = raw.get("descriptions", {})
+    if not isinstance(raw_descriptions, dict):
+        raise ValueError(
+            f"workflow {name!r} has an invalid descriptions: expected object, "
+            f"got {type(raw_descriptions).__name__}"
+        )
+    descriptions: dict[str, str] = {}
+    for step, text in raw_descriptions.items():
+        if step not in known_steps:
+            raise ValueError(
+                f"workflow {name!r} has a description for unknown step {step!r}"
+            )
+        if not isinstance(text, str) or not text:
+            raise ValueError(
+                f"workflow {name!r} has an invalid description for step {step!r}: {text!r}"
+            )
+        descriptions[step] = text
+
     return Workflow(
         name=raw.get("name", name),
         start=raw["start"],
         transitions=transitions,
         max_parallel=max_parallel,
         finishers=finishers,
+        descriptions=descriptions,
     )
 
 

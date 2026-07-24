@@ -28,12 +28,20 @@ class ProcessFields:
     `params` is the check's parameter dict (already parsed from the form's JSON
     textarea). Exactly one of the target roles is meaningful: `target_kind`
     selects whether `target` names a workflow or a step.
+
+    `cadence` mirrors that same discriminator pattern for the schedule:
+    `"interval"` or `"cron"` selects which of `interval`/`cron` is the
+    authoritative value. It is an explicit field rather than inferred from
+    "whichever is non-blank" so a submission that toggles to cron but leaves
+    the box empty is reported against `errors.cron`, not `errors.interval`.
     """
 
-    interval: str
     check: str
     target_kind: str  # "workflow" | "step"
     target: str
+    cadence: str = "interval"  # "interval" | "cron"
+    interval: str = ""
+    cron: str = ""
     params: dict[str, Any] = field(default_factory=dict)
     sink_kind: str = "none"
     dedup: str = "per-interval"
@@ -84,6 +92,7 @@ class ProcessAdmin(ABC):
 
     @abstractmethod
     def sink_kinds(self) -> tuple[str, ...]:
-        """The sink kinds the form offers: `("none", "slack")` — the outbound
-        destinations a Process may declare (invariant #40). A new destination
-        is a new kind plus a sink driver, surfaced here."""
+        """The sink kinds the form offers, sorted: `("github", "none",
+        "slack")` — the outbound destinations a Process may declare (invariant
+        #40). A new destination is a new kind plus a sink driver, surfaced
+        here."""

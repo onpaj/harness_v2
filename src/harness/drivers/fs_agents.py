@@ -23,7 +23,7 @@ import os
 import uuid
 from pathlib import Path
 
-from harness.models import Outcome
+from harness.models import DONE, REQUEST_CHANGES
 from harness.ports.agent import AgentCatalog, AgentNotFound, AgentSpec
 from harness.ports.agent_admin import AgentAdmin, AgentFields, AgentValidationError
 
@@ -47,9 +47,11 @@ def _parse_agent_spec(name: str, raw: dict) -> AgentSpec:
         raise ValueError(f"agent {name!r} has no prompt")
 
     try:
-        allowed_outcomes = tuple(
-            Outcome(item) for item in raw.get("allowed_outcomes", ["done"])
-        )
+        raw_outcomes = raw.get("allowed_outcomes", ["done"])
+        for item in raw_outcomes:
+            if item not in (DONE, REQUEST_CHANGES):
+                raise ValueError(f"unknown outcome {item!r}")
+        allowed_outcomes = tuple(raw_outcomes)
     except (ValueError, TypeError) as error:
         raise ValueError(f"agent {name!r} has invalid allowed_outcomes: {error}") from None
 

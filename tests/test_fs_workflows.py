@@ -256,6 +256,92 @@ def test_finisher_invalid_kind_raises(tmp_path, kind):
         repository.get("default")
 
 
+def test_transition_hint_is_parsed_and_exposed(tmp_path):
+    definition = {
+        **DEFINITION,
+        "transitions": [
+            {"from": "plan", "on": "done", "to": "review", "hint": "send it to review"},
+            {"from": "review", "on": "done", "to": "end"},
+            {"from": "review", "on": "request_changes", "to": "plan"},
+        ],
+    }
+    (tmp_path / "default.json").write_text(json.dumps(definition))
+    repository = FilesystemWorkflowRepository(tmp_path)
+
+    workflow = repository.get("default")
+
+    assert workflow.transitions[0].hint == "send it to review"
+    assert workflow.transitions[1].hint == ""
+
+
+def test_transition_hint_not_a_string_raises(tmp_path):
+    definition = {
+        **DEFINITION,
+        "transitions": [
+            {"from": "plan", "on": "done", "to": "review", "hint": 3},
+        ],
+    }
+    (tmp_path / "default.json").write_text(json.dumps(definition))
+    repository = FilesystemWorkflowRepository(tmp_path)
+
+    with pytest.raises(WorkflowNotFound, match="hint"):
+        repository.get("default")
+
+
+def test_definition_without_descriptions_defaults_to_empty(tmp_path):
+    (tmp_path / "default.json").write_text(json.dumps(DEFINITION))
+    repository = FilesystemWorkflowRepository(tmp_path)
+
+    workflow = repository.get("default")
+
+    assert workflow.descriptions == {}
+    assert workflow.description_for("plan") is None
+
+
+def test_descriptions_are_parsed_and_exposed(tmp_path):
+    definition = {**DEFINITION, "descriptions": {"plan": "Write the plan."}}
+    (tmp_path / "default.json").write_text(json.dumps(definition))
+    repository = FilesystemWorkflowRepository(tmp_path)
+
+    workflow = repository.get("default")
+
+    assert workflow.descriptions == {"plan": "Write the plan."}
+    assert workflow.description_for("plan") == "Write the plan."
+    assert workflow.description_for("review") is None
+
+
+def test_descriptions_not_an_object_raises(tmp_path):
+    definition = {**DEFINITION, "descriptions": ["plan"]}
+    (tmp_path / "default.json").write_text(json.dumps(definition))
+    repository = FilesystemWorkflowRepository(tmp_path)
+
+    with pytest.raises(WorkflowNotFound, match="descriptions"):
+        repository.get("default")
+
+
+def test_description_for_unknown_step_raises(tmp_path):
+    definition = {**DEFINITION, "descriptions": {"plann": "Write the plan."}}
+    (tmp_path / "default.json").write_text(json.dumps(definition))
+    repository = FilesystemWorkflowRepository(tmp_path)
+
+    with pytest.raises(WorkflowNotFound, match="plann"):
+        repository.get("default")
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["", 3, None, True],
+    ids=["empty", "number", "null", "bool"],
+)
+def test_description_invalid_value_raises(tmp_path, text):
+    definition = {**DEFINITION, "descriptions": {"plan": text}}
+    (tmp_path / "default.json").write_text(json.dumps(definition))
+    repository = FilesystemWorkflowRepository(tmp_path)
+
+    with pytest.raises(WorkflowNotFound, match="plan"):
+        repository.get("default")
+
+
 def test_path_separator_is_rejected_even_when_escape_target_exists(tmp_path):
     """A weaker version of this test (no real file at the escaped path)
     would pass even if the separator guard were deleted entirely: the

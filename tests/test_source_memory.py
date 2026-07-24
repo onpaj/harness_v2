@@ -39,7 +39,7 @@ def test_poll_builds_task_with_worktree_and_repository():
     assert task.repository == "app-backend"
     assert task.worktree == f"/wt/{task.id}"
     assert task.created == "2026-07-19T10:00:00Z"
-    assert task.workflow_template == "default"
+    assert task.workflow_template == "development"
     assert task.data["body"] == "details"
     assert task.data["source"]["issue"] == issue
 

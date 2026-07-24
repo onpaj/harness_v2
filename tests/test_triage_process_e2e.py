@@ -28,7 +28,7 @@ from harness.drivers.memory import (
     MemoryWorkspace,
     ScriptedBehavior,
 )
-from harness.models import Outcome, Task
+from harness.models import DONE, REQUEST_CHANGES, Task
 
 MAX_STEPS = 1000
 
@@ -118,7 +118,7 @@ async def test_triage_process_claims_labels_and_hands_off_to_ingestion(tmp_path)
         # ScriptedBehavior stands in for the PM persona (a real deployment
         # would use a catalog agent instead): the first task through "triage"
         # is approved, the second isn't.
-        behavior = ScriptedBehavior({"triage": [Outcome.DONE, Outcome.REQUEST_CHANGES]})
+        behavior = ScriptedBehavior({"triage": [DONE, REQUEST_CHANGES]})
 
         harness = build(
             tmp_path,

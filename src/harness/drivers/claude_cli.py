@@ -26,7 +26,6 @@ import re
 from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 
-from harness.models import Outcome
 from harness.ports.agent import AgentRun, AgentRunner, AgentSpec
 
 # Last fenced ```json ... ``` block in the agent's final text.
@@ -128,7 +127,7 @@ def _require_result(envelope: object, *, raw: str) -> str:
 
 
 def _verdict_from_envelope(
-    envelope: dict, *, allowed: tuple[Outcome, ...], raw: str
+    envelope: dict, *, allowed: tuple[str, ...], raw: str
 ) -> AgentRun:
     """Map an envelope carrying `result` (+`is_error`) onto an `AgentRun`.
 
@@ -143,19 +142,18 @@ def _verdict_from_envelope(
         raise VerdictError(f"verdict is not readable JSON: {result!r}")
     if "outcome" not in verdict:
         raise VerdictError(f"verdict has no 'outcome' field: {verdict!r}")
-    try:
-        outcome = Outcome(verdict["outcome"])
-    except ValueError as error:
-        raise VerdictError(f"unknown outcome {verdict['outcome']!r}") from error
+    outcome = verdict["outcome"]
+    if not isinstance(outcome, str) or not outcome:
+        raise VerdictError(f"unknown outcome {outcome!r}")
     if outcome not in allowed:
         raise VerdictError(
-            f"outcome {outcome.value!r} is not in allowed {allowed!r}"
+            f"outcome {outcome!r} is not in allowed {allowed!r}"
         )
     return AgentRun(outcome, summary=verdict.get("summary", ""), raw=raw)
 
 
 def try_verdict(
-    envelope: object, *, allowed: tuple[Outcome, ...], raw: str
+    envelope: object, *, allowed: tuple[str, ...], raw: str
 ) -> AgentRun | None:
     """A readable, allowed verdict as an `AgentRun`, else `None`.
 
@@ -168,9 +166,8 @@ def try_verdict(
     verdict = _extract_verdict(result)
     if verdict is None:
         return None
-    try:
-        outcome = Outcome(verdict.get("outcome"))
-    except ValueError:
+    outcome = verdict.get("outcome")
+    if not isinstance(outcome, str) or not outcome:
         return None
     if outcome not in allowed:
         return None
@@ -178,7 +175,7 @@ def try_verdict(
 
 
 def fallback_verdict(
-    result_text: str, *, allowed: tuple[Outcome, ...], raw: str
+    result_text: str, *, allowed: tuple[str, ...], raw: str
 ) -> AgentRun | None:
     """Rescue a finished step whose single allowed outcome makes it unambiguous.
 
@@ -193,9 +190,9 @@ def fallback_verdict(
     return None
 
 
-def _verdict_reprompt(allowed: tuple[Outcome, ...]) -> str:
+def _verdict_reprompt(allowed: tuple[str, ...]) -> str:
     """The follow-up prompt for a resumed session that skipped its verdict."""
-    names = ", ".join(outcome.value for outcome in allowed)
+    names = ", ".join(allowed)
     return (
         "Your previous message did not end with the required machine-readable "
         "verdict, so the harness could not read a result. Reply with ONLY the "
@@ -206,7 +203,7 @@ def _verdict_reprompt(allowed: tuple[Outcome, ...]) -> str:
     )
 
 
-def parse_verdict(stdout: str, *, allowed: tuple[Outcome, ...]) -> AgentRun:
+def parse_verdict(stdout: str, *, allowed: tuple[str, ...]) -> AgentRun:
     """Pull the verdict out of the `claude -p --output-format json` envelope.
 
     The outer JSON carries `result` (the agent's final text) and `is_error`. If
@@ -224,7 +221,7 @@ def parse_verdict(stdout: str, *, allowed: tuple[Outcome, ...]) -> AgentRun:
 
 
 def verdict_from_final(
-    message: dict, *, allowed: tuple[Outcome, ...], raw: str
+    message: dict, *, allowed: tuple[str, ...], raw: str
 ) -> AgentRun:
     """The verdict carried by the terminal `type == "result"` stream-json message.
 
@@ -445,7 +442,7 @@ class ClaudeCliRunner(AgentRunner):
         spec: AgentSpec,
         cwd: Path,
         timeout: float,
-        allowed: tuple[Outcome, ...],
+        allowed: tuple[str, ...],
     ) -> AgentRun | None:
         """One cheap `claude -p --resume` that asks only for the verdict block.
 

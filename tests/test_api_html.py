@@ -101,6 +101,7 @@ def test_index_renders_board_shell(client):
     body = response.text
     assert "/static/htmx.min.js" in body
     assert "/static/sse.js" in body
+    assert "/static/format-local-time.js" in body
     assert "/api/events" in body
     assert "https://" not in body
     assert 'name="viewport"' in body
@@ -167,6 +168,13 @@ def test_card_shows_time_in_state_only_when_history_exists(client):
     assert "since" not in card_two
 
 
+def test_card_time_is_a_time_element_for_client_side_localization(client):
+    body = client.get("/fragment/board").text
+
+    assert '<time datetime="2026-07-19T10:00:05Z"' in body
+    assert 'title="2026-07-19T10:00:05Z UTC"' in body
+
+
 def test_fragment_task_shows_metadata_and_history(client):
     body = client.get("/fragment/task/tsk_1").text
 
@@ -175,6 +183,24 @@ def test_fragment_task_shows_metadata_and_history(client):
     assert "development" in body
     assert "2026-07-19T10:00:05Z" in body
     assert "dispatcher" in body
+
+
+def test_fragment_task_times_are_time_elements_for_client_side_localization(client):
+    body = client.get("/fragment/task/tsk_1").text
+
+    # "created" field
+    assert '<time datetime="2026-07-19T10:00:00Z"' in body
+    assert 'title="2026-07-19T10:00:00Z UTC"' in body
+    # history table "time" column
+    assert '<time datetime="2026-07-19T10:00:05Z"' in body
+    assert 'title="2026-07-19T10:00:05Z UTC"' in body
+
+
+def test_fragment_task_shows_copy_id_button(client):
+    body = client.get("/fragment/task/tsk_1").text
+
+    assert 'class="copy-id-btn"' in body
+    assert 'data-copy-id="tsk_1"' in body
 
 
 def test_fragment_task_shows_pipeline_workflow_and_dash_step(client):
@@ -201,6 +227,7 @@ def test_fragment_task_unknown_returns_404(client):
 
 def test_static_files_are_served(client):
     assert client.get("/static/htmx.min.js").status_code == 200
+    assert client.get("/static/format-local-time.js").status_code == 200
 
 
 def test_no_endpoint_mutates(client):

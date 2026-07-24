@@ -113,6 +113,59 @@ def test_write_raw_transition_missing_to_is_rejected(tmp_path):
     assert not (tmp_path / "default.json").exists()
 
 
+def test_write_raw_description_for_unknown_step_is_rejected(tmp_path):
+    admin = FilesystemWorkflowAdmin(tmp_path)
+
+    with pytest.raises(WorkflowValidationError):
+        admin.write_raw(
+            "default",
+            json.dumps(
+                {
+                    "start": "plan",
+                    "transitions": [{"from": "plan", "on": "done", "to": "review"}],
+                    "descriptions": {"unknown": "text"},
+                }
+            ),
+        )
+
+    assert not (tmp_path / "default.json").exists()
+
+
+def test_write_raw_descriptions_not_an_object_is_rejected(tmp_path):
+    admin = FilesystemWorkflowAdmin(tmp_path)
+
+    with pytest.raises(WorkflowValidationError):
+        admin.write_raw(
+            "default",
+            json.dumps(
+                {
+                    "start": "plan",
+                    "transitions": [{"from": "plan", "on": "done", "to": "review"}],
+                    "descriptions": ["plan"],
+                }
+            ),
+        )
+
+    assert not (tmp_path / "default.json").exists()
+
+
+def test_write_raw_valid_descriptions_and_hint_are_accepted(tmp_path):
+    admin = FilesystemWorkflowAdmin(tmp_path)
+    text = json.dumps(
+        {
+            "start": "plan",
+            "transitions": [
+                {"from": "plan", "on": "done", "to": "review", "hint": "go review it"}
+            ],
+            "descriptions": {"plan": "Write the plan."},
+        }
+    )
+
+    admin.write_raw("default", text)
+
+    assert admin.read_raw("default") == text
+
+
 def test_write_raw_rejected_submission_leaves_existing_file_untouched(tmp_path):
     admin = FilesystemWorkflowAdmin(tmp_path)
     admin.write_raw("default", DEFINITION_TEXT)

@@ -13,7 +13,6 @@ from harness.models import (
     FAILED,
     BehaviorResult,
     HistoryEntry,
-    Outcome,
     Task,
     append_history,
 )
@@ -78,8 +77,10 @@ class Consumer:
             self._fail(task, f"behavior raised an exception: {error}")
             return True
 
-        if not isinstance(result, BehaviorResult) or not isinstance(
-            result.outcome, Outcome
+        if (
+            not isinstance(result, BehaviorResult)
+            or not isinstance(result.outcome, str)
+            or not result.outcome
         ):
             self._fail(task, f"behavior returned an invalid result: {result!r}")
             return True
@@ -93,13 +94,13 @@ class Consumer:
             actor=self.actor,
             from_step=self._step,
             to_step=None,
-            outcome=result.outcome.value,
+            outcome=result.outcome,
             summary=result.summary or None,
         )
         merged_data = {**task.data, **(result.data or {})}
         updated = append_history(
             replace(
-                task, data=merged_data, last_outcome=result.outcome.value, lock_id=None
+                task, data=merged_data, last_outcome=result.outcome, lock_id=None
             ),
             entry,
         )
@@ -108,7 +109,7 @@ class Consumer:
             "consumed",
             task_id=task.id,
             step=self._step,
-            outcome=result.outcome.value,
+            outcome=result.outcome,
             summary=result.summary,
             queue=self._step,
             task=updated.to_dict(),

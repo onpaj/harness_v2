@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from harness.ids import new_task_id
-from harness.models import BehaviorResult, Outcome, Task, Workflow
+from harness.models import DONE, BehaviorResult, Task, Workflow
 from harness.ports.agent import (
     AgentCatalog,
     AgentNotFound,
@@ -113,7 +113,7 @@ class ScriptedBehavior(ConsumerBehavior):
     When the scripted outcomes for a step run out, returns DONE.
     """
 
-    def __init__(self, outcomes: dict[str, list[Outcome]] | None = None) -> None:
+    def __init__(self, outcomes: dict[str, list[str]] | None = None) -> None:
         self._outcomes = {step: list(values) for step, values in (outcomes or {}).items()}
         self.seen: list[str] = []
 
@@ -121,8 +121,8 @@ class ScriptedBehavior(ConsumerBehavior):
         step = task.status or ""
         self.seen.append(step)
         pending = self._outcomes.get(step)
-        outcome = pending.pop(0) if pending else Outcome.DONE
-        return BehaviorResult(outcome, summary=f"{step}: {outcome.value}")
+        outcome = pending.pop(0) if pending else DONE
+        return BehaviorResult(outcome, summary=f"{step}: {outcome}")
 
 
 class MemoryArtifactSlot(ArtifactSlot):
@@ -230,7 +230,7 @@ class MemoryTaskSource(TaskSource):
         self,
         *,
         clock: Clock,
-        workflow: str = "default",
+        workflow: str = "development",
         repository: str | None = None,
         worktree_root: str = "/memory/worktrees",
     ) -> None:
@@ -472,7 +472,7 @@ class FakeAgentRunner(AgentRunner):
             return self._runs[spec.name]
         if self._default is not None:
             return self._default
-        return AgentRun(Outcome.DONE, f"{spec.name}: done")
+        return AgentRun(DONE, f"{spec.name}: done")
 
 
 class MemoryRepositoryRegistry(RepositoryRegistry):
