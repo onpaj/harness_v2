@@ -159,6 +159,26 @@ def test_slack_sink_is_accepted_and_stamped_onto_tasks(tmp_path: Path) -> None:
     assert "source" not in task.data  # destination identity, no origin stamp
 
 
+def test_github_sink_is_accepted_and_stamped_onto_tasks(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "notify-github",
+        {
+            "trigger": {"interval": "1h"},
+            "action": {"check": "always"},
+            "target": {"workflow": "wf"},
+            "sink": {"kind": "github"},
+        },
+    )
+
+    (trigger,) = _build(tmp_path)
+
+    assert trigger.sink == {"kind": "github"}
+    (task,) = trigger.poll()
+    assert task.data["sink"] == {"kind": "github"}
+    assert "source" not in task.data  # destination identity, no origin stamp
+
+
 def test_trigger_kind_schedule_is_accepted(tmp_path: Path) -> None:
     _write(
         tmp_path,

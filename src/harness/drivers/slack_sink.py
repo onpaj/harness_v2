@@ -1,13 +1,15 @@
 """SlackWebhookSink: a task's progress/outcome as messages to a Slack webhook.
 
 The first real Process sink — the outbound-only mirror of
-`GithubLabelReflector`, matched on the **destination** identity instead of the
-origin: `_mine` reads `task.data.sink.kind` (stamped by the compiled
-`ScheduledTrigger` of a process declaring `{"kind": "slack"}`), never
-`data.source` — so a Process can ingest from one medium and reflect into
-another (invariant #40). `poll()` is always `[]`; like the label reflector it
-subclasses `TaskSource` directly, not `Trigger` (which names the exact inverse
-shape: real `poll()`, no-op reflection).
+`GithubLabelReflector`, both routed through the same `effective_sink_kind`
+helper (`ports/source.py`): `_mine` matches on `data.sink.kind` when a process
+declares one (e.g. `{"kind": "slack"}`), falling back to `data.source.kind`
+when it doesn't — so a Process can ingest from one medium and reflect into
+another (invariant #40), while a Slack-origin task with no explicit sink still
+routes here by the same default-to-source rule `github` relies on. `poll()` is
+always `[]`; like the label reflector it subclasses `TaskSource` directly, not
+`Trigger` (which names the exact inverse shape: real `poll()`, no-op
+reflection).
 
 Stateless by choice: every report posts a fresh webhook message. The stateful
 create-then-update sink (Slack Web API, one message edited as progress
@@ -33,7 +35,7 @@ import urllib.request
 from typing import Callable
 
 from harness.models import Task
-from harness.ports.source import FinishResult, Progress, TaskSource
+from harness.ports.source import FinishResult, Progress, TaskSource, effective_sink_kind
 
 
 def post_json(url: str, payload: dict) -> None:
@@ -90,9 +92,10 @@ class SlackWebhookSink(TaskSource):
         self._post(self._webhook_url, {"text": text})
 
     def _mine(self, task: Task) -> bool:
-        # Destination identity, not origin: the `data.sink` stamp, never
-        # `data.source` — a task with no sink (or another kind) is foreign.
-        return task.data.get("sink", {}).get("kind") == self.kind
+        # Effective sink kind: `data.sink.kind` if present, else falling back
+        # to `data.source.kind` — a task with no sink and no matching source
+        # is foreign.
+        return effective_sink_kind(task) == self.kind
 
     def _name(self, task: Task) -> str:
         title = task.data.get("title")

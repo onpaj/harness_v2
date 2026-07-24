@@ -11,7 +11,7 @@ but only once, otherwise the loop would spin forever.
 
 from __future__ import annotations
 
-from harness.models import BehaviorResult, Outcome, Task
+from harness.models import DONE, REQUEST_CHANGES, BehaviorResult, Task
 from harness.ports.artifacts import ArtifactStore
 from harness.ports.behavior import ConsumerBehavior
 from harness.ports.clock import Clock
@@ -46,10 +46,10 @@ class DummyBehavior(ConsumerBehavior):
         )
         if asks_changes:
             self._already_asked.add(task.id)
-            outcome = Outcome.REQUEST_CHANGES
+            outcome = REQUEST_CHANGES
             summary = f"{step}: changes requested"
         else:
-            outcome = Outcome.DONE
+            outcome = DONE
             summary = f"{step}: done"
 
         # Artifact into the harness folder (attempt-indexed), work into the

@@ -15,7 +15,7 @@ from harness.drivers.claude_cli import (
     try_verdict,
     verdict_from_final,
 )
-from harness.models import Outcome
+from harness.models import DONE, REQUEST_CHANGES
 from harness.ports.agent import AgentSpec
 
 
@@ -117,9 +117,9 @@ def test_parse_verdict_reads_fenced_block():
     inner = '```json\n{"outcome": "done", "summary": "ok"}\n```'
     stdout = _envelope(f"Done.\n{inner}")
 
-    run = parse_verdict(stdout, allowed=(Outcome.DONE,))
+    run = parse_verdict(stdout, allowed=(DONE,))
 
-    assert run.outcome is Outcome.DONE
+    assert run.outcome == DONE
     assert run.summary == "ok"
     assert run.raw == stdout
 
@@ -129,10 +129,10 @@ def test_parse_verdict_request_changes_when_allowed():
     stdout = _envelope(inner)
 
     run = parse_verdict(
-        stdout, allowed=(Outcome.DONE, Outcome.REQUEST_CHANGES)
+        stdout, allowed=(DONE, REQUEST_CHANGES)
     )
 
-    assert run.outcome is Outcome.REQUEST_CHANGES
+    assert run.outcome == REQUEST_CHANGES
     assert run.summary == "fix it"
 
 
@@ -142,19 +142,19 @@ def test_parse_verdict_takes_last_fenced_block():
     stdout = _envelope(f"{first}\nin between\n{last}")
 
     run = parse_verdict(
-        stdout, allowed=(Outcome.DONE, Outcome.REQUEST_CHANGES)
+        stdout, allowed=(DONE, REQUEST_CHANGES)
     )
 
-    assert run.outcome is Outcome.DONE
+    assert run.outcome == DONE
     assert run.summary == "last"
 
 
 def test_parse_verdict_falls_back_to_whole_result_json():
     stdout = _envelope('{"outcome": "done", "summary": "no fence"}')
 
-    run = parse_verdict(stdout, allowed=(Outcome.DONE,))
+    run = parse_verdict(stdout, allowed=(DONE,))
 
-    assert run.outcome is Outcome.DONE
+    assert run.outcome == DONE
     assert run.summary == "no fence"
 
 
@@ -162,9 +162,9 @@ def test_parse_verdict_missing_summary_defaults_empty():
     inner = '```json\n{"outcome": "done"}\n```'
     stdout = _envelope(inner)
 
-    run = parse_verdict(stdout, allowed=(Outcome.DONE,))
+    run = parse_verdict(stdout, allowed=(DONE,))
 
-    assert run.outcome is Outcome.DONE
+    assert run.outcome == DONE
     assert run.summary == ""
 
 
@@ -173,7 +173,7 @@ def test_parse_verdict_outcome_outside_allowed_raises():
     stdout = _envelope(inner)
 
     with pytest.raises(VerdictError):
-        parse_verdict(stdout, allowed=(Outcome.DONE,))
+        parse_verdict(stdout, allowed=(DONE,))
 
 
 def test_parse_verdict_invalid_outcome_value_raises():
@@ -181,7 +181,7 @@ def test_parse_verdict_invalid_outcome_value_raises():
     stdout = _envelope(inner)
 
     with pytest.raises(VerdictError):
-        parse_verdict(stdout, allowed=(Outcome.DONE, Outcome.REQUEST_CHANGES))
+        parse_verdict(stdout, allowed=(DONE, REQUEST_CHANGES))
 
 
 def test_parse_verdict_is_error_true_raises():
@@ -189,26 +189,26 @@ def test_parse_verdict_is_error_true_raises():
     stdout = _envelope(inner, is_error=True)
 
     with pytest.raises(VerdictError):
-        parse_verdict(stdout, allowed=(Outcome.DONE,))
+        parse_verdict(stdout, allowed=(DONE,))
 
 
 def test_parse_verdict_unreadable_outer_json_raises():
     with pytest.raises(VerdictError):
-        parse_verdict("this is not JSON", allowed=(Outcome.DONE,))
+        parse_verdict("this is not JSON", allowed=(DONE,))
 
 
 def test_parse_verdict_missing_result_field_raises():
     stdout = json.dumps({"is_error": False})
 
     with pytest.raises(VerdictError):
-        parse_verdict(stdout, allowed=(Outcome.DONE,))
+        parse_verdict(stdout, allowed=(DONE,))
 
 
 def test_parse_verdict_no_verdict_block_raises():
     stdout = _envelope("Just chatter, no verdict.")
 
     with pytest.raises(VerdictError):
-        parse_verdict(stdout, allowed=(Outcome.DONE,))
+        parse_verdict(stdout, allowed=(DONE,))
 
 
 def test_parse_verdict_missing_outcome_key_raises():
@@ -216,7 +216,7 @@ def test_parse_verdict_missing_outcome_key_raises():
     stdout = _envelope(inner)
 
     with pytest.raises(VerdictError):
-        parse_verdict(stdout, allowed=(Outcome.DONE,))
+        parse_verdict(stdout, allowed=(DONE,))
 
 
 def test_build_argv_stream_json_adds_verbose():
@@ -361,9 +361,9 @@ def test_verdict_from_final_parses_result_message():
     inner = '```json\n{"outcome": "done", "summary": "ok"}\n```'
     final = {"type": "result", "subtype": "success", "is_error": False, "result": inner}
 
-    run = verdict_from_final(final, allowed=(Outcome.DONE,), raw="RAW")
+    run = verdict_from_final(final, allowed=(DONE,), raw="RAW")
 
-    assert run.outcome is Outcome.DONE
+    assert run.outcome == DONE
     assert run.summary == "ok"
     assert run.raw == "RAW"
 
@@ -372,7 +372,7 @@ def test_verdict_from_final_is_error_raises():
     final = {"type": "result", "is_error": True, "result": "boom"}
 
     with pytest.raises(VerdictError):
-        verdict_from_final(final, allowed=(Outcome.DONE,), raw="RAW")
+        verdict_from_final(final, allowed=(DONE,), raw="RAW")
 
 
 def test_verdict_from_final_outside_allowed_raises():
@@ -380,7 +380,7 @@ def test_verdict_from_final_outside_allowed_raises():
     final = {"type": "result", "is_error": False, "result": inner}
 
     with pytest.raises(VerdictError):
-        verdict_from_final(final, allowed=(Outcome.DONE,), raw="RAW")
+        verdict_from_final(final, allowed=(DONE,), raw="RAW")
 
 
 # --- try_verdict (tolerant: the runner's recovery path) ----------------------
@@ -398,12 +398,12 @@ def _final(result: str, *, is_error: bool = False) -> dict:
 def test_try_verdict_reads_valid_block():
     run = try_verdict(
         _final('done.\n```json\n{"outcome": "done", "summary": "ok"}\n```'),
-        allowed=(Outcome.DONE,),
+        allowed=(DONE,),
         raw="RAW",
     )
 
     assert run is not None
-    assert run.outcome is Outcome.DONE
+    assert run.outcome == DONE
     assert run.summary == "ok"
     assert run.raw == "RAW"
 
@@ -412,7 +412,7 @@ def test_try_verdict_none_when_no_block():
     # The exact failure we saw: a prose wrap-up, no verdict block at all.
     run = try_verdict(
         _final("Implementation complete. Summary:\n\nprose, no json."),
-        allowed=(Outcome.DONE,),
+        allowed=(DONE,),
         raw="RAW",
     )
 
@@ -422,7 +422,7 @@ def test_try_verdict_none_when_no_block():
 def test_try_verdict_none_when_outcome_missing():
     run = try_verdict(
         _final('```json\n{"summary": "no outcome"}\n```'),
-        allowed=(Outcome.DONE,),
+        allowed=(DONE,),
         raw="RAW",
     )
 
@@ -432,7 +432,7 @@ def test_try_verdict_none_when_outcome_missing():
 def test_try_verdict_none_when_outcome_disallowed():
     run = try_verdict(
         _final('```json\n{"outcome": "request_changes"}\n```'),
-        allowed=(Outcome.DONE,),
+        allowed=(DONE,),
         raw="RAW",
     )
 
@@ -442,7 +442,7 @@ def test_try_verdict_none_when_outcome_disallowed():
 def test_try_verdict_none_when_outcome_unknown_value():
     run = try_verdict(
         _final('```json\n{"outcome": "nonsense"}\n```'),
-        allowed=(Outcome.DONE, Outcome.REQUEST_CHANGES),
+        allowed=(DONE, REQUEST_CHANGES),
         raw="RAW",
     )
 
@@ -452,14 +452,14 @@ def test_try_verdict_none_when_outcome_unknown_value():
 def test_try_verdict_raises_on_is_error():
     # An envelope-level defect is a real failure, never a recoverable miss.
     with pytest.raises(VerdictError):
-        try_verdict(_final("x", is_error=True), allowed=(Outcome.DONE,), raw="RAW")
+        try_verdict(_final("x", is_error=True), allowed=(DONE,), raw="RAW")
 
 
 def test_try_verdict_raises_on_missing_result_field():
     with pytest.raises(VerdictError):
         try_verdict(
             {"type": "result", "is_error": False},
-            allowed=(Outcome.DONE,),
+            allowed=(DONE,),
             raw="RAW",
         )
 
@@ -470,12 +470,12 @@ def test_try_verdict_raises_on_missing_result_field():
 def test_fallback_single_outcome_synthesizes_the_only_outcome():
     run = fallback_verdict(
         "  Implementation complete. Summary: prose.  ",
-        allowed=(Outcome.DONE,),
+        allowed=(DONE,),
         raw="RAW",
     )
 
     assert run is not None
-    assert run.outcome is Outcome.DONE
+    assert run.outcome == DONE
     assert run.summary == "Implementation complete. Summary: prose."
     assert run.raw == "RAW"
 
@@ -483,7 +483,7 @@ def test_fallback_single_outcome_synthesizes_the_only_outcome():
 def test_fallback_multi_outcome_is_ambiguous_returns_none():
     run = fallback_verdict(
         "prose",
-        allowed=(Outcome.DONE, Outcome.REQUEST_CHANGES),
+        allowed=(DONE, REQUEST_CHANGES),
         raw="RAW",
     )
 
@@ -583,6 +583,6 @@ async def test_drain_renders_activity_and_captures_verdict():
     assert captured == ["● session started (opus)", "Listing files.", "⏵ Bash: ls"]
     assert stderr == "warn"
     assert final is not None and final["type"] == "result"
-    run = verdict_from_final(final, allowed=(Outcome.DONE,), raw=raw)
-    assert run.outcome is Outcome.DONE
+    run = verdict_from_final(final, allowed=(DONE,), raw=raw)
+    assert run.outcome == DONE
     assert run.summary == "ok"

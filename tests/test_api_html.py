@@ -196,6 +196,13 @@ def test_fragment_task_times_are_time_elements_for_client_side_localization(clie
     assert 'title="2026-07-19T10:00:05Z UTC"' in body
 
 
+def test_fragment_task_shows_copy_id_button(client):
+    body = client.get("/fragment/task/tsk_1").text
+
+    assert 'class="copy-id-btn"' in body
+    assert 'data-copy-id="tsk_1"' in body
+
+
 def test_fragment_task_shows_pipeline_workflow_and_dash_step(client):
     """FR-9: a pipeline task (workflow set, step unset) shows its workflow
     name and a dash — never a literal 'None' — in the step cell."""

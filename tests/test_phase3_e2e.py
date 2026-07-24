@@ -32,7 +32,7 @@ from harness.drivers.memory import (
 from harness.drivers.git_workspace import GitWorkspace
 from harness.drivers.worktree_artifacts import WorktreeArtifactView
 from harness.drivers.memory import FakeClock
-from harness.models import Outcome, Task
+from harness.models import DONE, REQUEST_CHANGES, Task
 from harness.ports.agent import AgentRun, AgentRunner, AgentSpec
 
 DEFINITION = {
@@ -88,10 +88,10 @@ class EchoRunner(AgentRunner):
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(f"# {spec.name} attempt\n", encoding="utf-8")
 
-        outcome = Outcome.DONE
+        outcome = DONE
         if spec.name == "review" and task_id not in self._review_seen:
             self._review_seen.add(task_id)
-            outcome = Outcome.REQUEST_CHANGES
+            outcome = REQUEST_CHANGES
 
         assert outcome in spec.allowed_outcomes
         return AgentRun(outcome, summary=f"{spec.name}: ok")
@@ -126,11 +126,11 @@ def _make_repo(path: Path) -> None:
 
 
 def _catalog() -> MemoryAgentCatalog:
-    def spec(step: str, *outcomes: Outcome) -> AgentSpec:
+    def spec(step: str, *outcomes: str) -> AgentSpec:
         return AgentSpec(
             name=step,
             prompt=f"Persona for the {step} step.",
-            allowed_outcomes=outcomes or (Outcome.DONE,),
+            allowed_outcomes=outcomes or (DONE,),
         )
 
     return MemoryAgentCatalog(
@@ -139,7 +139,7 @@ def _catalog() -> MemoryAgentCatalog:
             "design": spec("design"),
             "architecture": spec("architecture"),
             "development": spec("development"),
-            "review": spec("review", Outcome.DONE, Outcome.REQUEST_CHANGES),
+            "review": spec("review", DONE, REQUEST_CHANGES),
         }
     )
 

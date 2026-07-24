@@ -131,6 +131,24 @@ def test_repeated_finish_posts_once() -> None:
     assert len(post.posts) == 1
 
 
+def test_matches_source_kind_when_no_explicit_sink() -> None:
+    """Routing-contract test, not a claim that Slack ingestion exists: a task
+    with `data.source.kind == "slack"` and no explicit `data.sink` is matched
+    by the default-to-source path `effective_sink_kind` provides — the same
+    symmetry `github` relies on."""
+    sink, post = _sink()
+    task = Task(
+        id="t-1",
+        created="2026-07-23T10:00:00Z",
+        data={"source": {"kind": "slack"}},
+    )
+
+    sink.report_progress(task, Progress(step="development"))
+
+    [(_, payload)] = post.posts
+    assert "development" in payload["text"]
+
+
 def test_default_post_helper_sends_a_json_post(monkeypatch) -> None:
     """The stdlib helper, monkeypatched at the `urllib` boundary — no network."""
     import urllib.request
