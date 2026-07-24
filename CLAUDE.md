@@ -143,10 +143,10 @@ Dependencies flow strictly downward, no cycles.
 | Base | `models` (imports nothing from the package), `ids` |
 | Logic | `router` (knows only `models`) |
 | Base (package-free) | `models`, `ids`, `artifacts_layout` (the `.artifacts/<id>/<step>-NN` convention) |
-| Ports | `ports/{queue,workflows,strategy,behavior,events,clock,workspace,artifacts,forge,board,agent,repos,source,control,logs,issues,merge,issue_state,triggers,updater,process_admin,issue_import}` |
+| Ports | `ports/{queue,workflows,strategy,behavior,events,clock,workspace,artifacts,forge,board,agent,repos,source,control,logs,issues,merge,issue_state,triggers,updater,process_admin,issue_import,command}` |
 | Orchestration | `dispatcher`, `consumer`, `source_poller`, `task_control`, `pr_watcher`, `merge_reconciler`, `issue_reconciler` — know only ports (and, for `pr_watcher`/`merge_reconciler`/`issue_reconciler`, the base `ids` module — not `workspace`/`forge`/`artifacts`/`agent`/`repos`/`drivers`) |
 | Behaviors | `behaviors/{landing,agent,resolve_conflict,open_issue}` — touch ports, not drivers |
-| Drivers | `drivers/{fs_queue,fs_workflows,fifo_strategy,dummy_behavior,stdout_events,system_clock,memory,git_workspace,fake_forge,claude_cli,fs_agents,fs_repos,worktree_artifacts,source_reflector,github_client,github_source,github_forge,github_issues,github_issues_check,github_conflicts_check,failed_tasks_check,github_merge_checker,github_issue_checker,launchd,composite_events,git_remote,projection_events,stage_output,scheduled_trigger,checks,fs_triggers,fs_processes,slack_sink,uv_updater,label_issue,github_issue_import}` |
+| Drivers | `drivers/{fs_queue,fs_workflows,fifo_strategy,dummy_behavior,stdout_events,system_clock,memory,git_workspace,fake_forge,claude_cli,fs_agents,fs_repos,worktree_artifacts,source_reflector,github_client,github_source,github_forge,github_issues,github_issues_check,github_conflicts_check,failed_tasks_check,github_merge_checker,github_issue_checker,launchd,composite_events,git_remote,projection_events,stage_output,scheduled_trigger,checks,fs_triggers,fs_processes,slack_sink,uv_updater,label_issue,github_issue_import,subprocess_command}` |
 | UI | `api/{app,routes}` — reads through `BoardView`/`ArtifactView`/`StageOutputView`, writes through `TaskControl`; never a driver |
 | Edges | `app` (wiring), `cli` |
 
@@ -158,6 +158,7 @@ Dependencies flow strictly downward, no cycles.
 - `ports/forge.py` — `Forge.open_pull_request(...)` (landing proposes a PR) + `base_branch(task)` (the branch that PR targets, which landing syncs in first — ADR-0017)
 - `ports/agent.py` — `AgentRunner.run(...)`, `AgentCatalog.get(name)`, `AgentSpec` (persona as data)
 - `ports/repos.py` — `RepositoryRegistry.resolve(name) -> Path` (repo name → path)
+- `ports/command.py` — the `CommandRunner` port: `run(command, *, cwd, timeout) -> CommandResult` (exit code + merged stdout/stderr), raising `CommandTimeout` past the budget (the process is killed). The verify step's counterpart of `AgentRunner` — a future `VerifyBehavior` decides *what* to run, only the driver knows subprocesses. `drivers/subprocess_command.py` (`SubprocessCommandRunner`) is the real driver over `asyncio.create_subprocess_shell`; `MemoryCommandRunner` in `drivers/memory.py` is the scripted fake (pops preset `CommandResult`s, repeats the last, records `calls`)
 - `behaviors/agent.py` — `ClaudeCliBehavior`: attach worktree → allocate attempt → run the agent → the worker commits. Also resolves the task's workflow (via an optional `WorkflowRepository`) to derive the step's live outcome vocabulary, hints and description, falling back to the persona's `allowed_outcomes` when workflow-less (invariant #42, ADR-0018)
 - `ports/source.py` — the `TaskSource` port (`poll`/`report_progress`/`finish`) + `Progress`/`FinishResult`
 - `source_poller.py` — `SourcePoller`: the core that fills the inbox from the source (knows only ports)

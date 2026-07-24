@@ -23,6 +23,7 @@ from harness.ports.artifacts import (
 )
 from harness.ports.behavior import ConsumerBehavior
 from harness.ports.clock import Clock
+from harness.ports.command import CommandResult, CommandRunner
 from harness.ports.events import EventSink
 from harness.ports.forge import Forge, PullRequest, PullRequestState
 from harness.ports.issue_state import IssueChecker
@@ -495,3 +496,17 @@ class MemoryRepositoryRegistry(RepositoryRegistry):
 
     def names(self) -> list[str]:
         return list(self._repos)
+
+
+class MemoryCommandRunner(CommandRunner):
+    """Scripted CommandRunner: pops preset results, repeats the last one."""
+
+    def __init__(self, results: list[CommandResult] | None = None) -> None:
+        self._results = list(results) if results else [CommandResult(0, "ok")]
+        self.calls: list[dict] = []
+
+    async def run(self, command: str, *, cwd: Path, timeout: float) -> CommandResult:
+        self.calls.append({"command": command, "cwd": cwd, "timeout": timeout})
+        if len(self._results) > 1:
+            return self._results.pop(0)
+        return self._results[0]
