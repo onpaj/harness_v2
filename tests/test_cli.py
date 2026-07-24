@@ -670,6 +670,42 @@ def test_agent_init_round_trips_through_filesystem_agent_catalog(tmp_path):
     assert spec.allowed_outcomes == (DONE, REQUEST_CHANGES)
 
 
+def test_agent_init_clamps_custom_outcomes_to_a_loadable_fallback(tmp_path):
+    """Regression guard: `harness agent init <step> --workflow heal` is a
+    second write path to `agents/<step>.json`, alongside `_write_default_agents`
+    run by `harness init`. `heal`'s custom outcome vocabulary (`heal`:
+    file/skip; `dedup`: unique/duplicate) must be clamped here too — an
+    unclamped write would produce an `allowed_outcomes` that
+    `fs_agents._parse_agent_spec` rejects on load, and `app.build()` loads
+    agents eagerly, so the *next* `harness run` would crash at startup, not
+    just fail one task."""
+    main(["init", "--root", str(tmp_path)])
+
+    assert main(
+        ["agent", "init", "dedup", "--root", str(tmp_path), "--workflow", "heal"]
+    ) == 0
+
+    definition = json.loads((tmp_path / "agents" / "dedup.json").read_text())
+    assert definition["allowed_outcomes"] == ["done"]
+
+    catalog = FilesystemAgentCatalog(tmp_path / "agents")
+    spec = catalog.get("dedup")
+    assert spec.allowed_outcomes == (DONE,)
+    assert spec.allowed_tools == ("Read", "Bash")
+    assert spec.prompt
+
+    # `--force` re-running over `heal` itself (file/skip) must stay loadable
+    # too — not just the freshly-created `dedup`.
+    assert main(
+        [
+            "agent", "init", "heal", "--root", str(tmp_path), "--workflow", "heal",
+            "--force",
+        ]
+    ) == 0
+    heal_spec = catalog.get("heal")
+    assert heal_spec.allowed_outcomes == (DONE,)
+
+
 def test_submit_step_writes_a_workflow_less_task(tmp_path, capsys):
     main(["init", "--root", str(tmp_path), "--no-workflow"])
     (tmp_path / "agents" / "development.json").write_text(

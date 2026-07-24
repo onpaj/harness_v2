@@ -644,9 +644,14 @@ def _agent_init(args: argparse.Namespace) -> int:
         print(text)
         return 0
 
-    definition = _agent_definition_template(
-        args.step, list(workflow.outcomes_for(args.step))
-    )
+    # Same clamp as `_write_default_agents`: `allowed_outcomes` written here
+    # is only the workflow-less fallback (invariant #42), and `fs_agents`
+    # restricts it to {done, request_changes} — an unclamped custom-outcome
+    # step (e.g. `heal`'s file/skip, `dedup`'s unique/duplicate) would write
+    # a persona file that fails to load, and `app.build()` loads agents
+    # eagerly, so the next `harness run` would crash at startup.
+    fallback = [o for o in workflow.outcomes_for(args.step) if o in (DONE, REQUEST_CHANGES)] or [DONE]
+    definition = _agent_definition_template(args.step, fallback)
     text = json.dumps(definition, indent=2, ensure_ascii=False)
     path.write_text(text, encoding="utf-8")
     print(str(path))
