@@ -185,6 +185,9 @@
               {% elif option == 'slack' %}
               <span class="option-card__title">Slack</span>
               <span class="option-card__desc">Posts progress to the webhook in <code>SLACK_WEBHOOK_URL</code>.</span>
+              {% elif option == 'github' %}
+              <span class="option-card__title">GitHub labels</span>
+              <span class="option-card__desc">Reflects to the task's origin issue. No-op unless the action populates a GitHub source (e.g. github-issues).</span>
               {% else %}
               <span class="option-card__title">{{ option }}</span>
               <span class="option-card__desc">Reflects progress to this destination.</span>

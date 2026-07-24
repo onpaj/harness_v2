@@ -104,6 +104,25 @@ def test_slack_sink_round_trips(tmp_path: Path) -> None:
     _compiles(tmp_path)
 
 
+def test_github_sink_round_trips(tmp_path: Path) -> None:
+    admin = FilesystemProcessAdmin(tmp_path)
+
+    written = admin.write(
+        "notify-github",
+        ProcessFields(
+            interval="1h",
+            check="always",
+            target_kind="workflow",
+            target="wf",
+            sink_kind="github",
+        ),
+    )
+
+    assert written.sink_kind == "github"
+    assert admin.read("notify-github") == written
+    _compiles(tmp_path)
+
+
 # --- validation: right field key --------------------------------------------
 
 
@@ -234,4 +253,4 @@ def test_check_names_and_sink_kinds(tmp_path: Path) -> None:
 
     assert "always" in admin.check_names()
     assert "disk-threshold" in admin.check_names()
-    assert admin.sink_kinds() == ("none", "slack")
+    assert admin.sink_kinds() == ("github", "none", "slack")

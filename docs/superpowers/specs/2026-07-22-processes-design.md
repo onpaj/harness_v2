@@ -172,6 +172,22 @@ file), mirroring `FilesystemTriggerRepository`:
 > 3's stateful create-then-update handle (and the `Reflector` port) remains
 > open.
 
+> **Update 2026-07-23 — routing unified.** Bullet 1's defaulting is no longer
+> just a stated intention: `ports/source.py::effective_sink_kind(task)` is the
+> one shared routing rule (`data.sink.kind` if present, else
+> `data.source.kind`), and both `GithubLabelReflector` and `SlackWebhookSink`
+> route their `_mine` through it. `github` is now an accepted `sink.kind`
+> alongside `none`/`slack` — but it remains the *degenerate, same-as-origin*
+> case, not an independent destination the way `slack` is: `GithubLabelReflector`
+> can only ever target a task's origin issue (`data.source.issue`), so a
+> Process-declared `{"sink": {"kind": "github"}}` is schema-valid and stamped
+> onto every fired task, but stays inert unless the task's `data.source`
+> already carries a matching GitHub repo/issue (as the `github-issues` check's
+> observations do today). See ADR-0018 for the boundary this unification makes
+> newly worth stating explicitly: a sink only reflects and can never fail or
+> route a task, which is why `github`-as-sink (labels) stays a world apart
+> from `open-pr` (PR creation, a finisher) even though both call GitHub.
+
 The whole point of the `sink` field is to keep **source ≠ destination** open —
 today a Process's origin and its reflection target are the same medium (or, in
 v1, there is no reflection at all), but tomorrow a Process should ingest from
