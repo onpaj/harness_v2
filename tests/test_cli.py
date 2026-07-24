@@ -25,6 +25,7 @@ from harness.cli import (
 )
 from harness.drivers.fs_agents import FilesystemAgentCatalog
 from harness.drivers.github_client import FakeGithubClient
+from harness.drivers.jira_client import FakeJiraClient
 from harness.drivers.memory import MemoryArtifactStore, MemoryRepositoryRegistry
 from harness.drivers.stage_output import StageOutputProjection
 from harness.models import DONE, END, REQUEST_CHANGES, Task, Transition, Workflow
@@ -1351,11 +1352,112 @@ def test_process_check_factories_github_conflicts_fails_fast_without_a_client(tm
 
 def test_process_check_factories_stays_dependency_free_for_builtin_checks(tmp_path):
     """`BUILTIN_CHECKS` itself is untouched by this factory — it only ever adds
-    the two externally-dependent kinds."""
+    the three externally-dependent kinds."""
     registry = MemoryRepositoryRegistry({})
     checks = _process_check_factories(_process_args(), registry, client=None)
 
-    assert set(checks) == {"github-issues", "github-conflicts"}
+    assert set(checks) == {"github-issues", "github-conflicts", "jira-issues"}
+
+
+def test_process_check_factories_builds_a_jira_issues_process(tmp_path):
+    from harness.drivers.memory import FakeClock
+
+    (tmp_path / "processes").mkdir()
+    (tmp_path / "processes" / "jira-todo.json").write_text(
+        '{"trigger": {"interval": "60s"},'
+        ' "action": {"check": "jira-issues",'
+        '            "params": {"project": "PROJ", "label": "harness-todo",'
+        '                       "repository": "my-service"}},'
+        ' "target": {"workflow": "default"}, "dedup": "per-state",'
+        ' "sink": {"kind": "none"}}'
+    )
+    registry = MemoryRepositoryRegistry({"my-service": Path("/repos/my-service")})
+    checks = _process_check_factories(_process_args(), registry, jira_client=FakeJiraClient())
+
+    sources = _compile_processes(
+        tmp_path,
+        checks=checks,
+        known_targets={"default"},
+        clock=FakeClock("2026-07-24T10:00:00Z"),
+    )
+
+    assert len(sources) == 1
+    assert sources[0].kind == "scheduled:jira-todo"
+
+
+def test_process_check_factories_jira_issues_fails_fast_without_a_client(tmp_path, monkeypatch):
+    from harness.drivers.fs_processes import ProcessValidationError
+    from harness.drivers.memory import FakeClock
+
+    monkeypatch.delenv("JIRA_BASE_URL", raising=False)
+    monkeypatch.delenv("JIRA_EMAIL", raising=False)
+    monkeypatch.delenv("JIRA_API_TOKEN", raising=False)
+    (tmp_path / "processes").mkdir()
+    (tmp_path / "processes" / "jira-todo.json").write_text(
+        '{"trigger": {"interval": "60s"},'
+        ' "action": {"check": "jira-issues",'
+        '            "params": {"project": "PROJ", "repository": "my-service"}},'
+        ' "target": {"workflow": "default"}}'
+    )
+    registry = MemoryRepositoryRegistry({"my-service": Path("/repos/my-service")})
+    checks = _process_check_factories(_process_args(), registry, jira_client=None)
+
+    with pytest.raises(ProcessValidationError) as exc:
+        _compile_processes(
+            tmp_path,
+            checks=checks,
+            known_targets={"default"},
+            clock=FakeClock("2026-07-24T10:00:00Z"),
+        )
+    assert "JIRA_BASE_URL" in str(exc.value)
+    assert exc.value.field == "check"
+
+
+def test_process_check_factories_jira_issues_requires_a_known_repository(tmp_path):
+    from harness.drivers.fs_processes import ProcessValidationError
+    from harness.drivers.memory import FakeClock
+
+    (tmp_path / "processes").mkdir()
+    (tmp_path / "processes" / "jira-todo.json").write_text(
+        '{"trigger": {"interval": "60s"},'
+        ' "action": {"check": "jira-issues",'
+        '            "params": {"project": "PROJ", "repository": "unknown-repo"}},'
+        ' "target": {"workflow": "default"}}'
+    )
+    registry = MemoryRepositoryRegistry({"my-service": Path("/repos/my-service")})
+    checks = _process_check_factories(_process_args(), registry, jira_client=FakeJiraClient())
+
+    with pytest.raises(ProcessValidationError) as exc:
+        _compile_processes(
+            tmp_path,
+            checks=checks,
+            known_targets={"default"},
+            clock=FakeClock("2026-07-24T10:00:00Z"),
+        )
+    assert exc.value.field == "params"
+
+
+def test_process_check_factories_jira_issues_requires_jql_or_project(tmp_path):
+    from harness.drivers.fs_processes import ProcessValidationError
+    from harness.drivers.memory import FakeClock
+
+    (tmp_path / "processes").mkdir()
+    (tmp_path / "processes" / "jira-todo.json").write_text(
+        '{"trigger": {"interval": "60s"},'
+        ' "action": {"check": "jira-issues", "params": {"repository": "my-service"}},'
+        ' "target": {"workflow": "default"}}'
+    )
+    registry = MemoryRepositoryRegistry({"my-service": Path("/repos/my-service")})
+    checks = _process_check_factories(_process_args(), registry, jira_client=FakeJiraClient())
+
+    with pytest.raises(ProcessValidationError) as exc:
+        _compile_processes(
+            tmp_path,
+            checks=checks,
+            known_targets={"default"},
+            clock=FakeClock("2026-07-24T10:00:00Z"),
+        )
+    assert exc.value.field == "params"
 
 
 def _write_sink_process(tmp_path, sink_kind="slack"):
