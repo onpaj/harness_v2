@@ -31,7 +31,7 @@
           <div class="card__meta">
             {% if task.lock_id %}<span class="badge working">processing</span>{% endif %}
             {% if task.last_outcome %}<span class="badge {{ task.last_outcome }}">{{ task.last_outcome }}</span>{% endif %}
-            {% if task.history %}<span class="card__time" title="{{ task.history[-1].at }}">{{ task.history[-1].at | shorttime }}</span>{% endif %}
+            {% if task.history %}<time datetime="{{ task.history[-1].at }}" class="card__time" title="{{ task.history[-1].at }} UTC">{{ task.history[-1].at | shorttime }}</time>{% endif %}
           </div>
         </div>
         {% endfor %}
