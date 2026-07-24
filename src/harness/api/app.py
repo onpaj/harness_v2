@@ -15,6 +15,7 @@ from harness.ports.artifacts import ArtifactRef, ArtifactView
 from harness.ports.board import BoardView
 from harness.ports.clock import Clock
 from harness.ports.control import TaskControl
+from harness.ports.issue_import import IssueImport, NullIssueImport
 from harness.ports.logs import StageOutputView
 from harness.ports.process_admin import (
     ProcessAdmin,
@@ -151,6 +152,7 @@ def create_app(
     workflow_admin: WorkflowAdmin | None = None,
     process_admin: ProcessAdmin | None = None,
     updater: Updater | None = None,
+    issue_import: IssueImport | None = None,
     version: str = "unknown",
     build_time: str | None = None,
 ) -> FastAPI:
@@ -161,6 +163,7 @@ def create_app(
     workflow_admin = workflow_admin or _EmptyWorkflowAdmin()
     process_admin = process_admin or _EmptyProcessAdmin()
     updater = updater or _NullUpdater()
+    issue_import = issue_import or NullIssueImport()
     app = FastAPI(title="harness board", docs_url=None, redoc_url=None)
     app.state.view = view
     app.state.artifacts = artifacts
@@ -190,6 +193,7 @@ def create_app(
             workflow_admin,
             process_admin,
             updater,
+            issue_import,
             version,
             build_time,
         )

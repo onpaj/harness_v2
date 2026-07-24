@@ -83,6 +83,7 @@ swapped out later.
 40. **Outbound reflection routes on one effective sink kind: `data.sink.kind`, defaulting to `data.source.kind`.** `ports/source.py::effective_sink_kind(task)` is the single routing rule every reflecting `TaskSource` compares its own `kind` against — a pure dict lookup, no I/O. Accepted kinds are `none`, `slack` and `github`. `slack` is a destination genuinely independent of origin (GitHub in, Slack out): a non-`none`/non-`github` sink is stamped by the compiled trigger as `data.sink = {"kind": ...}` (after the observation merge, so a check can never clobber it), and `SlackWebhookSink` (an outbound-only `TaskSource`, `poll()` always `[]`, registered in `cli._run` only when `SLACK_WEBHOOK_URL` is set; the URL is a secret and never enters a JSON file) matches on the effective kind, posting a stateless webhook message per report (deduped per-run by an in-process ledger, invariant #21; the stateful create-then-update refinement stays open). `github` is the *degenerate, same-as-origin* case, not an independently addressable destination: `GithubLabelReflector` can only ever target a task's origin issue (`data.source.issue`), so it is the default a task falls back to when no explicit `data.sink` is set — never a destination a Process can point at a GitHub repo the task didn't originate from. A sink only reflects state and can never fail or route a task (ADR-0018 — contrast a finisher, invariant #41, which can). See ADR-0015.
 41. **A finisher is data, not a step name.** A step's finishing behavior is chosen via the workflow's `finishers` mapping (step → a `FinisherBinding{kind, config}`, parsed either as a plain string — `"open-pr"`, `config={}` — or an object — `{"kind": "label-issue", "labels": {...}}`, everything but `"kind"` becomes `config`) resolved against a registry of **factories** wired in `build()` (`{"open-pr": lambda step, config, inner: landing}` by default). A factory receives the step name, that binding's own `config`, and a zero-arg thunk that *lazily* builds the "inner" behavior `behavior_for` would otherwise have returned for that step — so a finisher can either fully **replace** the step's behavior (`open-pr`: ignores `step`/`config`/`inner`, `land` never runs an agent) or **wrap** it (`label-issue`: calls the thunk, lets the step's own persona run, then acts on the outcome it returned). The thunk is lazy, not an eagerly-built behavior, because a step exclusively finished by `open-pr` (the landing step) typically has no catalog agent at all — eagerly resolving it for every bound step would raise `AgentNotFound` for a perfectly normal deployment. `behavior_for` has no branch on a step's name for finishing. Conflicting bindings across served workflows (comparing the whole `FinisherBinding`, kind *and* config) and unknown kinds fail at build, never at consume time; a workflow with no `finishers` key defaults `landing_step` to `open-pr` and behaves exactly as before. See ADR-0016 and ADR-0018.
 42. **A step's outcome vocabulary is the workflow's, derived live.** `Workflow.outcomes_for(step)` — the unique `on` values of the edges leaving `step`, in definition order — is the single, authoritative declaration of what a step may report, computed from the graph itself on every run, never frozen. `AgentSpec.allowed_outcomes` is only the fallback for a workflow-less task (no `workflow_template`, an unresolvable one, or a step with no outgoing edges) and for any behavior with no `WorkflowRepository` wired at all — it is not the primary declaration once a workflow is driving the step. Two hints exist to steer an agent's choice and are BOTH prompt-only, read only by `ClaudeCliBehavior`'s prompt composition, and never touched by `route()` or the dispatcher: `Transition.hint` (per outcome) and `Workflow.descriptions` (per step). See ADR-0018.
+43. **A component needing both a live harness queue and an external-system dependency is built inside `build()` from a factory `cli.py` supplies.** Neither wired standalone in `cli.py`'s `serve()` (that shape needs no queue — the admin ports) nor built directly by name inside `build()` (that shape needs no external client — `FailedTasksCheck`). `IssueImport`/`GithubIssueImportService` (the Ahanas board's manual "Add issue" button) follows this: `cli.py` closes the `GithubClient`/`RepositoryRegistry` it already built into an `IssueImportFactory`, and `build()` invokes it once `inbox`/`step_queues`/`done`/`failed`/`healed`/`archived`/`events` exist, exposing the result as `harness.issue_import` — always concrete, mirroring `harness.control`. `IssueImport` is touched only by `api/routes.py`'s `POST /issues/import` handler and `build()`'s own wiring — `dispatcher.py`/`consumer.py` don't import it; guarded by `test_architecture.py` the same way invariants #23/#32/#34 guard `TaskControl`/`MergeChecker`/`IssueChecker`.
 
 ## Working here
 
@@ -142,10 +143,10 @@ Dependencies flow strictly downward, no cycles.
 | Base | `models` (imports nothing from the package), `ids` |
 | Logic | `router` (knows only `models`) |
 | Base (package-free) | `models`, `ids`, `artifacts_layout` (the `.artifacts/<id>/<step>-NN` convention) |
-| Ports | `ports/{queue,workflows,strategy,behavior,events,clock,workspace,artifacts,forge,board,agent,repos,source,control,logs,issues,merge,issue_state,triggers,updater,process_admin}` |
+| Ports | `ports/{queue,workflows,strategy,behavior,events,clock,workspace,artifacts,forge,board,agent,repos,source,control,logs,issues,merge,issue_state,triggers,updater,process_admin,issue_import}` |
 | Orchestration | `dispatcher`, `consumer`, `source_poller`, `task_control`, `pr_watcher`, `merge_reconciler`, `issue_reconciler` — know only ports (and, for `pr_watcher`/`merge_reconciler`/`issue_reconciler`, the base `ids` module — not `workspace`/`forge`/`artifacts`/`agent`/`repos`/`drivers`) |
 | Behaviors | `behaviors/{landing,agent,resolve_conflict,open_issue}` — touch ports, not drivers |
-| Drivers | `drivers/{fs_queue,fs_workflows,fifo_strategy,dummy_behavior,stdout_events,system_clock,memory,git_workspace,fake_forge,claude_cli,fs_agents,fs_repos,worktree_artifacts,source_reflector,github_client,github_source,github_forge,github_issues,github_issues_check,github_conflicts_check,failed_tasks_check,github_merge_checker,github_issue_checker,launchd,composite_events,git_remote,projection_events,stage_output,scheduled_trigger,checks,fs_triggers,fs_processes,slack_sink,uv_updater,label_issue}` |
+| Drivers | `drivers/{fs_queue,fs_workflows,fifo_strategy,dummy_behavior,stdout_events,system_clock,memory,git_workspace,fake_forge,claude_cli,fs_agents,fs_repos,worktree_artifacts,source_reflector,github_client,github_source,github_forge,github_issues,github_issues_check,github_conflicts_check,failed_tasks_check,github_merge_checker,github_issue_checker,launchd,composite_events,git_remote,projection_events,stage_output,scheduled_trigger,checks,fs_triggers,fs_processes,slack_sink,uv_updater,label_issue,github_issue_import}` |
 | UI | `api/{app,routes}` — reads through `BoardView`/`ArtifactView`/`StageOutputView`, writes through `TaskControl`; never a driver |
 | Edges | `app` (wiring), `cli` |
 
@@ -208,11 +209,36 @@ Dependencies flow strictly downward, no cycles.
   a built-ins-only subset; without a `GITHUB_TOKEN` the GitHub names still
   list, but saving one fails on the `check` field via the factory's own
   fail-fast
+- `ports/issue_import.py` — `IssueImport` (write-side port behind the Ahanas
+  board's manual "Add issue" button): `add(ref) -> IssueImportResult`, one ref
+  in, one outcome out, never raising. Also hosts `NullIssueImport` (the
+  "GitHub is not configured" fallback shared by `build()`'s own default and
+  `create_app`'s) and `IssueImportFactory`, the `Callable` type `cli.py`
+  supplies to `build()` (invariant #43, mirroring `extra_checks`/`finishers`):
+  `GithubIssueImportService` needs both an external client (`cli.py`'s to
+  build) and the harness's own live queues (which don't exist until `build()`
+  runs), the same "live queue + external dependency" shape as
+  `FailedTasksCheck`, so it is built inside `build()` from a factory rather
+  than standalone in `cli.py`'s `serve()` or by name inside `build()`
+- `drivers/github_issue_import.py` — `GithubIssueImportService`: the `IssueImport`
+  driver. `add(ref)` parses `owner/repo#number` or a full issue URL, resolves
+  the repo through `RepositoryRegistry`/`github_slug` (mirroring
+  `GithubIssuesCheck`), fetches the issue by number via `GithubClient.get_issue`
+  (no label required, unlike the scanning ingestion path), and — unless an
+  identical `dedup_key` is already present anywhere across `inbox`/step
+  queues/`done`/`failed`/`healed`/`archived` (idempotent re-submission) —
+  builds a `Task` byte-for-byte shaped like `GithubTaskSource.poll()`'s
+  (same `data.source`, same `dedup_key`) and emits the same `"ingested"`
+  event `SourcePoller.tick()` does, so the board's existing SSE path and every
+  downstream consumer (dispatcher, label reflection, the reconcilers) need no
+  change. Best-effort claims the issue's `harness:queued` label; a failure
+  there is swallowed, never fatal, since the task is already real by then
 - `behaviors/resolve_conflict.py` — `ResolveConflictBehavior`: merges the base
   into the attached branch; a clean merge commits without spending an agent
   call, a real conflict runs the `resolve` persona then the worker commits
 - `api/` — FastAPI board and admin UI; sees only `BoardView`, `ArtifactView`,
-  `TaskControl`, `AgentAdmin`, `WorkflowAdmin` and `ProcessAdmin` — never a driver or `ArtifactStore`
+  `TaskControl`, `AgentAdmin`, `WorkflowAdmin`, `ProcessAdmin` and `IssueImport`
+  — never a driver or `ArtifactStore`
 - `ports/merge.py` — the `MergeChecker` port: `is_merged(task) -> bool | None` (`None`: no `data.pr`; raises on a transient failure — the caller must retry, never treat that as "not merged")
 - `merge_reconciler.py` — `MergeReconciler`: the core that checks a `done` task's PR and archives it once merged (knows only ports/models, mirrors `source_poller.py`)
 - `drivers/github_merge_checker.py` — `GithubMergeChecker`: reads `repo`/`number` straight off `task.data["pr"]` at check time, no per-repo construction

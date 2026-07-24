@@ -1242,3 +1242,85 @@ def test_conflicting_finisher_bindings_with_same_kind_but_different_config_fails
             events=MemoryEventSink(),
             finishers={"record": lambda step, config, inner: RecordingFinisher()},
         )
+
+
+# --- issue_import_factory (invariant #43) ------------------------------------
+
+
+def test_build_without_issue_import_factory_yields_null_issue_import(tmp_path):
+    from harness.ports.issue_import import NullIssueImport
+
+    seed_definition(tmp_path, DEFINITION)
+
+    harness = build(tmp_path, "default", events=MemoryEventSink())
+
+    assert isinstance(harness.issue_import, NullIssueImport)
+    result = harness.issue_import.add("o/r#1")
+    assert result.ok is False
+    assert "not configured" in result.error
+
+
+def test_build_with_issue_import_factory_receives_the_harness_own_queues(tmp_path):
+    """The factory `build()` invokes must be handed the exact queues `build()`
+    itself constructed, not fresh/disconnected ones — otherwise a task the
+    service puts into "inbox" would never reach the dispatcher."""
+    seed_definition(tmp_path, DEFINITION)
+    seen = {}
+
+    class RecordingIssueImport:
+        def add(self, ref):
+            raise NotImplementedError
+
+    def factory(**kwargs):
+        seen.update(kwargs)
+        return RecordingIssueImport()
+
+    harness = build(
+        tmp_path, "default", events=MemoryEventSink(), issue_import_factory=factory
+    )
+
+    assert seen["inbox"] is harness._inbox
+    assert seen["done"] is harness._done
+    assert seen["failed"] is harness._failed
+    assert seen["healed"] is harness._healed
+    assert seen["archived"] is harness._archived
+    assert set(seen["step_queues"]) == set(harness._step_queues)
+    assert isinstance(harness.issue_import, RecordingIssueImport)
+
+
+def test_build_issue_import_events_reach_the_projection(tmp_path):
+    """The factory's `events` kwarg must be the composed `CompositeEventSink`
+    (built before the factory runs) — otherwise an "ingested" event the
+    service emits never reaches the board projection."""
+    from harness.drivers.github_client import FakeGithubClient, Issue
+    from harness.drivers.github_issue_import import GithubIssueImportService
+    from harness.drivers.memory import MemoryRepositoryRegistry
+
+    seed_definition(tmp_path, DEFINITION)
+    registry = MemoryRepositoryRegistry({"repo": tmp_path})
+    client = FakeGithubClient([Issue(1, "t", "b", "u", ())])
+
+    def factory(*, inbox, step_queues, done, failed, healed, archived, events, clock):
+        return GithubIssueImportService(
+            client=client,
+            registry=registry,
+            inbox=inbox,
+            step_queues=step_queues,
+            done=done,
+            failed=failed,
+            healed=healed,
+            archived=archived,
+            events=events,
+            clock=clock,
+            worktree_root=str(tmp_path / "worktrees"),
+            slug_of=lambda path: "o/repo",
+        )
+
+    harness = build(
+        tmp_path, "default", events=MemoryEventSink(), issue_import_factory=factory
+    )
+
+    result = harness.issue_import.add("o/repo#1")
+
+    assert result.ok is True
+    assert harness.projection.get(result.task_id) is not None
