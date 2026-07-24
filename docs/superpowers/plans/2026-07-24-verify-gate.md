@@ -908,7 +908,8 @@ git commit -m "test: e2e for the verify gate's request_changes loop"
 
 1. **Update the operator's workflow file** `~/harness-root/workflows/development.json`: insert the `verify` step edges and the `"finishers": {"verify": "verify"}` binding exactly as in Task 4's `DEFAULT_DEFINITION` (the installed file is operator config; `harness init` only writes it for fresh roots).
 2. **Configure verify commands** in `~/harness-root/repos.json` — convert each entry to the object form where wanted, e.g. `"harness_v2": {"path": "/Users/rem/harness_v2-run", "verify": ".venv/bin/pytest -q"}`. Repos left in string form skip the gate (done no-op).
-3. Restart the service (`harness update` / launchd kickstart) and watch one task flow through the new `verify` column on the board.
+3. **Regenerate the `development` agent** so its persona picks up the new verify-run sentence — `harness agent init development --force` (`src/harness/cli.py`'s `agent init` subcommand: scaffolds `agents/<step>.json` from the built-in template, `--force` overwrites an existing file; run from a root already `harness init`-ed, e.g. `~/harness-root`). The new sentence only lands in a fresh `agents/development.json`, never by editing `cli.py` alone — an already-`init`-ed root keeps its old persona text until this is run. If the operator has hand-edited `agents/development.json` beyond the template, regenerating clobbers those edits (`--force` overwrites unconditionally, no diff/merge) — reconcile by hand instead in that case.
+4. Restart the service (`harness update` / launchd kickstart) and watch one task flow through the new `verify` column on the board.
 
 ### Self-review notes
 

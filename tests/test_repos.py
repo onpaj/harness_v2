@@ -130,6 +130,13 @@ def test_object_form_without_path_is_not_found(tmp_path):
         registry.resolve("app")
 
 
+def test_verify_command_malformed_json_is_none(tmp_path):
+    config = tmp_path / "repos.json"
+    config.write_text("{this is not json")
+    registry = FilesystemRepositoryRegistry(config)
+    assert registry.verify_command("app") is None
+
+
 def test_memory_registry_verify_command(tmp_path):
     registry = MemoryRepositoryRegistry({"app": tmp_path}, verify={"app": "make test"})
     assert registry.verify_command("app") == "make test"

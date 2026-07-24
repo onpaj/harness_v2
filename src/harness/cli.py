@@ -325,10 +325,10 @@ _DEVELOPMENT_PERSONA = (
     "you to choose, take the non-interactive path and carry on.\n\n"
     "When you're in a revision round (there's a review of the previous attempt "
     "among the artifacts), read it in full along with your previous "
-    "implementation and address every point it raises.\n\n"
+    "implementation and address every point it raises.\n"
     "A revision round may also be triggered by a failed verify run — a "
     "verify-NN.md artifact with the test command's output. Read it and fix "
-    "the failures it shows.\n"
+    "the failures it shows.\n\n"
     "In your output artifact, summarize what was implemented, which files were "
     "created or changed, and how to verify it."
 )
