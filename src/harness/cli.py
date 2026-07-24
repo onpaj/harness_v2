@@ -40,6 +40,7 @@ from harness.drivers.github_forge import GithubForge
 from harness.drivers.github_issue_checker import GithubIssueChecker
 from harness.drivers.github_merge_checker import GithubMergeChecker
 from harness.drivers.github_source import GithubLabelReflector, GithubTaskSource
+from harness.drivers.jira_client import HttpJiraClient, JiraClient
 from harness.drivers.label_issue import LabelIssueBehavior
 from harness.drivers.slack_sink import SlackWebhookSink
 from harness.drivers.subprocess_command import SubprocessCommandRunner
@@ -832,11 +833,14 @@ def _process_check_factories(
     registry: RepositoryRegistry,
     *,
     client: GithubClient | None = None,
+    jira_client: JiraClient | None = None,
 ) -> dict[str, CheckFactory]:
     """Check kinds `processes/*.json` may name that need a dependency
     `BUILTIN_CHECKS` can't carry — `github-issues`/`github-conflicts`, each
-    closed over a `GithubClient` + the repo registry. The client comes from the
-    caller (tests) or `GITHUB_TOKEN`.
+    closed over a `GithubClient` + the repo registry, and `jira-issues`,
+    closed over a `JiraClient` + the repo registry. The clients come from the
+    caller (tests) or the environment (`GITHUB_TOKEN`; `JIRA_BASE_URL`/
+    `JIRA_EMAIL`/`JIRA_API_TOKEN`).
 
     Returns just the factory dict — process *compilation* itself now happens
     inside `app.build()` (ADR-0018), which merges this dict over
@@ -849,11 +853,22 @@ def _process_check_factories(
     from harness.drivers.github_conflicts_check import GithubConflictsCheck
     from harness.drivers.github_issues_check import SPEC as GITHUB_ISSUES_SPEC
     from harness.drivers.github_issues_check import GithubIssuesCheck
+    from harness.drivers.jira_issues_check import JiraIssuesCheck
     from harness.ports.triggers import CheckDefinition
 
     if client is None:
         token = os.environ.get("GITHUB_TOKEN")
         client = HttpGithubClient(token) if token else None
+
+    if jira_client is None:
+        base_url = os.environ.get("JIRA_BASE_URL")
+        email = os.environ.get("JIRA_EMAIL")
+        api_token = os.environ.get("JIRA_API_TOKEN")
+        jira_client = (
+            HttpJiraClient(base_url, email, api_token)
+            if base_url and email and api_token
+            else None
+        )
 
     def github_issues_factory(params: dict) -> GithubIssuesCheck:
         if client is None:
@@ -885,8 +900,58 @@ def _process_check_factories(
             head_prefix=params.get("head_prefix", "harness/"),
         )
 
+    def jira_issues_factory(params: dict) -> JiraIssuesCheck:
+        if jira_client is None:
+            raise ProcessValidationError(
+                "jira-issues action requires JIRA_BASE_URL/JIRA_EMAIL/JIRA_API_TOKEN",
+                field="check",
+            )
+        repository = params.get("repository")
+        if not isinstance(repository, str) or not repository:
+            raise ProcessValidationError(
+                "jira-issues action requires params.repository", field="params"
+            )
+        if repository not in registry.names():
+            raise ProcessValidationError(
+                f"jira-issues action names an unknown repository {repository!r}",
+                field="params",
+            )
+        label = params.get("label", "harness-todo")
+        claimed_label = params.get("claimed_label", "harness-queued")
+        jql = params.get("jql")
+        project = params.get("project")
+        if not isinstance(label, str) or not isinstance(claimed_label, str):
+            raise ProcessValidationError(
+                "jira-issues action requires label/claimed_label to be strings",
+                field="params",
+            )
+        if jql is None and project is None:
+            raise ProcessValidationError(
+                "jira-issues action requires params.jql or params.project",
+                field="params",
+            )
+        if jql is not None and not isinstance(jql, str):
+            raise ProcessValidationError(
+                "jira-issues action requires params.jql to be a string", field="params"
+            )
+        if project is not None and not isinstance(project, str):
+            raise ProcessValidationError(
+                "jira-issues action requires params.project to be a string",
+                field="params",
+            )
+        return JiraIssuesCheck(
+            client=jira_client,
+            repository=repository,
+            label=label,
+            claimed_label=claimed_label,
+            jql=jql,
+            project=project,
+        )
+
     # Bundle each factory with its declarative spec so the process form renders
-    # these actions' parameters from data, exactly like the built-ins.
+    # these actions' parameters from data, exactly like the built-ins. No
+    # `CheckSpec` exists yet for `jira-issues`, so it stays a bare factory —
+    # `check_spec_of`'s generic name-only fallback covers it in the form.
     return {
         "github-issues": CheckDefinition(
             spec=GITHUB_ISSUES_SPEC, factory=github_issues_factory
@@ -894,6 +959,7 @@ def _process_check_factories(
         "github-conflicts": CheckDefinition(
             spec=GITHUB_CONFLICTS_SPEC, factory=github_conflicts_factory
         ),
+        "jira-issues": jira_issues_factory,
     }
 
 
@@ -1764,17 +1830,32 @@ def _run(args: argparse.Namespace) -> int:
     token = os.environ.get("GITHUB_TOKEN")
     github_client = HttpGithubClient(token) if token else None
 
+    # Same shape for Jira: all three env vars are required, or the
+    # `jira-issues` action fails fast at process build time (mirrors the
+    # `GITHUB_TOKEN` gate above).
+    jira_base_url = os.environ.get("JIRA_BASE_URL")
+    jira_email = os.environ.get("JIRA_EMAIL")
+    jira_api_token = os.environ.get("JIRA_API_TOKEN")
+    jira_client = (
+        HttpJiraClient(jira_base_url, jira_email, jira_api_token)
+        if jira_base_url and jira_email and jira_api_token
+        else None
+    )
+
     # Processes (`processes/*.json`) compile inside `app.build()` itself now
     # (ADR-0018) — the `failed-tasks` check needs the harness's own live
     # `failed`/`healed`/`events`, which only exist once `build()` has
-    # constructed them. `_process_check_factories` supplies just the two
-    # externally-dependent check kinds (`github-issues`/`github-conflicts`);
-    # the Slack-sink *decision*, though, still has to happen here, before
-    # `build()` — a `SlackWebhookSink` must be present in `sources` before
-    # `build()` constructs `SourceReflectorSink(sources)` internally. Reading
-    # the raw declared sink kinds needs no compilation at all (invariant #40).
+    # constructed them. `_process_check_factories` supplies just the
+    # externally-dependent check kinds (`github-issues`/`github-conflicts`/
+    # `jira-issues`); the Slack-sink *decision*, though, still has to happen
+    # here, before `build()` — a `SlackWebhookSink` must be present in
+    # `sources` before `build()` constructs `SourceReflectorSink(sources)`
+    # internally. Reading the raw declared sink kinds needs no compilation at
+    # all (invariant #40).
     sources = sources + _slack_sinks(_declared_sink_kinds(layout.processes))
-    extra_checks = _process_check_factories(args, registry, client=github_client)
+    extra_checks = _process_check_factories(
+        args, registry, client=github_client, jira_client=jira_client
+    )
 
     # "label-issue" (a finisher, invariant #41): applies an outcome -> label
     # mapping to a task's source GitHub issue, wrapping (not replacing) the
