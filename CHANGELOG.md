@@ -1,6 +1,30 @@
 # CHANGELOG
 
 
+## v0.18.0 (2026-07-24)
+
+### Features
+
+- **admin**: Offer the run's full action registry in the process form
+  ([#115](https://github.com/onpaj/harness_v2/pull/115),
+  [`92986d2`](https://github.com/onpaj/harness_v2/commit/92986d23478a1aa0d380e871daa9d4db2fa7e9aa))
+
+### Refactoring
+
+- Unify the default workflow into development, drop legacy support
+  ([`ca9990b`](https://github.com/onpaj/harness_v2/commit/ca9990ba029774469d0391e41b003551ba7ca1d0))
+
+The `default`→`development` rename (#110) shipped as a non-breaking migration:
+  `_migrate_legacy_workflow` copied `default.json` forward and `_run` kept serving a legacy
+  `default` workflow alongside `development` for any in-flight task still carrying
+  `workflow_template: "default"`. That transition is complete, so remove the migration function, its
+  two call sites, and the legacy-serving block, and fix the stale `--workflow`/`--github-workflow`
+  help text that still named `default`. `development` is now the sole primary workflow; `harness
+  init` writes only `development.json`. Drops the two migration tests.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+
+
 ## v0.17.0 (2026-07-24)
 
 ### Documentation
