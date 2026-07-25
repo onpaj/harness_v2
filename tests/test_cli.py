@@ -170,7 +170,7 @@ def test_run_heal_repo_wires_open_issue_finisher_and_tracker(monkeypatch, tmp_pa
     assert isinstance(behavior, OpenIssueBehavior)
     # offline (no token) → the in-memory tracker, so the loop still runs
     assert isinstance(behavior._tracker, MemoryIssueTracker)
-    assert behavior._repo == "onpaj/harness_v2"
+    assert behavior._slug_for("anything") == "onpaj/harness_v2"
 
     # the thin generator also wrote the autoheal process — targeting the
     # *workflow*, not the bare step (a workflow-less target finishes after one
@@ -209,7 +209,7 @@ def test_run_heal_via_env_var_wires_everything_without_a_flag(monkeypatch, tmp_p
     assert DEFAULT_HEAL_WORKFLOW in captured["served_names"]
     behavior = captured["finishers"]["open-issue"]("file-issue", {}, lambda: None)
     assert isinstance(behavior, OpenIssueBehavior)
-    assert behavior._repo == "onpaj/harness_v2"
+    assert behavior._slug_for("anything") == "onpaj/harness_v2"
     assert (tmp_path / "processes" / "autoheal.json").is_file()
 
 

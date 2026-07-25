@@ -1733,11 +1733,21 @@ def _run(args: argparse.Namespace) -> int:
         # `open-issue` replaces the file-issue step's behavior (like `open-pr`):
         # it ignores step/config/inner and files the drafted heal issue. A
         # factory, per the finisher registry contract (invariant #41).
+        # `slug_for` ignores the task's own `repository` and always targets the
+        # configured heal repo — the healer files onto its own repo, not the
+        # failed task's, mirroring the old hardcoded `repo=heal_repo`. `label`
+        # is both the carried label and the idempotency scope, matching the old
+        # fixed `labels=("harness:self-heal",)`/`scope_label="harness:self-heal"`
+        # pair. `from_step="heal"` reads the same step the old `_latest_draft`
+        # did. TODO(Task 4): thread this through the finisher registry's own
+        # `config`/binding shape instead of a closure, and update the `heal`
+        # persona to emit a fenced json draft block.
         finishers["open-issue"] = lambda step, config, inner: OpenIssueBehavior(
             tracker=issue_tracker,
-            repo=heal_repo,
             artifacts=artifact_view,
-            clock=SystemClock(),
+            slug_for=lambda _repository, _slug=heal_repo: _slug,
+            label="harness:self-heal",
+            from_step="heal",
         )
         _ensure_autoheal_process(layout, heal_repo)
 
