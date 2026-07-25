@@ -276,13 +276,18 @@ Dependencies flow strictly downward, no cycles.
   `duplicate` (settles silently — no issue). Only the `unique` path's `file-issue`
   step's `open-issue` finisher opens the drafted issue on the harness repo via
   `IssueTracker`. `harness init` ships `workflows/heal.json` + `agents/heal.json` +
-  `agents/dedup.json`. Enabled by naming a heal repo, either `--heal-repo
+  `agents/dedup.json`. The `open-issue` finisher kind is registered
+  unconditionally (it derives its repo from `task.repository` and its label
+  from the binding — invariant 26 — so it needs no wiring-time
+  configuration); what still needs naming a heal repo, either `--heal-repo
   <owner/repo>` (interactive) or the `HARNESS_HEAL_REPO` env var (the flag-free
   path for the launchd service, mirroring how `SLACK_WEBHOOK_URL` gates the slack
-  sink) — needs `--agent claude`; either serves `heal`, registers the `open-issue`
-  finisher and writes `processes/autoheal.json` if absent (a hand-edited process is
-  never clobbered). Recursion is guarded by the `data.heal` marker, not by
-  construction (invariant 25).
+  sink) — needs `--agent claude` — is serving `heal` itself, writing
+  `processes/autoheal.json` if absent (a hand-edited process is never
+  clobbered), and stamping that repo as `params.repository` on every fresh
+  heal task, which is what gives the `heal` step a worktree and, through
+  `open-issue`'s `slug_for`, a repo to file onto. Recursion is guarded by the
+  `data.heal` marker, not by construction (invariant 25).
 - **`claim()`** is an atomic `rename` into `<queue>/.processing/`. A single operation
   handles the lease, idempotency and provenance after a crash.
 - **A step's concurrency is workflow config, not wiring.** `Workflow.max_parallel`

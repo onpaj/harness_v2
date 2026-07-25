@@ -23,6 +23,7 @@ that invariant, not just of the heal/dedup wiring.
 """
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -59,7 +60,13 @@ HEAL_DEFINITION = {
         "heal": "diagnose the failed task from its report; decide whether it warrants a GitHub issue",
         "dedup": "read the harness repo's open issues; decide whether the drafted issue is new",
     },
-    "finishers": {"file-issue": "open-issue"},
+    "finishers": {
+        "file-issue": {
+            "kind": "open-issue",
+            "from_step": "heal",
+            "label": "harness:self-heal",
+        }
+    },
 }
 
 HEAL_SPEC = AgentSpec(
@@ -112,8 +119,8 @@ async def drive_until_quiet(harness) -> int:
     raise AssertionError("loop did not settle")
 
 
-def build_harness(tmp_path, *, runner, clock, tracker=None):
-    artifacts = MemoryArtifactStore()
+def build_harness(tmp_path, *, runner, clock, tracker=None, artifacts=None):
+    artifacts = artifacts if artifacts is not None else MemoryArtifactStore()
     tracker = tracker if tracker is not None else MemoryIssueTracker()
     finishers = {
         "open-issue": lambda step, config, inner: OpenIssueBehavior(
@@ -154,48 +161,68 @@ def put_failed_task(tmp_path, task_id="tsk_e2e", *, data=None) -> None:
     (failed_dir / f"{task_id}.json").write_text(json.dumps(task.to_dict()))
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="the heal persona still writes prose; Task 4 rebinds it to the fenced-JSON draft array",
-)
+class _HealDraftRunner(FakeAgentRunner):
+    """`FakeAgentRunner`, plus: when it runs the `heal` step, it also writes
+    the fenced-JSON draft directly into the shared `MemoryArtifactStore`,
+    under the *running* heal task's id.
+
+    That id isn't known ahead of time — the heal task is fired fresh by
+    `FailedTasksCheck`, not by this test — but it doesn't need to be
+    predicted: `MemoryWorkspaceHandle.path` is `/memory/worktrees/<id>`, so
+    the id the harness actually used is simply the last path segment of the
+    `cwd` the runner is handed for this call. Writing straight into the
+    store (rather than onto `cwd`, the way `FakeAgentRunner(writes=...)`
+    would) is deliberate too: with `MemoryWorkspace`, `cwd` is a synthetic
+    path, and nothing ever copies files written there into an `ArtifactView`
+    the way a real worktree's commit would — the store IS the artifact view
+    here (`build_harness` passes one `MemoryArtifactStore` as both), so a
+    write meant for `OpenIssueBehavior` to read has to land there directly.
+    """
+
+    def __init__(self, *, artifacts: MemoryArtifactStore, draft: str, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self._artifacts = artifacts
+        self._draft = draft
+
+    async def run(self, *, prompt, spec, cwd, timeout, on_output=None):
+        if spec.name == "heal":
+            task_id = Path(cwd).name
+            self._artifacts.begin(task_id, "heal").put("heal-01.md", self._draft)
+        return await super().run(
+            prompt=prompt, spec=spec, cwd=cwd, timeout=timeout, on_output=on_output
+        )
+
+
 async def test_heal_file_dedup_unique_opens_exactly_one_issue(tmp_path):
     """Path 1: `heal` -> `file` -> `dedup` -> `unique` -> `file-issue`. The
     dispatcher only accepts `file`/`unique` because `HEAL_DEFINITION` declares
     those exact edges (invariant #42) — this is the full triage+dedup path,
     including the issue actually getting filed.
 
-    Since Task 3 rewrote `OpenIssueBehavior` to read a fenced ```json``` draft
-    block from the `heal` step's *artifact* (`harness.issue_drafts`) instead
-    of synthesizing a single issue from the verdict summary/task data, this
-    now needs the `heal` persona to actually emit a drafts block — and
-    `_HEALER_PERSONA` in `cli.py` still instructs a prose report whose first
-    line is `# <title>`, not that fenced-JSON array. That's Task 4's job.
-    Even set aside the persona, this fixture's `FakeAgentRunner` couldn't
-    write the artifact where `OpenIssueBehavior` would find it either:
-    `ClaudeCliBehavior` writes an agent's artifact into the attached git
-    worktree, not into the shared `MemoryArtifactStore` this test passes to
-    `OpenIssueBehavior`, and `MemoryWorkspace`'s worktree path
-    (`/memory/worktrees/<id>`) isn't a real, writable filesystem location for
-    `FakeAgentRunner(writes=...)` to target — nor is the fresh heal task's id
-    known until the harness fires it. That context is real and worth keeping
-    even after Task 4, but it does not excuse the assertions below: today
-    this fixture's `heal` step writes no artifact at all, so `file-issue`
-    reads an empty artifact (zero drafts, not an error) and files nothing —
-    this test correctly fails on the "one issue opened" assertion below, and
-    `xfail(strict=True)` is what keeps that failure visible until Task 4
-    lands, rather than green forever on a narrowed check."""
+    `OpenIssueBehavior` reads a fenced ```json``` draft block from the `heal`
+    step's *artifact* (`harness.issue_drafts`), so this drives the real
+    `_HEALER_PERSONA` shape end to end: `_HealDraftRunner` above stands in for
+    the agent and writes that block where `OpenIssueBehavior` will look for
+    it, using the fresh heal task's id recovered from the worktree `cwd` it
+    is handed (see that class's docstring for why that recovery works and
+    why the write targets the store directly)."""
     seed(tmp_path)
     put_failed_task(
         tmp_path, data={"request": "Do the thing", "source": {"url": "https://gh/i/9"}}
     )
-    runner = FakeAgentRunner(
+    artifacts = MemoryArtifactStore()
+    runner = _HealDraftRunner(
+        artifacts=artifacts,
+        draft='```json\n[{"title": "Fix it", "body": "diagnosis\\n\\nOrigin: https://gh/i/9"}]\n```',
         runs={
             "heal": AgentRun("file", "Add the missing edge"),
             "dedup": AgentRun("unique", "nothing similar is open"),
-        }
+        },
     )
     clock = FakeClock()
-    harness, tracker = build_harness(tmp_path, runner=runner, clock=clock)
+    harness, tracker = build_harness(
+        tmp_path, runner=runner, clock=clock, artifacts=artifacts
+    )
 
     await drive_until_quiet(harness)
 

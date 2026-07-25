@@ -67,6 +67,7 @@ from harness.models import DONE, REQUEST_CHANGES, Task
 from harness.ports.behavior import ConsumerBehavior
 from harness.ports.clock import Clock
 from harness.ports.issue_state import IssueChecker
+from harness.ports.issues import IssueError
 from harness.ports.merge import MergeChecker
 from harness.ports.repos import RepositoryNotFound, RepositoryRegistry
 from harness.ports.source import TaskSource
@@ -149,7 +150,13 @@ HEAL_DEFINITION = {
         "heal": "diagnose the failed task from its report; decide whether it warrants a GitHub issue",
         "dedup": "read the harness repo's open issues; decide whether the drafted issue is new",
     },
-    "finishers": {"file-issue": "open-issue"},
+    "finishers": {
+        "file-issue": {
+            "kind": "open-issue",
+            "from_step": "heal",
+            "label": "harness:self-heal",
+        }
+    },
 }
 
 
@@ -422,15 +429,19 @@ _HEALER_PERSONA = (
     "tool, or the task's own request being simply wrong or impossible.\n\n"
     "Be conservative: only propose a change when there is a concrete, "
     "plausible one.\n\n"
-    "For a harness bug or an operational/tuning problem, draft a proposed "
-    "GitHub issue to the file the harness told you to write your output to "
-    "above. Its first line must be a title `# <concise title>`; then a short "
-    "diagnosis (what failed and why), and a concrete proposed change. For an "
-    "operational/tuning problem, recommend diagnostically rather than "
-    "prescriptively: name the exceeded budget and the two levers available — "
-    "raising the step's per-agent `timeout`, or decomposing the step into "
-    "smaller ones — without prescribing a specific number. Then finish with "
-    "the outcome that files it.\n\n"
+    "For a harness bug or an operational/tuning problem, write your diagnosis "
+    "to the file the harness told you to write your output to above, and end "
+    "that file with a fenced ```json block holding a one-element array:\n"
+    '```json\n'
+    '[{"title": "<concise title>", "body": "<diagnosis, then a concrete '
+    'proposed change>"}]\n'
+    "```\n"
+    "The harness reads that block by machine and opens the issue itself — you "
+    "must never open one. For an operational/tuning problem, recommend "
+    "diagnostically rather than prescriptively: name the exceeded budget and "
+    "the two levers available — raising the step's per-agent `timeout`, or "
+    "decomposing the step into smaller ones — without prescribing a specific "
+    "number. Then finish with the outcome that files it.\n\n"
     "For an external or transient failure, write nothing and finish with the "
     "outcome that skips — its summary saying briefly why there is nothing to "
     "file.\n\n"
@@ -1624,6 +1635,31 @@ def _build_issue_checker(args: argparse.Namespace) -> IssueChecker | None:
     return GithubIssueChecker(HttpGithubClient(token)) if token else None
 
 
+def _slug_resolver(registry: RepositoryRegistry) -> Callable[[str | None], str]:
+    """`task.repository` → `owner/repo`, the way every other GitHub-touching
+    driver does it: resolve the name to a clone through the registry, then read
+    the slug off that clone's `origin`. `repos.json` holds paths only — the
+    slug is never duplicated in config. Every failure is an `IssueError`, so it
+    lands the task in `failed/` with a message naming the cause."""
+
+    def slug_for(name: str | None) -> str:
+        if not name:
+            raise IssueError(
+                "the task has no repository, so no GitHub repo can be resolved "
+                "— set the process's params.repository"
+            )
+        try:
+            path = registry.resolve(name)
+        except RepositoryNotFound as error:
+            raise IssueError(str(error)) from None
+        slug = github_slug(path)
+        if slug is None:
+            raise IssueError(f"repo {name!r} ({path}) has no github.com origin remote")
+        return slug
+
+    return slug_for
+
+
 def _run(args: argparse.Namespace) -> int:
     root = _root(args.root)
     layout = HarnessLayout(root)
@@ -1660,6 +1696,45 @@ def _run(args: argparse.Namespace) -> int:
     runner = ClaudeCliRunner() if use_agent else None
     workspace = GitWorkspace(registry, layout.worktrees)
     artifact_view = WorktreeArtifactView(layout.worktrees)
+
+    # The `open-issue` finisher kind, registered unconditionally: it derives
+    # its repo from `task.repository` and takes its label from the binding, so
+    # it needs no wiring-time configuration at all. That is what lets a root
+    # serve the seeded `heal` workflow without any heal-specific setup.
+    issue_token = os.environ.get("GITHUB_TOKEN")
+    issue_tracker = (
+        GithubIssueTracker(HttpGithubClient(issue_token))
+        if issue_token
+        else MemoryIssueTracker()
+    )
+    slug_for = _slug_resolver(registry)
+
+    def _open_issue(step, config, inner):
+        label = config.get("label")
+        if not isinstance(label, str) or not label:
+            raise ValueError(
+                f"step {step!r} binds the 'open-issue' finisher without a "
+                f"'label' — it is both the label every issue carries and the "
+                f"scope of the idempotency search"
+            )
+        from_step = config.get("from_step")
+        return OpenIssueBehavior(
+            tracker=issue_tracker,
+            artifacts=artifact_view,
+            slug_for=slug_for,
+            label=label,
+            from_step=from_step,
+            allowed_labels=tuple(config.get("allowed_labels", ())),
+            # Replace shape when a step is named; wrap shape otherwise. The
+            # thunk is only called in the wrap shape, so a step bound in the
+            # replace shape never triggers `catalog.get` (ADR-0018).
+            inner=None if from_step else inner(),
+        )
+
+    finishers: dict[
+        str, Callable[[str, dict, Callable[[], ConsumerBehavior]], ConsumerBehavior]
+    ] = {"open-issue": _open_issue}
+
     forge = _build_forge(args.forge, root, registry)
     github = [] if args.no_github_source else _github_sources(args, root, registry)
     # The outbound reflector is registered only when classic ingestion is off
@@ -1678,19 +1753,19 @@ def _run(args: argparse.Namespace) -> int:
     if resolver_defined and args.resolver_workflow not in served_names:
         served_names = [*served_names, args.resolver_workflow]
 
-    # Self-healing (ADR-0018): enabled by a heal repo — `--heal-repo
-    # <owner/repo>` OR the `HARNESS_HEAL_REPO` env var, the flag-free path that
-    # mirrors how `SLACK_WEBHOOK_URL` gates the slack sink (config in the
-    # service's env, never a run flag). Either way the `open-issue` finisher
-    # files heal issues on that repo. This must run *before* `known_targets` is
-    # computed below — the autoheal process's `{"workflow": "heal"}` target (and
-    # any bare trigger naming it) needs "heal" in the served set to validate. It
-    # reuses the claude agent, so it needs `--agent claude`; offline (no
-    # GITHUB_TOKEN) it falls back to the in-memory tracker so the loop still
-    # runs harmlessly.
-    finishers: dict[
-        str, Callable[[str, dict, Callable[[], ConsumerBehavior]], ConsumerBehavior]
-    ] = {}
+    # Self-healing (ADR-0018): a heal repo — `--heal-repo <owner/repo>` OR the
+    # `HARNESS_HEAL_REPO` env var, the flag-free path that mirrors how
+    # `SLACK_WEBHOOK_URL` gates the slack sink (config in the service's env,
+    # never a run flag) — serves the seeded `heal` workflow and writes
+    # `processes/autoheal.json`. The `open-issue` finisher itself needs none
+    # of this (it is registered unconditionally above); what `heal_repo`
+    # still controls is the value stamped as `params.repository` on every
+    # fresh heal task (invariant #25), which is what gives the `heal` step a
+    # worktree and, through the generic `slug_for` above, a repo to file
+    # onto. This must run *before* `known_targets` is computed below — the
+    # autoheal process's `{"workflow": "heal"}` target (and any bare trigger
+    # naming it) needs "heal" in the served set to validate. It reuses the
+    # claude agent, so it needs `--agent claude`.
     heal_repo = args.heal_repo or os.environ.get("HARNESS_HEAL_REPO")
     if heal_repo:
         if args.heal_repo and not use_agent:
@@ -1705,14 +1780,14 @@ def _run(args: argparse.Namespace) -> int:
                 " heal step cannot run and failed tasks will settle unhealed.",
                 file=sys.stderr,
             )
-        # The `heal_repo` slug is also `task.repository` on every heal task
-        # (invariant #25) — `GitWorkspace.attach` resolves it through this same
-        # `registry`, and an unregistered slug raises `RepositoryNotFound` at
-        # attach time. That failure lands the heal task in `failed/`, which the
-        # recursion guard (invariant #25/#26) then retires straight to
-        # `healed/` with no issue filed — self-healing goes silently inert. Warn
-        # up front rather than let the operator discover it that way; this must
-        # never block startup (a WARNING, not an error).
+        # `heal_repo` is a repo *name*, resolved through the same `registry`
+        # `GitWorkspace.attach` and `slug_for` above both use — an
+        # unregistered name raises `RepositoryNotFound` at attach time. That
+        # failure lands the heal task in `failed/`, which the recursion guard
+        # (invariant #25/#26) then retires straight to `healed/` with no
+        # issue filed — self-healing goes silently inert. Warn up front
+        # rather than let the operator discover it that way; this must never
+        # block startup (a WARNING, not an error).
         try:
             registry.resolve(heal_repo)
         except RepositoryNotFound:
@@ -1724,44 +1799,6 @@ def _run(args: argparse.Namespace) -> int:
             )
         if DEFAULT_HEAL_WORKFLOW not in served_names:
             served_names = [*served_names, DEFAULT_HEAL_WORKFLOW]
-        token = os.environ.get("GITHUB_TOKEN")
-        issue_tracker = (
-            GithubIssueTracker(HttpGithubClient(token))
-            if token
-            else MemoryIssueTracker()
-        )
-        # `open-issue` replaces the file-issue step's behavior (like `open-pr`):
-        # it ignores step/config/inner and would file the drafted heal issue
-        # once the `heal` persona actually emits one — see the TODO below,
-        # which today makes that still-broken. A factory, per the finisher
-        # registry contract (invariant #41).
-        # `slug_for` ignores the task's own `repository` and always targets the
-        # configured heal repo — the healer files onto its own repo, not the
-        # failed task's, mirroring the old hardcoded `repo=heal_repo`. `label`
-        # is both the carried label and the idempotency scope, matching the old
-        # fixed `labels=("harness:self-heal",)`/`scope_label="harness:self-heal"`
-        # pair. `from_step="heal"` reads the same step the old `_latest_draft`
-        # did.
-        #
-        # TODO(Task 4): this wiring is NOT behavior-preserving — it is
-        # knowingly, temporarily broken. `OpenIssueBehavior` now reads a
-        # fenced ```json``` draft *array* from the `heal` step's artifact
-        # (`harness.issue_drafts`), but `_HEALER_PERSONA` above still
-        # instructs a prose report whose first line is `# <title>`, not that
-        # array. So a real heal run today either raises `DraftError` ->
-        # `IssueError` (the heal task lands in `failed/`) once the persona
-        # writes its prose report, or — if it writes nothing — finds no
-        # artifact and files nothing. Either way, self-healing is inert or
-        # actively failing until Task 4 rewrites the `heal` persona to emit
-        # the fenced-JSON draft array (and threads this through the finisher
-        # registry's own `config`/binding shape instead of this closure).
-        finishers["open-issue"] = lambda step, config, inner: OpenIssueBehavior(
-            tracker=issue_tracker,
-            artifacts=artifact_view,
-            slug_for=lambda _repository, _slug=heal_repo: _slug,
-            label="harness:self-heal",
-            from_step="heal",
-        )
         _ensure_autoheal_process(layout, heal_repo)
 
     # Scheduled triggers (`triggers/*.json`) are `TaskSource`s that ride the
@@ -1843,9 +1880,9 @@ def _run(args: argparse.Namespace) -> int:
         print(f"error: {error}", file=sys.stderr)
         return 2
     except ValueError as error:
-        # e.g. a served workflow names a finisher kind nothing registered — most
-        # commonly `heal.json`'s `file-issue` step served without `--heal-repo`
-        # (which is what wires the "open-issue" kind into the registry).
+        # e.g. a served workflow names a finisher kind nothing registered, or
+        # binds one (like "open-issue") without the config it requires — a
+        # binding with no `label` fails here too (see `_open_issue` above).
         print(f"error: {error}", file=sys.stderr)
         return 2
 
