@@ -96,6 +96,7 @@ class Consumer:
             to_step=None,
             outcome=result.outcome,
             summary=result.summary or None,
+            tokens=result.tokens,
         )
         merged_data = {**task.data, **(result.data or {})}
         updated = append_history(

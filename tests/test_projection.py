@@ -560,7 +560,7 @@ def test_snapshot_tabs_are_sorted_alphabetically():
 # --- agent history -----------------------------------------------------------
 
 
-def _handled(step, at, *, outcome=None, summary=None, reason=None):
+def _handled(step, at, *, outcome=None, summary=None, reason=None, tokens=None):
     """A history line as the consumer writes it: actor="consumer:<step>"."""
     return HistoryEntry(
         at=at,
@@ -570,7 +570,52 @@ def _handled(step, at, *, outcome=None, summary=None, reason=None):
         outcome=outcome,
         summary=summary,
         reason=reason,
+        tokens=tokens,
     )
+
+
+def test_agent_history_lifts_tokens_onto_agent_activity():
+    projection = BoardProjection(WORKFLOW.steps(), [WORKFLOW])
+    task = make_task(
+        "tsk_1",
+        data={"title": "Fix the bug"},
+        history=(
+            _handled(
+                "plan",
+                "2026-07-19T10:00:00Z",
+                outcome="done",
+                summary="planned it",
+                tokens={
+                    "attempt": 1,
+                    "input": 120,
+                    "output": 45,
+                    "model": "claude-sonnet-5",
+                },
+            ),
+        ),
+    )
+    projection.apply("review", task)
+
+    activity = projection.agent_history("plan")[0]
+
+    assert activity.input_tokens == 120
+    assert activity.output_tokens == 45
+    assert activity.model == "claude-sonnet-5"
+
+
+def test_agent_history_tokens_default_none_when_entry_has_none():
+    projection = BoardProjection(WORKFLOW.steps(), [WORKFLOW])
+    task = make_task(
+        "tsk_1",
+        history=(_handled("plan", "2026-07-19T10:00:00Z", outcome="done"),),
+    )
+    projection.apply("review", task)
+
+    activity = projection.agent_history("plan")[0]
+
+    assert activity.input_tokens is None
+    assert activity.output_tokens is None
+    assert activity.model is None
 
 
 def test_agent_history_collects_only_that_agents_handlings():

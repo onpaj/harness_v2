@@ -54,6 +54,12 @@ class BehaviorResult:
     data: dict[str, Any] | None = None
     """Extra fields the consumer merges into task.data on delivery. None (the
     default) merges nothing — every existing behavior is unaffected."""
+    tokens: dict[str, Any] | None = None
+    """This delivery's own token usage, attached directly to the `HistoryEntry`
+    the consumer appends — a per-delivery fact of the same kind as `outcome`/
+    `summary`, never merged into `task.data` (unlike `data`, which is a
+    task-level shallow-merge). None (the default) for every non-agent
+    behavior."""
 
 
 @dataclass(frozen=True)
@@ -67,6 +73,11 @@ class HistoryEntry:
     outcome: str | None = None
     summary: str | None = None
     reason: str | None = None
+    tokens: dict[str, Any] | None = None
+    """This handling's token usage — shape {"attempt", "input", "output",
+    "cache_read", "cache_creation", "total_cost_usd", "model"}. None for a
+    non-agent behavior (a finisher, a fail entry) or for history predating
+    this field."""
 
     def to_dict(self) -> dict[str, Any]:
         raw: dict[str, Any] = {
@@ -81,6 +92,8 @@ class HistoryEntry:
             raw["summary"] = self.summary
         if self.reason is not None:
             raw["reason"] = self.reason
+        if self.tokens is not None:
+            raw["tokens"] = self.tokens
         return raw
 
     @classmethod
@@ -93,6 +106,7 @@ class HistoryEntry:
             outcome=raw.get("outcome"),
             summary=raw.get("summary"),
             reason=raw.get("reason"),
+            tokens=raw.get("tokens"),
         )
 
 

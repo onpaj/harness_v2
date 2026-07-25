@@ -66,6 +66,43 @@ def test_memory_catalog_names_lists_every_spec():
     assert catalog.names() == ["plan", "review"]
 
 
+def test_agent_run_token_fields_default_to_zero_and_none():
+    run = AgentRun(DONE, "done")
+
+    assert run.input_tokens == 0
+    assert run.output_tokens == 0
+    assert run.cache_read_tokens == 0
+    assert run.cache_creation_tokens == 0
+    assert run.total_cost_usd is None
+    assert run.model is None
+
+
+async def test_fake_runner_scripts_token_usage(tmp_path):
+    """FR-3: FakeAgentRunner needs no new plumbing to script usage — a caller
+    just constructs the AgentRun with the fields filled in."""
+    spec = AgentSpec(name="planner", prompt="p")
+    scripted = AgentRun(
+        DONE,
+        "done",
+        input_tokens=120,
+        output_tokens=45,
+        cache_read_tokens=5,
+        cache_creation_tokens=2,
+        total_cost_usd=0.01,
+        model="claude-sonnet-5",
+    )
+    runner = FakeAgentRunner(runs={"planner": scripted})
+
+    result = await runner.run(prompt="do it", spec=spec, cwd=tmp_path, timeout=60.0)
+
+    assert result.input_tokens == 120
+    assert result.output_tokens == 45
+    assert result.cache_read_tokens == 5
+    assert result.cache_creation_tokens == 2
+    assert result.total_cost_usd == 0.01
+    assert result.model == "claude-sonnet-5"
+
+
 async def test_fake_runner_returns_scripted_run_and_records_call(tmp_path):
     spec = AgentSpec(name="planner", prompt="p")
     scripted = AgentRun(DONE, "done", raw="{}")

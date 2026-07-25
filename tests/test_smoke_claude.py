@@ -137,6 +137,21 @@ async def test_trivial_task_lands_with_real_claude(tmp_path):
     finished = Task.from_dict(json.loads(done_path.read_text()))
     assert finished.status == "end"
 
+    # Real usage parsing: the `plan` step's history entry carries token counts
+    # lifted from the real stream-json `usage` block, and the running total on
+    # the task reflects them.
+    plan_entry = next(
+        entry for entry in finished.history if entry.actor == "consumer:plan"
+    )
+    assert plan_entry.tokens is not None
+    assert plan_entry.tokens["input"] > 0
+    assert plan_entry.tokens["output"] > 0
+    assert plan_entry.tokens["model"]
+    tokens_total = finished.data.get("tokens_total")
+    assert tokens_total is not None
+    assert tokens_total["input"] >= plan_entry.tokens["input"]
+    assert tokens_total["output"] >= plan_entry.tokens["output"]
+
     # The worker committed the agent's work on the task branch and landing opened a PR.
     worktree = layout.worktrees / task_id
     log = subprocess.run(

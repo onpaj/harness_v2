@@ -31,6 +31,10 @@
         <li><span class="k">step</span><span class="v">{{ task.step or "—" }}</span></li>
         <li><span class="k">status</span><span class="v">{{ task.status or "—" }}</span></li>
         <li><span class="k">lastOutcome</span><span class="v">{{ task.last_outcome or "—" }}</span></li>
+        {% if task.data.tokens_total %}
+        <li><span class="k">tokens</span>
+            <span class="v">{{ task.data.tokens_total.input or 0 }} in / {{ task.data.tokens_total.output or 0 }} out</span></li>
+        {% endif %}
         <li><span class="k">lockId</span><span class="v">{{ task.lock_id or "—" }}</span></li>
         <li><span class="k">created</span><span class="v"><time datetime="{{ task.created }}" title="{{ task.created }} UTC">{{ task.created | shorttime }}</time></span></li>
         <li><span class="k">data</span><span class="v"><pre>{{ task.data }}</pre></span></li>
@@ -58,7 +62,7 @@
     <section class="tab-panel" data-panel="history">
       <div class="table-scroll">
       <table>
-        <tr><th>time</th><th>actor</th><th>from</th><th>to</th><th>outcome</th><th class="wrap">reason</th></tr>
+        <tr><th>time</th><th>actor</th><th>from</th><th>to</th><th>outcome</th><th>tokens</th><th class="wrap">reason</th></tr>
         {% for entry in task.history %}
         <tr>
           <td><time datetime="{{ entry.at }}" title="{{ entry.at }} UTC">{{ entry.at | shorttime }}</time></td>
@@ -66,6 +70,7 @@
           <td>{{ entry.from_step or "—" }}</td>
           <td>{{ entry.to_step or "—" }}</td>
           <td>{{ entry.outcome or "—" }}</td>
+          <td>{{ (entry.tokens.input ~ " / " ~ entry.tokens.output) if entry.tokens else "—" }}</td>
           <td class="wrap">{{ entry.reason or "—" }}</td>
         </tr>
         {% endfor %}
