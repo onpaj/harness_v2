@@ -912,8 +912,12 @@ class OpenIssueBehavior(ConsumerBehavior):
         refs = []
         dropped: list[str] = []
         for draft in drafts:
-            allowed = tuple(l for l in draft.labels if l in self._allowed_labels)
-            dropped.extend(l for l in draft.labels if l not in self._allowed_labels)
+            allowed = tuple(
+                label for label in draft.labels if label in self._allowed_labels
+            )
+            dropped.extend(
+                label for label in draft.labels if label not in self._allowed_labels
+            )
             refs.append(
                 self._tracker.open_issue(
                     repo,
