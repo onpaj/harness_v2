@@ -45,12 +45,15 @@ class IssueTracker(ABC):
         body: str,
         labels: tuple[str, ...],
         marker: str,
+        scope_label: str,
     ) -> IssueRef:
-        """Open an issue on `repo`.
+        """Open an issue on `repo`, carrying `scope_label` plus `labels`.
 
-        **Idempotent per `marker`.** If an open issue on `repo` already carries
-        the marker, return that one instead of creating a second — the twin of
-        `GithubForge` matching an existing PR on `head=owner:branch`. A re-run
-        after a crash (before the healed task left `failed/`) won't file a
-        duplicate. Raises `IssueError` on failure.
+        **Idempotent per `(repo, scope_label, marker)`.** If an open issue on
+        `repo` carrying `scope_label` already has the marker, return that one
+        instead of creating a second — the twin of `GithubForge` matching an
+        existing PR on `head=owner:branch`. `scope_label` is both a label every
+        issue from a binding carries and the scope the marker search reads, so
+        two bindings filing into the same repo never see each other's issues.
+        Raises `IssueError` on failure.
         """

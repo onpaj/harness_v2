@@ -132,17 +132,16 @@ class GithubClient(ABC):
         """Open a fresh issue on `repo`."""
 
     @abstractmethod
-    def search_issue_by_marker(self, repo: str, marker: str) -> Issue | None:
-        """The open self-heal issue whose body carries `marker`, or None.
+    def search_issue_by_marker(self, repo: str, marker: str, *, label: str) -> Issue | None:
+        """The open issue carrying `label` whose body contains `marker`, or None.
 
-        Used to keep issue creation idempotent without the Search API — it scans
-        the `harness:self-heal`-labelled open issues and matches the marker in
-        the body.
+        Keeps issue creation idempotent without the Search API — it scans the
+        `label`-carrying open issues and matches the marker in the body.
         """
 
 
 SELF_HEAL_LABEL = "harness:self-heal"
-"""Label every healer-opened issue carries — also the scope of the marker search."""
+"""The label the seeded heal workflow's open-issue binding uses."""
 
 
 class FakeGithubClient(GithubClient):
@@ -293,8 +292,8 @@ class FakeGithubClient(GithubClient):
         self._issues[number] = issue
         return issue
 
-    def search_issue_by_marker(self, repo: str, marker: str) -> Issue | None:
-        for issue in self.list_issues(repo, label=SELF_HEAL_LABEL):
+    def search_issue_by_marker(self, repo: str, marker: str, *, label: str) -> Issue | None:
+        for issue in self.list_issues(repo, label=label):
             if marker in issue.body:
                 return issue
         return None
@@ -539,8 +538,8 @@ class HttpGithubClient(GithubClient):
             labels=tuple(l["name"] for l in item.get("labels", [])),
         )
 
-    def search_issue_by_marker(self, repo: str, marker: str) -> Issue | None:
-        for issue in self.list_issues(repo, label=SELF_HEAL_LABEL):
+    def search_issue_by_marker(self, repo: str, marker: str, *, label: str) -> Issue | None:
+        for issue in self.list_issues(repo, label=label):
             if marker in issue.body:
                 return issue
         return None

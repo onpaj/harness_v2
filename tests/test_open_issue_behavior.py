@@ -74,7 +74,7 @@ async def test_second_heal_of_the_same_marker_returns_the_existing_issue():
 
 async def test_issue_error_propagates_uncaught():
     class RaisingTracker(IssueTracker):
-        def open_issue(self, repo, *, title, body, labels, marker):
+        def open_issue(self, repo, *, title, body, labels, marker, scope_label):
             raise IssueError("no token")
 
     artifacts = MemoryArtifactStore()

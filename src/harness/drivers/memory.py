@@ -391,9 +391,14 @@ class MemoryIssueTracker(IssueTracker):
         body: str,
         labels: tuple[str, ...],
         marker: str,
+        scope_label: str,
     ) -> IssueRef:
         for existing in self.opened:
-            if existing["repo"] == repo and existing["marker"] == marker:
+            if (
+                existing["repo"] == repo
+                and existing["marker"] == marker
+                and existing["scope_label"] == scope_label
+            ):
                 return existing["ref"]
         number = len(self.opened) + 1
         ref = IssueRef(number=number, url=f"https://forge.local/{repo}/issues/{number}")
@@ -402,8 +407,9 @@ class MemoryIssueTracker(IssueTracker):
                 "repo": repo,
                 "title": title,
                 "body": body,
-                "labels": labels,
+                "labels": tuple(dict.fromkeys((*labels, scope_label))),
                 "marker": marker,
+                "scope_label": scope_label,
                 "ref": ref,
             }
         )

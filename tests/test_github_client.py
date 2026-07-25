@@ -80,8 +80,12 @@ def test_fake_search_issue_by_marker_matches_body_within_the_label():
         labels=(SELF_HEAL_LABEL,),
     )
 
-    found = client.search_issue_by_marker("o/r", "<!-- harness-heal:tsk_9 -->")
-    missing = client.search_issue_by_marker("o/r", "<!-- harness-heal:other -->")
+    found = client.search_issue_by_marker(
+        "o/r", "<!-- harness-heal:tsk_9 -->", label=SELF_HEAL_LABEL
+    )
+    missing = client.search_issue_by_marker(
+        "o/r", "<!-- harness-heal:other -->", label=SELF_HEAL_LABEL
+    )
 
     assert found is not None and found.title == "Heal"
     assert missing is None
@@ -92,7 +96,12 @@ def test_fake_search_ignores_issues_without_the_self_heal_label():
         [Issue(1, "A", "<!-- harness-heal:tsk_9 -->", "u1", ("bug",))]
     )
 
-    assert client.search_issue_by_marker("o/r", "<!-- harness-heal:tsk_9 -->") is None
+    assert (
+        client.search_issue_by_marker(
+            "o/r", "<!-- harness-heal:tsk_9 -->", label=SELF_HEAL_LABEL
+        )
+        is None
+    )
 
 
 # --- issue state (open/closed/gone), fake ----------------------------------
@@ -866,7 +875,9 @@ def test_http_search_issue_by_marker_scans_self_heal_issues():
     opener = FakeOpener(payload)
     client = HttpGithubClient("tok", opener=opener)
 
-    found = client.search_issue_by_marker("o/r", "<!-- harness-heal:tsk_9 -->")
+    found = client.search_issue_by_marker(
+        "o/r", "<!-- harness-heal:tsk_9 -->", label=SELF_HEAL_LABEL
+    )
     assert found is not None and found.number == 7
 
     # scoped the listing to the self-heal label
@@ -885,4 +896,9 @@ def test_http_search_issue_by_marker_returns_none_when_no_body_matches():
     ]
     client = HttpGithubClient("tok", opener=FakeOpener(payload))
 
-    assert client.search_issue_by_marker("o/r", "<!-- harness-heal:tsk_9 -->") is None
+    assert (
+        client.search_issue_by_marker(
+            "o/r", "<!-- harness-heal:tsk_9 -->", label=SELF_HEAL_LABEL
+        )
+        is None
+    )

@@ -47,7 +47,12 @@ class OpenIssueBehavior(ConsumerBehavior):
         marker = task.data["heal"]["of"]
 
         ref = self._tracker.open_issue(
-            self._repo, title=title, body=body, labels=self._labels, marker=marker
+            self._repo,
+            title=title,
+            body=body,
+            labels=self._labels,
+            marker=marker,
+            scope_label="harness:self-heal",
         )
         return BehaviorResult(DONE, f"opened issue {ref.url}")
 
