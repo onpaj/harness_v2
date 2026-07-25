@@ -202,9 +202,11 @@ def test_run_heal_repo_wires_open_issue_finisher_and_tracker(monkeypatch, tmp_pa
 
 def test_a_binding_without_a_label_fails_the_build(monkeypatch, tmp_path, capsys):
     """`build()` calls the "open-issue" factory eagerly for every step of a
-    *served* workflow (invariant #41), so this must actually serve `review`
-    for the missing-label check to run — the failure surfaces before `serve()`
-    is ever reached, so no real server is started."""
+    *served* workflow (invariant #41). `review` is served automatically
+    because its definition is on disk — the served set is every workflow
+    file under `workflows/` — so the missing-label check runs and the
+    failure surfaces before `serve()` is ever reached, so no real server is
+    started."""
     main(["init", "--root", str(tmp_path)])
     path = tmp_path / "workflows" / "review.json"
     path.write_text(json.dumps({
@@ -215,7 +217,7 @@ def test_a_binding_without_a_label_fails_the_build(monkeypatch, tmp_path, capsys
     }))
     capsys.readouterr()
 
-    assert main(["run", "--root", str(tmp_path), "--workflow", "review"]) == 2
+    assert main(["run", "--root", str(tmp_path)]) == 2
     # Specifically the missing-`label` check, not merely "unknown kind" —
     # `open-issue` must already be a known finisher kind here.
     assert "label" in capsys.readouterr().err
@@ -487,12 +489,13 @@ def test_run_label_issue_finisher_wraps_inner_and_applies_the_mapped_label(
     assert isinstance(built, LabelIssueBehavior)
 
 
-def test_run_without_heal_repo_wires_open_issue_but_serves_no_heal_workflow(
+def test_run_without_heal_repo_wires_open_issue_and_still_serves_heal(
     monkeypatch, tmp_path
 ):
     """`open-issue` is registered regardless (it needs no heal-specific
-    configuration), but `heal_repo` alone still decides whether the seeded
-    `heal` workflow itself is served — those are two separate questions."""
+    configuration), and the seeded `heal` workflow is served too — every
+    `harness init` root has `workflows/heal.json` on disk, and the served set
+    is now exactly what `workflows/` holds, independent of `heal_repo`."""
     main(["init", "--root", str(tmp_path)])
     captured = {}
 
@@ -510,7 +513,7 @@ def test_run_without_heal_repo_wires_open_issue_but_serves_no_heal_workflow(
 
     assert main(["run", "--root", str(tmp_path)]) == 0
     assert set(captured["finishers"]) == {"open-issue"}
-    assert DEFAULT_HEAL_WORKFLOW not in captured["served_names"]
+    assert DEFAULT_HEAL_WORKFLOW in captured["served_names"]
 
 
 def test_run_wires_the_registry_into_build_and_serve(monkeypatch, tmp_path):
@@ -988,18 +991,6 @@ def test_init_creates_processes_directory(tmp_path):
     assert built == []
 
 
-def test_run_with_unknown_workflow_fails_cleanly(tmp_path, capsys):
-    """The third documented error path: unknown workflow (via `run`)."""
-    main(["init", "--root", str(tmp_path)])
-    capsys.readouterr()
-
-    assert main(["run", "--root", str(tmp_path), "--workflow", "nonexistent"]) == 2
-
-    out, err = capsys.readouterr()
-    assert out == ""
-    assert "nonexistent" in err
-
-
 HOTFIX_DEFINITION = {
     "name": "hotfix",
     "start": "plan",
@@ -1007,122 +998,61 @@ HOTFIX_DEFINITION = {
 }
 
 
-def test_run_serves_multiple_workflows_with_repeated_flag(monkeypatch, tmp_path):
+def test_run_serves_every_workflow_definition_on_disk(monkeypatch, tmp_path):
+    """No flag: the served set is exactly what `workflows/` holds."""
     main(["init", "--root", str(tmp_path)])
     (tmp_path / "workflows" / "hotfix.json").write_text(json.dumps(HOTFIX_DEFINITION))
     captured = {}
 
-    async def fake_serve(harness, port, poll_interval, source_interval=30.0, pr_poll_interval=0.0, reconcile_interval=300.0, registry=None):
-        captured["harness"] = harness
-
-    monkeypatch.setattr("harness.cli.serve", fake_serve)
-
-    assert main(
-        [
-            "run",
-            "--root",
-            str(tmp_path),
-            "--workflow",
-            "development",
-            "--workflow",
-            "hotfix",
-        ]
-    ) == 0
-    # The scaffolded resolver workflow is served whenever its file exists.
-    assert set(captured["harness"].workflows) == {"development", "hotfix", "resolver"}
-
-
-def test_run_with_no_workflow_flag_serves_default_and_resolver(monkeypatch, tmp_path):
-    main(["init", "--root", str(tmp_path)])
-    (tmp_path / "workflows" / "hotfix.json").write_text(json.dumps(HOTFIX_DEFINITION))
-    captured = {}
-
-    async def fake_serve(harness, port, poll_interval, source_interval=30.0, pr_poll_interval=0.0, reconcile_interval=300.0, registry=None):
+    async def fake_serve(harness, port, poll_interval, source_interval=30.0,
+                         pr_poll_interval=0.0, reconcile_interval=300.0, registry=None):
         captured["harness"] = harness
 
     monkeypatch.setattr("harness.cli.serve", fake_serve)
 
     assert main(["run", "--root", str(tmp_path)]) == 0
-    # `hotfix` isn't served (not selected), but the scaffolded `resolver` is —
-    # its definition exists, so it rides alongside the default (decoupled from
-    # the mergeability watcher flag).
-    assert set(captured["harness"].workflows) == {"development", "resolver"}
+    assert set(captured["harness"].workflows) == {
+        "development", "hotfix", "resolver", "heal"
+    }
 
 
-def test_run_all_workflows_serves_every_definition_found(monkeypatch, tmp_path):
-    main(["init", "--root", str(tmp_path)])
-    (tmp_path / "workflows" / "hotfix.json").write_text(json.dumps(HOTFIX_DEFINITION))
+def test_run_with_no_workflow_definitions_is_workflow_less_not_an_error(monkeypatch, tmp_path):
+    """FR-6: an empty workflows/ runs the catalog agents directly."""
+    (tmp_path / "workflows").mkdir(parents=True)
+    (tmp_path / "agents").mkdir(parents=True)
     captured = {}
 
-    async def fake_serve(harness, port, poll_interval, source_interval=30.0, pr_poll_interval=0.0, reconcile_interval=300.0, registry=None):
+    async def fake_serve(harness, port, poll_interval, source_interval=30.0,
+                         pr_poll_interval=0.0, reconcile_interval=300.0, registry=None):
         captured["harness"] = harness
 
     monkeypatch.setattr("harness.cli.serve", fake_serve)
 
-    # `init` also scaffolds the resolver and heal workflows; `--heal-repo`
-    # here is only what makes `heal` itself *served* (it stamps the fresh
-    # heal task's `params.repository` — invariant #25) — the "open-issue"
-    # finisher kind it binds to is registered regardless, unconditionally.
-    assert main(
-        ["run", "--root", str(tmp_path), "--all-workflows", "--heal-repo", "onpaj/harness_v2"]
-    ) == 0
-    assert set(captured["harness"].workflows) == {"development", "hotfix", "resolver", "heal"}
+    assert main(["run", "--root", str(tmp_path)]) == 0
+    assert tuple(captured["harness"].workflows) == ()
 
 
-def test_run_all_workflows_without_heal_repo_still_builds_the_heal_workflow(
-    monkeypatch, tmp_path
-):
-    """`open-issue` is registered unconditionally, so serving the dormant
-    `heal` workflow via `--all-workflows` no longer needs `--heal-repo` at
-    build time — the flag only decides whether a fresh heal task gets a
-    `params.repository` to attach a worktree with, a runtime concern."""
-    main(["init", "--root", str(tmp_path)])
-    captured = {}
-
-    async def fake_serve(harness, port, poll_interval, source_interval=30.0, pr_poll_interval=0.0, reconcile_interval=300.0, registry=None):
-        captured["harness"] = harness
-
-    monkeypatch.setattr("harness.cli.serve", fake_serve)
-
-    assert main(["run", "--root", str(tmp_path), "--all-workflows"]) == 0
-    assert "heal" in captured["harness"].workflows
-
-
-def test_run_rejects_workflow_and_all_workflows_together(tmp_path, capsys):
+def test_the_workflow_selection_flags_are_gone(tmp_path, capsys):
     main(["init", "--root", str(tmp_path)])
     capsys.readouterr()
 
-    assert main(
-        ["run", "--root", str(tmp_path), "--workflow", "default", "--all-workflows"]
-    ) == 2
-
-    out, err = capsys.readouterr()
-    assert out == ""
-    assert "mutually exclusive" in err
-
-
-def test_run_all_workflows_with_no_definitions_is_a_startup_error(tmp_path, capsys):
-    (tmp_path / "workflows").mkdir(parents=True)
-
-    assert main(["run", "--root", str(tmp_path), "--all-workflows"]) == 2
-
-    out, err = capsys.readouterr()
-    assert out == ""
-    assert "no workflow definitions found" in err
+    with pytest.raises(SystemExit):
+        main(["run", "--root", str(tmp_path), "--workflow", "development"])
+    with pytest.raises(SystemExit):
+        main(["run", "--root", str(tmp_path), "--all-workflows"])
 
 
 def test_run_rejects_github_workflow_not_in_served_set(tmp_path, capsys):
     main(["init", "--root", str(tmp_path)])
-    (tmp_path / "workflows" / "hotfix.json").write_text(json.dumps(HOTFIX_DEFINITION))
     capsys.readouterr()
 
+    # `hotfix.json` is never written, so `hotfix` is not on disk and
+    # therefore not served.
     assert main(
         [
             "run",
             "--root",
             str(tmp_path),
-            "--workflow",
-            "default",
             "--github-workflow",
             "hotfix",
         ]
@@ -1134,16 +1064,18 @@ def test_run_rejects_github_workflow_not_in_served_set(tmp_path, capsys):
     assert "not served" in err
 
 
-def test_run_single_custom_workflow_ignores_github_workflow_default(
+def test_run_without_a_default_workflow_ignores_github_workflow_default(
     monkeypatch, tmp_path, capsys
 ):
     """Regression: `--github-workflow` used to default to `DEFAULT_WORKFLOW`
-    ("default") and get checked against the served set unconditionally, so
-    `run --workflow hotfix` with no GitHub flags at all (and no GITHUB_TOKEN)
-    used to fail startup even though no GithubTaskSource is ever built in that
-    case. FR-6 requires single-workflow runs to behave exactly as before."""
+    ("development") and get checked against the served set unconditionally,
+    so a root whose served set excludes "development" (no `development.json`
+    on disk) used to fail startup even with no GitHub flags at all, even
+    though no GithubTaskSource is ever built in that case. FR-6 requires this
+    to succeed regardless of what the served set actually is."""
     monkeypatch.delenv("GITHUB_TOKEN", raising=False)
     main(["init", "--root", str(tmp_path)])
+    (tmp_path / "workflows" / f"{DEFAULT_WORKFLOW}.json").unlink()
     (tmp_path / "workflows" / "hotfix.json").write_text(json.dumps(HOTFIX_DEFINITION))
     captured = {}
 
@@ -1153,13 +1085,13 @@ def test_run_single_custom_workflow_ignores_github_workflow_default(
     monkeypatch.setattr("harness.cli.serve", fake_serve)
     capsys.readouterr()
 
-    assert main(["run", "--root", str(tmp_path), "--workflow", "hotfix"]) == 0
+    assert main(["run", "--root", str(tmp_path)]) == 0
 
     out, err = capsys.readouterr()
     assert err == ""
-    # `hotfix` is the selected workflow; the scaffolded `resolver` rides along
-    # because its definition exists.
-    assert set(captured["harness"].workflows) == {"hotfix", "resolver"}
+    # `development` isn't on disk, so it isn't served; `hotfix`, `resolver`
+    # and `heal` are, because their files are.
+    assert set(captured["harness"].workflows) == {"hotfix", "resolver", "heal"}
 
 
 def test_init_rejects_workflow_name_with_path_separator(tmp_path, capsys):
@@ -1694,12 +1626,10 @@ def _parse_run(argv):
     return captured["args"]
 
 
-def test_run_resolves_default_workflow_when_omitted(tmp_path, monkeypatch):
-    """Plain `harness run` (no --workflow) against an ordinarily-initialized
-    harness serves `development` — the same effective default as before
-    --workflow's argparse default became None to support --no-workflow
-    harnesses. The scaffolded `resolver` workflow is appended because its
-    definition exists."""
+def test_run_serves_every_scaffolded_workflow_for_an_ordinary_init(tmp_path, monkeypatch):
+    """Plain `harness run` against an ordinarily-initialized harness serves
+    every workflow `init` scaffolded: `development`, `heal` and `resolver` —
+    the served set is exactly what `workflows/` holds."""
     main(["init", "--root", str(tmp_path)])
     seen = {}
 
@@ -1712,12 +1642,12 @@ def test_run_resolves_default_workflow_when_omitted(tmp_path, monkeypatch):
     with pytest.raises(SystemExit):
         main(["run", "--root", str(tmp_path), "--api-port", "0"])
 
-    assert list(seen["served"]) == ["development", "resolver"]
+    assert list(seen["served"]) == ["development", "heal", "resolver"]
 
 
 def test_run_with_no_workflow_harness_defaults_to_none(tmp_path, monkeypatch):
-    """A --no-workflow harness has no workflows/default.json, so an omitted
-    --workflow flag must resolve to an empty served set (workflow-less), not
+    """A --no-workflow harness has no `workflows/` directory at all, so
+    `harness run` must resolve to an empty served set (workflow-less), not
     raise WorkflowNotFound."""
     main(["init", "--root", str(tmp_path), "--no-workflow"])
     seen = {}

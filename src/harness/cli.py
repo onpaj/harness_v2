@@ -1371,35 +1371,16 @@ def _service_status(args: argparse.Namespace) -> int:
     return _print_service_report(args.label, target, report)
 
 
-def _resolve_served_workflows(
-    args: argparse.Namespace, layout: HarnessLayout
-) -> tuple[str, ...] | None:
-    """The set of workflow names `harness run` should serve, or None on error
-    (an error message has already been printed to stderr)."""
-    if args.workflows and args.all_workflows:
-        print(
-            "error: --workflow and --all-workflows are mutually exclusive",
-            file=sys.stderr,
-        )
-        return None
-    if args.all_workflows:
-        names = FilesystemWorkflowRepository(layout.workflows).names()
-        if not names:
-            print(
-                f"error: no workflow definitions found under {layout.workflows}",
-                file=sys.stderr,
-            )
-            return None
-        return names
-    if args.workflows:
-        return tuple(args.workflows)
-    # Neither --workflow nor --all-workflows: probe for the primary workflow.
-    # Present (a normal `harness init`) → serve `development`.
-    # Absent → workflow-less (FR-6): serve no workflow and run the catalog
-    # agents directly, rather than failing on a missing `development.json`.
-    if (layout.workflows / f"{DEFAULT_WORKFLOW}.json").is_file():
-        return (DEFAULT_WORKFLOW,)
-    return ()
+def _resolve_served_workflows(layout: HarnessLayout) -> tuple[str, ...]:
+    """The set of workflow names `harness run` serves: every definition under
+    `<root>/workflows/`.
+
+    Serving is data, not configuration — dropping a workflow file into the root
+    serves it, and removing it stops serving it. An empty or missing directory
+    is workflow-less mode (FR-6): no workflow is served and the catalog agents
+    run directly, rather than a startup error.
+    """
+    return FilesystemWorkflowRepository(layout.workflows).names()
 
 
 def _parse_hours(raw: str) -> list[int]:
@@ -1663,17 +1644,17 @@ def _slug_resolver(registry: RepositoryRegistry) -> Callable[[str | None], str]:
 def _run(args: argparse.Namespace) -> int:
     root = _root(args.root)
     layout = HarnessLayout(root)
-    served_names = _resolve_served_workflows(args, layout)
-    if served_names is None:
-        return 2
+    served_names = _resolve_served_workflows(layout)
 
     # `--github-workflow` defaults to `None` (not `DEFAULT_WORKFLOW`) so this
     # check only fires when the operator actually named a workflow for GitHub
     # ingestion. Validating the *default* against the served set would reject
-    # e.g. `run --workflow hotfix` with no GitHub flags at all -- a regression
-    # against FR-6, since no GithubTaskSource is ever built in that case.
-    # `--github-step` (workflow-less GitHub ingestion) skips the check: it names
-    # a step, not a workflow, and `_github_sources` applies its own defaulting.
+    # a root whose served set happens to exclude "development" (e.g. no
+    # `development.json` on disk) even with no GitHub flags at all -- a
+    # regression against FR-6, since no GithubTaskSource is ever built in
+    # that case. `--github-step` (workflow-less GitHub ingestion) skips the
+    # check: it names a step, not a workflow, and `_github_sources` applies
+    # its own defaulting.
     if args.github_workflow is not None and args.github_workflow not in served_names:
         print(
             f"error: --github-workflow {args.github_workflow!r} is not served "
@@ -1744,27 +1725,17 @@ def _run(args: argparse.Namespace) -> int:
     sources = github + reflectors
     merge_checker = _build_merge_checker(args)
     issue_checker = _build_issue_checker(args)
-    # The resolver workflow rides alongside the primary one so its tasks — queued
-    # by a `github-conflicts` process — get their own step queues and board
-    # columns. Served whenever its definition exists: a process-only detection
-    # path still needs a served target (a process targeting an unserved
-    # workflow fails to compile).
-    resolver_defined = (layout.workflows / f"{args.resolver_workflow}.json").is_file()
-    if resolver_defined and args.resolver_workflow not in served_names:
-        served_names = [*served_names, args.resolver_workflow]
 
     # Self-healing (ADR-0018): a heal repo — `--heal-repo <owner/repo>` OR the
     # `HARNESS_HEAL_REPO` env var, the flag-free path that mirrors how
     # `SLACK_WEBHOOK_URL` gates the slack sink (config in the service's env,
-    # never a run flag) — serves the seeded `heal` workflow and writes
-    # `processes/autoheal.json`. The `open-issue` finisher itself needs none
-    # of this (it is registered unconditionally above); what `heal_repo`
-    # still controls is the value stamped as `params.repository` on every
-    # fresh heal task (invariant #25), which is what gives the `heal` step a
-    # worktree and, through the generic `slug_for` above, a repo to file
-    # onto. This must run *before* `known_targets` is computed below — the
-    # autoheal process's `{"workflow": "heal"}` target (and any bare trigger
-    # naming it) needs "heal" in the served set to validate. It reuses the
+    # never a run flag) — writes `processes/autoheal.json`. The seeded `heal`
+    # workflow is already served by the serve-everything-on-disk rule above,
+    # and the `open-issue` finisher is registered unconditionally, so neither
+    # needs `heal_repo` to switch on. What `heal_repo` still controls is the
+    # value stamped as `params.repository` on every fresh heal task
+    # (invariant #25), which is what gives the `heal` step a worktree and,
+    # through the generic `slug_for` above, a repo to file onto. It reuses the
     # claude agent, so it needs `--agent claude`.
     heal_repo = args.heal_repo or os.environ.get("HARNESS_HEAL_REPO")
     if heal_repo:
@@ -1797,8 +1768,6 @@ def _run(args: argparse.Namespace) -> int:
                 " until it is added there, so self-healing will file nothing.",
                 file=sys.stderr,
             )
-        if DEFAULT_HEAL_WORKFLOW not in served_names:
-            served_names = [*served_names, DEFAULT_HEAL_WORKFLOW]
         _ensure_autoheal_process(layout, heal_repo)
 
     # Scheduled triggers (`triggers/*.json`) are `TaskSource`s that ride the
@@ -2013,20 +1982,6 @@ def main(argv: list[str] | None = None) -> int:
 
     run = subparsers.add_parser("run", help="start the orchestration loop")
     run.add_argument("--root", default=None)
-    run.add_argument(
-        "--workflow",
-        action="append",
-        dest="workflows",
-        default=None,
-        help="workflow to serve (repeatable); unset serves 'development' when it "
-        "exists, otherwise runs workflow-less on the catalog agents",
-    )
-    run.add_argument(
-        "--all-workflows",
-        action="store_true",
-        help="serve every workflow definition found under <root>/workflows "
-        "(mutually exclusive with --workflow)",
-    )
     run.add_argument("--delay", type=float, default=5.0)
     run.add_argument("--poll", type=float, default=0.2)
     run.add_argument(
