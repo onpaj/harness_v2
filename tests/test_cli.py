@@ -178,7 +178,8 @@ def test_run_heal_repo_wires_open_issue_finisher_and_tracker(monkeypatch, tmp_pa
     assert main(["run", "--root", str(tmp_path), "--heal-repo", "onpaj/harness_v2"]) == 0
     assert DEFAULT_HEAL_WORKFLOW in captured["served_names"]
     # the finisher registry holds factories (invariant #41), so call it to get
-    # the behavior — open-issue ignores step/config/inner and replaces the step.
+    # the behavior — open-issue reads label/from_step off the binding's config;
+    # with from_step set it replaces the step and never calls the thunk.
     behavior = captured["finishers"]["open-issue"](
         "file-issue", HEAL_FINISHER_CONFIG, lambda: None
     )
@@ -197,21 +198,6 @@ def test_run_heal_repo_wires_open_issue_finisher_and_tracker(monkeypatch, tmp_pa
     process = json.loads((tmp_path / "processes" / "autoheal.json").read_text())
     assert process["target"] == {"workflow": "heal"}
     assert process["action"]["check"] == "failed-tasks"
-
-
-def test_open_issue_is_registered_without_any_heal_configuration(monkeypatch, tmp_path):
-    """The finisher kind no longer depends on a heal repo — serving the seeded
-    heal workflow must not need any flag or env var."""
-    main(["init", "--root", str(tmp_path)])
-
-    async def fake_serve(harness, port, poll_interval, source_interval=30.0,
-                         pr_poll_interval=0.0, reconcile_interval=300.0, registry=None):
-        return None
-
-    monkeypatch.setattr("harness.cli.serve", fake_serve)
-    monkeypatch.delenv("HARNESS_HEAL_REPO", raising=False)
-
-    assert main(["run", "--root", str(tmp_path)]) == 0
 
 
 def test_a_binding_without_a_label_fails_the_build(monkeypatch, tmp_path, capsys):
@@ -237,10 +223,11 @@ def test_a_binding_without_a_label_fails_the_build(monkeypatch, tmp_path, capsys
 
 def test_run_heal_via_env_var_wires_everything_without_a_flag(monkeypatch, tmp_path):
     """The flag-free path: `HARNESS_HEAL_REPO` (config in the service env, not a
-    run flag) enables healing exactly as `--heal-repo` does — serves `heal`,
-    registers the `open-issue` finisher on that repo, and materializes
-    `processes/autoheal.json` so the failed-tasks check has a target. This is
-    what lets the launchd service self-heal with no CLI flag (ADR-0018)."""
+    run flag) enables healing exactly as `--heal-repo` does — serves `heal`
+    and materializes `processes/autoheal.json` so the failed-tasks check has
+    a target (the `open-issue` finisher itself is registered unconditionally,
+    independent of this env var). This is what lets the launchd service
+    self-heal with no CLI flag (ADR-0018)."""
     from harness.behaviors.open_issue import OpenIssueBehavior
 
     main(["init", "--root", str(tmp_path)])
@@ -2730,6 +2717,69 @@ def test_build_issue_checker_with_a_token_wires_the_http_client(monkeypatch):
 
     assert isinstance(checker, GithubIssueChecker)
     assert isinstance(checker._client, HttpGithubClient)
+
+
+# --- slug resolver ------------------------------------------------------
+
+
+def test_slug_resolver_resolves_a_registered_repo_with_a_github_origin(monkeypatch):
+    """The happy path: a registered name resolves to a clone whose origin
+    `github_slug` can read — the slug it returns is what `open-issue` files
+    the issue onto."""
+    from harness.cli import _slug_resolver
+
+    registry = MemoryRepositoryRegistry({"heblo": Path("/repos/heblo")})
+    monkeypatch.setattr(
+        "harness.cli.github_slug",
+        lambda path: "onpaj/Anela.Heblo" if path == Path("/repos/heblo") else None,
+    )
+
+    slug_for = _slug_resolver(registry)
+
+    assert slug_for("heblo") == "onpaj/Anela.Heblo"
+
+
+def test_slug_resolver_raises_issue_error_for_a_missing_name(monkeypatch):
+    """`None`/empty — no repository was stamped on the task — is a distinct
+    failure from an unregistered name, but both must be `IssueError`."""
+    from harness.cli import _slug_resolver
+    from harness.ports.issues import IssueError
+
+    registry = MemoryRepositoryRegistry({})
+    slug_for = _slug_resolver(registry)
+
+    with pytest.raises(IssueError, match="no repository"):
+        slug_for(None)
+    with pytest.raises(IssueError, match="no repository"):
+        slug_for("")
+
+
+def test_slug_resolver_raises_issue_error_for_an_unregistered_name(monkeypatch):
+    """`RepositoryNotFound` from the registry is translated into `IssueError`,
+    not left to propagate as-is or swallowed."""
+    from harness.cli import _slug_resolver
+    from harness.ports.issues import IssueError
+
+    registry = MemoryRepositoryRegistry({"heblo": Path("/repos/heblo")})
+    slug_for = _slug_resolver(registry)
+
+    with pytest.raises(IssueError, match="some-unregistered-repo-name"):
+        slug_for("some-unregistered-repo-name")
+
+
+def test_slug_resolver_raises_issue_error_for_a_non_github_origin(monkeypatch):
+    """A registered clone that resolves fine but whose origin isn't GitHub
+    (or has none) must also fail as `IssueError`, naming the repo and path."""
+    from harness.cli import _slug_resolver
+    from harness.ports.issues import IssueError
+
+    registry = MemoryRepositoryRegistry({"local": Path("/repos/local")})
+    monkeypatch.setattr("harness.cli.github_slug", lambda path: None)
+
+    slug_for = _slug_resolver(registry)
+
+    with pytest.raises(IssueError, match="local"):
+        slug_for("local")
 
 
 def test_run_agent_defaults_to_claude_and_accepts_dummy(tmp_path, monkeypatch):
