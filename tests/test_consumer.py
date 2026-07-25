@@ -53,6 +53,17 @@ class DataBehavior(ConsumerBehavior):
         return BehaviorResult(DONE, "done with data", data=self._data)
 
 
+class TokensBehavior(ConsumerBehavior):
+    """Returns a fixed BehaviorResult.tokens payload — for testing that the
+    consumer attaches it to the HistoryEntry, not to task.data."""
+
+    def __init__(self, tokens: dict) -> None:
+        self._tokens = tokens
+
+    async def run(self, task):
+        return BehaviorResult(DONE, "done", tokens=self._tokens)
+
+
 def build(behavior, task: Task | None = None):
     queue = MemoryTaskQueue("design")
     inbox = MemoryTaskQueue("tasks")
@@ -289,6 +300,26 @@ async def test_behavior_result_without_data_leaves_task_data_untouched():
     await consumer.tick()
 
     assert inbox.list()[0].data == {"source": {"kind": "github"}}
+
+
+async def test_result_tokens_attach_to_history_entry_not_task_data():
+    tokens = {"attempt": 1, "input": 120, "output": 45, "model": "claude-sonnet-5"}
+    consumer, _, inbox, _, _ = build(TokensBehavior(tokens), make_task())
+
+    await consumer.tick()
+
+    updated = inbox.list()[0]
+    assert updated.history[-1].tokens == tokens
+    # tokens is a per-delivery fact — it never leaks into task.data.
+    assert "tokens" not in updated.data
+
+
+async def test_no_result_tokens_leaves_history_entry_tokens_none():
+    consumer, _, inbox, _, _ = build(ScriptedBehavior(), make_task())
+
+    await consumer.tick()
+
+    assert inbox.list()[0].history[-1].tokens is None
 
 
 async def test_consumer_failure_event_carries_failed_queue():

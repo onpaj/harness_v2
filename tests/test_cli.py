@@ -471,6 +471,7 @@ def test_run_registers_label_issue_finisher_only_with_a_token(monkeypatch, tmp_p
     monkeypatch.setattr("harness.cli.build", fake_build)
     monkeypatch.setattr("harness.cli.serve", fake_serve)
     monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    monkeypatch.delenv("HARNESS_HEAL_REPO", raising=False)
 
     assert main(["run", "--root", str(tmp_path)]) == 0
     assert captured["finishers"] is None
@@ -601,6 +602,8 @@ def test_run_without_heal_repo_wires_no_open_issue_finisher(monkeypatch, tmp_pat
 
     monkeypatch.setattr("harness.cli.build", fake_build)
     monkeypatch.setattr("harness.cli.serve", fake_serve)
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    monkeypatch.delenv("HARNESS_HEAL_REPO", raising=False)
 
     assert main(["run", "--root", str(tmp_path)]) == 0
     assert captured["finishers"] is None
@@ -1110,6 +1113,7 @@ def test_run_serves_multiple_workflows_with_repeated_flag(monkeypatch, tmp_path)
         captured["harness"] = harness
 
     monkeypatch.setattr("harness.cli.serve", fake_serve)
+    monkeypatch.delenv("HARNESS_HEAL_REPO", raising=False)
 
     assert main(
         [
@@ -1135,6 +1139,7 @@ def test_run_with_no_workflow_flag_serves_default_and_resolver(monkeypatch, tmp_
         captured["harness"] = harness
 
     monkeypatch.setattr("harness.cli.serve", fake_serve)
+    monkeypatch.delenv("HARNESS_HEAL_REPO", raising=False)
 
     assert main(["run", "--root", str(tmp_path)]) == 0
     # `hotfix` isn't served (not selected), but the scaffolded `resolver` is —
@@ -1162,10 +1167,13 @@ def test_run_all_workflows_serves_every_definition_found(monkeypatch, tmp_path):
     assert set(captured["harness"].workflows) == {"development", "hotfix", "resolver", "heal"}
 
 
-def test_run_all_workflows_without_heal_repo_fails_fast_on_the_heal_workflow(tmp_path, capsys):
+def test_run_all_workflows_without_heal_repo_fails_fast_on_the_heal_workflow(
+    tmp_path, capsys, monkeypatch
+):
     """Serving the dormant `heal` workflow without `--heal-repo` means nothing
     registers its `file-issue` step's "open-issue" finisher kind — `build()`
     refuses at startup (fail-fast configuration), not mid-run."""
+    monkeypatch.delenv("HARNESS_HEAL_REPO", raising=False)
     main(["init", "--root", str(tmp_path)])
     capsys.readouterr()
 
@@ -1229,6 +1237,7 @@ def test_run_single_custom_workflow_ignores_github_workflow_default(
     used to fail startup even though no GithubTaskSource is ever built in that
     case. FR-6 requires single-workflow runs to behave exactly as before."""
     monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    monkeypatch.delenv("HARNESS_HEAL_REPO", raising=False)
     main(["init", "--root", str(tmp_path)])
     (tmp_path / "workflows" / "hotfix.json").write_text(json.dumps(HOTFIX_DEFINITION))
     captured = {}
@@ -1887,6 +1896,7 @@ def test_run_resolves_default_workflow_when_omitted(tmp_path, monkeypatch):
     --workflow's argparse default became None to support --no-workflow
     harnesses. The scaffolded `resolver` workflow is appended because its
     definition exists."""
+    monkeypatch.delenv("HARNESS_HEAL_REPO", raising=False)
     main(["init", "--root", str(tmp_path)])
     seen = {}
 
@@ -1906,6 +1916,7 @@ def test_run_with_no_workflow_harness_defaults_to_none(tmp_path, monkeypatch):
     """A --no-workflow harness has no workflows/default.json, so an omitted
     --workflow flag must resolve to an empty served set (workflow-less), not
     raise WorkflowNotFound."""
+    monkeypatch.delenv("HARNESS_HEAL_REPO", raising=False)
     main(["init", "--root", str(tmp_path), "--no-workflow"])
     seen = {}
 

@@ -1,5 +1,5 @@
 from harness.models import Task
-from harness.ports.board import Board, BoardColumn, BoardTab
+from harness.ports.board import AgentActivity, Board, BoardColumn, BoardTab
 
 
 def make_task(task_id: str) -> Task:
@@ -33,6 +33,43 @@ def test_workflow_lookup():
 
     assert board.workflow("hotfix").columns[0].name == "patch"
     assert board.workflow("nonexistent") is None
+
+
+def test_agent_activity_to_dict_carries_token_fields():
+    activity = AgentActivity(
+        task_id="tsk_1",
+        title="Fix the bug",
+        at="2026-07-19T10:00:00Z",
+        outcome="done",
+        summary="planned it",
+        reason=None,
+        input_tokens=120,
+        output_tokens=45,
+        model="claude-sonnet-5",
+    )
+
+    raw = activity.to_dict()
+
+    assert raw["inputTokens"] == 120
+    assert raw["outputTokens"] == 45
+    assert raw["model"] == "claude-sonnet-5"
+
+
+def test_agent_activity_token_fields_default_none():
+    activity = AgentActivity(
+        task_id="tsk_1",
+        title="Fix the bug",
+        at="2026-07-19T10:00:00Z",
+        outcome="done",
+        summary="planned it",
+        reason=None,
+    )
+
+    raw = activity.to_dict()
+
+    assert raw["inputTokens"] is None
+    assert raw["outputTokens"] is None
+    assert raw["model"] is None
 
 
 def test_default_tab_prefers_development_then_alphabetical_then_none():

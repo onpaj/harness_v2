@@ -36,6 +36,19 @@ def test_behavior_result_carries_data():
     assert result.data == {"pr": {"number": 1}}
 
 
+def test_behavior_result_tokens_defaults_none():
+    assert BehaviorResult(DONE).tokens is None
+
+
+def test_behavior_result_carries_tokens_separately_from_data():
+    result = BehaviorResult(
+        DONE, data={"tokens_total": {"input": 1, "output": 2}}, tokens={"input": 1}
+    )
+
+    assert result.tokens == {"input": 1}
+    assert result.data == {"tokens_total": {"input": 1, "output": 2}}
+
+
 def test_history_entry_roundtrips_summary():
     entry = HistoryEntry(
         at="t",
@@ -56,6 +69,46 @@ def test_history_entry_omits_summary_when_absent():
     entry = HistoryEntry(at="t", actor="dispatcher", from_step=None, to_step="plan")
 
     assert "summary" not in entry.to_dict()
+
+
+def test_history_entry_roundtrips_tokens():
+    entry = HistoryEntry(
+        at="t",
+        actor="consumer:development",
+        from_step="development",
+        to_step=None,
+        outcome="done",
+        tokens={
+            "attempt": 1,
+            "input": 1234,
+            "output": 567,
+            "cache_read": 0,
+            "cache_creation": 0,
+            "total_cost_usd": 0.0231,
+            "model": "claude-sonnet-5",
+        },
+    )
+
+    raw = entry.to_dict()
+
+    assert raw["tokens"]["input"] == 1234
+    assert HistoryEntry.from_dict(raw) == entry
+
+
+def test_history_entry_omits_tokens_when_absent():
+    entry = HistoryEntry(at="t", actor="dispatcher", from_step=None, to_step="plan")
+
+    assert "tokens" not in entry.to_dict()
+
+
+def test_history_entry_from_dict_defaults_tokens_when_absent():
+    """Backward compatibility: history written before this field existed has
+    no `tokens` key at all — must default to None, not raise KeyError."""
+    raw = {"at": "t", "actor": "dispatcher", "from": None, "to": "plan"}
+
+    entry = HistoryEntry.from_dict(raw)
+
+    assert entry.tokens is None
 
 
 def test_task_roundtrips_through_camelcase_json():

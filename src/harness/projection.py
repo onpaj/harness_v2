@@ -203,6 +203,9 @@ class BoardProjection(BoardView):
                 outcome=entry.outcome,
                 summary=entry.summary,
                 reason=entry.reason,
+                input_tokens=(entry.tokens or {}).get("input"),
+                output_tokens=(entry.tokens or {}).get("output"),
+                model=(entry.tokens or {}).get("model"),
             )
             for task in self._tasks.values()
             for entry in task.history

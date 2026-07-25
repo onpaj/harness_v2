@@ -24,6 +24,7 @@ import json
 import os
 import re
 from collections.abc import AsyncIterator, Callable
+from dataclasses import replace
 from pathlib import Path
 
 from harness.ports.agent import AgentRun, AgentRunner, AgentSpec
@@ -232,6 +233,33 @@ def verdict_from_final(
     return _verdict_from_envelope(message, allowed=allowed, raw=raw)
 
 
+def _usage_from_result(message: dict) -> dict[str, int | float | None]:
+    """Read `usage`/`total_cost_usd` off a terminal `result` message.
+
+    Missing or malformed fields degrade to zero/`None`, never raise — this is
+    telemetry layered on an already-successful verdict parse, not a new
+    failure mode for the run (matches `_extract_verdict`'s tolerant shape).
+    """
+    usage = message.get("usage")
+    if not isinstance(usage, dict):
+        usage = {}
+
+    def _as_int(value: object) -> int:
+        return value if isinstance(value, int) and not isinstance(value, bool) else 0
+
+    total_cost = message.get("total_cost_usd")
+    if isinstance(total_cost, bool) or not isinstance(total_cost, (int, float)):
+        total_cost = None
+
+    return {
+        "input_tokens": _as_int(usage.get("input_tokens")),
+        "output_tokens": _as_int(usage.get("output_tokens")),
+        "cache_read_tokens": _as_int(usage.get("cache_read_input_tokens")),
+        "cache_creation_tokens": _as_int(usage.get("cache_creation_input_tokens")),
+        "total_cost_usd": total_cost,
+    }
+
+
 # --- stream-json rendering (pure) --------------------------------------------
 
 
@@ -393,7 +421,7 @@ class ClaudeCliRunner(AgentRunner):
             stderr=asyncio.subprocess.PIPE,
         )
         try:
-            final, raw, stderr = await asyncio.wait_for(
+            final, raw, stderr, model = await asyncio.wait_for(
                 _drain(proc, on_output), timeout
             )
         except asyncio.TimeoutError as error:
@@ -406,10 +434,26 @@ class ClaudeCliRunner(AgentRunner):
         if final is None:
             raise VerdictError(f"claude produced no result message: {raw!r}")
 
+        # Usage/model are telemetry lifted once from the terminal message and
+        # the resolved model reported by system/init, then layered onto
+        # whichever AgentRun this call ultimately returns.
+        usage = _usage_from_result(final)
+
+        def with_usage(base: AgentRun) -> AgentRun:
+            return replace(
+                base,
+                input_tokens=usage["input_tokens"],
+                output_tokens=usage["output_tokens"],
+                cache_read_tokens=usage["cache_read_tokens"],
+                cache_creation_tokens=usage["cache_creation_tokens"],
+                total_cost_usd=usage["total_cost_usd"],
+                model=model,
+            )
+
         allowed = spec.allowed_outcomes
         run = try_verdict(final, allowed=allowed, raw=raw)
         if run is not None:
-            return run
+            return with_usage(run)
 
         # The agent finished but skipped its verdict block — recover rather than
         # throw away a completed run. A multi-outcome step (review) is ambiguous,
@@ -424,16 +468,17 @@ class ClaudeCliRunner(AgentRunner):
                 cwd=cwd,
                 timeout=timeout,
                 allowed=allowed,
+                model=model,
             )
             if run is not None:
                 return run
 
         run = fallback_verdict(final.get("result", ""), allowed=allowed, raw=raw)
         if run is not None:
-            return run
+            return with_usage(run)
 
         # Nothing recovered it — raise the precise strict error for the log.
-        return verdict_from_final(final, allowed=allowed, raw=raw)
+        return with_usage(verdict_from_final(final, allowed=allowed, raw=raw))
 
     async def _reprompt_verdict(
         self,
@@ -443,12 +488,18 @@ class ClaudeCliRunner(AgentRunner):
         cwd: Path,
         timeout: float,
         allowed: tuple[str, ...],
+        model: str | None,
     ) -> AgentRun | None:
         """One cheap `claude -p --resume` that asks only for the verdict block.
 
         Best-effort: any failure — bad exit, timeout, still no readable verdict —
         returns `None` so the caller can fall back. The re-prompt must never turn
         an already-finished run into a hard error of its own.
+
+        Usage is this call's own — it is a second, smaller call, distinct from
+        the original run's usage. `model` cannot be read from this call's own
+        envelope: a resumed session doesn't re-emit `system/init`, so the
+        caller passes in the model already resolved from the original call.
         """
         argv = build_argv(
             prompt=_verdict_reprompt(allowed),
@@ -481,23 +532,39 @@ class ClaudeCliRunner(AgentRunner):
         except (json.JSONDecodeError, ValueError):
             return None
         try:
-            return try_verdict(envelope, allowed=allowed, raw=text)
+            run = try_verdict(envelope, allowed=allowed, raw=text)
         except VerdictError:
             return None
+        if run is None:
+            return None
+        usage = _usage_from_result(envelope) if isinstance(envelope, dict) else {}
+        return replace(
+            run,
+            input_tokens=usage.get("input_tokens", 0),
+            output_tokens=usage.get("output_tokens", 0),
+            cache_read_tokens=usage.get("cache_read_tokens", 0),
+            cache_creation_tokens=usage.get("cache_creation_tokens", 0),
+            total_cost_usd=usage.get("total_cost_usd"),
+            model=model,
+        )
 
 
 async def _drain(
     proc: asyncio.subprocess.Process, on_output: Callable[[str], None] | None
-) -> tuple[dict | None, str, str]:
+) -> tuple[dict | None, str, str, str | None]:
     """Consume the subprocess: render each line via `on_output`, keep the verdict.
 
-    Returns `(final_result_message, raw_stdout, stderr)`. stderr is read
-    concurrently so a full stderr pipe can't deadlock the stdout read.
+    Returns `(final_result_message, raw_stdout, stderr, resolved_model)`. stderr
+    is read concurrently so a full stderr pipe can't deadlock the stdout read.
+    The resolved model is read off the `system`/`init` message — the model that
+    actually ran, which can differ from `spec.model` when `fallback_model`
+    kicks in.
     """
     assert proc.stdout is not None and proc.stderr is not None
     stderr_task = asyncio.ensure_future(proc.stderr.read())
     try:
         final: dict | None = None
+        model: str | None = None
         raw_parts: list[str] = []
         async for raw_line in _iter_lines(proc.stdout):
             text = raw_line.decode(errors="replace")
@@ -507,11 +574,18 @@ async def _drain(
                 continue
             if message.get("type") == "result":
                 final = message
-            elif on_output is not None:
+                continue
+            if (
+                message.get("type") == "system"
+                and message.get("subtype") == "init"
+                and isinstance(message.get("model"), str)
+            ):
+                model = message["model"]
+            if on_output is not None:
                 for line in render_stream_line(message):
                     on_output(line)
         stderr = (await stderr_task).decode(errors="replace")
-        return final, "\n".join(raw_parts), stderr
+        return final, "\n".join(raw_parts), stderr, model
     finally:
         # On the timeout path `_drain` is cancelled mid-read; cancel the stderr
         # reader too and await it so it doesn't linger as a pending task.

@@ -173,7 +173,148 @@ async def test_returns_behavior_result_from_agent_run(tmp_path):
 
     result = await behavior.run(make_task())
 
-    assert result == BehaviorResult(DONE, "dev: done")
+    assert result == BehaviorResult(
+        DONE,
+        "dev: done",
+        data={"tokens_total": {"input": 0, "output": 0}},
+        tokens={
+            "attempt": 1,
+            "input": 0,
+            "output": 0,
+            "cache_read": 0,
+            "cache_creation": 0,
+            "total_cost_usd": None,
+            "model": None,
+        },
+    )
+
+
+async def test_behavior_carries_token_usage_and_attempt_into_result(tmp_path):
+    runner = FakeAgentRunner(
+        runs={
+            "development": AgentRun(
+                DONE,
+                "dev: done",
+                input_tokens=120,
+                output_tokens=45,
+                cache_read_tokens=10,
+                cache_creation_tokens=5,
+                total_cost_usd=0.0231,
+                model="claude-sonnet-5",
+            )
+        },
+    )
+    behavior, _, _ = build(tmp_path, runner=runner)
+
+    result = await behavior.run(make_task())
+
+    assert result.tokens == {
+        "attempt": 1,
+        "input": 120,
+        "output": 45,
+        "cache_read": 10,
+        "cache_creation": 5,
+        "total_cost_usd": 0.0231,
+        "model": "claude-sonnet-5",
+    }
+    assert result.data == {"tokens_total": {"input": 120, "output": 45}}
+
+
+async def test_multi_step_task_accumulates_tokens_across_steps(tmp_path):
+    # Two distinct steps sharing one workspace — the running total travels
+    # through task.data the same way the consumer's merge carries it in
+    # production (FR-6's acceptance: totals sum correctly across a task).
+    workspace = RealFsWorkspace(tmp_path)
+    events = MemoryEventSink()
+
+    plan_behavior = ClaudeCliBehavior(
+        clock=FakeClock(),
+        workspace=workspace,
+        runner=FakeAgentRunner(
+            runs={"plan": AgentRun(DONE, "plan: done", input_tokens=50, output_tokens=20)}
+        ),
+        spec=AgentSpec(name="plan", prompt="p"),
+        events=events,
+    )
+    review_behavior = ClaudeCliBehavior(
+        clock=FakeClock(),
+        workspace=workspace,
+        runner=FakeAgentRunner(
+            runs={
+                "review": AgentRun(DONE, "review: done", input_tokens=30, output_tokens=15)
+            }
+        ),
+        spec=AgentSpec(name="review", prompt="r"),
+        events=events,
+    )
+
+    task = replace(make_task(status="plan"))
+    plan_result = await plan_behavior.run(task)
+    assert plan_result.data == {"tokens_total": {"input": 50, "output": 20}}
+
+    task = replace(task, status="review", data={**task.data, **(plan_result.data or {})})
+    review_result = await review_behavior.run(task)
+
+    assert review_result.data == {"tokens_total": {"input": 80, "output": 35}}
+
+
+async def test_request_changes_rerun_gets_its_own_attempt_and_tokens(tmp_path):
+    # FR-5's acceptance: a re-run of the same step (the request_changes loop)
+    # produces a second attempt with its own token counts, neither
+    # overwriting the other. Two behaviors share the same real fs worktree
+    # (`tmp_path`), so `next_attempt` sees the first run's artifact on disk.
+    spec = AgentSpec(name="review", prompt="r")
+    task = replace(make_task(status="review"))
+
+    first_behavior, _, _ = build(
+        tmp_path,
+        runner=FakeAgentRunner(
+            runs={
+                "review": AgentRun(
+                    REQUEST_CHANGES, "needs fixes", input_tokens=40, output_tokens=10
+                )
+            },
+            writes={"review": {".artifacts/tsk_1/review-01.md": "# review\n"}},
+        ),
+        spec=spec,
+    )
+    first = await first_behavior.run(task)
+
+    second_behavior, _, _ = build(
+        tmp_path,
+        runner=FakeAgentRunner(
+            runs={
+                "review": AgentRun(DONE, "review: done", input_tokens=25, output_tokens=8)
+            },
+        ),
+        spec=spec,
+    )
+    second = await second_behavior.run(task)
+
+    assert first.tokens["attempt"] == 1
+    assert first.tokens["input"] == 40
+    assert first.tokens["output"] == 10
+    assert second.tokens["attempt"] == 2
+    assert second.tokens["input"] == 25
+    assert second.tokens["output"] == 8
+
+
+async def test_behavior_accumulates_running_token_total_across_prior_steps(tmp_path):
+    runner = FakeAgentRunner(
+        runs={
+            "development": AgentRun(
+                DONE, "dev: done", input_tokens=50, output_tokens=20
+            )
+        },
+    )
+    behavior, _, _ = build(tmp_path, runner=runner)
+    task = replace(
+        make_task(), data={"request": "x", "tokens_total": {"input": 100, "output": 30}}
+    )
+
+    result = await behavior.run(task)
+
+    assert result.data == {"tokens_total": {"input": 150, "output": 50}}
 
 
 async def test_emits_stage_output_events_tagged_with_identity(tmp_path):
