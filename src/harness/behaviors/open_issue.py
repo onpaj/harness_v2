@@ -80,7 +80,7 @@ class OpenIssueBehavior(ConsumerBehavior):
             # so `slug_for` is only called once there is something to file.
             repo = self._slug_for(task.repository)
             for draft in drafts:
-                allowed = []
+                allowed: list[str] = []
                 for label in draft.labels:
                     if label in self._allowed_labels:
                         allowed.append(label)

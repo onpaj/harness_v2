@@ -1731,8 +1731,10 @@ def _run(args: argparse.Namespace) -> int:
             else MemoryIssueTracker()
         )
         # `open-issue` replaces the file-issue step's behavior (like `open-pr`):
-        # it ignores step/config/inner and files the drafted heal issue. A
-        # factory, per the finisher registry contract (invariant #41).
+        # it ignores step/config/inner and would file the drafted heal issue
+        # once the `heal` persona actually emits one — see the TODO below,
+        # which today makes that still-broken. A factory, per the finisher
+        # registry contract (invariant #41).
         # `slug_for` ignores the task's own `repository` and always targets the
         # configured heal repo — the healer files onto its own repo, not the
         # failed task's, mirroring the old hardcoded `repo=heal_repo`. `label`

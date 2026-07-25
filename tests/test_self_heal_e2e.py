@@ -158,7 +158,7 @@ def put_failed_task(tmp_path, task_id="tsk_e2e", *, data=None) -> None:
     strict=True,
     reason="the heal persona still writes prose; Task 4 rebinds it to the fenced-JSON draft array",
 )
-async def test_heal_file_dedup_unique_reaches_file_issue_and_completes(tmp_path):
+async def test_heal_file_dedup_unique_opens_exactly_one_issue(tmp_path):
     """Path 1: `heal` -> `file` -> `dedup` -> `unique` -> `file-issue`. The
     dispatcher only accepts `file`/`unique` because `HEAL_DEFINITION` declares
     those exact edges (invariant #42) — this is the full triage+dedup path,
@@ -217,20 +217,24 @@ async def test_heal_file_dedup_unique_reaches_file_issue_and_completes(tmp_path)
     assert "tsk_e2e" in heal_call["prompt"]
     assert "## Failure report" in heal_call["prompt"]
 
-    # exactly one issue filed, marker derived from the *original* failed
-    # task's id (invariant #26's idempotency scoping — `marker_for` also
+    # the fresh heal-workflow task itself reached a clean end.
+    done_files = list((tmp_path / "done").glob("*.json"))
+    assert len(done_files) == 1
+    heal_task = Task.from_dict(json.loads(done_files[0].read_text()))
+    assert heal_task.status == "end"
+
+    # exactly one issue filed, marker derived from the *running* heal task's
+    # id — `OpenIssueBehavior.run` calls `marker_for(task.id, draft.title)`
+    # against the task it is handed, which is the fresh heal task fired by
+    # `FailedTasksCheck`, not the original failed task ("tsk_e2e") that
+    # spawned it (invariant #26's idempotency scoping — `marker_for` also
     # folds in the draft's own title, which this fixture cannot predict, see
     # the docstring above), carrying the Origin footer sourced from the
     # original task's data.source (FR-3).
     assert len(tracker.opened) == 1
     opened = tracker.opened[0]
-    assert opened["marker"] == marker_for("tsk_e2e", opened["title"])
+    assert opened["marker"] == marker_for(heal_task.id, opened["title"])
     assert "Origin: https://gh/i/9" in opened["body"]
-
-    # the fresh heal-workflow task itself reached a clean end.
-    done_files = list((tmp_path / "done").glob("*.json"))
-    assert len(done_files) == 1
-    assert Task.from_dict(json.loads(done_files[0].read_text())).status == "end"
 
 
 async def test_heal_file_dedup_duplicate_settles_silently(tmp_path):
