@@ -1143,11 +1143,21 @@ Run: `.venv/bin/pytest -q`
 
 `tests/test_self_heal_e2e.py` carries a **`@pytest.mark.xfail(strict=True)`** tripwire added during Task 3's fix wave: its real assertions (one issue opened, the marker, the `Origin:` footer) were restored but expected to fail, because the heal persona still wrote prose. This task is what closes that gap, so:
 
-1. Update the artifact the e2e's fake agent writes to the fenced-JSON form, e.g. `'# Fix it\n\n```json\n[{"title": "Fix it", "body": "diagnosis"}]\n```'`.
-2. **Remove the `xfail` marker.** Strict mode means the suite FAILS with `XPASS(strict)` the moment the test starts passing — that failure is the tripwire firing correctly, not a regression. Delete the marker and its Task-4 reason; the test must end this task passing normally.
-3. The marker assertion is `marker_for(task.id, title)` now, not the raw failed-task id.
+1. Update the artifact the e2e's fake agent writes to the fenced-JSON form. **The body must carry the `Origin:` line** — the restored assertion requires `"Origin: https://gh/i/9"` in the filed body, and origin-linking left the generic behavior when it stopped being heal-specific, so the drafted body is now the only thing that can supply it:
 
-If the e2e still cannot produce a fenced-JSON artifact through the fake runner (`ClaudeCliBehavior` writes into the worktree, not the shared `MemoryArtifactStore`), stop and report it — do not re-narrow the assertions or re-add the marker.
+   ```
+   # Fix it
+
+   ```json
+   [{"title": "Fix it", "body": "diagnosis\n\nOrigin: https://gh/i/9"}]
+   ```
+   ```
+
+2. **Remove the `xfail` marker.** Strict mode means the suite FAILS with `XPASS(strict)` the moment the test starts passing — that failure is the tripwire firing correctly, not a regression. Delete the marker and its Task-4 reason; the test must end this task passing normally.
+3. The marker assertion keys off the *running heal task's* id (read out of `done/`), not the original failed task's — already correct in the test, don't change it.
+4. **Fix the test's docstring while you are there.** It currently claims the fake runner "couldn't write the artifact where `OpenIssueBehavior` would find it" and that the fresh heal task's id is unknowable. Task 3's fix wave disproved both: recover the id from the `cwd` the runner is handed (`/memory/worktrees/<id>`) and write into the shared `MemoryArtifactStore`. Replace the "couldn't" framing with that recipe.
+
+This is a solved problem, not a dead end — the recipe above was demonstrated end to end. Do not re-narrow the assertions and do not re-add the marker.
 
 - [ ] **Step 7: Run the full suite again**
 
