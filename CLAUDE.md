@@ -142,7 +142,7 @@ Dependencies flow strictly downward, no cycles.
 |---|---|
 | Base | `models` (imports nothing from the package), `ids` |
 | Logic | `router` (knows only `models`) |
-| Base (package-free) | `models`, `ids`, `artifacts_layout` (the `.artifacts/<id>/<step>-NN` convention) |
+| Base (package-free) | `models`, `ids`, `artifacts_layout` (the `.artifacts/<id>/<step>-NN` convention), `issue_drafts` |
 | Ports | `ports/{queue,workflows,strategy,behavior,events,clock,workspace,artifacts,forge,board,agent,repos,source,control,logs,issues,merge,issue_state,triggers,updater,process_admin,issue_import,command}` |
 | Orchestration | `dispatcher`, `consumer`, `source_poller`, `task_control`, `pr_watcher`, `merge_reconciler`, `issue_reconciler` — know only ports (and, for `pr_watcher`/`merge_reconciler`/`issue_reconciler`, the base `ids` module — not `workspace`/`forge`/`artifacts`/`agent`/`repos`/`drivers`) |
 | Behaviors | `behaviors/{landing,agent,resolve_conflict,verify,open_issue}` — touch ports, not drivers |
@@ -152,6 +152,7 @@ Dependencies flow strictly downward, no cycles.
 
 - `projection.py` — in-memory read model of the board; hydration from queues + event stream
 - `artifacts_layout.py` — the single source of truth for artifact placement in the worktree (`next_attempt`, `artifacts_dir`); read by both the behavior and `WorktreeArtifactView`
+- `issue_drafts.py` — parse a step's issue drafts from a fenced JSON array in its artifact; derives idempotency markers (`IssueDraft`, `parse_drafts`, `marker_for`, `DraftError`); knows only `models`
 - `ports/board.py` — the `BoardView` port through which the UI looks
 - `ports/artifacts.py` — `ArtifactStore` (writing, phase 2) and `ArtifactView` (reading for the UI); phase 3 reads via `WorktreeArtifactView`
 - `ports/workspace.py` — `Workspace.attach(task) -> WorkspaceHandle` (worktree + commit; `merge`/`abort_merge` for the base-sync)
