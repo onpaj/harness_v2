@@ -1140,7 +1140,14 @@ In `_HEALER_PERSONA`, replace the drafting paragraph (the one beginning `"For a 
 - [ ] **Step 6: Run the full suite and fix fallout**
 
 Run: `.venv/bin/pytest -q`
-Expected: `tests/test_self_heal_e2e.py` fails — its heal artifact is still markdown. Update the artifact it writes to the fenced-JSON form, e.g. `'# Fix it\n\n```json\n[{"title": "Fix it", "body": "diagnosis"}]\n```'`, and assert on `tracker.opened[0]["title"]` as before.
+
+`tests/test_self_heal_e2e.py` carries a **`@pytest.mark.xfail(strict=True)`** tripwire added during Task 3's fix wave: its real assertions (one issue opened, the marker, the `Origin:` footer) were restored but expected to fail, because the heal persona still wrote prose. This task is what closes that gap, so:
+
+1. Update the artifact the e2e's fake agent writes to the fenced-JSON form, e.g. `'# Fix it\n\n```json\n[{"title": "Fix it", "body": "diagnosis"}]\n```'`.
+2. **Remove the `xfail` marker.** Strict mode means the suite FAILS with `XPASS(strict)` the moment the test starts passing — that failure is the tripwire firing correctly, not a regression. Delete the marker and its Task-4 reason; the test must end this task passing normally.
+3. The marker assertion is `marker_for(task.id, title)` now, not the raw failed-task id.
+
+If the e2e still cannot produce a fenced-JSON artifact through the fake runner (`ClaudeCliBehavior` writes into the worktree, not the shared `MemoryArtifactStore`), stop and report it — do not re-narrow the assertions or re-add the marker.
 
 - [ ] **Step 7: Run the full suite again**
 
