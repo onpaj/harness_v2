@@ -23,6 +23,7 @@ from harness.ports.artifacts import (
 )
 from harness.ports.behavior import ConsumerBehavior
 from harness.ports.clock import Clock
+from harness.ports.command import CommandResult, CommandRunner
 from harness.ports.events import EventSink
 from harness.ports.forge import Forge, PullRequest, PullRequestState
 from harness.ports.issue_state import IssueChecker
@@ -478,8 +479,11 @@ class FakeAgentRunner(AgentRunner):
 class MemoryRepositoryRegistry(RepositoryRegistry):
     """Repository registry over a name → path dict."""
 
-    def __init__(self, repos: dict[str, Path]) -> None:
+    def __init__(
+        self, repos: dict[str, Path], *, verify: dict[str, str] | None = None
+    ) -> None:
         self._repos = repos
+        self._verify = verify or {}
 
     def resolve(self, name: str) -> Path:
         try:
@@ -487,5 +491,22 @@ class MemoryRepositoryRegistry(RepositoryRegistry):
         except KeyError:
             raise RepositoryNotFound(f"repo {name!r} is not in the registry") from None
 
+    def verify_command(self, name: str) -> str | None:
+        return self._verify.get(name)
+
     def names(self) -> list[str]:
         return list(self._repos)
+
+
+class MemoryCommandRunner(CommandRunner):
+    """Scripted CommandRunner: pops preset results, repeats the last one."""
+
+    def __init__(self, results: list[CommandResult] | None = None) -> None:
+        self._results = list(results) if results else [CommandResult(0, "ok")]
+        self.calls: list[dict] = []
+
+    async def run(self, command: str, *, cwd: Path, timeout: float) -> CommandResult:
+        self.calls.append({"command": command, "cwd": cwd, "timeout": timeout})
+        if len(self._results) > 1:
+            return self._results.pop(0)
+        return self._results[0]

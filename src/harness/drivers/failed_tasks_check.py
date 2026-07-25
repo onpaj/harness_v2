@@ -29,9 +29,19 @@ from harness.ports.board import HEALED_COLUMN
 from harness.ports.clock import Clock
 from harness.ports.events import EventSink
 from harness.ports.queue import TaskQueue
-from harness.ports.triggers import Check, Observation
+from harness.ports.triggers import Check, CheckSpec, Observation
 
 ACTOR = "failed-tasks"
+
+SPEC = CheckSpec(
+    name="failed-tasks",
+    label="Failed tasks",
+    description="Drains each failed task into the self-heal workflow. Takes no settings.",
+)
+"""The action definition for `failed-tasks`. It carries no parameters — but it
+is a *fully declared* action, not an unknown one: wiring bundles this spec with
+the factory (`app.build()`) so the UI renders it like any other action ("no
+settings needed"), never as a raw-JSON blob."""
 
 
 class FailedTasksCheck(Check):

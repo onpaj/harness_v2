@@ -77,6 +77,15 @@ class GithubClient(ABC):
         """
 
     @abstractmethod
+    def get_issue(self, repo: str, number: int) -> Issue | None:
+        """The issue itself, by number, regardless of any label — or None when
+        it is gone (404). The point-lookup counterpart to `list_issues`'
+        label scan: used by manual issue import, where an operator names a
+        specific issue that may carry no label at all. Same 404→None idiom as
+        `get_issue_state`; every other error path still propagates.
+        """
+
+    @abstractmethod
     def add_label(self, repo: str, number: int, label: str) -> None:
         """Add a label. Adding one that is already set is a no-op."""
 
@@ -177,6 +186,9 @@ class FakeGithubClient(GithubClient):
         if number not in self._issues:
             return None
         return "closed" if number in self._closed_issues else "open"
+
+    def get_issue(self, repo: str, number: int) -> Issue | None:
+        return self._issues.get(number)
 
     def list_issues(self, repo: str, *, label: str) -> list[Issue]:
         # Mirror GitHub's `state=open` filter: a closed issue never appears here.
@@ -361,6 +373,24 @@ class HttpGithubClient(GithubClient):
                 return None
             raise
         return item.get("state")
+
+    def get_issue(self, repo: str, number: int) -> Issue | None:
+        url = f"{self._api}/repos/{repo}/issues/{number}"
+        request = urllib.request.Request(url, headers=self._headers(), method="GET")
+        try:
+            with self._opener.open(request) as response:
+                item = json.loads(response.read())
+        except urllib.error.HTTPError as error:
+            if error.code == 404:  # gone → None, not an error
+                return None
+            raise
+        return Issue(
+            number=item["number"],
+            title=item.get("title", ""),
+            body=item.get("body") or "",
+            url=item.get("html_url", ""),
+            labels=tuple(l["name"] for l in item.get("labels", [])),
+        )
 
     def add_label(self, repo: str, number: int, label: str) -> None:
         url = f"{self._api}/repos/{repo}/issues/{number}/labels"

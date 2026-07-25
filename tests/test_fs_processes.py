@@ -631,3 +631,178 @@ def test_disk_threshold_missing_params_raises_process_error_not_keyerror(
     with pytest.raises(ProcessValidationError) as excinfo:
         _build(tmp_path)
     assert "no-params" in str(excinfo.value)
+
+
+# --- repository field (per-process target repository) ------------------------
+
+
+def test_repository_absent_stamps_no_repository(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "no-repo",
+        {
+            "trigger": {"interval": "1h"},
+            "action": {"check": "always"},
+            "target": {"workflow": "wf"},
+        },
+    )
+
+    (trigger,) = _build(tmp_path)
+
+    assert trigger._repository is None
+    (task,) = trigger.poll()
+    assert task.repository is None
+
+
+def test_repository_present_is_read_from_the_file(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "with-repo",
+        {
+            "trigger": {"interval": "1h"},
+            "action": {"check": "always"},
+            "target": {"workflow": "wf"},
+            "repository": "harness_v2",
+        },
+    )
+
+    (trigger,) = _build(tmp_path)
+
+    assert trigger._repository == "harness_v2"
+    (task,) = trigger.poll()
+    assert task.repository == "harness_v2"
+
+
+def test_repository_unknown_raises_when_known_repositories_supplied(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path,
+        "bad-repo",
+        {
+            "trigger": {"interval": "1h"},
+            "action": {"check": "always"},
+            "target": {"workflow": "wf"},
+            "repository": "ghost",
+        },
+    )
+
+    with pytest.raises(ProcessValidationError) as excinfo:
+        _build(tmp_path, known_repositories={"harness_v2"})
+    assert "bad-repo" in str(excinfo.value)
+    assert excinfo.value.field == "repository"
+
+
+def test_repository_unknown_is_accepted_when_known_repositories_is_none(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path,
+        "no-registry",
+        {
+            "trigger": {"interval": "1h"},
+            "action": {"check": "always"},
+            "target": {"workflow": "wf"},
+            "repository": "whatever",
+        },
+    )
+
+    (trigger,) = _build(tmp_path)
+    assert trigger._repository == "whatever"
+
+
+def test_repository_non_string_raises_naming_the_file(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "bad-type",
+        {
+            "trigger": {"interval": "1h"},
+            "action": {"check": "always"},
+            "target": {"workflow": "wf"},
+            "repository": 42,
+        },
+    )
+
+    with pytest.raises(ProcessValidationError) as excinfo:
+        _build(tmp_path)
+    assert "bad-type" in str(excinfo.value)
+    assert excinfo.value.field == "repository"
+
+
+def test_repository_empty_string_raises_naming_the_file(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "empty-repo",
+        {
+            "trigger": {"interval": "1h"},
+            "action": {"check": "always"},
+            "target": {"workflow": "wf"},
+            "repository": "",
+        },
+    )
+
+    with pytest.raises(ProcessValidationError) as excinfo:
+        _build(tmp_path)
+    assert "empty-repo" in str(excinfo.value)
+    assert excinfo.value.field == "repository"
+
+
+def test_file_repository_overrides_the_build_kwarg_default(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "with-repo",
+        {
+            "trigger": {"interval": "1h"},
+            "action": {"check": "always"},
+            "target": {"workflow": "wf"},
+            "repository": "from-file",
+        },
+    )
+
+    (trigger,) = _build(tmp_path, repository="from-kwarg")
+
+    assert trigger._repository == "from-file"
+
+
+def test_build_kwarg_default_applies_when_file_has_no_repository(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "no-repo",
+        {
+            "trigger": {"interval": "1h"},
+            "action": {"check": "always"},
+            "target": {"workflow": "wf"},
+        },
+    )
+
+    (trigger,) = _build(tmp_path, repository="from-kwarg")
+
+    assert trigger._repository == "from-kwarg"
+
+
+def test_observation_repository_wins_over_the_process_default(tmp_path: Path) -> None:
+    # A github-issues-style check stamps its own per-observation repository;
+    # this simulates that shape with a trivial check factory so the test
+    # doesn't need a real GithubClient (same trick as the collision tests above).
+    from harness.ports.triggers import Check, Observation
+
+    class _FixedRepoCheck(Check):
+        def evaluate(self):
+            return [Observation(data={}, repository="obs-repo")]
+
+    checks = {**BUILTIN_CHECKS, "fixed-repo": lambda params: _FixedRepoCheck()}
+    _write(
+        tmp_path,
+        "with-repo",
+        {
+            "trigger": {"interval": "1h"},
+            "action": {"check": "fixed-repo"},
+            "target": {"workflow": "wf"},
+            "repository": "process-default",
+        },
+    )
+
+    (trigger,) = _build(tmp_path, checks=checks)
+    (task,) = trigger.poll()
+
+    assert task.repository == "obs-repo"

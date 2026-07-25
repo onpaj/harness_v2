@@ -7,11 +7,15 @@ something to offer; the check/sink dropdowns come through the port.
 
 from __future__ import annotations
 
+import json
+import re
+
 import pytest
 from fastapi.testclient import TestClient
 
 from harness.api.app import create_app
 from harness.drivers.fs_processes import FilesystemProcessAdmin
+from harness.drivers.fs_repos import FilesystemRepositoryRegistry
 from harness.drivers.memory import FakeClock
 from harness.ports.board import Board, BoardColumn, BoardTab
 from harness.ports.process_admin import ProcessFields
@@ -163,6 +167,34 @@ def test_new_process_page_populates_dropdowns(client):
     assert "default" in body
 
 
+def test_process_form_embeds_action_definitions_as_data(client):
+    """The action definitions (labels + parameters) are served as JSON the
+    script interprets — the form has nothing hardcoded per action. The old
+    template baked a `PARAM_SPECS` object and a `check_meta` map into the page;
+    now those come from the port."""
+    import json
+
+    body = client.get("/admin/processes/new").text
+
+    # the embedded, machine-readable definitions the script builds its fields from
+    assert 'id="check-specs-data"' in body
+    marker = 'id="check-specs-data">'
+    start = body.index(marker) + len(marker)
+    end = body.index("</script>", start)
+    specs = json.loads(body[start:end])
+
+    by_name = {spec["name"]: spec for spec in specs}
+    disk = by_name["disk-threshold"]
+    assert disk["label"] == "Disk threshold"
+    assert {param["key"] for param in disk["params"]} == {"path", "percent"}
+    percent = next(p for p in disk["params"] if p["key"] == "percent")
+    assert percent["type"] == "number"
+
+    # the hardcoded structures the template used to carry are gone
+    assert "var PARAM_SPECS = {\n" not in body
+    assert "check_meta" not in body
+
+
 def test_create_process_via_form(client, admin):
     response = client.post("/admin/processes", data=_valid_form())
 
@@ -258,8 +290,15 @@ def test_edit_process_page_shows_cron_value_and_no_disabled_inputs(client, admin
     assert 'name="cadence" value="cron"\n                   checked' in body
     # Both cadence panels must always submit — neither input may be `disabled`,
     # only visually hidden via the wrapping div, or the hidden panel's value
-    # would silently drop from the POST body on a toggle-then-submit.
-    assert "disabled" not in body
+    # would silently drop from the POST body on a toggle-then-submit. (The
+    # Repository section's `<select>` is legitimately `disabled` here — no
+    # repository is set — but that's a UI affordance only: the server decides
+    # "all vs. specific" from `repo_scope`, never from the select's own
+    # disabled-ness, so it's fine for that field alone to be disabled.)
+    interval_tag = re.search(r'<input[^>]*id="interval"[^>]*>', body).group()
+    cron_tag = re.search(r'<input[^>]*id="cron"[^>]*>', body).group()
+    assert "disabled" not in interval_tag
+    assert "disabled" not in cron_tag
 
 
 def test_update_process_via_form(client, admin):
@@ -285,11 +324,135 @@ def test_delete_process_via_form_redirects(client, admin):
     assert admin.list() == ()
 
 
+def test_edit_page_renders_a_check_absent_from_the_registry(client, admin, tmp_path):
+    """A hand-written process naming a check the running registry doesn't know
+    still renders — with a generic prepended card and the raw-JSON editor for
+    its params — so editing never hides the current definition."""
+    import json
+
+    (admin._root / "mystery.json").write_text(
+        json.dumps(
+            {
+                "trigger": {"interval": "1h"},
+                "action": {"check": "custom-thing", "params": {"foo": "bar"}},
+                "target": {"workflow": "default"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    body = client.get("/admin/processes/mystery").text
+
+    assert body.count("value=\"custom-thing\"") == 1  # the prepended card
+    assert "always" in body  # the real registry options are still offered
+
+
 def test_nav_includes_processes_link(client):
     assert "/admin/processes" in client.get("/admin/agents").text
 
 
 # --- no process_admin configured ---------------------------------------------
+
+
+# --- repository field ---------------------------------------------------------
+
+
+def test_put_process_json_carries_repository(client):
+    response = client.put(
+        "/api/processes/nightly",
+        json={
+            "interval": "1h",
+            "check": "always",
+            "target_kind": "workflow",
+            "target": "default",
+            "repository": "harness_v2",
+        },
+    )
+
+    assert response.status_code == 200
+    assert client.get("/api/processes/nightly").json()["repository"] == "harness_v2"
+
+
+def test_get_process_defaults_repository_to_empty_string(client, admin):
+    admin.write(
+        "nightly",
+        ProcessFields(interval="1h", check="always", target_kind="workflow", target="default"),
+    )
+
+    assert client.get("/api/processes/nightly").json()["repository"] == ""
+
+
+def test_create_process_via_form_with_specific_repository(client, admin):
+    response = client.post(
+        "/admin/processes",
+        data=_valid_form(repo_scope="specific", repository="harness_v2"),
+    )
+
+    assert response.status_code == 200
+    assert admin.read("nightly").repository == "harness_v2"
+
+
+def test_create_process_via_form_all_repositories_ignores_stale_select_value(client, admin):
+    # Even if a stale/leftover `repository` value rode along in the POST body
+    # (e.g. a disabled <select> a misbehaving browser submitted anyway), the
+    # server decides "all" from `repo_scope` alone.
+    response = client.post(
+        "/admin/processes",
+        data=_valid_form(repo_scope="all", repository="harness_v2"),
+    )
+
+    assert response.status_code == 200
+    assert admin.read("nightly").repository == ""
+
+
+def test_create_process_via_form_no_repo_scope_defaults_to_all(client, admin):
+    response = client.post("/admin/processes", data=_valid_form())
+
+    assert response.status_code == 200
+    assert admin.read("nightly").repository == ""
+
+
+def test_edit_process_page_redisplays_specific_scope_after_a_params_error(
+    client, admin
+):
+    # The params-JSON error path reconstructs fields from every posted key
+    # (routes.py's generic dict reconstruction), so a `repo_scope=specific`
+    # submission must still render "Specific" checked, not silently reset to
+    # "All repositories".
+    response = client.post(
+        "/admin/processes",
+        data=_valid_form(
+            name="nightly",
+            check="disk-threshold",
+            params="{not json",
+            repo_scope="specific",
+            repository="harness_v2",
+        ),
+    )
+
+    assert response.status_code == 200
+    assert "field-error" in response.text
+    specific_radio = re.search(
+        r'<input type="radio" name="repo_scope" value="specific"[^>]*>', response.text
+    ).group()
+    assert "checked" in specific_radio
+
+
+def test_process_admin_repository_options_render_in_new_process_page(tmp_path):
+    repos_config = tmp_path / "repos.json"
+    repos_config.write_text(json.dumps({"harness_v2": "/repos/harness_v2"}), encoding="utf-8")
+    admin = FilesystemProcessAdmin(
+        tmp_path / "processes", registry=FilesystemRepositoryRegistry(repos_config)
+    )
+    view = FakeBoardView(_board())
+    app_client = TestClient(
+        create_app(view=view, clock=FakeClock(), process_admin=admin)
+    )
+
+    body = app_client.get("/admin/processes/new").text
+
+    assert "harness_v2" in body
+    assert "All repositories" in body
 
 
 def test_app_without_process_admin_boots_and_lists_nothing(tmp_path):

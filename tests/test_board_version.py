@@ -25,6 +25,18 @@ def test_index_shows_the_version_and_build_time():
     assert "2026-07-21T10:32:00Z" in response.text
 
 
+def test_build_time_is_a_time_element_for_client_side_localization():
+    """The status bar's build time must be a `<time datetime>` node so
+    format-local-time.js rewrites it into the viewer's local timezone —
+    plain interpolated text stays UTC forever."""
+    client = make_client(version="0.2.1", build_time="2026-07-21T10:32:00Z")
+
+    response = client.get("/")
+
+    assert '<time datetime="2026-07-21T10:32:00Z"' in response.text
+    assert 'title="2026-07-21T10:32:00Z UTC"' in response.text
+
+
 def test_index_shows_unknown_when_build_time_is_absent():
     client = make_client(version="0.2.1", build_time=None)
 

@@ -177,6 +177,78 @@ async def test_process_step_target_is_placed_by_the_dispatcher(tmp_path):
     assert Task.from_dict(json.loads(done_files[0].read_text())).status == "end"
 
 
+async def test_process_repository_field_is_stamped_onto_produced_tasks(tmp_path):
+    """FR-7: an `always`-backed process (no per-observation repository) with a
+    declared `"repository"` produces tasks carrying it end to end, through
+    `app.build()`'s own process compilation."""
+    write_process(
+        tmp_path,
+        "nightly",
+        {
+            "trigger": {"interval": "1h"},
+            "action": {"check": "always"},
+            "target": {"workflow": "default"},
+            "repository": "harness_v2",
+        },
+    )
+    clock = FakeClock()
+    harness = build_harness(tmp_path, clock=clock)
+
+    await drive_until_quiet(harness)
+
+    done_files = list((tmp_path / "done").glob("*.json"))
+    assert len(done_files) == 1
+    finished = Task.from_dict(json.loads(done_files[0].read_text()))
+    assert finished.repository == "harness_v2"
+
+
+def test_github_issues_observation_repository_beats_the_process_default(tmp_path):
+    """FR-7's precedence proof: a `github-issues`-backed process that also
+    declares a process-level `"repository"` still produces a task carrying
+    *the issue's own* repo (the observation wins), never the process default."""
+    from harness.cli import _process_check_factories
+    from harness.drivers.github_client import FakeGithubClient, Issue
+    from harness.drivers.memory import MemoryRepositoryRegistry
+
+    (tmp_path / "processes").mkdir()
+    (tmp_path / "processes" / "harness-todo.json").write_text(
+        json.dumps(
+            {
+                "trigger": {"interval": "30s"},
+                "action": {"check": "github-issues", "params": {"label": "harness:todo"}},
+                "target": {"workflow": "default"},
+                "dedup": "per-state",
+                "sink": {"kind": "none"},
+                "repository": "process-default-repo",
+            }
+        )
+    )
+    client = FakeGithubClient(
+        [Issue(42, "Do the thing", "body", "https://gh/i/42", ("harness:todo",))]
+    )
+    registry = MemoryRepositoryRegistry({"heblo": Path("/repos/heblo")})
+    slugs = {Path("/repos/heblo"): "onpaj/Anela.Heblo"}
+    clock = FakeClock("2026-07-22T10:00:00Z")
+
+    import argparse
+
+    args = argparse.Namespace(worktree_root=None, github_label="harness:todo")
+    import harness.drivers.github_issues_check as mod
+
+    orig = mod.github_slug
+    mod.github_slug = slugs.get  # type: ignore[assignment]
+    try:
+        checks = _process_check_factories(args, registry, client=client)
+        (source,) = FilesystemProcessRepository(tmp_path / "processes").build(
+            clock=clock, checks=checks, known_targets={"default"}
+        )
+
+        (task,) = source.poll()
+        assert task.repository == "heblo"
+    finally:
+        mod.github_slug = orig  # type: ignore[assignment]
+
+
 async def test_no_processes_behaves_as_before(tmp_path):
     """Backward-compat: with an empty/absent processes/ the harness runs exactly
     as today — no pollers — and a submitted task still flows to done."""

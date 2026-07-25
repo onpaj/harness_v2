@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import html
 import json
+import re
 from collections.abc import AsyncIterator
 from datetime import datetime
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Form, HTTPException, Request
 from fastapi.responses import (
     HTMLResponse,
     JSONResponse,
@@ -32,6 +33,7 @@ from harness.ports.board import (
 )
 from harness.ports.clock import Clock
 from harness.ports.control import TaskControl
+from harness.ports.issue_import import IssueImport, IssueImportResult
 from harness.ports.logs import StageOutputView
 from harness.ports.process_admin import (
     ProcessAdmin,
@@ -78,6 +80,11 @@ def _shorttime(value: str | None) -> str:
 
 
 TEMPLATES.env.filters["shorttime"] = _shorttime
+
+
+def _split_refs(text: str) -> list[str]:
+    """The textarea's raw text -> non-empty refs, comma/space/newline-separated."""
+    return [ref for ref in re.split(r"[,\s]+", text.strip()) if ref]
 
 
 async def board_event_stream(
@@ -234,6 +241,18 @@ def _target_option_groups(view: BoardView) -> tuple[list[str], list[str]]:
     return sorted(workflows), sorted(steps)
 
 
+def _repository_from_payload(payload) -> str:
+    """"" means "all repositories". A JSON API body has no `repo_scope` key at
+    all, so it falls straight through to reading `repository` as-is — the
+    scope discriminator only exists for the HTML form's two-control UI, which
+    resolves "all vs. specific" server-side (never trusting a stale/disabled
+    `<select>` value) before it ever reaches `ProcessFields`."""
+    scope = payload.get("repo_scope")
+    if scope is not None and (scope or "all").strip() != "specific":
+        return ""
+    return (payload.get("repository") or "").strip()
+
+
 def _process_fields_dict(name: str, fields: ProcessFields) -> dict:
     return {
         "name": name,
@@ -246,6 +265,7 @@ def _process_fields_dict(name: str, fields: ProcessFields) -> dict:
         "params": dict(fields.params),
         "sink_kind": fields.sink_kind,
         "dedup": fields.dedup,
+        "repository": fields.repository,
     }
 
 
@@ -261,6 +281,7 @@ def _process_fields_from(payload: dict) -> ProcessFields:
         params=payload.get("params") or {},
         sink_kind=(payload.get("sink_kind") or "none").strip(),
         dedup=(payload.get("dedup") or "per-interval").strip(),
+        repository=_repository_from_payload(payload),
     )
 
 
@@ -294,6 +315,7 @@ def _process_fields_from_form(form) -> ProcessFields:
         params=params,
         sink_kind=(form.get("sink_kind") or "none").strip(),
         dedup=(form.get("dedup") or "per-interval").strip(),
+        repository=_repository_from_payload(form),
     )
 
 
@@ -303,15 +325,22 @@ def _process_form_context(
     is_new: bool,
     fields: ProcessFields,
     params_text: str | None,
-    check_names: tuple[str, ...],
+    check_specs: tuple,
     sink_kinds: tuple[str, ...],
     workflow_options: list[str],
     step_options: list[str],
+    repository_options: tuple[str, ...],
     errors: dict[str, str],
     saved: bool,
 ) -> dict:
     if params_text is None:
         params_text = json.dumps(fields.params, indent=2) if fields.params else ""
+    # The declarative action definitions the form renders from — nothing about
+    # an action is hardcoded in the template. Serialized to plain dicts so the
+    # same list drives both the server-rendered cards and the client-side param
+    # fields (embedded as JSON). `check_specs_json` is the exact JSON the script
+    # parses; it never contains a `</script>` sequence (spec text is our own).
+    specs = [spec.to_dict() for spec in check_specs]
     return {
         "name": name,
         "is_new": is_new,
@@ -324,10 +353,13 @@ def _process_form_context(
         "params": params_text,
         "sink_kind": fields.sink_kind,
         "dedup": fields.dedup,
-        "check_names": list(check_names),
+        "repository": fields.repository,
+        "check_specs": specs,
+        "check_specs_json": json.dumps(specs),
         "sink_kinds": list(sink_kinds),
         "workflow_options": workflow_options,
         "step_options": step_options,
+        "repository_options": list(repository_options),
         "dedup_options": ["per-interval", "per-state"],
         "errors": errors,
         "saved": saved,
@@ -489,6 +521,7 @@ def build_html_router(
     workflow_admin: WorkflowAdmin,
     process_admin: ProcessAdmin,
     updater: Updater,
+    issue_import: IssueImport,
     version: str,
     build_time: str | None,
 ) -> APIRouter:
@@ -544,6 +577,22 @@ def build_html_router(
         # "gone" signal board.html's afterSwap listener keys off to close #detail
         # instead of reopening it. The board redraws via the SSE revision bump.
         return HTMLResponse("")
+
+    @router.post("/issues/import", response_class=HTMLResponse)
+    def import_issues(request: Request, refs: str = Form("")) -> HTMLResponse:
+        parsed_refs = _split_refs(refs)
+        if not parsed_refs:
+            results: list[IssueImportResult] = []
+        else:
+            # Sequential, never gathered/threaded: a same-batch duplicate ref
+            # must see the first ref's task already in the inbox, so the
+            # second reports `already_queued` instead of a second task.
+            results = [issue_import.add(ref) for ref in parsed_refs]
+        return TEMPLATES.TemplateResponse(
+            request=request,
+            name="_issue_import_result.html",
+            context={"results": results, "empty": not parsed_refs},
+        )
 
     # Sync `def`, so FastAPI runs it in a threadpool: the blocking `uv` upgrade
     # never stalls the event loop the harness shares. A successful restart may
@@ -858,10 +907,11 @@ def build_html_router(
                 is_new=is_new,
                 fields=fields,
                 params_text=params_text,
-                check_names=process_admin.check_names(),
+                check_specs=process_admin.check_specs(),
                 sink_kinds=process_admin.sink_kinds(),
                 workflow_options=workflow_options,
                 step_options=step_options,
+                repository_options=process_admin.repository_names(),
                 errors=errors,
                 saved=saved,
             ),

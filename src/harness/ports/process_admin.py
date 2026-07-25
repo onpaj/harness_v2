@@ -18,6 +18,8 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any
 
+from harness.ports.triggers import CheckSpec
+
 
 @dataclass(frozen=True)
 class ProcessFields:
@@ -45,6 +47,11 @@ class ProcessFields:
     params: dict[str, Any] = field(default_factory=dict)
     sink_kind: str = "none"
     dedup: str = "per-interval"
+    repository: str = ""
+    """The repository name a produced task's worktree attaches to, or "" for
+    "all repositories" (no process-level default — an observation's own
+    repository, or none at all, applies unchanged). Validated as a name
+    against RepositoryRegistry wherever one is available to the caller."""
 
 
 class ProcessNotFound(Exception):
@@ -94,8 +101,27 @@ class ProcessAdmin(ABC):
         through this port so the UI never imports a driver (invariant #5)."""
 
     @abstractmethod
+    def check_specs(self) -> tuple[CheckSpec, ...]:
+        """The full declarative definition of every action the form offers,
+        sorted by name — the richer counterpart of `check_names()`. Each
+        `CheckSpec` carries the action's label, description and parameter
+        definitions, so the UI renders each action's form from data alone with
+        nothing hardcoded per action. A wiring-registered check that carries no
+        spec (a bare factory) still yields a generic spec (name only, no
+        params), never disappearing from the form."""
+
+    @abstractmethod
     def sink_kinds(self) -> tuple[str, ...]:
         """The sink kinds the form offers, sorted: `("github", "none",
         "slack")` — the outbound destinations a Process may declare (invariant
         #40). A new destination is a new kind plus a sink driver, surfaced
         here."""
+
+    @abstractmethod
+    def repository_names(self) -> tuple[str, ...]:
+        """The repository names the form offers for "Specific repository",
+        sorted — mirrors check_names()/sink_kinds(). Backed by
+        RepositoryRegistry.names() where the driver was given one; empty when
+        none was configured, in which case only "All repositories" is offered
+        and repository validation at write() falls back to lenient (matching
+        every other known_*=None escape hatch)."""

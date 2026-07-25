@@ -50,6 +50,84 @@ class Check(ABC):
 CheckFactory = Callable[[dict[str, Any]], Check]
 
 
+@dataclass(frozen=True)
+class ParamSpec:
+    """One input parameter an action (`Check`) declares as data.
+
+    The UI renders a form control from this alone — nothing about a check is
+    hardcoded in a template. `type` is `"text"` or `"number"` (a number is
+    written into the params JSON as a JSON number, not a string). `required`
+    only labels the field; validation stays with the check's own factory, which
+    already raises on a missing/mistyped param.
+    """
+
+    key: str
+    label: str
+    type: str = "text"  # "text" | "number"
+    required: bool = False
+    placeholder: str = ""
+    hint: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "key": self.key,
+            "label": self.label,
+            "type": self.type,
+            "required": self.required,
+            "placeholder": self.placeholder,
+            "hint": self.hint,
+        }
+
+
+@dataclass(frozen=True)
+class CheckSpec:
+    """The declarative definition of an action: its display metadata and the
+    parameters it accepts. This is the single source of truth the UI interprets
+    — every action carries one, so the form never hardcodes anything per action.
+    An action with no parameters (`params == ()`) is a fully-defined action too,
+    not an unknown one — the form renders "no settings needed", never the
+    raw-JSON fallback."""
+
+    name: str
+    label: str
+    description: str = ""
+    params: tuple[ParamSpec, ...] = ()
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "label": self.label,
+            "description": self.description,
+            "params": [param.to_dict() for param in self.params],
+        }
+
+
+@dataclass(frozen=True)
+class CheckDefinition:
+    """An action definition: the declarative `spec` bundled with the `factory`
+    that builds the `Check`. It is *callable* — a `CheckDefinition` IS a
+    `CheckFactory` — so every existing `checks[name](params)` call site works
+    unchanged, while `spec` carries the parameter definition the UI needs. This
+    is how "everything is defined in that action definition" (the spec) travels
+    with the code that runs the action (the factory)."""
+
+    spec: CheckSpec
+    factory: CheckFactory
+
+    def __call__(self, params: dict[str, Any]) -> Check:
+        return self.factory(params)
+
+
+def check_spec_of(name: str, factory: CheckFactory) -> CheckSpec:
+    """The declared `CheckSpec` for a registry entry, or a generic fallback for
+    a bare factory carrying none (a hand-registered lambda, a test double). The
+    fallback names the action after its registry key with no parameters — the
+    UI still renders it as an ordinary card, exactly as it always could for a
+    check it didn't recognize."""
+    spec = getattr(factory, "spec", None)
+    return spec if isinstance(spec, CheckSpec) else CheckSpec(name=name, label=name)
+
+
 def parse_interval(text: str) -> float:
     """Convert a duration string to seconds.
 

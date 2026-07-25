@@ -20,7 +20,23 @@ from __future__ import annotations
 from harness.drivers.git_remote import github_slug
 from harness.drivers.github_client import GithubClient
 from harness.ports.repos import RepositoryRegistry
-from harness.ports.triggers import Check, Observation
+from harness.ports.triggers import Check, CheckSpec, Observation, ParamSpec
+
+SPEC = CheckSpec(
+    name="github-conflicts",
+    label="GitHub conflicts",
+    description="Detects harness PRs with merge conflicts.",
+    params=(
+        ParamSpec(
+            key="head_prefix",
+            label="Branch prefix",
+            placeholder="harness/",
+            hint="Only PRs whose head branch starts with this prefix are watched.",
+        ),
+    ),
+)
+"""The action definition for `github-conflicts`. `cli.py` bundles it with the
+factory that closes over a `GithubClient` + the repo registry."""
 
 
 class GithubConflictsCheck(Check):

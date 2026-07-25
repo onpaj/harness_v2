@@ -10,6 +10,7 @@ from pathlib import Path
 from harness.behaviors.agent import ClaudeCliBehavior
 from harness.behaviors.landing import LandingBehavior
 from harness.behaviors.resolve_conflict import ResolveConflictBehavior
+from harness.behaviors.verify import VerifyBehavior
 from harness.consumer import Consumer
 from harness.dispatcher import Dispatcher
 from harness.drivers.composite_events import CompositeEventSink
@@ -22,10 +23,12 @@ from harness.drivers.fs_workflows import (
 )
 from harness.drivers.memory import (
     MemoryArtifactStore,
+    MemoryCommandRunner,
     MemoryForge,
     MemoryWorkspace,
 )
 from harness.drivers.checks import BUILTIN_CHECKS
+from harness.drivers.failed_tasks_check import SPEC as FAILED_TASKS_SPEC
 from harness.drivers.failed_tasks_check import FailedTasksCheck
 from harness.drivers.fs_processes import FilesystemProcessRepository
 from harness.drivers.projection_events import ProjectionSink
@@ -38,14 +41,17 @@ from harness.ports.agent import AgentCatalog, AgentRunner
 from harness.ports.artifacts import ArtifactStore, ArtifactView
 from harness.ports.behavior import ConsumerBehavior
 from harness.ports.clock import Clock
+from harness.ports.command import CommandRunner
 from harness.ports.events import EventSink
 from harness.ports.forge import Forge
+from harness.ports.issue_import import IssueImport, IssueImportFactory, NullIssueImport
 from harness.ports.issue_state import IssueChecker
 from harness.ports.logs import StageOutputView
 from harness.ports.merge import MergeChecker
 from harness.ports.queue import TaskQueue
+from harness.ports.repos import RepositoryRegistry
 from harness.ports.source import TaskSource
-from harness.ports.triggers import CheckFactory
+from harness.ports.triggers import CheckDefinition, CheckFactory
 from harness.ports.workflows import WorkflowNotFound
 from harness.ports.workspace import Workspace
 from harness.projection import BoardProjection
@@ -140,6 +146,7 @@ class Harness:
         issue_reconciler: IssueReconciler | None = None,
         healed: TaskQueue | None = None,
         process_checks: dict[str, CheckFactory] | None = None,
+        issue_import: IssueImport | None = None,
     ) -> None:
         self.layout = layout
         self.workflows = workflows
@@ -151,6 +158,11 @@ class Harness:
         self.artifacts = artifacts
         self.stage_output = stage_output
         self.control = control
+        # UI-facing write port for the Ahanas board's manual "Add issue" button
+        # (invariant #43): always a concrete `IssueImport`, never `None`,
+        # mirroring `self.control` — `NullIssueImport` when no factory was
+        # supplied (no `GITHUB_TOKEN`).
+        self.issue_import = issue_import if issue_import is not None else NullIssueImport()
         self._inbox = inbox
         self._step_queues = step_queues
         self._done = done
@@ -354,6 +366,9 @@ def build(
     request_changes_once_at: str | None = None,
     extra_checks: dict[str, CheckFactory] | None = None,
     processes_root: Path | None = None,
+    issue_import_factory: IssueImportFactory | None = None,
+    repository_registry: RepositoryRegistry | None = None,
+    command_runner: CommandRunner | None = None,
 ) -> Harness:
     layout = HarnessLayout(Path(root))
     events = events or StdoutEventSink()
@@ -480,6 +495,27 @@ def build(
             clock=clock,
         )
 
+    # `IssueImport` (invariant #43): the Ahanas board's manual "Add issue"
+    # write port. Built here, not in cli.py, because it needs both an
+    # external dependency (GithubClient/RepositoryRegistry, cli.py's to build)
+    # and the harness's own live queues (which don't exist until now) — the
+    # same "live queue + external dependency" shape as `failed-tasks` above,
+    # with the GitHub-specific half arriving as a factory `cli.py` supplies.
+    issue_import: IssueImport = (
+        issue_import_factory(
+            inbox=inbox,
+            step_queues=step_queues,
+            done=done,
+            failed=failed,
+            healed=healed_queue,
+            archived=archived,
+            events=events,
+            clock=clock,
+        )
+        if issue_import_factory is not None
+        else NullIssueImport()
+    )
+
     # Read side of artifacts: when passed in (phase 3: `WorktreeArtifactView`),
     # both landing and `api/` get it; otherwise the write store (also an
     # `ArtifactView`) stays, as in phase 2.
@@ -501,6 +537,12 @@ def build(
         forge=forge,
         copy_artifacts=artifact_view is None,
     )
+    command_runner = command_runner or MemoryCommandRunner()
+    verify = VerifyBehavior(
+        workspace=workspace,
+        registry=repository_registry,
+        runner=command_runner,
+    )
 
     # The finisher registry: kind → factory (ADR-0016/ADR-0018, mirroring the
     # persona catalog of ADR-0007). A factory takes the step name, that
@@ -520,7 +562,10 @@ def build(
     # finishing action is a registry entry, never a branch in behavior_for.
     finisher_registry: dict[
         str, Callable[[str, dict, Callable[[], ConsumerBehavior]], ConsumerBehavior]
-    ] = {"open-pr": lambda step, config, inner: landing}
+    ] = {
+        "open-pr": lambda step, config, inner: landing,
+        "verify": lambda step, config, inner: verify,
+    }
     finisher_registry.update(finishers or {})
 
     # The step → binding map is the union of every served workflow's
@@ -626,12 +671,22 @@ def build(
     checks: dict[str, CheckFactory] = {
         **BUILTIN_CHECKS,
         **(extra_checks or {}),
-        "failed-tasks": lambda params: FailedTasksCheck(
-            failed=failed,
-            healed=healed_queue,
-            events=events,
-            clock=clock,
-            repository=params.get("repository"),
+        # A `CheckDefinition`, not a bare lambda: it carries `failed-tasks`'
+        # declarative spec (no user-facing parameters) alongside the factory, so
+        # the process form treats it as a fully-defined action rather than an
+        # unknown one. `repository` is still accepted at call time — it isn't a
+        # form field; it's the `--heal-repo`/`HARNESS_HEAL_REPO` value the
+        # autoheal process wiring stamps into `action.params` directly
+        # (invariant #25/#39), never entered by an operator through the UI.
+        "failed-tasks": CheckDefinition(
+            spec=FAILED_TASKS_SPEC,
+            factory=lambda params: FailedTasksCheck(
+                failed=failed,
+                healed=healed_queue,
+                events=events,
+                clock=clock,
+                repository=params.get("repository"),
+            ),
         ),
     }
     # `known_targets` must include served *workflow* names too, not just step
@@ -640,6 +695,9 @@ def build(
     # processes targeting `default`/`resolver`) validates against the workflow
     # name itself, not its steps.
     known_targets = set(known_steps) | set(resolved)
+    known_repositories = (
+        set(repository_registry.names()) if repository_registry is not None else None
+    )
     process_repo = FilesystemProcessRepository(processes_root or layout.processes)
     process_sources = process_repo.build(
         clock=clock,
@@ -647,6 +705,7 @@ def build(
         repository=None,
         worktree_root=str(layout.worktrees),
         known_targets=known_targets,
+        known_repositories=known_repositories,
     )
     # `all_sources` feeds `pollers` ONLY — never `SourceReflectorSink`, which
     # was already constructed above, over the caller's own `sources`. Safe:
@@ -692,4 +751,5 @@ def build(
         issue_reconciler=issue_reconciler,
         healed=healed_queue,
         process_checks=checks,
+        issue_import=issue_import,
     )
