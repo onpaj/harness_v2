@@ -105,7 +105,10 @@ here as one shape:
   per ADR-0000's additive convention — not by deletion. The rest of `0018`
   (the `failed-tasks` check, the `open-issue` finisher, the recursion guard,
   the Process-compilation wiring) is unchanged and still authoritative.
-- **The check's `repository` param must equal `HARNESS_HEAL_REPO`.** Both
+- **The check's `repository` param must equal `HARNESS_HEAL_REPO`.**
+  *(Superseded by ADR-0021: `HARNESS_HEAL_REPO` is gone and the process file's
+  own param is the single source both are wired from, so the drift described
+  below is no longer reachable.)* Both
   `_ensure_autoheal_process`'s generated `processes/autoheal.json` (`action.
   params.repository`) and the `open-issue` finisher's `OpenIssueBehavior(repo=
   ...)` are wired from the same `heal_repo` variable in `cli.py`'s

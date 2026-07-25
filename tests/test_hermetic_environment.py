@@ -3,7 +3,8 @@
 The `verify` gate (ADR-0009's "landing is a step" applied to verification)
 runs a repo's test command through `SubprocessCommandRunner`, which inherits
 the harness process's environment. Under the launchd service that environment
-carries `GITHUB_TOKEN` and, with self-healing on, `HARNESS_HEAL_REPO`. So when
+carries `GITHUB_TOKEN` — and, when this bug was found, `HARNESS_HEAL_REPO`
+too (self-healing has since moved to `processes/autoheal.json`). So when
 this repo's verify command is its own `pytest`, any test whose assertion
 depends on one of those variables being *unset* flips red under the gate while
 staying green in the operator's shell — a spurious `request_changes` bouncing
@@ -63,7 +64,6 @@ def test_the_suite_is_green_under_the_service_environment():
     hostile = {
         **os.environ,
         "GITHUB_TOKEN": "tok",
-        "HARNESS_HEAL_REPO": "onpaj/harness_v2",
         "SLACK_WEBHOOK_URL": "https://hooks.slack.invalid/services/x",
         "JIRA_BASE_URL": "https://example.atlassian.net",
         "JIRA_EMAIL": "operator@example.com",
@@ -94,24 +94,43 @@ def test_a_test_can_still_opt_back_in(monkeypatch):
     assert os.environ["GITHUB_TOKEN"] == "tok"
 
 
-def test_every_configuration_variable_the_package_reads_is_covered():
-    """Pin the cleared set to what `src/harness` actually reads.
-
-    A new `os.environ.get("HARNESS_...")` in `cli.py` that nobody adds to
-    `_HARNESS_ENVIRONMENT` would silently reopen exactly the hole this file
-    exists to close, so the list is derived from the source rather than
-    trusted.
-    """
+def _configuration_variables_read_by_the_package() -> set[str]:
     found: set[str] = set()
     for path in _SRC.rglob("*.py"):
         for match in _ENV_READ.finditer(path.read_text(encoding="utf-8")):
             found.add(match.group(1) or match.group(2))
+    return found - _NOT_HARNESS_CONFIGURATION
 
-    uncovered = found - set(_HARNESS_ENVIRONMENT) - _NOT_HARNESS_CONFIGURATION
+
+def test_every_configuration_variable_the_package_reads_is_cleared():
+    """A new `os.environ.get("HARNESS_...")` must not reopen the hole.
+
+    The list is derived from the source rather than trusted, so adding a
+    variable to `cli.py` without adding it to `_HARNESS_ENVIRONMENT` fails
+    here instead of silently making the suite environment-dependent again.
+    """
+    uncovered = _configuration_variables_read_by_the_package() - set(
+        _HARNESS_ENVIRONMENT
+    )
     assert not uncovered, (
         f"src/harness reads {sorted(uncovered)} as configuration, but "
         f"tests/conftest.py's _HARNESS_ENVIRONMENT does not clear them — an "
         f"ambient value would change what the suite asserts on, and the verify "
         f"gate inherits the service's environment. Add them there, or list "
         f"them in _NOT_HARNESS_CONFIGURATION with a reason."
+    )
+
+
+def test_no_variable_is_cleared_that_the_package_no_longer_reads():
+    """The inverse: a stale entry is a claim the code stopped making.
+
+    `HARNESS_HEAL_REPO` is why this direction exists — when self-healing moved
+    to `processes/autoheal.json`, the variable stopped being read, and a list
+    that still named it would have quietly implied `cli.py` still had an
+    environment-driven enablement path it does not.
+    """
+    stale = set(_HARNESS_ENVIRONMENT) - _configuration_variables_read_by_the_package()
+    assert not stale, (
+        f"tests/conftest.py's _HARNESS_ENVIRONMENT clears {sorted(stale)}, but "
+        f"src/harness no longer reads them. Drop them from the list."
     )

@@ -28,19 +28,22 @@ if str(_SRC) not in sys.path:
 # This is not hypothetical tidiness. The `verify` gate runs a repo's test
 # command through `SubprocessCommandRunner`, which inherits the harness
 # process's environment; under the launchd service that environment carries
-# `GITHUB_TOKEN` (the wrapper resolves it from `gh auth token`) and, with
-# self-healing enabled, `HARNESS_HEAL_REPO`. Running this repo's own suite as
-# its verify command therefore turned eight `test_cli.py` tests red — tests
-# asserting "*without* a token" / "*without* a heal repo" while both were set.
-# A green suite in the operator's shell, a red one under the gate, and a task
-# bounced back to `development` over a defect that does not exist in the diff.
+# `GITHUB_TOKEN` (the wrapper resolves it from `gh auth token`) and, at the
+# time, `HARNESS_HEAL_REPO`. Running this repo's own suite as its verify
+# command therefore turned eight `test_cli.py` tests red — tests asserting
+# "*without* a token" / "*without* a heal repo" while both were set. A green
+# suite in the operator's shell, a red one under the gate, and a task bounced
+# back to `development` over a defect that does not exist in the diff.
+#
+# (`HARNESS_HEAL_REPO` is gone now — self-healing is configured by
+# `processes/autoheal.json`, like every other automation. `GITHUB_TOKEN`, a
+# real secret, is not going anywhere, so the fixture stays.)
 #
 # `HARNESS_SMOKE_CLAUDE` is deliberately absent: it is the opt-in gate for
 # `test_smoke_claude.py`, read at collection time by a module-level skipif, so
 # clearing it here would be both ineffective and wrong.
 _HARNESS_ENVIRONMENT = (
     "GITHUB_TOKEN",
-    "HARNESS_HEAL_REPO",
     "HARNESS_HOME",
     "JIRA_API_TOKEN",
     "JIRA_BASE_URL",
