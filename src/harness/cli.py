@@ -1739,9 +1739,20 @@ def _run(args: argparse.Namespace) -> int:
         # is both the carried label and the idempotency scope, matching the old
         # fixed `labels=("harness:self-heal",)`/`scope_label="harness:self-heal"`
         # pair. `from_step="heal"` reads the same step the old `_latest_draft`
-        # did. TODO(Task 4): thread this through the finisher registry's own
-        # `config`/binding shape instead of a closure, and update the `heal`
-        # persona to emit a fenced json draft block.
+        # did.
+        #
+        # TODO(Task 4): this wiring is NOT behavior-preserving — it is
+        # knowingly, temporarily broken. `OpenIssueBehavior` now reads a
+        # fenced ```json``` draft *array* from the `heal` step's artifact
+        # (`harness.issue_drafts`), but `_HEALER_PERSONA` above still
+        # instructs a prose report whose first line is `# <title>`, not that
+        # array. So a real heal run today either raises `DraftError` ->
+        # `IssueError` (the heal task lands in `failed/`) once the persona
+        # writes its prose report, or — if it writes nothing — finds no
+        # artifact and files nothing. Either way, self-healing is inert or
+        # actively failing until Task 4 rewrites the `heal` persona to emit
+        # the fenced-JSON draft array (and threads this through the finisher
+        # registry's own `config`/binding shape instead of this closure).
         finishers["open-issue"] = lambda step, config, inner: OpenIssueBehavior(
             tracker=issue_tracker,
             artifacts=artifact_view,

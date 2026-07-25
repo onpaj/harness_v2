@@ -36,7 +36,7 @@ from harness.issue_drafts import DraftError, marker_for, parse_drafts
 from harness.models import DONE, BehaviorResult, Task
 from harness.ports.artifacts import ArtifactView
 from harness.ports.behavior import ConsumerBehavior
-from harness.ports.issues import IssueError, IssueTracker
+from harness.ports.issues import IssueError, IssueRef, IssueTracker
 
 
 class OpenIssueBehavior(ConsumerBehavior):
@@ -65,32 +65,37 @@ class OpenIssueBehavior(ConsumerBehavior):
             inner_result = await self._inner.run(task)
 
         step = self._from_step or task.status or ""
-        repo = self._slug_for(task.repository)
 
         try:
             drafts = parse_drafts(self._latest_artifact(task.id, step))
         except DraftError as error:
             raise IssueError(f"step {step!r} of task {task.id}: {error}") from None
 
-        refs = []
+        refs: list[IssueRef] = []
         dropped: list[str] = []
-        for draft in drafts:
-            allowed = tuple(
-                label for label in draft.labels if label in self._allowed_labels
-            )
-            dropped.extend(
-                label for label in draft.labels if label not in self._allowed_labels
-            )
-            refs.append(
-                self._tracker.open_issue(
-                    repo,
-                    title=draft.title,
-                    body=draft.body,
-                    labels=allowed,
-                    marker=marker_for(task.id, draft.title),
-                    scope_label=self._label,
+        if drafts:
+            # Resolved lazily: a repository-less task (invariant #25 — e.g. an
+            # autoheal process with no seeded `params.repository`) must be
+            # able to settle `done` with nothing to file instead of raising,
+            # so `slug_for` is only called once there is something to file.
+            repo = self._slug_for(task.repository)
+            for draft in drafts:
+                allowed = []
+                for label in draft.labels:
+                    if label in self._allowed_labels:
+                        allowed.append(label)
+                    else:
+                        dropped.append(label)
+                refs.append(
+                    self._tracker.open_issue(
+                        repo,
+                        title=draft.title,
+                        body=draft.body,
+                        labels=tuple(allowed),
+                        marker=marker_for(task.id, draft.title),
+                        scope_label=self._label,
+                    )
                 )
-            )
 
         outcome = inner_result.outcome if inner_result is not None else DONE
         return BehaviorResult(outcome, _summary(refs, dropped))
@@ -104,7 +109,7 @@ class OpenIssueBehavior(ConsumerBehavior):
         return self._artifacts.read(task_id, step, latest.attempt, latest.name) or ""
 
 
-def _summary(refs, dropped: list[str]) -> str:
+def _summary(refs: list[IssueRef], dropped: list[str]) -> str:
     if not refs:
         summary = "no issues to file"
     else:

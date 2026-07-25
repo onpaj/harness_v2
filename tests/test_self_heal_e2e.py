@@ -24,6 +24,8 @@ that invariant, not just of the heal/dedup wiring.
 
 import json
 
+import pytest
+
 from harness.app import HarnessLayout, build
 from harness.behaviors.open_issue import OpenIssueBehavior
 from harness.drivers.memory import (
@@ -35,6 +37,7 @@ from harness.drivers.memory import (
     MemoryIssueTracker,
     MemoryWorkspace,
 )
+from harness.issue_drafts import marker_for
 from harness.models import HEALED, Task
 from harness.ports.agent import AgentRun, AgentSpec
 
@@ -151,25 +154,36 @@ def put_failed_task(tmp_path, task_id="tsk_e2e", *, data=None) -> None:
     (failed_dir / f"{task_id}.json").write_text(json.dumps(task.to_dict()))
 
 
+@pytest.mark.xfail(
+    strict=True,
+    reason="the heal persona still writes prose; Task 4 rebinds it to the fenced-JSON draft array",
+)
 async def test_heal_file_dedup_unique_reaches_file_issue_and_completes(tmp_path):
     """Path 1: `heal` -> `file` -> `dedup` -> `unique` -> `file-issue`. The
     dispatcher only accepts `file`/`unique` because `HEAL_DEFINITION` declares
-    those exact edges (invariant #42) — this is the full triage+dedup path.
+    those exact edges (invariant #42) — this is the full triage+dedup path,
+    including the issue actually getting filed.
 
-    KNOWN GAP (tracked for Task 4 — "wire the factory, rebind the healer"):
-    this used to also assert exactly one issue got filed, with an Origin
-    footer sourced from the original task's `data.source`. Since Task 3
-    rewrote `OpenIssueBehavior` to read a fenced ```json``` draft block from
-    the `heal` step's *artifact* (`harness.issue_drafts`) instead of
-    synthesizing a single issue from the verdict summary/task data, that
-    assertion needs the `heal` persona to actually emit a drafts block — and
-    this fixture's `FakeAgentRunner` writes no such artifact. It can't easily
-    be made to either: `MemoryWorkspace`'s worktree path
+    Since Task 3 rewrote `OpenIssueBehavior` to read a fenced ```json``` draft
+    block from the `heal` step's *artifact* (`harness.issue_drafts`) instead
+    of synthesizing a single issue from the verdict summary/task data, this
+    now needs the `heal` persona to actually emit a drafts block — and
+    `_HEALER_PERSONA` in `cli.py` still instructs a prose report whose first
+    line is `# <title>`, not that fenced-JSON array. That's Task 4's job.
+    Even set aside the persona, this fixture's `FakeAgentRunner` couldn't
+    write the artifact where `OpenIssueBehavior` would find it either:
+    `ClaudeCliBehavior` writes an agent's artifact into the attached git
+    worktree, not into the shared `MemoryArtifactStore` this test passes to
+    `OpenIssueBehavior`, and `MemoryWorkspace`'s worktree path
     (`/memory/worktrees/<id>`) isn't a real, writable filesystem location for
-    `FakeAgentRunner(writes=...)` to target, and the fresh heal task's id is
-    only known once the harness fires it. Left to Task 4 rather than guessed
-    at here — this test still proves the routing all the way through
-    `file-issue` and a clean completion, just not the filing itself."""
+    `FakeAgentRunner(writes=...)` to target — nor is the fresh heal task's id
+    known until the harness fires it. That context is real and worth keeping
+    even after Task 4, but it does not excuse the assertions below: today
+    this fixture's `heal` step writes no artifact at all, so `file-issue`
+    reads an empty artifact (zero drafts, not an error) and files nothing —
+    this test correctly fails on the "one issue opened" assertion below, and
+    `xfail(strict=True)` is what keeps that failure visible until Task 4
+    lands, rather than green forever on a narrowed check."""
     seed(tmp_path)
     put_failed_task(
         tmp_path, data={"request": "Do the thing", "source": {"url": "https://gh/i/9"}}
@@ -203,10 +217,15 @@ async def test_heal_file_dedup_unique_reaches_file_issue_and_completes(tmp_path)
     assert "tsk_e2e" in heal_call["prompt"]
     assert "## Failure report" in heal_call["prompt"]
 
-    # No artifact drafts were written (see the KNOWN GAP note above), so
-    # `file-issue` still runs but files nothing — proving it's reached and
-    # doesn't blow up, not that filing itself works end to end.
-    assert tracker.opened == []
+    # exactly one issue filed, marker derived from the *original* failed
+    # task's id (invariant #26's idempotency scoping — `marker_for` also
+    # folds in the draft's own title, which this fixture cannot predict, see
+    # the docstring above), carrying the Origin footer sourced from the
+    # original task's data.source (FR-3).
+    assert len(tracker.opened) == 1
+    opened = tracker.opened[0]
+    assert opened["marker"] == marker_for("tsk_e2e", opened["title"])
+    assert "Origin: https://gh/i/9" in opened["body"]
 
     # the fresh heal-workflow task itself reached a clean end.
     done_files = list((tmp_path / "done").glob("*.json"))

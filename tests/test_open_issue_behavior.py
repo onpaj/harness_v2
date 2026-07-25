@@ -266,6 +266,23 @@ async def test_a_malformed_block_raises_issue_error():
         await behavior.run(task())
 
 
+async def test_a_repository_less_task_with_no_drafts_settles_done_and_files_nothing():
+    """Invariant #25: a repository-less heal task is the default case for an
+    autoheal process with no seeded `params.repository`. With zero drafts,
+    `slug_for` must never be called — resolving the slug is what would raise."""
+    artifacts = MemoryArtifactStore()
+    tracker = MemoryIssueTracker()
+    behavior = make(
+        tracker=tracker, artifacts=artifacts, inner=StubInner(artifacts=artifacts, text=block())
+    )
+
+    result = await behavior.run(task(repository=None))
+
+    assert tracker.opened == []
+    assert result.outcome == DONE
+    assert "no issues to file" in result.summary
+
+
 async def test_an_unresolvable_repository_raises_issue_error():
     artifacts = MemoryArtifactStore()
     behavior = make(
