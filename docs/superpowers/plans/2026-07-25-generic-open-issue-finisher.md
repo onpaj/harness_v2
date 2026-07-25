@@ -1460,6 +1460,7 @@ was silently inert.
 - **Invariant 26:** rewrite the `file-issue` sentence — the `open-issue` finisher is now generic, bound as `{"kind": "open-issue", "from_step": "heal", "label": "harness:self-heal"}`, reads a fenced json draft array, and can file 0..N issues. Keep the "never the LLM" claim; it is unchanged and is the point.
 - **Invariant 39:** the sentence about `build()` losing `heal`/`issue_tracker` stands, but drop any reference to `--heal-repo` gating.
 - Search for and fix every other mention: `grep -rn "heal-repo\|HARNESS_HEAL_REPO\|--all-workflows\|--workflow" CLAUDE.md README.md docs/`.
+- **Fix the `issue_drafts.py` module-map line.** Task 2 added a bullet saying it "knows only `models`" — inaccurate: the module imports nothing from the `harness` package at all. Reword to say exactly that, matching how `models`/`ids`/`artifacts_layout` are described.
 - **Also sweep the docs site**, which the module map does not cover: `grep -rn "harness-heal\|heal-repo\|HARNESS_HEAL_REPO" src/harness_docs_site/`. Task 1's reviewer found `src/harness_docs_site/architecture.py:949` still describing `GithubIssueTracker` as deduping "by an embedded `harness-heal` marker" — the prefix is now `harness-issue:`. Fix that line and any sibling it finds.
 
 - [ ] **Step 3: Commit**
