@@ -675,9 +675,11 @@ def build(
         # declarative spec (no user-facing parameters) alongside the factory, so
         # the process form treats it as a fully-defined action rather than an
         # unknown one. `repository` is still accepted at call time — it isn't a
-        # form field; it's the `--heal-repo`/`HARNESS_HEAL_REPO` value the
-        # autoheal process wiring stamps into `action.params` directly
-        # (invariant #25/#39), never entered by an operator through the UI.
+        # form field; it's the slug `processes/autoheal.json` carries in its own
+        # `action.params` (written there by the `--heal-repo` bootstrap, and read
+        # back by `cli._autoheal_repo` to wire the `open-issue` finisher against
+        # the same repo — invariant #25/#39, ADR-0021), never entered by an
+        # operator through the UI.
         "failed-tasks": CheckDefinition(
             spec=FAILED_TASKS_SPEC,
             factory=lambda params: FailedTasksCheck(

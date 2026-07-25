@@ -10,6 +10,7 @@ import pytest
 from harness.app import HarnessLayout
 from harness.cli import (
     AGENT_PERSONAS,
+    AUTOHEAL_PROCESS_DEFINITION,
     DEFAULT_DEFINITION,
     DEFAULT_HEAL_WORKFLOW,
     DEFAULT_WORKFLOW,
@@ -42,6 +43,29 @@ SERVE_TEST_WORKFLOW = Workflow(
         Transition(from_step="review", on="done", to_step=END),
     ),
 )
+
+
+def _write_autoheal(root: Path, repository: str | None) -> Path:
+    """Write `processes/autoheal.json` the way a `--heal-repo` bootstrap would.
+
+    Self-healing is enabled by this file's existence and configured by its
+    `action.params.repository` — `repository=None` writes the param-less form,
+    which names no repo to file against.
+    """
+    path = Path(root) / "processes" / "autoheal.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    params = {} if repository is None else {"repository": repository}
+    path.write_text(
+        json.dumps(
+            {
+                **AUTOHEAL_PROCESS_DEFINITION,
+                "action": {"check": "failed-tasks", "params": params},
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    return path
 
 
 def test_init_creates_layout_and_default_workflow(tmp_path):
@@ -181,15 +205,23 @@ def test_run_heal_repo_wires_open_issue_finisher_and_tracker(monkeypatch, tmp_pa
     assert process["action"]["check"] == "failed-tasks"
 
 
-def test_run_heal_via_env_var_wires_everything_without_a_flag(monkeypatch, tmp_path):
-    """The flag-free path: `HARNESS_HEAL_REPO` (config in the service env, not a
-    run flag) enables healing exactly as `--heal-repo` does — serves `heal`,
-    registers the `open-issue` finisher on that repo, and materializes
-    `processes/autoheal.json` so the failed-tasks check has a target. This is
-    what lets the launchd service self-heal with no CLI flag (ADR-0018)."""
+def test_run_heal_via_the_process_file_wires_everything_without_a_flag(
+    monkeypatch, tmp_path
+):
+    """The flag-free path: `processes/autoheal.json` alone enables healing —
+    serves `heal` and registers the `open-issue` finisher on the repo named in
+    the process's own `action.params.repository`. No flag, no environment
+    variable: this is what lets the launchd service self-heal, whose wrapper
+    execs a fixed `harness run --root ... --api-port ...` (ADR-0018).
+
+    Enablement by a file in `processes/` is how every *other* automation in the
+    harness works; autoheal was the sole exception until this."""
     from harness.behaviors.open_issue import OpenIssueBehavior
 
     main(["init", "--root", str(tmp_path)])
+    # Written by a prior `--heal-repo` bootstrap, or by hand. Either way it is
+    # the only configuration this run gets.
+    _write_autoheal(tmp_path, "onpaj/harness_v2")
     captured = {}
 
     def fake_build(*args, **kwargs):
@@ -202,16 +234,128 @@ def test_run_heal_via_env_var_wires_everything_without_a_flag(monkeypatch, tmp_p
 
     monkeypatch.setattr("harness.cli.build", fake_build)
     monkeypatch.setattr("harness.cli.serve", fake_serve)
-    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
-    monkeypatch.setenv("HARNESS_HEAL_REPO", "onpaj/harness_v2")
 
-    # No --heal-repo anywhere on the command line.
+    # No --heal-repo anywhere on the command line, and no env var.
     assert main(["run", "--root", str(tmp_path)]) == 0
     assert DEFAULT_HEAL_WORKFLOW in captured["served_names"]
     behavior = captured["finishers"]["open-issue"]("file-issue", {}, lambda: None)
     assert isinstance(behavior, OpenIssueBehavior)
+    # The repo the finisher files against is the process's own param — the same
+    # value `FailedTasksCheck` stamps as `task.repository`, so they can't drift.
     assert behavior._repo == "onpaj/harness_v2"
-    assert (tmp_path / "processes" / "autoheal.json").is_file()
+
+
+def test_run_heal_repo_flag_bootstraps_the_process_file_for_later_runs(
+    monkeypatch, tmp_path
+):
+    """`--heal-repo` writes the file; the *next* run needs no flag.
+
+    The two halves of the new contract in one test: the flag is a bootstrap
+    that persists its argument, and persistence is what makes the flag
+    unnecessary from then on."""
+    main(["init", "--root", str(tmp_path)])
+    captured = {}
+
+    def fake_build(*args, **kwargs):
+        captured["served_names"] = args[1]
+        return object()
+
+    async def fake_serve(harness, port, poll_interval, source_interval=30.0, pr_poll_interval=0.0, reconcile_interval=300.0, registry=None):
+        pass
+
+    monkeypatch.setattr("harness.cli.build", fake_build)
+    monkeypatch.setattr("harness.cli.serve", fake_serve)
+
+    # First run: the flag bootstraps the file.
+    assert main(["run", "--root", str(tmp_path), "--heal-repo", "onpaj/harness_v2"]) == 0
+    autoheal = tmp_path / "processes" / "autoheal.json"
+    assert autoheal.is_file()
+    assert json.loads(autoheal.read_text())["action"]["params"]["repository"] == (
+        "onpaj/harness_v2"
+    )
+
+    # Second run: no flag, and healing is still on — read back out of the file.
+    captured.clear()
+    assert main(["run", "--root", str(tmp_path)]) == 0
+    assert DEFAULT_HEAL_WORKFLOW in captured["served_names"]
+
+
+def test_run_ignores_an_autoheal_process_with_no_repository_param(
+    monkeypatch, tmp_path
+):
+    """A repository-less autoheal file names no repo, so there is nothing to
+    file issues against and nothing to wire.
+
+    `_autoheal_repo` returns None rather than guessing; `heal` stays unserved
+    and the `open-issue` kind unregistered. The operator still finds out —
+    `build()` rejects a process targeting an unserved workflow — but that is
+    the existing build-time error, not a new silent half-configured mode."""
+    main(["init", "--root", str(tmp_path)])
+    _write_autoheal(tmp_path, None)
+    captured = {}
+
+    def fake_build(*args, **kwargs):
+        captured["served_names"] = args[1]
+        captured["finishers"] = kwargs.get("finishers")
+        return object()
+
+    async def fake_serve(harness, port, poll_interval, source_interval=30.0, pr_poll_interval=0.0, reconcile_interval=300.0, registry=None):
+        pass
+
+    monkeypatch.setattr("harness.cli.build", fake_build)
+    monkeypatch.setattr("harness.cli.serve", fake_serve)
+
+    assert main(["run", "--root", str(tmp_path)]) == 0
+    assert DEFAULT_HEAL_WORKFLOW not in captured["served_names"]
+    assert captured["finishers"] is None
+
+
+def test_run_tolerates_a_broken_autoheal_process_file(monkeypatch, tmp_path):
+    """Broken JSON in `autoheal.json` must not crash `_run` before `build()`.
+
+    `build()` is where a malformed process earns its error message, with the
+    file name and the parse failure in it. `_autoheal_repo` reading it first
+    must not pre-empt that with a traceback."""
+    main(["init", "--root", str(tmp_path)])
+    (tmp_path / "processes").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "processes" / "autoheal.json").write_text("{not json", encoding="utf-8")
+
+    def fake_build(*args, **kwargs):
+        return object()
+
+    async def fake_serve(harness, port, poll_interval, source_interval=30.0, pr_poll_interval=0.0, reconcile_interval=300.0, registry=None):
+        pass
+
+    monkeypatch.setattr("harness.cli.build", fake_build)
+    monkeypatch.setattr("harness.cli.serve", fake_serve)
+
+    assert main(["run", "--root", str(tmp_path)]) == 0
+
+
+def test_run_config_driven_heal_without_claude_warns_instead_of_failing(
+    monkeypatch, tmp_path, capsys
+):
+    """A flag is a prompt the operator is standing at; a file is not.
+
+    `--heal-repo --agent dummy` hard-errors (exit 2) — the operator is there to
+    read it. The same misconfiguration reached through the process file only
+    warns, because the launchd service would otherwise crash-loop on it."""
+    main(["init", "--root", str(tmp_path)])
+    _write_autoheal(tmp_path, "onpaj/harness_v2")
+
+    def fake_build(*args, **kwargs):
+        return object()
+
+    async def fake_serve(harness, port, poll_interval, source_interval=30.0, pr_poll_interval=0.0, reconcile_interval=300.0, registry=None):
+        pass
+
+    monkeypatch.setattr("harness.cli.build", fake_build)
+    monkeypatch.setattr("harness.cli.serve", fake_serve)
+
+    assert main(["run", "--root", str(tmp_path), "--agent", "dummy"]) == 0
+    warning = capsys.readouterr().err
+    assert "autoheal.json" in warning
+    assert "--agent is not claude" in warning
 
 
 def test_run_heal_repo_uses_github_tracker_with_a_token(monkeypatch, tmp_path):

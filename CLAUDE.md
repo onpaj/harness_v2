@@ -65,7 +65,7 @@ swapped out later.
 22. **`todo` is the board's name for the inbox's fresh tasks** (`status is None`) — the first column. It is a view concern only: the router and dispatcher never see a `todo` queue, and auto-flow is unchanged (a fresh task passes through `todo` into `start`).
 23. **Operator control is a write-side port `TaskControl`, mirroring the read-side `BoardView`.** `restart` is a reset, not a routing decision: it clears `status`/`lastOutcome` and re-inboxes a `failed` task, then the dispatcher decides where next (invariant #3 holds). `TaskControl` is touched only by `TaskControlService` (core), `api/` and wiring — `dispatcher.py`/`consumer.py` don't import it; guarded by `test_architecture.py`. See ADR-0011 and ADR-0012.
 24. **`failed/` has one reader — the `failed-tasks` Check; `healed/` is the never-consumed terminal.** This refines "terminal states are queues nobody consumes": `done`/`end`/`healed` are terminal, while `failed/` is drained by the `failed-tasks` Check (an action of an operator-authored Process, typically `processes/autoheal.json`) and by nothing else. The router and dispatcher never learn about `failed`/`healed` as steps. Both queues are now built **unconditionally** — with no `failed-tasks`-driving process configured, `failed/` simply has no reader, exactly as before wiring one up. See ADR-0018.
-25. **The check produces at most one fresh task per claimed failure and never writes a claimed task back to `failed/`.** Every claim settles to `healed/` in the same `evaluate()` call. Recursion is guarded by a marker (`data.heal`), not by construction: a heal task that itself fails **does** pass through `failed/` normally (board-visible) before the check's next tick retires it to `healed/` without a new `Observation`. So no failure is healed twice and nothing loops. The check also stamps its own `params.repository` (the `--heal-repo`/`HARNESS_HEAL_REPO` value, wired identically for the `open-issue` finisher below) onto the fresh task it fires, so the `heal` step gets a worktree the same way any ordinary agent step does (invariant #15) — an autoheal process with no `repository` param fires a repository-less heal task, unchanged from before this stamp existed. See ADR-0018 and ADR-0019.
+25. **The check produces at most one fresh task per claimed failure and never writes a claimed task back to `failed/`.** Every claim settles to `healed/` in the same `evaluate()` call. Recursion is guarded by a marker (`data.heal`), not by construction: a heal task that itself fails **does** pass through `failed/` normally (board-visible) before the check's next tick retires it to `healed/` without a new `Observation`. So no failure is healed twice and nothing loops. The check also stamps its own `params.repository` (read straight out of `processes/autoheal.json`, the same value `cli._autoheal_repo` hands the `open-issue` finisher below — one source, so they cannot drift) onto the fresh task it fires, so the `heal` step gets a worktree the same way any ordinary agent step does (invariant #15) — an autoheal process with no `repository` param fires a repository-less heal task, unchanged from before this stamp existed. See ADR-0018 and ADR-0019.
 26. **The heal *workflow* is three steps — `heal` triages, `dedup` forks on novelty, `file-issue` is the only one that opens anything, and it isn't the LLM.** `heal`'s persona (persona as data) diagnoses the failure and returns `file` (a fixable harness bug or an operational problem worth filing — drafts the issue, routes to `dedup`) or `skip` (external/transient/impossible — routes straight to `end`, nothing filed). `dedup`'s persona reads the harness repo's open issues and returns `unique` (routes to `file-issue`) or `duplicate` (routes straight to `end`, silently — no issue, no board-visible failure). Only on the `unique` path does the `file-issue` step's `open-issue` finisher (a `ConsumerBehavior`, same footing as `open-pr`/`LandingBehavior`) read the drafted issue and call `IssueTracker.open_issue` (invariant 9) — neither persona ever opens anything itself. `IssueTracker` is a third port distinct from `Forge` (opens PRs) and `TaskSource.finish` (relabels), idempotent by a per-task marker. Both steps' outcome vocabularies (`file`/`skip`, `unique`/`duplicate`) are declared as workflow edges, not hardcoded in the personas — invariant #42 governs which outcomes each step may actually report. See ADR-0018 and ADR-0019.
 27. **`IssueTracker` and `FailedTasksCheck` are unknown to the dispatcher and consumer.** `IssueTracker` is touched only by the `open-issue` finisher (wired via `build()`'s `finishers=`); `FailedTasksCheck` is a `Check` registered inside `app.build()`'s internal checks dict. Neither is imported by `dispatcher.py`/`consumer.py`; guarded by `test_architecture.py`. See ADR-0018 and ADR-0019.
 28. **A task's workspace branch is `harness/<task.id>` unless `task.data["branch"]` overrides it.** The override exists for exactly one case (the resolver workflow fixing an existing PR): `GitWorkspace.attach` checks out that *existing* branch instead of creating a fresh one from HEAD. Absent the key, every path is unchanged.
@@ -110,6 +110,15 @@ that coverage would vanish.
 `tests/test_smoke_claude.py` is an **opt-in** smoke with real `claude -p` — it runs
 only with `HARNESS_SMOKE_CLAUDE=1`, otherwise it's skipped and `pytest -q` won't run it.
 It covers the thin subprocess shell of `ClaudeCliRunner` that the fake runners bypass.
+
+**The suite is hermetic against the harness's own configuration environment.**
+`tests/conftest.py`'s autouse `hermetic_environment` fixture unsets every variable
+`src/harness` reads as config (`GITHUB_TOKEN`, `HARNESS_HOME`, `SLACK_WEBHOOK_URL`,
+`JIRA_*`) before each test; a test that wants one sets it itself with
+`monkeypatch.setenv`, which runs after and wins. Not optional tidiness — see the
+gotcha below. `tests/test_hermetic_environment.py` derives the list from the source
+and checks it **both ways**: a new config variable missing from `_HARNESS_ENVIRONMENT`
+fails, and so does a stale entry the package no longer reads.
 
 ## Git conventions
 
@@ -277,12 +286,18 @@ Dependencies flow strictly downward, no cycles.
   `duplicate` (settles silently — no issue). Only the `unique` path's `file-issue`
   step's `open-issue` finisher opens the drafted issue on the harness repo via
   `IssueTracker`. `harness init` ships `workflows/heal.json` + `agents/heal.json` +
-  `agents/dedup.json`. Enabled by naming a heal repo, either `--heal-repo
-  <owner/repo>` (interactive) or the `HARNESS_HEAL_REPO` env var (the flag-free
-  path for the launchd service, mirroring how `SLACK_WEBHOOK_URL` gates the slack
-  sink) — needs `--agent claude`; either serves `heal`, registers the `open-issue`
-  finisher and writes `processes/autoheal.json` if absent (a hand-edited process is
-  never clobbered). Recursion is guarded by the `data.heal` marker, not by
+  `agents/dedup.json`. **Enabled by `processes/autoheal.json`** — a file in
+  `processes/`, exactly like every other automation here — and configured by that
+  process's own `action.params.repository`, which `cli._autoheal_repo` reads back
+  to wire the `open-issue` finisher. `--heal-repo <owner/repo>` is the interactive
+  *bootstrap* that writes the file (only if absent — a hand-edited process is never
+  clobbered) and serves `heal`; every later run needs no flag, which is how the
+  launchd service self-heals despite `wrapper_script` exec'ing a fixed argv. Needs
+  `--agent claude`: with the flag that's a hard error, config-driven it's only a
+  warning (an unattended service must not crash-loop). There is deliberately **no
+  environment variable** — the slug is a public repo name, not a secret, and one
+  source of truth means the check's `repository` param and the finisher's file-to
+  repo cannot drift. Recursion is guarded by the `data.heal` marker, not by
   construction (invariant 25).
 - **`claim()`** is an atomic `rename` into `<queue>/.processing/`. A single operation
   handles the lease, idempotency and provenance after a crash.
@@ -470,6 +485,22 @@ Dependencies flow strictly downward, no cycles.
   `claude`, so the wrapper exports one built by `cli.service_path_entries` (venv bin
   first, then `~/.npm-global/bin`, `~/.local/bin`, `/usr/local/bin`, …). A "claude not
   found" failure deep in a run is usually this.
+- **The verify command inherits the harness's whole environment — including its
+  secrets.** `SubprocessCommandRunner` does not sanitize; under the launchd service
+  a repo's test command therefore runs with `GITHUB_TOKEN` set (the wrapper resolves
+  it from `gh auth token`). Deliberate — a verify command legitimately needs `PATH`,
+  `HOME` and often a token for integration tests — but it makes any
+  environment-sensitive test suite report a *different verdict under the gate than in
+  the operator's shell*. That is not theoretical: this repo's own suite had eight
+  `test_cli.py` tests asserting on the *absence* of harness configuration while the
+  service had it set, so running `pytest` as harness_v2's own verify command produced
+  a spurious `request_changes` and bounced a clean diff back to `development` — a
+  loop the development agent cannot fix, because the defect is not in the diff.
+  Fixed on the *test* side (`conftest.py`'s `hermetic_environment`), not by
+  sanitizing the runner; the config half of the leak was closed for good by moving
+  self-healing's enablement into `processes/autoheal.json` (ADR-0021), leaving only
+  genuine secrets in the inherited environment. When onboarding another repo to the
+  gate, a suite that reads config from the environment is the first thing to check.
 - **`Harness.recover()` always includes `done`, whether or not a reconciler is wired
   this run.** A `.processing/` file in `done/` can only have been left by a
   `MergeReconciler` claim, but it may outlive the run that created it (the operator

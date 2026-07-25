@@ -1044,6 +1044,42 @@ def _ensure_autoheal_process(layout: HarnessLayout, heal_repo: str) -> None:
     )
 
 
+def _autoheal_repo(layout: HarnessLayout) -> str | None:
+    """The heal repo `processes/autoheal.json` already carries, or None.
+
+    Self-healing is enabled the same way every other automation in the harness
+    is: by a file in `processes/`. The slug lives in that file's
+    `action.params.repository` — the value `FailedTasksCheck` stamps onto every
+    heal task as `task.repository` (invariant #25) — so reading it back is how
+    `_run` learns the repo the `open-issue` finisher files against, keeping the
+    check's worktree repo and the finisher's file-to repo the same value by
+    construction rather than by two configuration surfaces agreeing (ADR-0019).
+
+    A broken or repository-less file returns None rather than raising: the
+    process still has to compile in `build()` moments later, and that is where
+    a malformed one earns its error message. Returning None here just means
+    "nothing to wire", and the missing `open-issue` kind surfaces as the
+    existing build-time ValueError.
+    """
+    path = layout.processes / "autoheal.json"
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError):
+        return None
+    if not isinstance(raw, dict):
+        return None
+    action = raw.get("action")
+    if not isinstance(action, dict) or action.get("check") != "failed-tasks":
+        return None
+    params = action.get("params")
+    if not isinstance(params, dict):
+        return None
+    repository = params.get("repository")
+    if isinstance(repository, str) and repository.strip():
+        return repository.strip()
+    return None
+
+
 def service_path_entries(harness: Path) -> list[str]:
     """`PATH` for the service: the venv's bin first, then the usual locations.
 
@@ -1744,20 +1780,26 @@ def _run(args: argparse.Namespace) -> int:
     if resolver_defined and args.resolver_workflow not in served_names:
         served_names = [*served_names, args.resolver_workflow]
 
-    # Self-healing (ADR-0018): enabled by a heal repo — `--heal-repo
-    # <owner/repo>` OR the `HARNESS_HEAL_REPO` env var, the flag-free path that
-    # mirrors how `SLACK_WEBHOOK_URL` gates the slack sink (config in the
-    # service's env, never a run flag). Either way the `open-issue` finisher
-    # files heal issues on that repo. This must run *before* `known_targets` is
-    # computed below — the autoheal process's `{"workflow": "heal"}` target (and
-    # any bare trigger naming it) needs "heal" in the served set to validate. It
-    # reuses the claude agent, so it needs `--agent claude`; offline (no
-    # GITHUB_TOKEN) it falls back to the in-memory tracker so the loop still
-    # runs harmlessly.
+    # Self-healing (ADR-0018): enabled by `processes/autoheal.json`, exactly as
+    # every other automation in the harness is enabled by a file in
+    # `processes/`. `--heal-repo <owner/repo>` is the interactive bootstrap that
+    # *writes* that file; once written, the run reads the slug back out of it
+    # (`action.params.repository`), so the launchd service — whose wrapper execs
+    # a fixed `harness run --root ... --api-port ...` with no seam for extra
+    # flags — needs neither a flag nor an environment variable. The file is the
+    # single source of truth: the same value the check stamps as
+    # `task.repository` (invariant #25) is the one the `open-issue` finisher
+    # files against, so the two cannot drift (ADR-0019).
+    #
+    # This must run *before* `known_targets` is computed below — the autoheal
+    # process's `{"workflow": "heal"}` target (and any bare trigger naming it)
+    # needs "heal" in the served set to validate. It reuses the claude agent, so
+    # it needs `--agent claude`; offline (no GITHUB_TOKEN) it falls back to the
+    # in-memory tracker so the loop still runs harmlessly.
     finishers: dict[
         str, Callable[[str, dict, Callable[[], ConsumerBehavior]], ConsumerBehavior]
     ] = {}
-    heal_repo = args.heal_repo or os.environ.get("HARNESS_HEAL_REPO")
+    heal_repo = args.heal_repo or _autoheal_repo(layout)
     if heal_repo:
         if args.heal_repo and not use_agent:
             print(
@@ -1766,9 +1808,12 @@ def _run(args: argparse.Namespace) -> int:
             )
             return 2
         if not use_agent:
+            # Config-driven, not flag-driven: the operator is not at a prompt to
+            # read an error, and the service must never crash-loop over this.
             print(
-                "warning: HARNESS_HEAL_REPO is set but --agent is not claude; the"
-                " heal step cannot run and failed tasks will settle unhealed.",
+                f"warning: {layout.processes / 'autoheal.json'} enables self-healing"
+                " but --agent is not claude; the heal step cannot run and failed"
+                " tasks will settle unhealed.",
                 file=sys.stderr,
             )
         # The `heal_repo` slug is also `task.repository` on every heal task

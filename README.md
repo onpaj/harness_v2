@@ -314,21 +314,32 @@ per `dirty` PR, deduped per conflicted head commit.
 By default a task that fails comes to rest in `failed/` and stays there — an
 operator has to notice, read its history, and decide whether the harness itself
 was at fault. Point the harness at a repo to file heal issues on and `failed/`
-becomes a queue that drains, via an **autoheal Process** (ADR-0018). Two ways to
-name that repo:
+becomes a queue that drains, via an **autoheal Process** (ADR-0018):
 
 ```sh
-# one-off / interactive: the flag also writes processes/autoheal.json for you
 harness run --root ~/harness-root --agent claude --heal-repo onpaj/harness_v2
-
-# unattended service: config in the env, no run flag (mirrors SLACK_WEBHOOK_URL)
-HARNESS_HEAL_REPO=onpaj/harness_v2 harness run --root ~/harness-root --agent claude
 ```
 
-`HARNESS_HEAL_REPO` is the flag-free path — set it in the service's env
-(`secrets.env`) and the launchd service self-heals with no CLI flag at all. Both
-paths do the same thing: serve the `heal` workflow, register the `open-issue`
-finisher on that repo, and materialize `processes/autoheal.json` if it's absent.
+`--heal-repo` is a **bootstrap**: it writes `processes/autoheal.json` (unless one
+already exists) with your repo as the `failed-tasks` action's `repository` param,
+serves the `heal` workflow, and registers the `open-issue` finisher on that repo.
+Every run after that needs no flag — the repo is read back out of the process
+file:
+
+```sh
+harness run --root ~/harness-root --agent claude   # healing still on
+```
+
+That is what lets the launchd service self-heal: its wrapper execs a fixed
+`harness run --root ... --api-port ...` with no seam for extra flags, and it does
+not need one. Self-healing is enabled by a file in `processes/`, exactly like
+every other automation here — no flag and no environment variable. Delete
+`processes/autoheal.json` to turn it off.
+
+Keeping the slug in the process file is also what stops it drifting: the same
+`action.params.repository` that the check stamps onto every heal task as
+`task.repository` is the one the `open-issue` finisher files against, so the
+healer's worktree and its issues cannot end up pointing at different repos.
 
 Self-healing is an ordinary Process, not bespoke machinery. The
 `processes/autoheal.json` whose `failed-tasks` action drains `failed/`: on each
@@ -351,13 +362,16 @@ once before the check retires it to `healed/` without re-observing it, so nothin
 loops. The issue is idempotent per original failed task (a hidden marker in its
 body), so a restart mid-heal never files a second one.
 
-`--heal-repo` needs `--agent claude` — the heal step is a claude agent. Its
-persona lives in `agents/heal.json`, and `workflows/heal.json` is written by
-`harness init` alongside the step personas (data, not code); `autoheal.json`
-itself is written by `--heal-repo`, but only if absent — a hand-edited process is
-never clobbered. With a `GITHUB_TOKEN` present the issue is opened on GitHub;
-offline it falls back to an in-memory tracker so the finisher runs harmlessly.
-Without `--heal-repo`, `failed/` stays a dead-end terminal exactly as before.
+Healing needs `--agent claude` — the heal step is a claude agent. Its persona
+lives in `agents/heal.json`, and `workflows/heal.json` is written by `harness
+init` alongside the step personas (data, not code); `autoheal.json` itself is
+written by `--heal-repo`, but only if absent — a hand-edited process is never
+clobbered. `--heal-repo --agent dummy` is a hard error (you are at a prompt to
+read it); the same mismatch reached through an existing `autoheal.json` only
+warns, so an unattended service never crash-loops on it. With a `GITHUB_TOKEN`
+present the issue is opened on GitHub; offline it falls back to an in-memory
+tracker so the finisher runs harmlessly. With no `autoheal.json`, `failed/`
+stays a dead-end terminal exactly as before.
 
 ## How work flows
 
