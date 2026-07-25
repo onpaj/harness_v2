@@ -486,21 +486,21 @@ Dependencies flow strictly downward, no cycles.
   first, then `~/.npm-global/bin`, `~/.local/bin`, `/usr/local/bin`, …). A "claude not
   found" failure deep in a run is usually this.
 - **The verify command inherits the harness's whole environment — including its
-  secrets and its own config.** `SubprocessCommandRunner` does not sanitize; under
-  the launchd service that means a repo's test command runs with `GITHUB_TOKEN`
-  (resolved from `gh auth token` by the wrapper) set — and, until self-healing
-  moved into `processes/autoheal.json`, `HARNESS_HEAL_REPO` as well.
-  Deliberate — a verify command legitimately needs `PATH`,
+  secrets.** `SubprocessCommandRunner` does not sanitize; under the launchd service
+  a repo's test command therefore runs with `GITHUB_TOKEN` set (the wrapper resolves
+  it from `gh auth token`). Deliberate — a verify command legitimately needs `PATH`,
   `HOME` and often a token for integration tests — but it makes any
   environment-sensitive test suite report a *different verdict under the gate than in
   the operator's shell*. That is not theoretical: this repo's own suite had eight
-  `test_cli.py` tests asserting "*without* a token" / "*without* a heal repo" while
-  never unsetting either, so running `pytest` as harness_v2's own verify command
-  produced a spurious `request_changes` and bounced a clean diff back to
-  `development` — a loop the development agent cannot fix, because the defect is not
-  in the diff. Fixed on the *test* side (`conftest.py`'s `hermetic_environment`), not
-  by sanitizing the runner. When onboarding another repo to the gate, a suite that
-  reads config from the environment is the first thing to check.
+  `test_cli.py` tests asserting on the *absence* of harness configuration while the
+  service had it set, so running `pytest` as harness_v2's own verify command produced
+  a spurious `request_changes` and bounced a clean diff back to `development` — a
+  loop the development agent cannot fix, because the defect is not in the diff.
+  Fixed on the *test* side (`conftest.py`'s `hermetic_environment`), not by
+  sanitizing the runner; the config half of the leak was closed for good by moving
+  self-healing's enablement into `processes/autoheal.json` (ADR-0021), leaving only
+  genuine secrets in the inherited environment. When onboarding another repo to the
+  gate, a suite that reads config from the environment is the first thing to check.
 - **`Harness.recover()` always includes `done`, whether or not a reconciler is wired
   this run.** A `.processing/` file in `done/` can only have been left by a
   `MergeReconciler` claim, but it may outlive the run that created it (the operator

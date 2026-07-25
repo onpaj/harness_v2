@@ -78,14 +78,16 @@ and the check already takes a `params` dict.
 - `processes/autoheal.json` sets it:
   `"action": {"check": "failed-tasks", "params": {"repository": "onpaj/harness_v2"}}`.
   The default `AUTOHEAL_PROCESS_DEFINITION` (`cli.py:832`) gains the same param,
-  defaulting to the configured heal repo (`HARNESS_HEAL_REPO`) so the check's
-  worktree repo and the finisher's file-to repo stay identical.
+  defaulting to the configured heal repo so the check's worktree repo and the
+  finisher's file-to repo stay identical. (Since ADR-0021 this param *is* the
+  configured heal repo — `cli._autoheal_repo` reads it back out of this file.)
 
 **Consequence (intended):** every step of the heal task now attaches the harness
 worktree. `heal` gains real code context for diagnosis (issue #94's design
 already flagged this as "arguably a feature"); `dedup` gets `gh`. This does
 **not** change where issues are filed — `OpenIssueBehavior` files against its
-fixed injected `repo` (from `HARNESS_HEAL_REPO`), independent of
+fixed injected `repo` (since ADR-0021, this file's own `params.repository`),
+independent of
 `task.repository` (`behaviors/open_issue.py`). The two are decoupled and both
 point at the harness repo.
 
@@ -246,11 +248,17 @@ restart) is operator action after merge, not part of the branch.
   the templates; a post-merge deploy step updates the live files (or re-runs the
   relevant `harness agent init`/regeneration). Flagged so the fix isn't "green
   tests, unchanged behavior in production".
-- **`repository` param vs. `HARNESS_HEAL_REPO` drift.** The check's worktree repo
-  (param) and the finisher's file-to repo (`HARNESS_HEAL_REPO`) must match, or
-  `dedup` reads a different repo's issues than where the issue lands. The default
-  template ties them; a hand-edited `autoheal.json` that sets one and not the
-  other is the footgun — the ADR notes it.
+- **`repository` param vs. heal-repo drift.** The check's worktree repo (param)
+  and the finisher's file-to repo must match, or `dedup` reads a different repo's
+  issues than where the issue lands. The default template ties them; a
+  hand-edited `autoheal.json` that sets one and not the other is the footgun —
+  the ADR notes it.
+
+  > **2026-07-25:** resolved, not merely noted. The environment variable this
+  > risk was written against is gone — `processes/autoheal.json`'s own
+  > `action.params.repository` is the single value `cli._autoheal_repo` reads to
+  > wire both halves, so the two cannot disagree and a hand-edited file is the
+  > configuration rather than a drift vector. See ADR-0021.
 - **`gh` in the heal worktree.** `dedup` relies on `gh` + `GITHUB_TOKEN` on the
   service `PATH` (already true for the service; the git-smoke fixtures use a fake
   issue list, never real `gh`).

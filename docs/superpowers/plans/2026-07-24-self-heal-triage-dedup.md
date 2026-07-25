@@ -14,7 +14,7 @@
 - **Conventional commits are load-bearing** — `feat:` bumps minor, `docs:`/`test:`/`refactor:` don't release. Use `feat:` for A/B, `feat:`/`docs:` for C.
 - **Tests run on in-memory drivers + `FakeClock`** — never sleep in real time; no disk beyond the `FilesystemTaskQueue` under `tmp_path` the self-heal e2e already uses.
 - **Custom outcomes live in the workflow JSON, not persona files.** Per ADR-0018 a persona's `allowed_outcomes` is the workflow-less *fallback* and `fs_agents` validation still restricts it to `{done, request_changes}` — do **not** relax that. The live vocabulary (`file`/`skip`, `unique`/`duplicate`) comes from `Workflow.outcomes_for`, derived from the `heal` workflow's edges at run time.
-- **The check's `repository` param must equal the finisher's file-to repo** (`HARNESS_HEAL_REPO`), so `dedup` reads the same repo the issue will be filed in.
+- **The check's `repository` param must equal the finisher's file-to repo**, so `dedup` reads the same repo the issue will be filed in. (Since ADR-0021 they are one value — `cli._autoheal_repo` reads the param and wires both.)
 - **Invariant #42 holds; the router/dispatcher/consumer are untouched** (invariants #2/#3/#4/#8). `open-issue` finisher, the recursion guard (#25), and the per-task marker are unchanged.
 
 ---
@@ -194,7 +194,7 @@ Clamp `_write_default_agents` so a custom-outcome step still writes a **loadable
 - [ ] **Step 3: Implement the test** to green against the real behavior (the source is already done in Tasks 1–2); adjust the module's `HEAL_DEFINITION`/specs to the three-step shape.
 
 - [ ] **Step 4: Write the ADR + docs**
-  - `docs/adr/0019-heal-triage-and-dedup.md`: Context (the healer filed nothing for operational failures; widening risks duplicate issues), Decision (heal task carries the harness `repository`; `heal` triages `file`/`skip`; a new `dedup` step reads open issues and forks `unique`/`duplicate`; custom vocabulary lives in the workflow, personas keep the fallback), Consequences (operational visibility; silent-on-duplicate; supersedes the two-step-heal portion of `0018-healing-as-a-process.md`; the `repository`-param must equal `HARNESS_HEAL_REPO`).
+  - `docs/adr/0019-heal-triage-and-dedup.md`: Context (the healer filed nothing for operational failures; widening risks duplicate issues), Decision (heal task carries the harness `repository`; `heal` triages `file`/`skip`; a new `dedup` step reads open issues and forks `unique`/`duplicate`; custom vocabulary lives in the workflow, personas keep the fallback), Consequences (operational visibility; silent-on-duplicate; supersedes the two-step-heal portion of `0018-healing-as-a-process.md`; the `repository`-param must equal the finisher's file-to repo — since ADR-0021 they are the same value).
   - `CLAUDE.md`: refine the invariant #24–#27 prose to the three-step heal workflow (`heal → dedup → file-issue`) and note the check now stamps `repository`. No new invariant number.
 
 - [ ] **Step 5: Full suite + commit** — `.venv/bin/pytest -q` (all green incl. `test_smoke_git.py`), then `git commit -am "feat: prove heal triage+dedup end to end; ADR-0019 + invariants"`
@@ -203,7 +203,7 @@ Clamp `_write_default_agents` so a custom-outcome step still writes a **loadable
 
 ## Post-merge deploy note (operator action, not part of the branch)
 
-The running service reads `~/harness-root/{workflows,agents,processes}`, not the source templates. After merge, update the four live files to match: `workflows/heal.json` (three-step), `agents/heal.json` (rewritten persona), new `agents/dedup.json`, `processes/autoheal.json` (add `params.repository: onpaj/harness_v2`), then restart the service. `HARNESS_HEAL_REPO` must equal that param — and that same slug must also be registered in `repos.json`, or `GitWorkspace.attach` raises `RepositoryNotFound` for every heal task, which fails to attach a worktree, lands in `failed/`, and is silently retired to `healed/` by the recursion guard with no issue ever filed. `harness run`/`serve` now warns on stderr at startup if the configured `HARNESS_HEAL_REPO` isn't registered — check for that warning after restarting the service.
+The running service reads `~/harness-root/{workflows,agents,processes}`, not the source templates. After merge, update the four live files to match: `workflows/heal.json` (three-step), `agents/heal.json` (rewritten persona), new `agents/dedup.json`, `processes/autoheal.json` (add `params.repository: onpaj/harness_v2`), then restart the service. That param is now the single source of truth (ADR-0021) — and that same slug must also be registered in `repos.json`, or `GitWorkspace.attach` raises `RepositoryNotFound` for every heal task, which fails to attach a worktree, lands in `failed/`, and is silently retired to `healed/` by the recursion guard with no issue ever filed. `harness run`/`serve` now warns on stderr at startup if the configured heal repo isn't registered — check for that warning after restarting the service.
 
 ## Self-Review
 

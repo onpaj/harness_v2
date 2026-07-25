@@ -29,15 +29,15 @@ if str(_SRC) not in sys.path:
 # command through `SubprocessCommandRunner`, which inherits the harness
 # process's environment; under the launchd service that environment carries
 # `GITHUB_TOKEN` (the wrapper resolves it from `gh auth token`) and, at the
-# time, `HARNESS_HEAL_REPO`. Running this repo's own suite as its verify
-# command therefore turned eight `test_cli.py` tests red — tests asserting
-# "*without* a token" / "*without* a heal repo" while both were set. A green
-# suite in the operator's shell, a red one under the gate, and a task bounced
-# back to `development` over a defect that does not exist in the diff.
+# time, a second variable configuring self-healing. Running this repo's own
+# suite as its verify command therefore turned eight `test_cli.py` tests red —
+# tests asserting on the *absence* of that configuration while the service had
+# it set. A green suite in the operator's shell, a red one under the gate, and
+# a task bounced back to `development` over a defect that is not in the diff.
 #
-# (`HARNESS_HEAL_REPO` is gone now — self-healing is configured by
-# `processes/autoheal.json`, like every other automation. `GITHUB_TOKEN`, a
-# real secret, is not going anywhere, so the fixture stays.)
+# Self-healing has since moved its enablement into `processes/autoheal.json`
+# (ADR-0021), so what remains here is genuine secrets — which are not going
+# anywhere, hence the fixture.
 #
 # `HARNESS_SMOKE_CLAUDE` is deliberately absent: it is the opt-in gate for
 # `test_smoke_claude.py`, read at collection time by a module-level skipif, so

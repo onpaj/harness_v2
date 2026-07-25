@@ -3,12 +3,13 @@
 The `verify` gate (ADR-0009's "landing is a step" applied to verification)
 runs a repo's test command through `SubprocessCommandRunner`, which inherits
 the harness process's environment. Under the launchd service that environment
-carries `GITHUB_TOKEN` — and, when this bug was found, `HARNESS_HEAL_REPO`
-too (self-healing has since moved to `processes/autoheal.json`). So when
-this repo's verify command is its own `pytest`, any test whose assertion
-depends on one of those variables being *unset* flips red under the gate while
-staying green in the operator's shell — a spurious `request_changes` bouncing
-a perfectly good diff back to `development` over a defect that is not in it.
+carries `GITHUB_TOKEN` — and, when this bug was found, a second variable
+configuring self-healing (since moved into `processes/autoheal.json`,
+ADR-0021). So when this repo's verify command is its own `pytest`, any test
+whose assertion depends on one of those variables being *unset* flips red
+under the gate while staying green in the operator's shell — a spurious
+`request_changes` bouncing a perfectly good diff back to `development` over a
+defect that is not in it.
 
 `conftest.py`'s autouse `hermetic_environment` fixture is the fix. These tests
 are its guard: one reproduces the original failure end to end under a hostile
@@ -124,10 +125,10 @@ def test_every_configuration_variable_the_package_reads_is_cleared():
 def test_no_variable_is_cleared_that_the_package_no_longer_reads():
     """The inverse: a stale entry is a claim the code stopped making.
 
-    `HARNESS_HEAL_REPO` is why this direction exists — when self-healing moved
-    to `processes/autoheal.json`, the variable stopped being read, and a list
-    that still named it would have quietly implied `cli.py` still had an
-    environment-driven enablement path it does not.
+    Self-healing's env-var enablement is why this direction exists — when it
+    moved into `processes/autoheal.json` (ADR-0021) the variable stopped being
+    read, and a list still naming it would have quietly implied `cli.py` kept
+    an environment-driven enablement path it does not have.
     """
     stale = set(_HARNESS_ENVIRONMENT) - _configuration_variables_read_by_the_package()
     assert not stale, (
