@@ -111,6 +111,15 @@ that coverage would vanish.
 only with `HARNESS_SMOKE_CLAUDE=1`, otherwise it's skipped and `pytest -q` won't run it.
 It covers the thin subprocess shell of `ClaudeCliRunner` that the fake runners bypass.
 
+**The suite is hermetic against the harness's own configuration environment.**
+`tests/conftest.py`'s autouse `hermetic_environment` fixture unsets every variable
+`src/harness` reads as config (`GITHUB_TOKEN`, `HARNESS_HEAL_REPO`, `HARNESS_HOME`,
+`SLACK_WEBHOOK_URL`, `JIRA_*`) before each test; a test that wants one sets it itself
+with `monkeypatch.setenv`, which runs after and wins. Not optional tidiness — see the
+gotcha below. A new config variable must be added to `_HARNESS_ENVIRONMENT`;
+`tests/test_hermetic_environment.py` derives the list from the source and fails if you
+forget.
+
 ## Git conventions
 
 **Commit straight into `main`.** In this phase that's the intended approach — don't
@@ -470,6 +479,21 @@ Dependencies flow strictly downward, no cycles.
   `claude`, so the wrapper exports one built by `cli.service_path_entries` (venv bin
   first, then `~/.npm-global/bin`, `~/.local/bin`, `/usr/local/bin`, …). A "claude not
   found" failure deep in a run is usually this.
+- **The verify command inherits the harness's whole environment — including its
+  secrets and its own config.** `SubprocessCommandRunner` does not sanitize; under
+  the launchd service that means a repo's test command runs with `GITHUB_TOKEN`
+  (resolved from `gh auth token` by the wrapper) and, with self-healing on,
+  `HARNESS_HEAL_REPO` set. Deliberate — a verify command legitimately needs `PATH`,
+  `HOME` and often a token for integration tests — but it makes any
+  environment-sensitive test suite report a *different verdict under the gate than in
+  the operator's shell*. That is not theoretical: this repo's own suite had eight
+  `test_cli.py` tests asserting "*without* a token" / "*without* a heal repo" while
+  never unsetting either, so running `pytest` as harness_v2's own verify command
+  produced a spurious `request_changes` and bounced a clean diff back to
+  `development` — a loop the development agent cannot fix, because the defect is not
+  in the diff. Fixed on the *test* side (`conftest.py`'s `hermetic_environment`), not
+  by sanitizing the runner. When onboarding another repo to the gate, a suite that
+  reads config from the environment is the first thing to check.
 - **`Harness.recover()` always includes `done`, whether or not a reconciler is wired
   this run.** A `.processing/` file in `done/` can only have been left by a
   `MergeReconciler` claim, but it may outlive the run that created it (the operator
