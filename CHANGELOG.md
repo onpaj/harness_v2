@@ -1,6 +1,15 @@
 # CHANGELOG
 
 
+## v0.21.1 (2026-07-25)
+
+### Bug Fixes
+
+- Spurious verify failures — hermetic test env, and autoheal enabled by its process file
+  ([#129](https://github.com/onpaj/harness_v2/pull/129),
+  [`e76edc4`](https://github.com/onpaj/harness_v2/commit/e76edc4278e5c5fb5fc5adc6520c850dae897324))
+
+
 ## v0.21.0 (2026-07-24)
 
 ### Bug Fixes
