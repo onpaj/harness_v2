@@ -1459,7 +1459,8 @@ was silently inert.
 - **Invariant 24:** replace "an action of an operator-authored Process, typically `processes/autoheal.json`" with a note that `harness init` seeds that file and its `action.params.repository` is the only place self-healing names a repo.
 - **Invariant 26:** rewrite the `file-issue` sentence — the `open-issue` finisher is now generic, bound as `{"kind": "open-issue", "from_step": "heal", "label": "harness:self-heal"}`, reads a fenced json draft array, and can file 0..N issues. Keep the "never the LLM" claim; it is unchanged and is the point.
 - **Invariant 39:** the sentence about `build()` losing `heal`/`issue_tracker` stands, but drop any reference to `--heal-repo` gating.
-- Search for and fix every other mention: `grep -n "heal-repo\|HARNESS_HEAL_REPO\|--all-workflows\|--workflow" CLAUDE.md README.md docs/`.
+- Search for and fix every other mention: `grep -rn "heal-repo\|HARNESS_HEAL_REPO\|--all-workflows\|--workflow" CLAUDE.md README.md docs/`.
+- **Also sweep the docs site**, which the module map does not cover: `grep -rn "harness-heal\|heal-repo\|HARNESS_HEAL_REPO" src/harness_docs_site/`. Task 1's reviewer found `src/harness_docs_site/architecture.py:949` still describing `GithubIssueTracker` as deduping "by an embedded `harness-heal` marker" — the prefix is now `harness-issue:`. Fix that line and any sibling it finds.
 
 - [ ] **Step 3: Commit**
 
