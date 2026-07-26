@@ -1582,6 +1582,46 @@ def test_run_serves_every_scaffolded_workflow_for_an_ordinary_init(tmp_path, mon
     assert list(seen["served"]) == ["development", "heal", "resolver"]
 
 
+def test_run_over_a_fresh_init_builds_successfully_with_a_real_build(monkeypatch, tmp_path):
+    """`harness init` writes `HEAL_DEFINITION`/`AUTOHEAL_PROCESS_DEFINITION`
+    (`src/harness/cli.py`) into every new root, but no test previously ran a
+    real, unmonkeypatched `build()` over a freshly-initialized root purely to
+    pin that those seeded constants compile together successfully: every
+    neighbouring `run` test that reaches a successful exit in this file
+    monkeypatches `build` itself (e.g.
+    `test_run_serves_every_scaffolded_workflow_for_an_ordinary_init` above),
+    and the two tests with a real `build()` over a comparable setup
+    (`test_a_binding_without_a_label_fails_the_build`,
+    `test_run_reports_an_unregistered_process_repository_cleanly`) both assert
+    exit *2*. This duplication already drifted once — commit `97bc9ef` had to
+    fix `HEAL_DEFINITION` in `cli.py` *and* its old hand-copied mirror in
+    `tests/test_self_heal_e2e.py` — so a test that would fail the moment the
+    seeded workflow/agents/process stop compiling together is worth the extra
+    coverage on top of `test_run_serves_resolver_workflow_when_its_file_exists`
+    below, which reaches the same real-`build()`-success shape incidentally
+    while proving something else (that the resolver workflow gets served).
+
+    Only `harness.cli.serve` is monkeypatched, so no port is bound and no
+    network touched — `build()` itself runs for real."""
+    main(["init", "--root", str(tmp_path)])
+    captured = {}
+
+    async def fake_serve(harness, port, poll_interval, source_interval=30.0, pr_poll_interval=0.0, reconcile_interval=300.0, registry=None):
+        captured["harness"] = harness
+
+    monkeypatch.setattr("harness.cli.serve", fake_serve)
+
+    assert main(["run", "--root", str(tmp_path)]) == 0
+
+    # `HEAL_DEFINITION` compiled: `heal` (and every other scaffolded workflow)
+    # is being served.
+    assert set(captured["harness"].workflows) == {"development", "heal", "resolver"}
+    # `AUTOHEAL_PROCESS_DEFINITION` compiled: the seeded `processes/autoheal.json`
+    # became one live poller alongside the scaffolded `triggers/` (empty by
+    # default, so this is exactly the autoheal process).
+    assert len(captured["harness"].pollers) == 1
+
+
 def test_run_with_no_workflow_harness_defaults_to_none(tmp_path, monkeypatch):
     """A --no-workflow harness has no `workflows/` directory at all, so
     `harness run` must resolve to an empty served set (workflow-less), not

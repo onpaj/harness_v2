@@ -13,8 +13,10 @@ task's repository's open issues and returns `unique` (routes to `file-issue`) or
 (`FilesystemTaskQueue` under `tmp_path`), no real waiting — `FakeClock` gates
 the process's interval bucket.
 
-`HEAL_DEFINITION` here mirrors `src/harness/cli.py`'s shipped definition
-exactly, and the two `FakeAgentRunner`-scripted outcomes per test
+`HEAL_DEFINITION` is imported straight from `src/harness/cli.py` — the exact
+definition `harness init` seeds — so this file can't drift from it the way a
+hand-copied literal did once (commit `97bc9ef`). The two `FakeAgentRunner`-scripted
+outcomes per test
 (`heal` -> `file`/`skip`, `dedup` -> `unique`/`duplicate`) are only accepted
 by the dispatcher because the workflow itself declares those edges
 (`Workflow.outcomes_for`, invariant #42) — so driving these three routing
@@ -29,6 +31,7 @@ import pytest
 
 from harness.app import HarnessLayout, build
 from harness.behaviors.open_issue import OpenIssueBehavior
+from harness.cli import HEAL_DEFINITION
 from harness.drivers.memory import (
     FakeAgentRunner,
     FakeClock,
@@ -41,33 +44,6 @@ from harness.drivers.memory import (
 from harness.issue_drafts import marker_for
 from harness.models import HEALED, Task
 from harness.ports.agent import AgentRun, AgentSpec
-
-HEAL_DEFINITION = {
-    "name": "heal",
-    "start": "heal",
-    "transitions": [
-        {"from": "heal", "on": "file", "to": "dedup",
-         "hint": "a harness bug, or an operational/tuning problem worth filing"},
-        {"from": "heal", "on": "skip", "to": "end",
-         "hint": "external/transient, or the task's own request was impossible — nothing to file"},
-        {"from": "dedup", "on": "unique", "to": "file-issue",
-         "hint": "nothing similar is open in the task's repository"},
-        {"from": "dedup", "on": "duplicate", "to": "end",
-         "hint": "a correlated issue is already open — settle silently"},
-        {"from": "file-issue", "on": "done", "to": "end"},
-    ],
-    "descriptions": {
-        "heal": "diagnose the failed task from its report; decide whether it warrants a GitHub issue",
-        "dedup": "read the task's repository's open issues; decide whether the drafted issue is new",
-    },
-    "finishers": {
-        "file-issue": {
-            "kind": "open-issue",
-            "from_step": "heal",
-            "label": "harness:self-heal",
-        }
-    },
-}
 
 HEAL_SPEC = AgentSpec(
     name="heal",
