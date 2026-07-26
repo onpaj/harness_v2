@@ -75,6 +75,22 @@ def test_the_last_block_wins():
     assert [d.title for d in parse_drafts(artifact)] == ["the real one"]
 
 
+def test_a_draft_with_no_body_still_succeeds_with_the_empty_default():
+    drafts = parse_drafts('```json\n[{"title": "no body field at all"}]\n```')
+
+    assert drafts == [IssueDraft(title="no body field at all", body="", labels=())]
+
+
+def test_a_draft_with_a_wrongly_typed_body_is_an_error():
+    with pytest.raises(DraftError, match="draft 0 has a non-string body"):
+        parse_drafts('```json\n[{"title": "ok", "body": 5}]\n```')
+
+
+def test_a_draft_with_wrongly_typed_labels_is_an_error():
+    with pytest.raises(DraftError, match="draft 0 has non-array labels"):
+        parse_drafts('```json\n[{"title": "ok", "labels": "oops"}]\n```')
+
+
 def test_the_marker_is_task_scoped_and_title_content_scoped():
     first = marker_for("tsk_abc", "A finding")
     again = marker_for("tsk_abc", "A finding")

@@ -76,14 +76,20 @@ def parse_drafts(artifact: str) -> list[IssueDraft]:
         if not isinstance(title, str) or not title.strip():
             raise DraftError(f"draft {index} has no title")
         body = item.get("body", "")
+        if not isinstance(body, str):
+            raise DraftError(
+                f"draft {index} has a non-string body: {type(body).__name__}"
+            )
         labels = item.get("labels", [])
+        if not isinstance(labels, list):
+            raise DraftError(
+                f"draft {index} has non-array labels: {type(labels).__name__}"
+            )
         drafts.append(
             IssueDraft(
                 title=title.strip(),
-                body=body if isinstance(body, str) else "",
-                labels=tuple(str(label) for label in labels)
-                if isinstance(labels, list)
-                else (),
+                body=body,
+                labels=tuple(str(label) for label in labels),
             )
         )
     return drafts
