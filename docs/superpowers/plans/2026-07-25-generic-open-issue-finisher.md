@@ -1523,6 +1523,8 @@ harness update --restart --only-if-idle
 
 Remove the `HARNESS_HEAL_REPO=onpaj/harness_v2` line from `~/harness-root/secrets.env`. Leave `CLAUDE_CODE_OAUTH_TOKEN` alone — the service cannot run agents without it.
 
+> **Order matters from here on.** `action.params.repository` is now validated at process-compile time, and a value that is not a `repos.json` key fails `harness run` — which under launchd means a crash-loop, not a warning. Do **repos.json first, autoheal.json second**. If you set the process's repository before the registry knows the name, the service will not come back up.
+
 - [ ] **Step 3: Point self-healing at the repo by registry name**
 
 Set `action.params.repository` in `~/harness-root/processes/autoheal.json` to `"harness_v2"` — the `repos.json` key, **not** the `onpaj/harness_v2` slug. This is the fix for the 29 "heal repo is not registered" warnings in `logs/harness.error.log`.
