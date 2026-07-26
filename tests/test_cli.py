@@ -176,7 +176,6 @@ def test_run_heal_repo_wires_open_issue_finisher_and_tracker(monkeypatch, tmp_pa
     monkeypatch.delenv("GITHUB_TOKEN", raising=False)
 
     assert main(["run", "--root", str(tmp_path), "--heal-repo", "onpaj/harness_v2"]) == 0
-    assert DEFAULT_HEAL_WORKFLOW in captured["served_names"]
     # the finisher registry holds factories (invariant #41), so call it to get
     # the behavior — open-issue reads label/from_step off the binding's config;
     # with from_step set it replaces the step and never calls the thunk.
@@ -225,11 +224,12 @@ def test_a_binding_without_a_label_fails_the_build(monkeypatch, tmp_path, capsys
 
 def test_run_heal_via_env_var_wires_everything_without_a_flag(monkeypatch, tmp_path):
     """The flag-free path: `HARNESS_HEAL_REPO` (config in the service env, not a
-    run flag) enables healing exactly as `--heal-repo` does — serves `heal`
-    and materializes `processes/autoheal.json` so the failed-tasks check has
-    a target (the `open-issue` finisher itself is registered unconditionally,
-    independent of this env var). This is what lets the launchd service
-    self-heal with no CLI flag (ADR-0018)."""
+    run flag) stamps `params.repository` on the autoheal process and
+    materializes `processes/autoheal.json` so the failed-tasks check has a
+    target and the fresh heal tasks it fires get a repo (`heal` itself is
+    served because `workflows/heal.json` is on disk, independent of this env
+    var; the `open-issue` finisher is registered unconditionally too). This
+    is what lets the launchd service self-heal with no CLI flag (ADR-0018)."""
     from harness.behaviors.open_issue import OpenIssueBehavior
 
     main(["init", "--root", str(tmp_path)])
@@ -250,7 +250,6 @@ def test_run_heal_via_env_var_wires_everything_without_a_flag(monkeypatch, tmp_p
 
     # No --heal-repo anywhere on the command line.
     assert main(["run", "--root", str(tmp_path)]) == 0
-    assert DEFAULT_HEAL_WORKFLOW in captured["served_names"]
     behavior = captured["finishers"]["open-issue"](
         "file-issue", HEAL_FINISHER_CONFIG, lambda: None
     )
@@ -1036,10 +1035,26 @@ def test_the_workflow_selection_flags_are_gone(tmp_path, capsys):
     main(["init", "--root", str(tmp_path)])
     capsys.readouterr()
 
-    with pytest.raises(SystemExit):
+    # Each assertion checks argparse's own rejection (exit code 2 +
+    # "unrecognized arguments"), never merely "some SystemExit happened" —
+    # that weaker shape would also pass if the flag were still accepted and
+    # a real serve() started and then died for an unrelated reason (e.g. the
+    # board port already being held by another process), which is exactly
+    # what the pre-fix version of this test did.
+    with pytest.raises(SystemExit) as exc:
         main(["run", "--root", str(tmp_path), "--workflow", "development"])
-    with pytest.raises(SystemExit):
+    assert exc.value.code == 2
+    assert "unrecognized arguments" in capsys.readouterr().err
+
+    with pytest.raises(SystemExit) as exc:
         main(["run", "--root", str(tmp_path), "--all-workflows"])
+    assert exc.value.code == 2
+    assert "unrecognized arguments" in capsys.readouterr().err
+
+    with pytest.raises(SystemExit) as exc:
+        main(["run", "--root", str(tmp_path), "--resolver-workflow", "resolver"])
+    assert exc.value.code == 2
+    assert "unrecognized arguments" in capsys.readouterr().err
 
 
 def test_run_rejects_github_workflow_not_in_served_set(tmp_path, capsys):

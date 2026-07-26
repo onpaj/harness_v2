@@ -2063,13 +2063,6 @@ def main(argv: list[str] | None = None) -> int:
         default="github",
         help="where landing proposes the change (default: real GitHub)",
     )
-    run.add_argument(
-        "--resolver-workflow",
-        default=DEFAULT_RESOLVER_WORKFLOW,
-        dest="resolver_workflow",
-        help="workflow the 'resolver' PR-conflict tasks (e.g. from a "
-        "github-conflicts process) are served under",
-    )
     run.set_defaults(handler=_run)
 
     agent = subparsers.add_parser("agent", help="manage per-step agent definitions")
