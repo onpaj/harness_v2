@@ -19,16 +19,22 @@ Separately, `--heal-repo`'s value had to be both a GitHub `owner/repo` slug and
 a `repos.json` key. On the reference install those disagreed, so self-healing
 was silently inert.
 
+This supersedes the `--heal-repo`/`HARNESS_HEAL_REPO` wiring-time repo binding
+described in ADR-0018 and the drift risk between it and `repos.json` recorded
+in ADR-0019: both are removed in favor of the single `action.params.repository`
+field below.
+
 ## Decision
 
 - `OpenIssueBehavior` is driven by its `FinisherBinding.config`: `label`
   (carried by every issue, and the scope of the idempotency search),
   `from_step` (whose *presence* selects replace-vs-wrap), `allowed_labels`
   (the allowlist a draft's own labels are filtered against).
-- A step's artifact carries its drafts as a fenced ```json array; parsing is a
-  pure module, `issue_drafts.py`, and the **last** block wins — the same rule
-  `_extract_verdict` applies to the agent's final message. An empty artifact
-  is zero drafts; a non-empty one with no readable array is an error.
+- A step's artifact carries its drafts as a fenced `json` block holding an
+  array; parsing is a pure module, `issue_drafts.py`, and the **last** block
+  wins — the same rule `_extract_verdict` applies to the agent's final
+  message. An empty artifact is zero drafts; a non-empty one with no readable
+  array is an error.
 - A draft's marker is `<task id>:<sha1(title)[:8]>` — task-scoped so a re-run
   re-finds what it already filed, content-scoped so reordered findings match
   the right issue.

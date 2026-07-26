@@ -359,13 +359,19 @@ The heal step's persona only ever drafts an *issue* — never a PR, never a new
 task. Recursion is guarded by a marker: the check stamps `data.heal` on the heal
 task it produces, and a heal task that itself fails is board-visible in `failed/`
 once before the check retires it to `healed/` without re-observing it, so nothing
-loops. The issue is idempotent per original failed task (a hidden marker in its
-body), so a restart mid-heal never files a second one.
+loops. The issue is idempotent per `(repo, scope_label, marker)` — a hidden
+marker in its body, scoped to the *heal* task and the draft's title
+(`marker_for(task.id, draft.title)`), not the original failed task (whose id
+survives only as `data.heal.of`). That protects a re-run of the same heal
+task from filing the same draft twice; it says nothing about the failure that
+triggered it.
 
 The `heal`/`dedup` personas live in `agents/heal.json`/`agents/dedup.json`,
 and `workflows/heal.json` is written by `harness init` alongside the step
-personas (data, not code) — all of it shipped dormant, regardless of whether
-`processes/autoheal.json` names a repo yet. With a `GITHUB_TOKEN` present the
+personas (data, not code) — self-healing is seeded live on every root
+(`processes/autoheal.json` runs on a 30s interval from the first `harness
+run`) and files nothing until `action.params.repository` names a registered
+repo. With a `GITHUB_TOKEN` present the
 issue is opened on GitHub; offline it falls back to an in-memory tracker so
 the finisher runs harmlessly. Until `action.params.repository` is set,
 `failed/` still drains into `healed/` on each tick and `heal`/`dedup` still
