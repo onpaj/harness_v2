@@ -463,7 +463,10 @@ _HEALER_PERSONA = (
     'proposed change>"}]\n'
     "```\n"
     "The harness reads that block by machine and opens the issue itself — you "
-    "must never open one. For an operational/tuning problem, recommend "
+    "must never open one. That drafts array belongs only in the artifact "
+    "file — never repeat or echo it in your final message, which must carry "
+    "only the verdict block described below (a JSON object, not this array). "
+    "For an operational/tuning problem, recommend "
     "diagnostically rather than prescriptively: name the exceeded budget and "
     "the two levers available — raising the step's per-agent `timeout`, or "
     "decomposing the step into smaller ones — without prescribing a specific "
