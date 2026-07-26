@@ -1499,7 +1499,17 @@ This task touches `~/harness-root`, not the repo. Do it only after Tasks 1–7 a
 - Modify: `~/harness-root/workflows/heal.json`
 - Modify: `~/harness-root/agents/heal.json`
 
-- [ ] **Step 1: Ship the new version**
+- [ ] **Step 1: Pre-flight — no stray JSON under `workflows/`**
+
+Serving is now "every `workflows/*.json`", and `app.build()` loads every served name eagerly (`WorkflowNotFound` → fail fast). A malformed or half-written file that was previously *ignored* because it wasn't the served `development` will now crash-loop `com.harness` on startup. Check before you ship:
+
+```bash
+ls -la ~/harness-root/workflows/ && for f in ~/harness-root/workflows/*.json; do python3 -c "import json,sys; json.load(open(sys.argv[1]))" "$f" || echo "BROKEN: $f"; done
+```
+
+Expected: exactly `development.json`, `heal.json`, `resolver.json`, all parsing. Anything else — a `.tmp`, a backup, a scratch file — must be moved out of that directory first.
+
+- [ ] **Step 2: Ship the new version**
 
 ```bash
 harness update --restart --only-if-idle
