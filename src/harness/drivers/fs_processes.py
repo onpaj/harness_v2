@@ -42,6 +42,15 @@ file at a time and has no visibility into siblings, so it cannot run this
 check at all — a hand-edited or admin-written file only gets it at the next
 full `harness run` startup (`FilesystemProcessRepository.build()`), not at
 admin-save time.
+
+One exception to "validates every file up front and fails fast": `build()`'s
+optional `dropped_workflows` parameter (only ever passed by `cli._run`, never
+by a direct `build()`/test call) names workflows already dropped from the
+served set for an unwirable finisher binding (ADR-0022). A process whose
+`{"workflow": ...}` target names one of them is skipped rather than raising
+`ProcessValidationError` — the workflow being gone is the reason it can't
+work, not a mistake in this file, and the caller has already warned about it
+by name. See `FilesystemProcessRepository.build`'s own docstring.
 """
 
 from __future__ import annotations
@@ -364,13 +373,28 @@ class FilesystemProcessRepository:
         known_targets: set[str] | None = None,
         known_repositories: set[str] | None = None,
         default_github_issues_label: str = "harness:todo",
+        dropped_workflows: set[str] | None = None,
     ) -> list[ScheduledTrigger]:
+        """`dropped_workflows` (default none — every other caller keeps the
+        fully fail-fast behavior unchanged) names workflows the caller has
+        already dropped from its served set (e.g. `cli._run`'s
+        `_validate_served_workflows`, ADR-0022's unwirable-binding filter). A
+        process whose `{"workflow": ...}` target names one of them is skipped
+        here — silently, since the caller already printed a warning naming
+        both the workflow and this file — rather than raising
+        `ProcessValidationError` for a target that would otherwise read as a
+        plain typo. Every other validation (an unknown check, a genuinely
+        unresolvable target, a malformed cadence, ...) is untouched."""
         if not self._root.exists():
             return []
 
         triggers: list[ScheduledTrigger] = []
         seen: dict[str, str] = {}  # github-issues label/claimed_label -> file name
         for path in sorted(self._root.glob("*.json")):
+            if dropped_workflows and self._targets_a_dropped_workflow(
+                path, dropped_workflows
+            ):
+                continue
             triggers.append(
                 self._build_one(
                     path,
@@ -386,6 +410,22 @@ class FilesystemProcessRepository:
                 path, seen, default_github_issues_label=default_github_issues_label
             )
         return triggers
+
+    @staticmethod
+    def _targets_a_dropped_workflow(path: Path, dropped_workflows: set[str]) -> bool:
+        """Raw-JSON pre-check, mirroring `_check_github_issues_collision`'s
+        re-read of an already-validated file: whether `path`'s `target` names
+        a workflow the caller already dropped from the served set. A
+        malformed file is left to `_build_one`'s own fail-fast below — this
+        only ever decides whether to *skip*, never validates."""
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return False
+        if not isinstance(raw, dict):
+            return False
+        target = raw.get("target")
+        return isinstance(target, dict) and target.get("workflow") in dropped_workflows
 
     @staticmethod
     def _check_github_issues_collision(

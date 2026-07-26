@@ -18,7 +18,13 @@ from pathlib import Path
 import uvicorn
 
 from harness.api.app import create_app
-from harness.app import LANDING_STEP, HarnessLayout, build, validate_workflow_finishers
+from harness.app import (
+    LANDING_STEP,
+    HarnessLayout,
+    UnknownFinisherKind,
+    build,
+    validate_workflow_finishers,
+)
 from harness.behaviors.open_issue import OpenIssueBehavior
 from harness.drivers.claude_cli import ClaudeCliRunner
 from harness.drivers.fake_forge import FakeForge
@@ -1547,6 +1553,30 @@ def _resolve_served_workflows(layout: HarnessLayout) -> tuple[str, ...]:
     return FilesystemWorkflowRepository(layout.workflows).names()
 
 
+def _processes_targeting_workflow(processes_root: Path, workflow_name: str) -> list[str]:
+    """Which `processes/*.json` files declare `{"target": {"workflow":
+    workflow_name}}`, read straight off the raw JSON — no `compile_process`
+    involved, like `_declared_sink_kinds`/`_warn_missing_autoheal_repository`.
+    Used only to enrich the served-workflow drop warning below with the
+    process(es) it takes down with it, so "my self-healing stopped" is
+    traceable from that one warning line rather than needing to correlate it
+    with a second one printed somewhere else."""
+    names: list[str] = []
+    if not processes_root.is_dir():
+        return names
+    for path in sorted(processes_root.glob("*.json")):
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            continue
+        if not isinstance(raw, dict):
+            continue
+        target = raw.get("target")
+        if isinstance(target, dict) and target.get("workflow") == workflow_name:
+            names.append(path.name)
+    return names
+
+
 def _validate_served_workflows(
     layout: HarnessLayout,
     wf_repo: FilesystemWorkflowRepository,
@@ -1554,19 +1584,30 @@ def _validate_served_workflows(
     finishers: dict[str, Callable[[str, dict, Callable[[], ConsumerBehavior]], ConsumerBehavior]],
 ) -> tuple[str, ...]:
     """Drop a served workflow whose own finisher bindings can't be wired
-    against `finishers`, printing a `warning:` that names the file, the step
-    and the reason — instead of letting it take the whole run down.
+    against `finishers` for a config reason, printing a `warning:` that names
+    the file, the step and the reason — instead of letting it take the whole
+    run down. An *unknown* finisher kind (`UnknownFinisherKind`, a `ValueError`
+    subclass) is a different failure shape entirely and is deliberately not
+    caught here: it propagates out of this function unchanged, and `_run`'s
+    own `except UnknownFinisherKind` around this call still fails the whole
+    run (exit 2) for it — see the operator's governing rule below.
 
-    `app.build()` still constructs a finisher eagerly for every bound step of
-    every served workflow it's handed, and still fails the *whole* run (exit
-    2) on the first one that can't be wired (invariant #41) — exactly right
-    for a genuine, operator-facing misconfiguration the operator is at a
-    prompt to fix. But `harness run` serves every `workflows/*.json` on disk
-    (ADR-0022), so a single stale file — e.g. the pre-generic string form
+    `harness run` serves every `workflows/*.json` on disk (ADR-0022), so a
+    single stale file — e.g. the pre-generic string form
     `"file-issue": "open-issue"`, which parses to an empty config and fails
     the `open-issue` factory's own `label` check — would otherwise crash-loop
-    a launchd-supervised service on every restart. A workflow proven
-    unwirable here is filtered out before `build()` ever sees it.
+    a launchd-supervised service on every restart. That is a *missing* value
+    (the binding names a real, registered kind but doesn't carry what its
+    factory needs), so it only warns and drops here, before `build()` ever
+    sees the workflow.
+
+    An unknown kind is different: it is a value that is *set and wrong* (a
+    typo, or a binding naming a kind that was never registered — e.g.
+    `label-issue` while `GITHUB_TOKEN` is unset). Per the operator's rule —
+    an explicitly-set bad value fails fast, only a missing one warns — that
+    must still fail the *whole* run, exactly as `app.build()`'s own
+    equivalent check always has (invariant #41): this function lets
+    `UnknownFinisherKind` propagate rather than dropping the workflow for it.
 
     A workflow that can't even be *parsed* (`WorkflowNotFound` — broken JSON,
     an unknown step in `finishers`, ...) is left in the returned set
@@ -1583,11 +1624,20 @@ def _validate_served_workflows(
             continue
         try:
             validate_workflow_finishers(workflow, finishers)
+        except UnknownFinisherKind:
+            raise
         except ValueError as error:
             path = layout.workflows / f"{name}.json"
+            dependents = _processes_targeting_workflow(layout.processes, name)
+            note = (
+                f" — also disables process(es) {', '.join(dependents)}, which "
+                f"target it"
+                if dependents
+                else ""
+            )
             print(
                 f"warning: workflow {name!r} ({path}) cannot be served — "
-                f"{error} — dropped from the served set",
+                f"{error} — dropped from the served set{note}",
                 file=sys.stderr,
             )
             continue
@@ -1951,18 +2001,37 @@ def _run(args: argparse.Namespace) -> int:
             inner=inner(), client=github_client, labels=config.get("labels", {})
         )
 
-    # A served workflow whose own finisher bindings can't be wired against
-    # `finishers` (e.g. the pre-generic string form `"open-issue"`, which
-    # parses to an empty config and fails the factory's own `label` check —
-    # exactly the shape `workflows/heal.json` shipped with on the reference
-    # install before this branch generalized the finisher) must not
+    # A served workflow whose own finisher binding names a *known* kind that
+    # rejects its config (e.g. the pre-generic string form `"open-issue"`,
+    # which parses to an empty config and fails the factory's own `label`
+    # check — exactly the shape `workflows/heal.json` shipped with on the
+    # reference install before this branch generalized the finisher) must not
     # crash-loop the whole service. Drop it from the served set with a
-    # warning instead of letting `build()` fail the entire run over one
-    # stale file — see ADR-0022. `build()` below still fails fast on
-    # everything else it always has (a genuine cross-workflow binding
-    # conflict, a malformed workflow file, ...).
+    # warning instead of letting `build()` fail the entire run over one stale
+    # file — see ADR-0022. An *unknown* kind is a different, set-and-wrong
+    # failure shape and is not dropped: `_validate_served_workflows` re-raises
+    # `UnknownFinisherKind` unchanged, and the `except` below still fails the
+    # whole run (exit 2) for it, exactly as `build()`'s own equivalent check
+    # always has (a genuine cross-workflow binding conflict, a malformed
+    # workflow file, ... still fail there too, unchanged).
     wf_repo = FilesystemWorkflowRepository(layout.workflows)
-    served_names = _validate_served_workflows(layout, wf_repo, served_names, finishers)
+    served_names_on_disk = served_names
+    try:
+        served_names = _validate_served_workflows(layout, wf_repo, served_names, finishers)
+    except UnknownFinisherKind as error:
+        # A set-and-wrong value (a typo, or a kind nothing ever registered) —
+        # the operator's rule keeps this fatal for the whole run, exactly as
+        # `app.build()`'s own equivalent check always has (invariant #41),
+        # unlike the config-shaped failures `_validate_served_workflows`
+        # itself warns-and-drops for. See ADR-0022.
+        print(f"error: {error}", file=sys.stderr)
+        return 2
+    # Workflows dropped by the pre-filter above (e.g. the stale string-form
+    # `heal.json`) can no longer be a Process's target either — a Process
+    # targeting one is made inert further down (`build()`'s `dropped_workflows`
+    # param, threaded to `FilesystemProcessRepository.build()`), rather than
+    # failing the whole build the way an unresolvable target normally would.
+    dropped_workflows = set(served_names_on_disk) - set(served_names)
 
     forge = _build_forge(args.forge, root, registry)
     github = [] if args.no_github_source else _github_sources(args, root, registry)
@@ -2054,14 +2123,20 @@ def _run(args: argparse.Namespace) -> int:
             issue_import_factory=issue_import_factory,
             repository_registry=registry,
             command_runner=SubprocessCommandRunner(),
+            dropped_workflows=dropped_workflows,
         )
     except WorkflowNotFound as error:
         print(f"error: {error}", file=sys.stderr)
         return 2
     except ValueError as error:
-        # e.g. a served workflow names a finisher kind nothing registered, or
-        # binds one (like "open-issue") without the config it requires — a
-        # binding with no `label` fails here too (see `_open_issue` above).
+        # A backstop, not the primary path: `served_names` here has already
+        # passed `_validate_served_workflows` above, so an unknown finisher
+        # kind or a binding rejecting its own config normally exits 2 earlier
+        # (the `except UnknownFinisherKind` around that call, or the warn/drop
+        # inside it). This still catches a genuine cross-workflow finisher
+        # conflict — two served workflows binding the same step differently —
+        # which only `build()` itself can see (see `_open_issue` above for the
+        # config-rejection shape).
         print(f"error: {error}", file=sys.stderr)
         return 2
     except ProcessValidationError as error:

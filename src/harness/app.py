@@ -79,16 +79,38 @@ named constant so `validate_workflow_finishers` doesn't need to duplicate
 `build()`'s own `landing`/`verify` wiring just to prove that."""
 
 
+class UnknownFinisherKind(ValueError):
+    """Raised by `validate_workflow_finishers` when a binding names a finisher
+    kind that isn't registered anywhere — as opposed to a plain `ValueError`,
+    raised when the kind *is* known but the factory rejects the binding's own
+    `config` (e.g. `open-issue` with no `label`).
+
+    The distinction is the operator's governing rule: an unknown kind is a
+    value that is *set and wrong* (a typo, or a binding authored against a
+    finisher that was never registered — e.g. `label-issue` when
+    `GITHUB_TOKEN` isn't set) and must fail the whole run, exactly as
+    `build()` itself has always failed it (invariant #41). A known kind with
+    incomplete config is closer to a *missing* value — that one binding is
+    unwirable, but nothing about the finisher registry itself is wrong — so
+    `cli._validate_served_workflows` only ever drops the served workflow with
+    a warning for a plain `ValueError`; it re-raises `UnknownFinisherKind`
+    (a `ValueError` subclass, so `isinstance` still holds for any caller that
+    only checks the base type) unchanged, so it keeps failing the whole
+    build via `cli._run`'s own `except UnknownFinisherKind` — see ADR-0022.
+    """
+
+
 def validate_workflow_finishers(
     workflow: Workflow,
     finishers: dict[str, Callable[[str, dict, Callable[[], ConsumerBehavior]], ConsumerBehavior]]
     | None = None,
 ) -> None:
-    """Raise `ValueError` if `workflow` binds a step to a finisher kind that
-    cannot be wired against `finishers` — the same custom registry `cli._run`
-    hands `build()` (e.g. `open-issue`, `label-issue`). Two failure shapes:
-    an unknown kind, or a factory that raises while building it (`open-issue`
-    fails this way when a binding's config carries no `label`).
+    """Raise `UnknownFinisherKind` if `workflow` binds a step to a finisher
+    kind that is not registered anywhere, or a plain `ValueError` if the kind
+    *is* registered but its factory rejects the binding's own `config` —
+    against `finishers`, the same custom registry `cli._run` hands `build()`
+    (e.g. `open-issue`, `label-issue`). `open-issue` fails the second way when
+    a binding's config carries no `label`.
 
     A lighter-weight mirror of the per-step resolution `build()` performs
     eagerly while constructing its consumers (`behavior_for`/the inline
@@ -107,10 +129,13 @@ def validate_workflow_finishers(
 
     `cli._run` calls this once per served workflow, before calling `build()`,
     to decide which workflows are wirable at all: a workflow whose own
-    binding can't be wired is dropped from the served set with a warning
-    rather than failing the whole run — see ADR-0022.
+    binding fails with a plain `ValueError` (known kind, bad config) is
+    dropped from the served set with a warning rather than failing the whole
+    run; `UnknownFinisherKind` propagates unchanged and still fails the whole
+    run, exactly as `build()`'s own check always has — see ADR-0022.
     """
     registry = finishers or {}
+    known_kinds = _ALWAYS_WIRABLE_FINISHER_KINDS | set(registry)
 
     def _inert_inner() -> None:
         return None
@@ -120,8 +145,9 @@ def validate_workflow_finishers(
             continue
         factory = registry.get(binding.kind)
         if factory is None:
-            raise ValueError(
-                f"step {step!r} names unknown finisher kind {binding.kind!r}"
+            raise UnknownFinisherKind(
+                f"step {step!r} names unknown finisher kind {binding.kind!r} "
+                f"(known: {', '.join(sorted(known_kinds))})"
             )
         factory(step, binding.config, _inert_inner)
 
@@ -423,6 +449,7 @@ def build(
     issue_import_factory: IssueImportFactory | None = None,
     repository_registry: RepositoryRegistry | None = None,
     command_runner: CommandRunner | None = None,
+    dropped_workflows: set[str] | None = None,
 ) -> Harness:
     layout = HarnessLayout(Path(root))
     events = events or StdoutEventSink()
@@ -645,7 +672,7 @@ def build(
     # from inside behavior_for once tasks are already flowing.
     for step, binding in step_bindings.items():
         if binding.kind not in finisher_registry:
-            raise ValueError(
+            raise UnknownFinisherKind(
                 f"step {step!r} names unknown finisher kind {binding.kind!r} "
                 f"(known: {', '.join(sorted(finisher_registry))})"
             )
@@ -762,6 +789,14 @@ def build(
         worktree_root=str(layout.worktrees),
         known_targets=known_targets,
         known_repositories=known_repositories,
+        # A Process targeting a workflow `cli._run` already dropped from the
+        # served set (an unwirable finisher binding, ADR-0022) is made inert
+        # here too, rather than failing the whole build the way an
+        # unresolvable target normally would: the workflow itself is already
+        # the reason it can't work, not a mistake in this file. Callers other
+        # than `cli._run` (e.g. `build()` invoked directly, as most tests do)
+        # pass nothing here and get the unchanged, fully fail-fast behavior.
+        dropped_workflows=dropped_workflows,
     )
     # `all_sources` feeds `pollers` ONLY — never `SourceReflectorSink`, which
     # was already constructed above, over the caller's own `sources`. Safe:

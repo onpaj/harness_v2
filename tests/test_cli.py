@@ -263,36 +263,67 @@ def test_a_binding_without_a_label_is_dropped_from_the_served_set(monkeypatch, t
     assert set(captured["served_names"]) == {DEFAULT_WORKFLOW, DEFAULT_HEAL_WORKFLOW, "resolver"}
 
 
-def test_the_stale_pre_generic_heal_workflow_is_dropped_not_fatal(monkeypatch, tmp_path, capsys):
-    """The exact reference-install failure: `workflows/heal.json` still
-    carrying the pre-generic string form `"file-issue": "open-issue"`
-    (`FinisherBinding(kind="open-issue")`, an empty config) fails the
-    `open-issue` factory's own `label` check exactly like
-    `test_a_binding_without_a_label_is_dropped_from_the_served_set` above,
-    just via the shipped `heal` workflow rather than a hand-authored one.
-    Before ADR-0022 this exited 2 (`error: step 'file-issue' binds the
-    'open-issue' finisher without a 'label'`) and, under the launchd
-    service's `KeepAlive=true`, crash-looped. Now it's a warning and `heal`
-    is simply not served — everything else still runs."""
+def _make_stale_heal_root(tmp_path) -> Path:
+    """`harness init`, then corrupt the seeded `workflows/heal.json` into the
+    pre-generic string form `"file-issue": "open-issue"` — the exact
+    reference-install shape (`FinisherBinding(kind="open-issue")`, an empty
+    config) that fails the `open-issue` factory's own `label` check. Returns
+    the workflow file's path."""
     main(["init", "--root", str(tmp_path)])
     heal_path = tmp_path / "workflows" / "heal.json"
     definition = json.loads(heal_path.read_text())
     definition["finishers"] = {"file-issue": "open-issue"}
     heal_path.write_text(json.dumps(definition))
+    return heal_path
+
+
+def _autoheal_still_inert(harness) -> bool:
+    """Whether the compiled `autoheal.json` process is nowhere among
+    `harness.pollers` — used below to confirm the dropped `heal` workflow's
+    dependent Process was skipped rather than compiled (which would either
+    crash the build or, worse, silently resolve by accident through the
+    `heal` *agent* catalog entry sharing the workflow's name)."""
+    return not any(
+        getattr(poller, "_source", None) is not None
+        and getattr(poller._source, "kind", None) == "scheduled:autoheal"
+        for poller in harness.pollers
+    )
+
+
+@pytest.mark.parametrize("agent", ["claude", "dummy"])
+def test_the_stale_pre_generic_heal_workflow_is_dropped_not_fatal(
+    monkeypatch, tmp_path, capsys, agent
+):
+    """The exact reference-install failure: `workflows/heal.json` still
+    carrying the pre-generic string form `"file-issue": "open-issue"` fails
+    the `open-issue` factory's own `label` check exactly like
+    `test_a_binding_without_a_label_is_dropped_from_the_served_set` above,
+    just via the shipped `heal` workflow rather than a hand-authored one.
+    Before ADR-0022 this exited 2 (`error: step 'file-issue' binds the
+    'open-issue' finisher without a 'label'`) and, under the launchd
+    service's `KeepAlive=true`, crash-looped. Now it's a warning and `heal`
+    is simply not served — everything else still runs.
+
+    `build()` is deliberately NOT mocked here (unlike the earlier revision of
+    this test): mocking it out proved nothing about the composite path — it
+    stayed green even when `build()` itself rejected `processes/autoheal.json`
+    outright, because `autoheal.json` targets `{"workflow": "heal"}` and
+    `heal` also happens to be an agent name in the default catalog
+    (`agents/heal.json`), a coincidence nothing pins. Only `serve` is
+    monkeypatched, as a belt-and-suspenders guard against starting a real
+    server / binding a port — `build()` runs for real and must not raise for
+    either `--agent claude` or `--agent dummy` (no catalog at all), which is
+    exactly the distinction the reviewer's bug depended on."""
+    heal_path = _make_stale_heal_root(tmp_path)
     captured = {}
 
-    def fake_build(*args, **kwargs):
-        captured["served_names"] = args[1]
-        return object()
-
     async def fake_serve(harness, port, poll_interval, source_interval=30.0, pr_poll_interval=0.0, reconcile_interval=300.0, registry=None):
-        pass
+        captured["harness"] = harness
 
-    monkeypatch.setattr("harness.cli.build", fake_build)
     monkeypatch.setattr("harness.cli.serve", fake_serve)
     capsys.readouterr()
 
-    exit_code = main(["run", "--root", str(tmp_path)])
+    exit_code = main(["run", "--root", str(tmp_path), "--agent", agent])
     err = capsys.readouterr().err
 
     assert exit_code == 0  # was 2 before ADR-0022
@@ -300,8 +331,105 @@ def test_the_stale_pre_generic_heal_workflow_is_dropped_not_fatal(monkeypatch, t
     assert DEFAULT_HEAL_WORKFLOW in err
     assert str(heal_path) in err
     assert "label" in err
-    assert DEFAULT_HEAL_WORKFLOW not in captured["served_names"]
-    assert set(captured["served_names"]) == {DEFAULT_WORKFLOW, "resolver"}
+    harness = captured["harness"]
+    assert DEFAULT_HEAL_WORKFLOW not in harness.workflows
+    assert set(harness.workflows) == {DEFAULT_WORKFLOW, "resolver"}
+    # Fix 2: the seeded autoheal Process targets the now-dropped `heal`
+    # workflow, so it must be skipped rather than crashing `build()` with
+    # "not a known workflow or step" — the same warning above names it.
+    assert "autoheal.json" in err
+    assert _autoheal_still_inert(harness)
+
+
+def test_the_stale_pre_generic_heal_workflow_is_dropped_not_fatal_with_no_heal_agent(
+    monkeypatch, tmp_path, capsys
+):
+    """The reviewer's third reproduction: with `agents/heal.json` removed
+    entirely, `--agent claude` no longer has an accidental `heal` *agent*
+    name to fall back on for `_parse_target`'s membership test — before
+    Fix 2 this exited 2 (`process autoheal.json targets 'heal', which is not
+    a known workflow or step`) even though the workflow drop above is
+    working exactly as intended. It must exit 0 the same as the parametrized
+    cases above."""
+    _make_stale_heal_root(tmp_path)
+    (tmp_path / "agents" / "heal.json").unlink()
+    captured = {}
+
+    async def fake_serve(harness, port, poll_interval, source_interval=30.0, pr_poll_interval=0.0, reconcile_interval=300.0, registry=None):
+        captured["harness"] = harness
+
+    monkeypatch.setattr("harness.cli.serve", fake_serve)
+    capsys.readouterr()
+
+    exit_code = main(["run", "--root", str(tmp_path), "--agent", "claude"])
+
+    assert exit_code == 0
+    harness = captured["harness"]
+    assert DEFAULT_HEAL_WORKFLOW not in harness.workflows
+    assert _autoheal_still_inert(harness)
+
+
+def test_unknown_finisher_kind_still_fails_the_whole_run(monkeypatch, tmp_path, capsys):
+    """The other side of ADR-0022's warn/fail split: an unknown finisher
+    kind is a value that is *set and wrong* (a typo, or a binding naming a
+    kind nothing ever registered) — not a missing one — so it must still
+    fail the whole run exactly as before Fix 1 restored this. Reproduces the
+    reviewer's exact finding: a workflow binding `{"kind":
+    "call-a-webhook"}` used to exit 0 with the workflow silently dropped."""
+    main(["init", "--root", str(tmp_path)])
+    path = tmp_path / "workflows" / "review.json"
+    path.write_text(json.dumps({
+        "name": "review",
+        "start": "review",
+        "transitions": [{"from": "review", "on": "done", "to": "end"}],
+        "finishers": {"review": {"kind": "call-a-webhook"}},
+    }))
+
+    async def fake_serve(harness, port, poll_interval, source_interval=30.0, pr_poll_interval=0.0, reconcile_interval=300.0, registry=None):
+        raise AssertionError("serve() must not be reached")
+
+    monkeypatch.setattr("harness.cli.serve", fake_serve)
+    capsys.readouterr()
+
+    assert main(["run", "--root", str(tmp_path)]) == 2
+    err = capsys.readouterr().err
+    assert err.startswith("error:")
+    assert "call-a-webhook" in err
+    # The one hint that tells an operator a kind is token-gated rather than
+    # misspelled — `build()`'s own diagnostic, restored here too.
+    assert "known: open-issue, open-pr, verify" in err
+
+
+def test_label_issue_binding_without_a_token_still_fails_the_whole_run(
+    monkeypatch, tmp_path, capsys
+):
+    """`label-issue` is only registered as a finisher kind when `GITHUB_TOKEN`
+    is set (invariant #41) — so a workflow binding it during a credential
+    outage must still fail the whole run with the "unknown finisher kind"
+    diagnostic (naming `label-issue` as unknown, not just missing config),
+    exactly as it did before Fix 1. This is what Fix 1 restores "by
+    construction" per the review, confirmed here directly."""
+    main(["init", "--root", str(tmp_path)])
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    path = tmp_path / "workflows" / "review.json"
+    path.write_text(json.dumps({
+        "name": "review",
+        "start": "review",
+        "transitions": [{"from": "review", "on": "done", "to": "end"}],
+        "finishers": {"review": {"kind": "label-issue"}},
+    }))
+
+    async def fake_serve(harness, port, poll_interval, source_interval=30.0, pr_poll_interval=0.0, reconcile_interval=300.0, registry=None):
+        raise AssertionError("serve() must not be reached")
+
+    monkeypatch.setattr("harness.cli.serve", fake_serve)
+    capsys.readouterr()
+
+    assert main(["run", "--root", str(tmp_path)]) == 2
+    err = capsys.readouterr().err
+    assert err.startswith("error:")
+    assert "label-issue" in err
+    assert "known: open-issue, open-pr, verify" in err
 
 
 def test_run_reports_an_unregistered_process_repository_cleanly(monkeypatch, tmp_path, capsys):

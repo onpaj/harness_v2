@@ -3,7 +3,12 @@ import json
 
 import pytest
 
-from harness.app import HarnessLayout, build, validate_workflow_finishers
+from harness.app import (
+    HarnessLayout,
+    UnknownFinisherKind,
+    build,
+    validate_workflow_finishers,
+)
 from harness.behaviors.landing import LandingBehavior
 from harness.drivers.fake_forge import FakeForge
 from harness.drivers.memory import (
@@ -972,18 +977,28 @@ def test_validate_workflow_finishers_passes_a_wirable_binding():
     workflow = _one_step_workflow(
         "file-issue", FinisherBinding(kind="open-issue", config={"label": "x"})
     )
+    calls = []
 
     def factory(step, config, inner):
         assert config["label"] == "x"
+        calls.append((step, config))
         return RecordingFinisher()
 
     validate_workflow_finishers(workflow, {"open-issue": factory})
+    # A call-count assertion, not just an in-factory one: without it this test
+    # stays green even if `validate_workflow_finishers` became a no-op for a
+    # known kind and never called the factory at all.
+    assert calls == [("file-issue", {"label": "x"})]
 
 
 def test_validate_workflow_finishers_raises_when_the_factory_raises():
     """Mirrors the reference-install bug: the old string form `"open-issue"`
     parses to an empty config, and the real factory raises over the missing
-    `label` — this must propagate, not be swallowed."""
+    `label` — this must propagate, not be swallowed. It must also NOT be an
+    `UnknownFinisherKind` — `open-issue` is a perfectly well-known kind here,
+    only its config is incomplete, and `cli._validate_served_workflows` tells
+    the two shapes apart by this exact type, not by matching on message text
+    (warn-and-drop for this one, fail-the-whole-run for the other)."""
     workflow = _one_step_workflow("file-issue", FinisherBinding(kind="open-issue"))
 
     def factory(step, config, inner):
@@ -991,15 +1006,23 @@ def test_validate_workflow_finishers_raises_when_the_factory_raises():
             raise ValueError(f"step {step!r} has no label")
         return RecordingFinisher()
 
-    with pytest.raises(ValueError, match="file-issue"):
+    with pytest.raises(ValueError, match="file-issue") as excinfo:
         validate_workflow_finishers(workflow, {"open-issue": factory})
+    assert not isinstance(excinfo.value, UnknownFinisherKind)
 
 
 def test_validate_workflow_finishers_raises_on_unknown_kind():
+    """A distinct type (`UnknownFinisherKind`, still a `ValueError` so any
+    caller matching on the base type keeps working) — an unknown kind is a
+    value that's *set and wrong* (invariant: fails fast), unlike a known kind
+    with incomplete config (invariant: only that binding is unwirable). The
+    enumeration mirrors `build()`'s own diagnostic (`(known: ...)`), the hint
+    that tells an operator a kind is token-gated rather than misspelled."""
     workflow = _one_step_workflow("publish", FinisherBinding(kind="call-api"))
 
-    with pytest.raises(ValueError, match="call-api"):
-        validate_workflow_finishers(workflow, {})
+    with pytest.raises(UnknownFinisherKind, match="call-api") as excinfo:
+        validate_workflow_finishers(workflow, {"open-issue": lambda *a: None})
+    assert "known: open-issue, open-pr, verify" in str(excinfo.value)
 
 
 def test_validate_workflow_finishers_never_raises_for_the_builtin_kinds():

@@ -117,9 +117,26 @@ exactly one meaning.
   run` serves every file in `workflows/` unconditionally: a launchd-supervised
   service restarting into the same fatal error on every attempt is
   functionally "ignoring" the rest of a perfectly good root, just more
-  loudly. What still fails the whole build, unchanged: an unknown finisher
-  kind, or a genuine binding conflict between two workflows that both
-  survive that pre-filter.
+  loudly. **Revised again, for the same reason as the note above**: the
+  first cut of this pre-filter caught every `ValueError`
+  `validate_workflow_finishers` could raise, including an *unknown* kind —
+  so `{"kind": "call-a-webhook"}` (or `label-issue` bound while
+  `GITHUB_TOKEN` is unset) also silently dropped its workflow instead of
+  failing the run, which is the wrong side of the operator's own rule: an
+  unknown kind is a value that is *set and wrong*, not a missing one.
+  Fixed by giving the unknown-kind case a distinct type
+  (`UnknownFinisherKind`, still a `ValueError` subclass) that
+  `_validate_served_workflows` re-raises instead of catching — so what
+  still fails the whole build is: an unknown finisher kind (now caught at
+  this very pre-filter, before `build()` is even reached, not merely "if it
+  survives" the filter), or a genuine binding conflict between two
+  workflows that both survive it (only `build()` itself can see that one,
+  since it's a cross-workflow fact). A `processes/*.json` Process that
+  targets only a workflow this filter drops is skipped right along with it
+  (a warning naming both, not a `ProcessValidationError`) — otherwise
+  `heal.json`'s drop would just move the same crash-loop one layer down,
+  into `FilesystemProcessRepository.build()` rejecting `autoheal.json`'s
+  `{"workflow": "heal"}` target as unresolvable.
 - The `workflow 'resolver' does not exist` crash-loop class is gone: serving
   what exists cannot name a file that is absent.
 - **Self-healing is now active by default, not opt-in.** Every `harness init`
