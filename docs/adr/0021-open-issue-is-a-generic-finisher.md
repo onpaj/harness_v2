@@ -1,4 +1,4 @@
-# ADR-0020: `open-issue` is a generic finisher; serving is data
+# ADR-0021: `open-issue` is a generic finisher; serving is data
 
 Status: Accepted
 

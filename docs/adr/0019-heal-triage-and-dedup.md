@@ -126,7 +126,7 @@ here as one shape:
   `warning:` to stderr (never a hard error — the rest of the harness still
   starts) when the configured `heal_repo` isn't in the registry.
 
-  > **Superseded 2026-07-26 (ADR-0020).** There is no `HARNESS_HEAL_REPO` or
+  > **Superseded 2026-07-26 (ADR-0021).** There is no `HARNESS_HEAL_REPO` or
   > `heal_repo` variable to drift any more: `--heal-repo`/`HARNESS_HEAL_REPO`
   > were removed, and `processes/autoheal.json`'s `action.params.repository`
   > is now the single place self-healing names a repo — both the check and

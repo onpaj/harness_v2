@@ -1403,15 +1403,15 @@ repos.json *name* now, not an owner/repo slug."
 ### Task 7: Document the decision
 
 **Files:**
-- Create: `docs/adr/0020-open-issue-is-a-generic-finisher.md`
+- Create: `docs/adr/0021-open-issue-is-a-generic-finisher.md`
 - Modify: `CLAUDE.md` (invariants 24, 26, 39)
 
 - [ ] **Step 1: Write the ADR**
 
-Create `docs/adr/0020-open-issue-is-a-generic-finisher.md`:
+Create `docs/adr/0021-open-issue-is-a-generic-finisher.md`:
 
 ```markdown
-# ADR-0020: `open-issue` is a generic finisher; serving is data
+# ADR-0021: `open-issue` is a generic finisher; serving is data
 
 Status: Accepted
 
@@ -1479,16 +1479,16 @@ was silently inert.
 - **Invariant 26:** rewrite the `file-issue` sentence — the `open-issue` finisher is now generic, bound as `{"kind": "open-issue", "from_step": "heal", "label": "harness:self-heal"}`, reads a fenced json draft array, and can file 0..N issues. Keep the "never the LLM" claim; it is unchanged and is the point.
 - **Invariant 39:** the sentence about `build()` losing `heal`/`issue_tracker` stands, but drop any reference to `--heal-repo` gating.
 - Search for and fix every other mention: `grep -rn "heal-repo\|HARNESS_HEAL_REPO\|--all-workflows\|--workflow" CLAUDE.md README.md docs/`.
-- **Sweep the earlier ADRs, which are now stale.** `docs/adr/0019-heal-triage-and-dedup.md:108-127` still says the check's `repository` param "must equal `HARNESS_HEAL_REPO`" and is "wired from the same `heal_repo` variable in `cli.py`" — both gone. Grep `docs/adr/` for `heal_repo`, `HARNESS_HEAL_REPO`, `harness-heal` and `--workflow` and correct every hit. An ADR records a decision at a point in time, so prefer a dated "superseded by ADR-0020" note over rewriting history where the original statement was true when written.
-- **Record the posture change in ADR-0020.** Self-healing is now **active by default**: `harness init` seeds a live `processes/autoheal.json` at a 30s interval on every root, where before it was dormant until `--heal-repo` was passed. It files nothing until `action.params.repository` names a registered repo — which now fails loudly at process-compile time rather than silently. That is an operator-visible behavior change and belongs in the Consequences section.
+- **Sweep the earlier ADRs, which are now stale.** `docs/adr/0019-heal-triage-and-dedup.md:108-127` still says the check's `repository` param "must equal `HARNESS_HEAL_REPO`" and is "wired from the same `heal_repo` variable in `cli.py`" — both gone. Grep `docs/adr/` for `heal_repo`, `HARNESS_HEAL_REPO`, `harness-heal` and `--workflow` and correct every hit. An ADR records a decision at a point in time, so prefer a dated "superseded by ADR-0021" note over rewriting history where the original statement was true when written.
+- **Record the posture change in ADR-0021.** Self-healing is now **active by default**: `harness init` seeds a live `processes/autoheal.json` at a 30s interval on every root, where before it was dormant until `--heal-repo` was passed. It files nothing until `action.params.repository` names a registered repo — which now fails loudly at process-compile time rather than silently. That is an operator-visible behavior change and belongs in the Consequences section.
 - **Fix the `issue_drafts.py` module-map line.** Task 2 added a bullet saying it "knows only `models`" — inaccurate: the module imports nothing from the `harness` package at all. Reword to say exactly that, matching how `models`/`ids`/`artifacts_layout` are described.
 - **Also sweep the docs site**, which the module map does not cover: `grep -rn "harness-heal\|heal-repo\|HARNESS_HEAL_REPO" src/harness_docs_site/`. Task 1's reviewer found `src/harness_docs_site/architecture.py:949` still describing `GithubIssueTracker` as deduping "by an embedded `harness-heal` marker" — the prefix is now `harness-issue:`. Fix that line and any sibling it finds.
 
 - [ ] **Step 3: Commit**
 
 ```bash
-git add docs/adr/0020-open-issue-is-a-generic-finisher.md CLAUDE.md README.md docs/
-git commit -m "docs: ADR-0020, generic open-issue finisher and data-driven serving"
+git add docs/adr/0021-open-issue-is-a-generic-finisher.md CLAUDE.md README.md docs/
+git commit -m "docs: ADR-0021, generic open-issue finisher and data-driven serving"
 ```
 
 ---

@@ -472,7 +472,7 @@ MODEL = ArchitectureModel(
                     adrs=(
                         "0016-finisher-as-data",
                         "0018-healing-as-a-process",
-                        "0020-open-issue-is-a-generic-finisher",
+                        "0021-open-issue-is-a-generic-finisher",
                     ),
                 ),
                 Driver(
@@ -941,7 +941,7 @@ MODEL = ArchitectureModel(
                 "(repo, scope_label, marker), so a re-run of the same heal "
                 "task never re-files the same draft."
             ),
-            adrs=("0018-healing-as-a-process", "0020-open-issue-is-a-generic-finisher"),
+            adrs=("0018-healing-as-a-process", "0021-open-issue-is-a-generic-finisher"),
             sources=(
                 "src/harness/ports/issues.py",
                 "src/harness/behaviors/open_issue.py",

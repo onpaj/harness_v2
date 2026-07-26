@@ -76,7 +76,7 @@ loop. `Healer`, `HealConfig`, and `Harness._heal_loop` are removed.
   unconditionally, but not `autoheal.json` (a bare init has no repo to file
   against).
 
-  > **Superseded 2026-07-26 (ADR-0020).** `--heal-repo`/`HARNESS_HEAL_REPO` were
+  > **Superseded 2026-07-26 (ADR-0021).** `--heal-repo`/`HARNESS_HEAL_REPO` were
   > removed outright, not kept as a generator: `harness run` no longer accepts
   > the flag, `_ensure_autoheal_process` runs unconditionally from `harness
   > init` (not from `run`), and it seeds `action.params: {}` rather than a
