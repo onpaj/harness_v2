@@ -22,6 +22,7 @@ from harness.cli import (
     _issue_import_factory,
     _process_check_factories,
     _slack_sinks,
+    _warn_missing_autoheal_repository,
     main,
     serve,
 )
@@ -220,13 +221,15 @@ def test_run_wires_open_issue_finisher_and_tracker(monkeypatch, tmp_path):
         behavior._slug_for("some-unregistered-repo-name")
 
 
-def test_a_binding_without_a_label_fails_the_build(monkeypatch, tmp_path, capsys):
-    """`build()` calls the "open-issue" factory eagerly for every step of a
-    *served* workflow (invariant #41). `review` is served automatically
-    because its definition is on disk — the served set is every workflow
-    file under `workflows/` — so the missing-label check runs and the
-    failure surfaces before `serve()` is ever reached, so no real server is
-    started."""
+def test_a_binding_without_a_label_is_dropped_from_the_served_set(monkeypatch, tmp_path, capsys):
+    """ADR-0022: a served workflow whose finisher binding can't be wired
+    (here, `open-issue` without the `label` its factory requires) no longer
+    fails the whole run — `_validate_served_workflows` catches it in
+    `cli._run`, before `build()` ever sees it, and drops just that workflow
+    with a warning naming the file, the step and the reason. `review` is
+    served automatically because its definition is on disk (the served set
+    is every workflow file under `workflows/`), so this reproduces without
+    any extra wiring; `development`/`resolver`/`heal` stay served."""
     main(["init", "--root", str(tmp_path)])
     path = tmp_path / "workflows" / "review.json"
     path.write_text(json.dumps({
@@ -235,12 +238,70 @@ def test_a_binding_without_a_label_fails_the_build(monkeypatch, tmp_path, capsys
         "transitions": [{"from": "review", "on": "done", "to": "end"}],
         "finishers": {"review": {"kind": "open-issue"}},
     }))
+    captured = {}
+
+    def fake_build(*args, **kwargs):
+        captured["served_names"] = args[1]
+        return object()
+
+    async def fake_serve(harness, port, poll_interval, source_interval=30.0, pr_poll_interval=0.0, reconcile_interval=300.0, registry=None):
+        pass
+
+    monkeypatch.setattr("harness.cli.build", fake_build)
+    monkeypatch.setattr("harness.cli.serve", fake_serve)
     capsys.readouterr()
 
-    assert main(["run", "--root", str(tmp_path)]) == 2
+    assert main(["run", "--root", str(tmp_path)]) == 0
+    err = capsys.readouterr().err
+    assert err.startswith("warning:")
+    assert "review" in err
+    assert str(path) in err
     # Specifically the missing-`label` check, not merely "unknown kind" —
     # `open-issue` must already be a known finisher kind here.
-    assert "label" in capsys.readouterr().err
+    assert "label" in err
+    assert "review" not in captured["served_names"]
+    assert set(captured["served_names"]) == {DEFAULT_WORKFLOW, DEFAULT_HEAL_WORKFLOW, "resolver"}
+
+
+def test_the_stale_pre_generic_heal_workflow_is_dropped_not_fatal(monkeypatch, tmp_path, capsys):
+    """The exact reference-install failure: `workflows/heal.json` still
+    carrying the pre-generic string form `"file-issue": "open-issue"`
+    (`FinisherBinding(kind="open-issue")`, an empty config) fails the
+    `open-issue` factory's own `label` check exactly like
+    `test_a_binding_without_a_label_is_dropped_from_the_served_set` above,
+    just via the shipped `heal` workflow rather than a hand-authored one.
+    Before ADR-0022 this exited 2 (`error: step 'file-issue' binds the
+    'open-issue' finisher without a 'label'`) and, under the launchd
+    service's `KeepAlive=true`, crash-looped. Now it's a warning and `heal`
+    is simply not served — everything else still runs."""
+    main(["init", "--root", str(tmp_path)])
+    heal_path = tmp_path / "workflows" / "heal.json"
+    definition = json.loads(heal_path.read_text())
+    definition["finishers"] = {"file-issue": "open-issue"}
+    heal_path.write_text(json.dumps(definition))
+    captured = {}
+
+    def fake_build(*args, **kwargs):
+        captured["served_names"] = args[1]
+        return object()
+
+    async def fake_serve(harness, port, poll_interval, source_interval=30.0, pr_poll_interval=0.0, reconcile_interval=300.0, registry=None):
+        pass
+
+    monkeypatch.setattr("harness.cli.build", fake_build)
+    monkeypatch.setattr("harness.cli.serve", fake_serve)
+    capsys.readouterr()
+
+    exit_code = main(["run", "--root", str(tmp_path)])
+    err = capsys.readouterr().err
+
+    assert exit_code == 0  # was 2 before ADR-0022
+    assert "warning:" in err
+    assert DEFAULT_HEAL_WORKFLOW in err
+    assert str(heal_path) in err
+    assert "label" in err
+    assert DEFAULT_HEAL_WORKFLOW not in captured["served_names"]
+    assert set(captured["served_names"]) == {DEFAULT_WORKFLOW, "resolver"}
 
 
 def test_run_reports_an_unregistered_process_repository_cleanly(monkeypatch, tmp_path, capsys):
@@ -1020,6 +1081,11 @@ def test_run_without_a_default_workflow_ignores_github_workflow_default(
     main(["init", "--root", str(tmp_path)])
     (tmp_path / "workflows" / f"{DEFAULT_WORKFLOW}.json").unlink()
     (tmp_path / "workflows" / "hotfix.json").write_text(json.dumps(HOTFIX_DEFINITION))
+    # Unrelated to this test's own regression: the seeded, repository-less
+    # `processes/autoheal.json` (ADR-0022) would otherwise print its own
+    # startup warning here and break the `err == ""` assertion below, which
+    # exists to check for the *github-workflow* regression specifically.
+    (tmp_path / "processes" / "autoheal.json").unlink()
     captured = {}
 
     async def fake_serve(harness, port, poll_interval, source_interval=30.0, pr_poll_interval=0.0, reconcile_interval=300.0, registry=None):
@@ -1639,6 +1705,87 @@ def test_slack_sinks_silent_when_no_process_declares_slack(
 
     assert sinks == []
     assert capsys.readouterr().err == ""
+
+
+def test_warn_missing_autoheal_repository_warns_for_the_seeded_empty_default(
+    capsys, tmp_path
+):
+    """`harness init` seeds `processes/autoheal.json` with `action.params ==
+    {}` (invariant #25) — valid, and must stay valid, but self-healing then
+    runs on every failure and files nothing. This is the warning ADR-0022
+    adds for that case."""
+    main(["init", "--root", str(tmp_path)])
+    capsys.readouterr()
+
+    _warn_missing_autoheal_repository(tmp_path / "processes")
+
+    err = capsys.readouterr().err
+    assert err.startswith("warning:")
+    assert "autoheal.json" in err
+    assert "action.params.repository" in err
+
+
+def test_warn_missing_autoheal_repository_silent_once_a_repository_is_set(
+    capsys, tmp_path
+):
+    main(["init", "--root", str(tmp_path)])
+    autoheal_path = tmp_path / "processes" / "autoheal.json"
+    definition = json.loads(autoheal_path.read_text())
+    definition["action"]["params"]["repository"] = "harness_v2"
+    autoheal_path.write_text(json.dumps(definition))
+    capsys.readouterr()
+
+    _warn_missing_autoheal_repository(tmp_path / "processes")
+
+    assert capsys.readouterr().err == ""
+
+
+def test_warn_missing_autoheal_repository_ignores_non_failed_tasks_processes(
+    capsys, tmp_path
+):
+    """A process with no `action.params.repository` that isn't `failed-tasks`
+    is none of this warning's business — e.g. `github-issues` has no
+    `repository` param at all."""
+    (tmp_path / "processes").mkdir()
+    (tmp_path / "processes" / "triage.json").write_text(json.dumps({
+        "trigger": {"interval": "1h"},
+        "action": {"check": "github-issues", "params": {}},
+        "target": {"workflow": "default"},
+    }))
+    capsys.readouterr()
+
+    _warn_missing_autoheal_repository(tmp_path / "processes")
+
+    assert capsys.readouterr().err == ""
+
+
+def test_warn_missing_autoheal_repository_empty_for_a_missing_processes_dir(
+    capsys, tmp_path
+):
+    _warn_missing_autoheal_repository(tmp_path / "processes")
+
+    assert capsys.readouterr().err == ""
+
+
+def test_run_warns_on_the_seeded_repository_less_autoheal_process(
+    monkeypatch, tmp_path, capsys
+):
+    """End to end through `main(["run", ...])`: the seeded root's
+    `processes/autoheal.json` (`action.params == {}`) triggers the startup
+    warning, and the run still proceeds (exit 0) — never fatal."""
+    main(["init", "--root", str(tmp_path)])
+
+    async def fake_serve(harness, port, poll_interval, source_interval=30.0, pr_poll_interval=0.0, reconcile_interval=300.0, registry=None):
+        pass
+
+    monkeypatch.setattr("harness.cli.serve", fake_serve)
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    capsys.readouterr()
+
+    assert main(["run", "--root", str(tmp_path)]) == 0
+    err = capsys.readouterr().err
+    assert "warning:" in err
+    assert "autoheal.json" in err
 
 
 def test_run_has_a_no_github_source_flag_defaulting_off():

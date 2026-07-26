@@ -3,7 +3,7 @@ import json
 
 import pytest
 
-from harness.app import HarnessLayout, build
+from harness.app import HarnessLayout, build, validate_workflow_finishers
 from harness.behaviors.landing import LandingBehavior
 from harness.drivers.fake_forge import FakeForge
 from harness.drivers.memory import (
@@ -14,7 +14,7 @@ from harness.drivers.memory import (
     MemoryForge,
     MemoryRepositoryRegistry,
 )
-from harness.models import ARCHIVED, DONE, BehaviorResult, Task
+from harness.models import ARCHIVED, DONE, END, BehaviorResult, FinisherBinding, Task, Transition, Workflow
 from harness.ports.agent import AgentRun, AgentSpec
 from harness.ports.behavior import ConsumerBehavior
 from harness.ports.board import UNKNOWN_WORKFLOW
@@ -953,6 +953,83 @@ def test_caller_supplied_finisher_registry_entry_is_used(tmp_path):
 
     by_actor = {consumer.actor: consumer for consumer in harness.consumers}
     assert by_actor["consumer:publish"]._behavior is recorder
+
+
+# --- ADR-0022: pre-flight finisher-binding validation (cli._run's served-set
+# filter, before build()'s own eager fail-fast) -------------------------------
+
+
+def _one_step_workflow(step: str, binding: FinisherBinding) -> Workflow:
+    return Workflow(
+        name="w",
+        start=step,
+        transitions=(Transition(from_step=step, on="done", to_step=END),),
+        finishers={step: binding},
+    )
+
+
+def test_validate_workflow_finishers_passes_a_wirable_binding():
+    workflow = _one_step_workflow(
+        "file-issue", FinisherBinding(kind="open-issue", config={"label": "x"})
+    )
+
+    def factory(step, config, inner):
+        assert config["label"] == "x"
+        return RecordingFinisher()
+
+    validate_workflow_finishers(workflow, {"open-issue": factory})
+
+
+def test_validate_workflow_finishers_raises_when_the_factory_raises():
+    """Mirrors the reference-install bug: the old string form `"open-issue"`
+    parses to an empty config, and the real factory raises over the missing
+    `label` — this must propagate, not be swallowed."""
+    workflow = _one_step_workflow("file-issue", FinisherBinding(kind="open-issue"))
+
+    def factory(step, config, inner):
+        if not config.get("label"):
+            raise ValueError(f"step {step!r} has no label")
+        return RecordingFinisher()
+
+    with pytest.raises(ValueError, match="file-issue"):
+        validate_workflow_finishers(workflow, {"open-issue": factory})
+
+
+def test_validate_workflow_finishers_raises_on_unknown_kind():
+    workflow = _one_step_workflow("publish", FinisherBinding(kind="call-api"))
+
+    with pytest.raises(ValueError, match="call-api"):
+        validate_workflow_finishers(workflow, {})
+
+
+def test_validate_workflow_finishers_never_raises_for_the_builtin_kinds():
+    """`open-pr`/`verify` are always wirable — no factory needs to be
+    supplied for them, exactly as `build()`'s own default registry needs
+    none from the caller."""
+    workflow = Workflow(
+        name="w",
+        start="land",
+        transitions=(Transition(from_step="land", on="done", to_step=END),),
+        finishers={"land": FinisherBinding(kind="open-pr")},
+    )
+
+    validate_workflow_finishers(workflow, None)
+
+
+def test_validate_workflow_finishers_calls_inner_for_a_wrap_shaped_factory():
+    """A wrap-shaped finisher (like `label-issue`) calls its `inner` thunk
+    eagerly; the thunk this validator hands it is inert (returns `None`), so
+    the factory must not choke on that to prove its own kind/config
+    resolution works."""
+    workflow = _one_step_workflow("triage", FinisherBinding(kind="label-issue"))
+    seen = {}
+
+    def factory(step, config, inner):
+        seen["inner"] = inner()
+        return RecordingFinisher()
+
+    validate_workflow_finishers(workflow, {"label-issue": factory})
+    assert seen["inner"] is None
 
 
 # --- ADR-0018: process compilation moved inside build() ---------------------

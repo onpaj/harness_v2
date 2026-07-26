@@ -18,7 +18,7 @@ from pathlib import Path
 import uvicorn
 
 from harness.api.app import create_app
-from harness.app import LANDING_STEP, HarnessLayout, build
+from harness.app import LANDING_STEP, HarnessLayout, build, validate_workflow_finishers
 from harness.behaviors.open_issue import OpenIssueBehavior
 from harness.drivers.claude_cli import ClaudeCliRunner
 from harness.drivers.fake_forge import FakeForge
@@ -1044,6 +1044,46 @@ def _slack_sinks(declared_kinds: set[str]) -> list[TaskSource]:
     return []
 
 
+def _warn_missing_autoheal_repository(processes_root: Path) -> None:
+    """Startup warning — never fatal — for a `failed-tasks` process with no
+    `action.params.repository`: `harness init` seeds `processes/autoheal.json`
+    with `action.params == {}` (invariant #25), which is valid and stays
+    valid, but self-healing then runs on every failure — spending an agent
+    call on `heal` and one on `dedup` — and files nothing, because
+    `OpenIssueBehavior`'s `slug_for` has no repository to resolve. Read
+    straight off the raw JSON, like `_declared_sink_kinds` — this only ever
+    decides whether to print a warning, so it doesn't need to wait for a full
+    `compile_process` to know the field is missing.
+
+    A *present but wrong* `params.repository` is a different case entirely —
+    a typo, not "not configured yet" — and already fails loud at
+    process-compile time (`fs_processes._validate_action_repository_param`,
+    `ProcessValidationError`, exit 2); this function only ever handles the
+    absent case, per ADR-0022."""
+    if not processes_root.is_dir():
+        return
+    for path in sorted(processes_root.glob("*.json")):
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            continue
+        if not isinstance(raw, dict):
+            continue
+        action = raw.get("action")
+        if not isinstance(action, dict) or action.get("check") != "failed-tasks":
+            continue
+        params = action.get("params")
+        repository = params.get("repository") if isinstance(params, dict) else None
+        if not repository:
+            print(
+                f"warning: {path.name} enables self-healing (action.check == "
+                "'failed-tasks') with no action.params.repository set — it "
+                "will run heal/dedup on every failure but file nothing until "
+                "you point it at a repository name from repos.json",
+                file=sys.stderr,
+            )
+
+
 AUTOHEAL_PROCESS_DEFINITION = {
     "trigger": {"interval": "30s"},
     "action": {"check": "failed-tasks", "params": {}},
@@ -1507,6 +1547,54 @@ def _resolve_served_workflows(layout: HarnessLayout) -> tuple[str, ...]:
     return FilesystemWorkflowRepository(layout.workflows).names()
 
 
+def _validate_served_workflows(
+    layout: HarnessLayout,
+    wf_repo: FilesystemWorkflowRepository,
+    served_names: tuple[str, ...],
+    finishers: dict[str, Callable[[str, dict, Callable[[], ConsumerBehavior]], ConsumerBehavior]],
+) -> tuple[str, ...]:
+    """Drop a served workflow whose own finisher bindings can't be wired
+    against `finishers`, printing a `warning:` that names the file, the step
+    and the reason — instead of letting it take the whole run down.
+
+    `app.build()` still constructs a finisher eagerly for every bound step of
+    every served workflow it's handed, and still fails the *whole* run (exit
+    2) on the first one that can't be wired (invariant #41) — exactly right
+    for a genuine, operator-facing misconfiguration the operator is at a
+    prompt to fix. But `harness run` serves every `workflows/*.json` on disk
+    (ADR-0022), so a single stale file — e.g. the pre-generic string form
+    `"file-issue": "open-issue"`, which parses to an empty config and fails
+    the `open-issue` factory's own `label` check — would otherwise crash-loop
+    a launchd-supervised service on every restart. A workflow proven
+    unwirable here is filtered out before `build()` ever sees it.
+
+    A workflow that can't even be *parsed* (`WorkflowNotFound` — broken JSON,
+    an unknown step in `finishers`, ...) is left in the returned set
+    untouched: that's `build()`'s own, unrelated fail-fast for a malformed
+    *workflow file*, not a finisher-binding problem, and this function has no
+    business silently dropping it.
+    """
+    kept: list[str] = []
+    for name in served_names:
+        try:
+            workflow = wf_repo.get(name)
+        except WorkflowNotFound:
+            kept.append(name)
+            continue
+        try:
+            validate_workflow_finishers(workflow, finishers)
+        except ValueError as error:
+            path = layout.workflows / f"{name}.json"
+            print(
+                f"warning: workflow {name!r} ({path}) cannot be served — "
+                f"{error} — dropped from the served set",
+                file=sys.stderr,
+            )
+            continue
+        kept.append(name)
+    return tuple(kept)
+
+
 def _parse_hours(raw: str) -> list[int]:
     """Parse "2,8,14,20" into sorted unique hours, rejecting anything out of 0-23."""
     hours = []
@@ -1840,6 +1928,42 @@ def _run(args: argparse.Namespace) -> int:
         str, Callable[[str, dict, Callable[[], ConsumerBehavior]], ConsumerBehavior]
     ] = {"open-issue": _open_issue}
 
+    # A single GitHub client threads into both the process check factories
+    # (`github-issues`/`github-conflicts`) and the `label-issue` finisher —
+    # one client per wiring site, like every other GitHub-touching helper
+    # here. Built here — ahead of where the process check factories and the
+    # issue-import factory consume it further down — so `finishers` below is
+    # already complete (including "label-issue") by the time the served-set
+    # validation that follows reads it.
+    token = os.environ.get("GITHUB_TOKEN")
+    github_client = HttpGithubClient(token) if token else None
+
+    # "label-issue" (a finisher, invariant #41): applies an outcome -> label
+    # mapping to a task's source GitHub issue, wrapping (not replacing) the
+    # step's own agent behavior — used by a triage Process's PM persona to
+    # relabel an issue harness:todo/harness:needs-info after judging it. Only
+    # registered when a token is configured; a workflow binding a step to it
+    # otherwise fails the served-set validation below (or, for an unserved
+    # workflow, `build()` itself) through the "unknown finisher kind" error,
+    # no new error path.
+    if github_client is not None:
+        finishers["label-issue"] = lambda step, config, inner: LabelIssueBehavior(
+            inner=inner(), client=github_client, labels=config.get("labels", {})
+        )
+
+    # A served workflow whose own finisher bindings can't be wired against
+    # `finishers` (e.g. the pre-generic string form `"open-issue"`, which
+    # parses to an empty config and fails the factory's own `label` check —
+    # exactly the shape `workflows/heal.json` shipped with on the reference
+    # install before this branch generalized the finisher) must not
+    # crash-loop the whole service. Drop it from the served set with a
+    # warning instead of letting `build()` fail the entire run over one
+    # stale file — see ADR-0022. `build()` below still fails fast on
+    # everything else it always has (a genuine cross-workflow binding
+    # conflict, a malformed workflow file, ...).
+    wf_repo = FilesystemWorkflowRepository(layout.workflows)
+    served_names = _validate_served_workflows(layout, wf_repo, served_names, finishers)
+
     forge = _build_forge(args.forge, root, registry)
     github = [] if args.no_github_source else _github_sources(args, root, registry)
     # The outbound reflector is registered only when classic ingestion is off
@@ -1856,7 +1980,6 @@ def _run(args: argparse.Namespace) -> int:
     # workflow names ∪ their steps ∪ any catalog agent) lets the repository
     # reject a misnamed target up front rather than failing at dispatch time.
     known_targets: set[str] = set(served_names)
-    wf_repo = FilesystemWorkflowRepository(layout.workflows)
     for name in served_names:
         try:
             known_targets |= set(wf_repo.get(name).steps())
@@ -1867,11 +1990,6 @@ def _run(args: argparse.Namespace) -> int:
     sources = sources + _scheduled_sources(
         args, root, registry, clock=SystemClock(), known_targets=known_targets
     )
-    # A single GitHub client threads into both the process check factories
-    # (`github-issues`/`github-conflicts`) and the `label-issue` finisher —
-    # one client per wiring site, like every other GitHub-touching helper here.
-    token = os.environ.get("GITHUB_TOKEN")
-    github_client = HttpGithubClient(token) if token else None
 
     # Same shape for Jira: all three env vars are required, or the
     # `jira-issues` action fails fast at process build time (mirrors the
@@ -1896,21 +2014,18 @@ def _run(args: argparse.Namespace) -> int:
     # internally. Reading the raw declared sink kinds needs no compilation at
     # all (invariant #40).
     sources = sources + _slack_sinks(_declared_sink_kinds(layout.processes))
+    # A compiled `failed-tasks` process with no `action.params.repository` is
+    # valid — it's the seeded `harness init` default — but silently inert:
+    # self-healing spends an agent call on `heal` and one on `dedup` every
+    # time `failed/` drains, and files nothing. Warn about it (never an
+    # error — a *missing* value is "not configured yet", not a typo; a
+    # *present but wrong* one still fails loud at process-compile time,
+    # unchanged — see ADR-0022) rather than leaving the token bill as the
+    # only signal.
+    _warn_missing_autoheal_repository(layout.processes)
     extra_checks = _process_check_factories(
         args, registry, client=github_client, jira_client=jira_client
     )
-
-    # "label-issue" (a finisher, invariant #41): applies an outcome -> label
-    # mapping to a task's source GitHub issue, wrapping (not replacing) the
-    # step's own agent behavior — used by a triage Process's PM persona to
-    # relabel an issue harness:todo/harness:needs-info after judging it. Only
-    # registered when a token is configured; a workflow binding a step to it
-    # otherwise fails at `build()` through the existing "unknown finisher kind"
-    # error, no new error path.
-    if github_client is not None:
-        finishers["label-issue"] = lambda step, config, inner: LabelIssueBehavior(
-            inner=inner(), client=github_client, labels=config.get("labels", {})
-        )
 
     # The Ahanas board's manual "Add issue" write port (invariant #43): built
     # inside `build()` from this factory once the harness's own live queues

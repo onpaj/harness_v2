@@ -71,6 +71,60 @@ RESOLVE_STEP = "resolve"
 """The step to which the wiring assigns ResolveConflictBehavior, when a catalog
 is configured — the resolver workflow's first step."""
 
+_ALWAYS_WIRABLE_FINISHER_KINDS = frozenset({"open-pr", "verify"})
+"""The two kinds `build()` always registers itself (see `finisher_registry`
+inside `build()`, below) — both ignore `step`/`config`/`inner` entirely and
+return a pre-built singleton, so neither can ever fail to construct. Kept as a
+named constant so `validate_workflow_finishers` doesn't need to duplicate
+`build()`'s own `landing`/`verify` wiring just to prove that."""
+
+
+def validate_workflow_finishers(
+    workflow: Workflow,
+    finishers: dict[str, Callable[[str, dict, Callable[[], ConsumerBehavior]], ConsumerBehavior]]
+    | None = None,
+) -> None:
+    """Raise `ValueError` if `workflow` binds a step to a finisher kind that
+    cannot be wired against `finishers` — the same custom registry `cli._run`
+    hands `build()` (e.g. `open-issue`, `label-issue`). Two failure shapes:
+    an unknown kind, or a factory that raises while building it (`open-issue`
+    fails this way when a binding's config carries no `label`).
+
+    A lighter-weight mirror of the per-step resolution `build()` performs
+    eagerly while constructing its consumers (`behavior_for`/the inline
+    `finisher_registry`), scoped to one workflow's own bindings and without
+    any of `build()`'s surrounding machinery (queues, catalog, workspace,
+    live processes). The thunk handed to a factory as its "inner behavior"
+    callback is inert — it returns `None` rather than a real behavior — so a
+    *wrap*-shaped finisher (e.g. `label-issue`, which calls the thunk eagerly
+    to embed the result) is still exercised for its own kind/config
+    resolution without needing a catalog agent or a live workspace to exist
+    yet; neither `OpenIssueBehavior` nor `LabelIssueBehavior` inspects the
+    type of what they're handed at construction. That means this check
+    cannot see a failure that would only surface from constructing the real
+    inner behavior (e.g. a step with no catalog entry) — `build()`'s own
+    fail-fast, unchanged, is still the final word for those.
+
+    `cli._run` calls this once per served workflow, before calling `build()`,
+    to decide which workflows are wirable at all: a workflow whose own
+    binding can't be wired is dropped from the served set with a warning
+    rather than failing the whole run — see ADR-0022.
+    """
+    registry = finishers or {}
+
+    def _inert_inner() -> None:
+        return None
+
+    for step, binding in workflow.finishers.items():
+        if binding.kind in _ALWAYS_WIRABLE_FINISHER_KINDS:
+            continue
+        factory = registry.get(binding.kind)
+        if factory is None:
+            raise ValueError(
+                f"step {step!r} names unknown finisher kind {binding.kind!r}"
+            )
+        factory(step, binding.config, _inert_inner)
+
 
 @dataclass(frozen=True)
 class HarnessLayout:
