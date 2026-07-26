@@ -1055,6 +1055,40 @@ def test_validate_workflow_finishers_calls_inner_for_a_wrap_shaped_factory():
     assert seen["inner"] is None
 
 
+def test_validate_workflow_finishers_raises_unknown_kind_regardless_of_binding_order():
+    """Reproduces the reviewer's exact finding: a single loop that did the
+    unknown-kind lookup and the factory invocation together let whichever
+    binding a dict iterates first win, so "an unknown kind is fatal" silently
+    depended on JSON key order. Two bindings in the *losing* order — the
+    config-shaped failure (`open-issue` with no `label`, a known kind whose
+    factory raises a plain `ValueError`) iterated before the unknown kind —
+    used to let that `ValueError` escape first and mask the unknown kind
+    entirely. This must still raise `UnknownFinisherKind`, not the earlier
+    `ValueError`. A test in the winning order alone (unknown kind first)
+    would not gate a regression back to the single-loop shape."""
+    workflow = Workflow(
+        name="w",
+        start="a",
+        transitions=(
+            Transition(from_step="a", on="done", to_step="b"),
+            Transition(from_step="b", on="done", to_step=END),
+        ),
+        finishers={
+            # Losing order: the config-shaped failure comes first.
+            "a": FinisherBinding(kind="open-issue"),
+            "b": FinisherBinding(kind="call-a-webhook"),
+        },
+    )
+
+    def open_issue_factory(step, config, inner):
+        if not config.get("label"):
+            raise ValueError(f"step {step!r} has no label")
+        return RecordingFinisher()
+
+    with pytest.raises(UnknownFinisherKind, match="call-a-webhook"):
+        validate_workflow_finishers(workflow, {"open-issue": open_issue_factory})
+
+
 # --- ADR-0018: process compilation moved inside build() ---------------------
 
 

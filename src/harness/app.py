@@ -140,16 +140,28 @@ def validate_workflow_finishers(
     def _inert_inner() -> None:
         return None
 
+    # First pass: every binding's kind must be known, over the *whole*
+    # workflow, before any factory runs — mirrors build()'s own two-pass
+    # shape (the step_bindings loop above raising UnknownFinisherKind, then
+    # a separate pass invoking factories via behavior_for). Collapsing this
+    # into one loop made "unknown kind is fatal" depend on JSON key order: a
+    # config-shaped ValueError from an earlier binding's factory would win
+    # the race and mask a later binding's unknown kind in the same workflow.
     for step, binding in workflow.finishers.items():
         if binding.kind in _ALWAYS_WIRABLE_FINISHER_KINDS:
             continue
-        factory = registry.get(binding.kind)
-        if factory is None:
+        if binding.kind not in registry:
             raise UnknownFinisherKind(
                 f"step {step!r} names unknown finisher kind {binding.kind!r} "
                 f"(known: {', '.join(sorted(known_kinds))})"
             )
-        factory(step, binding.config, _inert_inner)
+
+    # Second pass: every binding's kind is now known to resolve, so invoke
+    # each one's own factory against its own config.
+    for step, binding in workflow.finishers.items():
+        if binding.kind in _ALWAYS_WIRABLE_FINISHER_KINDS:
+            continue
+        registry[binding.kind](step, binding.config, _inert_inner)
 
 
 @dataclass(frozen=True)

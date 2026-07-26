@@ -1050,7 +1050,9 @@ def _slack_sinks(declared_kinds: set[str]) -> list[TaskSource]:
     return []
 
 
-def _warn_missing_autoheal_repository(processes_root: Path) -> None:
+def _warn_missing_autoheal_repository(
+    processes_root: Path, dropped_workflows: set[str] | None = None
+) -> None:
     """Startup warning — never fatal — for a `failed-tasks` process with no
     `action.params.repository`: `harness init` seeds `processes/autoheal.json`
     with `action.params == {}` (invariant #25), which is valid and stays
@@ -1065,7 +1067,18 @@ def _warn_missing_autoheal_repository(processes_root: Path) -> None:
     a typo, not "not configured yet" — and already fails loud at
     process-compile time (`fs_processes._validate_action_repository_param`,
     `ProcessValidationError`, exit 2); this function only ever handles the
-    absent case, per ADR-0022."""
+    absent case, per ADR-0022.
+
+    `dropped_workflows` (default none, mirroring `build()`'s own
+    `dropped_workflows` param) names workflows `_validate_served_workflows`
+    already dropped from the served set. A `failed-tasks` process whose own
+    `target.workflow` is one of them is made inert by
+    `FilesystemProcessRepository.build()`'s `_targets_a_dropped_workflow`
+    check — it never fires, so it will not "run heal/dedup on every failure"
+    the way this warning claims. Printing this warning for that process
+    contradicts the drop warning already printed for its target workflow
+    (which says outright that the process is disabled); skip it here instead
+    of leaving two startup warnings that disagree with each other."""
     if not processes_root.is_dir():
         return
     for path in sorted(processes_root.glob("*.json")):
@@ -1078,6 +1091,10 @@ def _warn_missing_autoheal_repository(processes_root: Path) -> None:
         action = raw.get("action")
         if not isinstance(action, dict) or action.get("check") != "failed-tasks":
             continue
+        if dropped_workflows:
+            target = raw.get("target")
+            if isinstance(target, dict) and target.get("workflow") in dropped_workflows:
+                continue
         params = action.get("params")
         repository = params.get("repository") if isinstance(params, dict) else None
         if not repository:
@@ -2091,7 +2108,7 @@ def _run(args: argparse.Namespace) -> int:
     # *present but wrong* one still fails loud at process-compile time,
     # unchanged — see ADR-0022) rather than leaving the token bill as the
     # only signal.
-    _warn_missing_autoheal_repository(layout.processes)
+    _warn_missing_autoheal_repository(layout.processes, dropped_workflows)
     extra_checks = _process_check_factories(
         args, registry, client=github_client, jira_client=jira_client
     )

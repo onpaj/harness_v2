@@ -334,11 +334,16 @@ def test_the_stale_pre_generic_heal_workflow_is_dropped_not_fatal(
     harness = captured["harness"]
     assert DEFAULT_HEAL_WORKFLOW not in harness.workflows
     assert set(harness.workflows) == {DEFAULT_WORKFLOW, "resolver"}
-    # Fix 2: the seeded autoheal Process targets the now-dropped `heal`
-    # workflow, so it must be skipped rather than crashing `build()` with
-    # "not a known workflow or step" — the same warning above names it.
+    # The seeded autoheal Process targets the now-dropped `heal` workflow, so
+    # it must be skipped rather than crashing `build()` with "not a known
+    # workflow or step" — the same warning above names it.
     assert "autoheal.json" in err
     assert _autoheal_still_inert(harness)
+    # Fix 2: with the process inert, `_warn_missing_autoheal_repository`'s
+    # own warning ("will run heal/dedup on every failure but file nothing")
+    # would directly contradict the drop warning above, which already says
+    # the process is disabled. It must not appear alongside it.
+    assert "will run heal/dedup" not in err
 
 
 def test_the_stale_pre_generic_heal_workflow_is_dropped_not_fatal_with_no_heal_agent(
@@ -400,6 +405,59 @@ def test_unknown_finisher_kind_still_fails_the_whole_run(monkeypatch, tmp_path, 
     assert "known: open-issue, open-pr, verify" in err
 
 
+@pytest.mark.parametrize(
+    "finishers",
+    [
+        # Winning order: the unknown kind is iterated first.
+        {"broadcast": {"kind": "call-a-webhook"}, "review": {"kind": "open-issue"}},
+        # Losing order — the regression this test pins: the config-shaped
+        # failure (open-issue, no label) is bound to a step iterated before
+        # the unknown-kind step. Before Fix 1, `validate_workflow_finishers`
+        # did the unknown-kind lookup and the factory call in a single loop
+        # over `workflow.finishers`, so whichever binding a dict iterated
+        # first decided the outcome: here the config-shaped `ValueError`
+        # would escape first, the workflow would be silently dropped with a
+        # warning (exit 0), and the unknown kind would never be seen.
+        {"review": {"kind": "open-issue"}, "broadcast": {"kind": "call-a-webhook"}},
+    ],
+    ids=["unknown-kind-first", "unknown-kind-second"],
+)
+def test_unknown_finisher_kind_fails_the_whole_run_regardless_of_binding_order(
+    monkeypatch, tmp_path, capsys, finishers
+):
+    """Fix 1's blocker, reproduced directly through `harness run`: one
+    workflow, two bindings — one names an unknown finisher kind
+    (`call-a-webhook`), the other a known kind whose factory rejects its own
+    config (`open-issue` with no `label`) — must exit 2 in *both* JSON key
+    orders. `build()` never had this bug (invariant #41's step_bindings loop
+    is already a complete unknown-kind pass before any factory runs);
+    `validate_workflow_finishers` had collapsed the two into one loop,
+    making "an unknown kind is fatal" depend on JSON key order. A test in
+    the winning order alone would not have caught that regression."""
+    main(["init", "--root", str(tmp_path)])
+    path = tmp_path / "workflows" / "review.json"
+    path.write_text(json.dumps({
+        "name": "review",
+        "start": "review",
+        "transitions": [
+            {"from": "review", "on": "done", "to": "broadcast"},
+            {"from": "broadcast", "on": "done", "to": "end"},
+        ],
+        "finishers": finishers,
+    }))
+
+    async def fake_serve(harness, port, poll_interval, source_interval=30.0, pr_poll_interval=0.0, reconcile_interval=300.0, registry=None):
+        raise AssertionError("serve() must not be reached")
+
+    monkeypatch.setattr("harness.cli.serve", fake_serve)
+    capsys.readouterr()
+
+    assert main(["run", "--root", str(tmp_path)]) == 2
+    err = capsys.readouterr().err
+    assert err.startswith("error:")
+    assert "call-a-webhook" in err
+
+
 def test_label_issue_binding_without_a_token_still_fails_the_whole_run(
     monkeypatch, tmp_path, capsys
 ):
@@ -442,8 +500,14 @@ def test_run_reports_an_unregistered_process_repository_cleanly(monkeypatch, tmp
     seeded `repos.json` reproduces the failure a typo in that one
     operator-facing field would cause.
 
-    `build()` raises before `serve()` is ever reached (mirroring
-    `test_a_binding_without_a_label_fails_the_build` above), so `serve` is
+    `build()` raises before `serve()` is ever reached — the only test in this
+    file where a real, unmonkeypatched `build()` raises inside `main()` this
+    way. (The other shape that used to raise inside `build()` — a served
+    workflow's own finisher binding rejecting its config — no longer does:
+    ADR-0022's pre-filter `_validate_served_workflows` catches it earlier and
+    warns-and-drops instead of failing the whole run, so
+    `test_a_binding_without_a_label_is_dropped_from_the_served_set` mocks
+    `build()` itself rather than reaching a real one.) So `serve` is
     monkeypatched only as a belt-and-suspenders guard against starting a real
     server / binding a port, matching the pattern the neighbouring `run`
     tests in this file use. If `main()` were to let the exception escape
@@ -1835,6 +1899,43 @@ def test_slack_sinks_silent_when_no_process_declares_slack(
     assert capsys.readouterr().err == ""
 
 
+def test_warn_missing_autoheal_repository_silent_when_its_target_workflow_was_dropped(
+    capsys, tmp_path
+):
+    """Fix 2: `_validate_served_workflows` already prints a warning saying a
+    dropped workflow's dependent process(es) are disabled — e.g. "also
+    disables process(es) autoheal.json, which target it". Under that drop,
+    `FilesystemProcessRepository.build()`'s own `_targets_a_dropped_workflow`
+    check makes the process inert, so it will not run heal/dedup on any
+    failure at all. This warning must not then claim, contradictorily, that
+    it "will run heal/dedup on every failure but file nothing" — so a
+    `dropped_workflows` naming the process's own target workflow silences
+    it, regardless of whether `action.params.repository` is set."""
+    main(["init", "--root", str(tmp_path)])
+    capsys.readouterr()
+
+    _warn_missing_autoheal_repository(tmp_path / "processes", {DEFAULT_HEAL_WORKFLOW})
+
+    assert capsys.readouterr().err == ""
+
+
+def test_warn_missing_autoheal_repository_still_warns_when_a_different_workflow_was_dropped(
+    capsys, tmp_path
+):
+    """The dropped-workflow suppression (Fix 2) is scoped to the process's
+    *own* target — a `dropped_workflows` set that names some unrelated
+    workflow must not silence the warning for a `failed-tasks` process whose
+    own target workflow is unaffected and still served."""
+    main(["init", "--root", str(tmp_path)])
+    capsys.readouterr()
+
+    _warn_missing_autoheal_repository(tmp_path / "processes", {"some-other-workflow"})
+
+    err = capsys.readouterr().err
+    assert err.startswith("warning:")
+    assert "autoheal.json" in err
+
+
 def test_warn_missing_autoheal_repository_warns_for_the_seeded_empty_default(
     capsys, tmp_path
 ):
@@ -1972,10 +2073,14 @@ def test_run_over_a_fresh_init_builds_successfully_with_a_real_build(monkeypatch
     neighbouring `run` test that reaches a successful exit in this file
     monkeypatches `build` itself (e.g.
     `test_run_serves_every_scaffolded_workflow_for_an_ordinary_init` above),
-    and the two tests with a real `build()` over a comparable setup
-    (`test_a_binding_without_a_label_fails_the_build`,
-    `test_run_reports_an_unregistered_process_repository_cleanly`) both assert
-    exit *2*. This duplication already drifted once — commit `97bc9ef` had to
+    and the only other test in this file with a real `build()` over a
+    comparable setup (`test_run_reports_an_unregistered_process_repository_cleanly`)
+    asserts exit *2*. (A served workflow's own finisher binding rejecting its
+    config used to be a second such case, but since ADR-0022 that shape is
+    caught earlier by the `_validate_served_workflows` pre-filter and
+    warns-and-drops rather than reaching a real `build()` raise — see
+    `test_a_binding_without_a_label_is_dropped_from_the_served_set`, which
+    mocks `build()` itself.) This duplication already drifted once — commit `97bc9ef` had to
     fix `HEAL_DEFINITION` in `cli.py` *and* its old hand-copied mirror in
     `tests/test_self_heal_e2e.py` — so a test that would fail the moment the
     seeded workflow/agents/process stop compiling together is worth the extra
