@@ -8,8 +8,9 @@ A third, distinct verb from the other two GitHub-touching ports:
 - `IssueTracker.open_issue` **creates a fresh issue** — the healer's deliverable.
 
 The healer diagnoses a failed task and, when it is a fixable harness bug, opens
-an issue on the harness repo through this port. The worker (the `Healer` loop)
-calls it, never the agent (invariant 9).
+an issue through this port on whatever repo `task.repository` resolves to. The
+worker (the `open-issue` finisher, `behaviors/open_issue.py`) calls it, never
+the agent (invariant 9).
 """
 
 from __future__ import annotations
@@ -29,9 +30,15 @@ class IssueRef:
 class IssueError(Exception):
     """Opening the issue failed (no token, a non-GitHub repo, an API error).
 
-    Symmetric to `ForgeError`: the `Healer` loop catches it and settles the task
-    to `healed/` with a `heal-failed` note — it never returns the task to
-    `failed/`, so a failure to file cannot loop.
+    Nothing catches this in the `open-issue` finisher: it propagates out of
+    `ConsumerBehavior.run`, and `Consumer.tick`'s blanket `except Exception`
+    (`consumer.py`) sends the task to `failed/`, exactly like any other
+    behavior failure. There is no `Healer` loop with special handling for it.
+    Recursion is prevented not by catching `IssueError` here, but by
+    `FailedTasksCheck`'s `data.heal` marker guard: a heal task that itself
+    fails passes through `failed/` normally, and the check retires it to
+    `healed/` on its next tick without producing a fresh `Observation`
+    (invariant 25).
     """
 
 
