@@ -106,7 +106,7 @@ here as one shape:
   (the `failed-tasks` check, the `open-issue` finisher, the recursion guard,
   the Process-compilation wiring) is unchanged and still authoritative.
 - **The check's `repository` param must equal `HARNESS_HEAL_REPO`.**
-  *(Superseded by ADR-0021: `HARNESS_HEAL_REPO` is gone and the process file's
+  *(Superseded by ADR-0022: `HARNESS_HEAL_REPO` is gone and the process file's
   own param is the single source both are wired from, so the drift described
   below is no longer reachable.)* Both
   `_ensure_autoheal_process`'s generated `processes/autoheal.json` (`action.
@@ -129,7 +129,7 @@ here as one shape:
   `warning:` to stderr (never a hard error — the rest of the harness still
   starts) when the configured `heal_repo` isn't in the registry.
 
-  > **Superseded 2026-07-26 (ADR-0021).** There is no `HARNESS_HEAL_REPO` or
+  > **Superseded 2026-07-26 (ADR-0022).** There is no `HARNESS_HEAL_REPO` or
   > `heal_repo` variable to drift any more: `--heal-repo`/`HARNESS_HEAL_REPO`
   > were removed, and `processes/autoheal.json`'s `action.params.repository`
   > is now the single place self-healing names a repo — both the check and

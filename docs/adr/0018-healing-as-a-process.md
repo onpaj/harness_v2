@@ -66,7 +66,7 @@ loop. `Healer`, `HealConfig`, and `Harness._heal_loop` are removed.
   recorded trade against the old "settle-note is the outcome" coupling.
 
 - **`--heal-repo` survives as a thin generator, not a code path.**
-  *(Refined by ADR-0021: the flag is now purely a bootstrap — enablement moved
+  *(Refined by ADR-0022: the flag is now purely a bootstrap — enablement moved
   to the existence of `processes/autoheal.json`, so later runs need no flag.)* Rather than
   remove the flag, `harness run --heal-repo <owner/repo>` now (a) adds `heal`
   to the served set, (b) builds the `IssueTracker` with the unchanged
@@ -78,7 +78,7 @@ loop. `Healer`, `HealConfig`, and `Harness._heal_loop` are removed.
   unconditionally, but not `autoheal.json` (a bare init has no repo to file
   against).
 
-  > **Superseded 2026-07-26 (ADR-0021).** `--heal-repo`/`HARNESS_HEAL_REPO` were
+  > **Superseded 2026-07-26 (ADR-0022).** `--heal-repo`/`HARNESS_HEAL_REPO` were
   > removed outright, not kept as a generator: `harness run` no longer accepts
   > the flag, `_ensure_autoheal_process` runs unconditionally from `harness
   > init` (not from `run`), and it seeds `action.params: {}` rather than a
