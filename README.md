@@ -362,7 +362,8 @@ once before the check retires it to `healed/` without re-observing it, so nothin
 loops. The issue is idempotent per `(repo, scope_label, marker)` — a hidden
 marker in its body, scoped to the *heal* task and the draft's title
 (`marker_for(task.id, draft.title)`), not the original failed task (whose id
-survives only as `data.heal.of`). That protects a re-run of the same heal
+survives as `data.heal.of` and in the heal task's `dedup_key`). That protects
+a re-run of the same heal
 task from filing the same draft twice; it says nothing about the failure that
 triggered it.
 

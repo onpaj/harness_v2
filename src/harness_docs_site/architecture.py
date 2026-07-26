@@ -938,8 +938,8 @@ MODEL = ArchitectureModel(
                 "open-issue finisher — not the LLM — opens an advisory issue "
                 "for each of a step's drafted findings. The self-heal binding "
                 "is the first consumer, not the only one. Idempotent per "
-                "(repo, scope_label, marker), so a crash before the settle "
-                "never re-files the same draft."
+                "(repo, scope_label, marker), so a re-run of the same heal "
+                "task never re-files the same draft."
             ),
             adrs=("0018-healing-as-a-process", "0020-open-issue-is-a-generic-finisher"),
             sources=(
@@ -952,9 +952,9 @@ MODEL = ArchitectureModel(
                     name="GithubIssueTracker",
                     tagline="Opens the issue on GitHub.",
                     description=(
-                        "Posts a step's draft to the harness repo, deduped "
-                        "by an embedded harness-issue marker in the body, "
-                        "scoped to the binding's label."
+                        "Posts a step's draft to the task's repository, "
+                        "deduped by an embedded harness-issue marker in the "
+                        "body, scoped to the binding's label."
                     ),
                     sources=("src/harness/drivers/github_issues.py",),
                 ),

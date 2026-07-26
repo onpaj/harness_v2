@@ -51,7 +51,7 @@ HEAL_DEFINITION = {
         {"from": "heal", "on": "skip", "to": "end",
          "hint": "external/transient, or the task's own request was impossible — nothing to file"},
         {"from": "dedup", "on": "unique", "to": "file-issue",
-         "hint": "nothing similar is open in the harness repo"},
+         "hint": "nothing similar is open in the task's repository"},
         {"from": "dedup", "on": "duplicate", "to": "end",
          "hint": "a correlated issue is already open — settle silently"},
         {"from": "file-issue", "on": "done", "to": "end"},
