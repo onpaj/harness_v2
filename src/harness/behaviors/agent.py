@@ -115,7 +115,33 @@ class ClaudeCliBehavior(ConsumerBehavior):
         # The agent only wrote artifacts and code; the worker runs the commit
         # (invariant 9).
         handle.commit(run.summary)
-        return BehaviorResult(run.outcome, run.summary)
+
+        # Token usage is pure record-keeping (invariants #4, #8) — built
+        # unconditionally from whatever `run` came back with, no branch on
+        # outcome or agent name (invariants #2, #14). `tokens` is this
+        # delivery's own record (goes onto the HistoryEntry via
+        # BehaviorResult.tokens); `tokens_total` is the running per-task sum
+        # (goes into task.data via the existing BehaviorResult.data merge).
+        tokens = {
+            "attempt": attempt,
+            "input": run.input_tokens,
+            "output": run.output_tokens,
+            "cache_read": run.cache_read_tokens,
+            "cache_creation": run.cache_creation_tokens,
+            "total_cost_usd": run.total_cost_usd,
+            "model": run.model,
+        }
+        previous_total = task.data.get("tokens_total") or {}
+        tokens_total = {
+            "input": previous_total.get("input", 0) + run.input_tokens,
+            "output": previous_total.get("output", 0) + run.output_tokens,
+        }
+        return BehaviorResult(
+            run.outcome,
+            run.summary,
+            data={"tokens_total": tokens_total},
+            tokens=tokens,
+        )
 
 
 def compose_prompt(

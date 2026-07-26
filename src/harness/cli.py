@@ -1096,6 +1096,7 @@ def _ensure_autoheal_process(layout: HarnessLayout) -> None:
     )
 
 
+
 def service_path_entries(harness: Path) -> list[str]:
     """`PATH` for the service: the venv's bin first, then the usual locations.
 
@@ -1246,7 +1247,12 @@ def _update(args: argparse.Namespace) -> int:
         return 2
 
     restart_service = getattr(args, "restart_service", None)
-    before = installed_version_report() if restart_service else None
+    # Snapshotted for either restart path (`--restart-service` and `--restart`),
+    # since both gate on the version actually having changed. Skipped entirely
+    # for a plain `harness update`, which restarts nothing and so would only pay
+    # the subprocess for an answer it never reads.
+    may_restart = bool(restart_service) or bool(getattr(args, "restart", False))
+    before = installed_version_report() if may_restart else None
 
     result = subprocess.run(
         [str(uv), "tool", "upgrade", PACKAGE_NAME],
@@ -1293,6 +1299,17 @@ def _update(args: argparse.Namespace) -> int:
         return 0
 
     label = getattr(args, "label", DEFAULT_LABEL)
+    # Same gate as the `--restart-service` path above: a no-op poll must not kill
+    # a healthy service. Without this, the every-30-minutes autoupdate schedule
+    # SIGKILLs the running harness on every fire whether or not anything was
+    # upgraded, so no stage lasting longer than the schedule's period can ever
+    # complete. The idle check below is not a substitute: it only defers a
+    # restart while a stage is *claimed*, and cannot know the restart was
+    # pointless to begin with.
+    if before == after:
+        print(f"service {label} left running (no version change)")
+        return 0
+
     if getattr(args, "only_if_idle", False):
         active = active_stages(_root(getattr(args, "root", None)))
         if active:

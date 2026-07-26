@@ -32,11 +32,25 @@ class AgentSpec:
 
 @dataclass(frozen=True)
 class AgentRun:
-    """Result of a single agent run: verdict, summary, and raw output."""
+    """Result of a single agent run: verdict, summary, and raw output.
+
+    `input_tokens`/`output_tokens`/`cache_read_tokens`/`cache_creation_tokens`,
+    `total_cost_usd` and `model` are best-effort telemetry lifted from the
+    CLI's own usage reporting — record-only, never a correctness signal. A
+    runner that can't produce them (a future non-Anthropic runner, or
+    `FakeAgentRunner` when a test doesn't care) simply leaves the defaults.
+    """
 
     outcome: str
     summary: str
     raw: str = ""
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cache_read_tokens: int = 0
+    cache_creation_tokens: int = 0
+    total_cost_usd: float | None = None
+    model: str | None = None
+    """The resolved model that actually ran (post-`fallback_model`), when known."""
 
 
 class AgentRunner(ABC):
@@ -56,7 +70,9 @@ class AgentRunner(ABC):
 
         `on_output`, when given, is called with each rendered activity line as the
         agent works — the seam through which the harness streams live stage output.
-        A runner that can't stream simply ignores it.
+        A runner that can't stream simply ignores it. Token usage and the resolved
+        model are best-effort telemetry — a runner that can't produce them leaves
+        `AgentRun`'s defaults rather than raising.
         """
 
 

@@ -111,6 +111,15 @@ that coverage would vanish.
 only with `HARNESS_SMOKE_CLAUDE=1`, otherwise it's skipped and `pytest -q` won't run it.
 It covers the thin subprocess shell of `ClaudeCliRunner` that the fake runners bypass.
 
+**The suite is hermetic against the harness's own configuration environment.**
+`tests/conftest.py`'s autouse `hermetic_environment` fixture unsets every variable
+`src/harness` reads as config (`GITHUB_TOKEN`, `HARNESS_HOME`, `SLACK_WEBHOOK_URL`,
+`JIRA_*`) before each test; a test that wants one sets it itself with
+`monkeypatch.setenv`, which runs after and wins. Not optional tidiness — see the
+gotcha below. `tests/test_hermetic_environment.py` derives the list from the source
+and checks it **both ways**: a new config variable missing from `_HARNESS_ENVIRONMENT`
+fails, and so does a stale entry the package no longer reads.
+
 ## Git conventions
 
 **Commit straight into `main`.** In this phase that's the intended approach — don't
@@ -157,10 +166,10 @@ Dependencies flow strictly downward, no cycles.
 - `ports/artifacts.py` — `ArtifactStore` (writing, phase 2) and `ArtifactView` (reading for the UI); phase 3 reads via `WorktreeArtifactView`
 - `ports/workspace.py` — `Workspace.attach(task) -> WorkspaceHandle` (worktree + commit; `merge`/`abort_merge` for the base-sync)
 - `ports/forge.py` — `Forge.open_pull_request(...)` (landing proposes a PR) + `base_branch(task)` (the branch that PR targets, which landing syncs in first — ADR-0017)
-- `ports/agent.py` — `AgentRunner.run(...)`, `AgentCatalog.get(name)`, `AgentSpec` (persona as data)
+- `ports/agent.py` — `AgentRunner.run(...)`, `AgentCatalog.get(name)`, `AgentSpec` (persona as data). `AgentRun` also carries best-effort token usage (input/output/cache read/cache creation, `total_cost_usd`, the resolved `model`) — record-only telemetry, defaulted so every existing construction site keeps compiling (ADR-0020)
 - `ports/repos.py` — `RepositoryRegistry.resolve(name) -> Path` (repo name → path)
 - `ports/command.py` — the `CommandRunner` port: `run(command, *, cwd, timeout) -> CommandResult` (exit code + merged stdout/stderr), raising `CommandTimeout` past the budget (the process is killed). The verify step's counterpart of `AgentRunner` — a future `VerifyBehavior` decides *what* to run, only the driver knows subprocesses. `drivers/subprocess_command.py` (`SubprocessCommandRunner`) is the real driver over `asyncio.create_subprocess_shell`; `MemoryCommandRunner` in `drivers/memory.py` is the scripted fake (pops preset `CommandResult`s, repeats the last, records `calls`)
-- `behaviors/agent.py` — `ClaudeCliBehavior`: attach worktree → allocate attempt → run the agent → the worker commits. Also resolves the task's workflow (via an optional `WorkflowRepository`) to derive the step's live outcome vocabulary, hints and description, falling back to the persona's `allowed_outcomes` when workflow-less (invariant #42, ADR-0018)
+- `behaviors/agent.py` — `ClaudeCliBehavior`: attach worktree → allocate attempt → run the agent → the worker commits. Also resolves the task's workflow (via an optional `WorkflowRepository`) to derive the step's live outcome vocabulary, hints and description, falling back to the persona's `allowed_outcomes` when workflow-less (invariant #42, ADR-0018). Builds this attempt's token-usage record (`BehaviorResult.tokens`, attempt-indexed — a per-delivery fact read straight onto the `HistoryEntry`, never merged into `task.data`) and the running per-task total (`BehaviorResult.data["tokens_total"]`, task-level, merged as usual) — record-only, never a routing input (ADR-0020)
 - `ports/source.py` — the `TaskSource` port (`poll`/`report_progress`/`finish`) + `Progress`/`FinishResult`
 - `source_poller.py` — `SourcePoller`: the core that fills the inbox from the source (knows only ports)
 - `pr_watcher.py` — `PrWatcher`: the core loop that claims a landed task out of `done/` once its PR has resolved (merged or closed unmerged) and archives it into `archived/`, dropping it from the board while keeping it gettable by id (knows only ports/models/ids)
@@ -492,6 +501,22 @@ Dependencies flow strictly downward, no cycles.
   `claude`, so the wrapper exports one built by `cli.service_path_entries` (venv bin
   first, then `~/.npm-global/bin`, `~/.local/bin`, `/usr/local/bin`, …). A "claude not
   found" failure deep in a run is usually this.
+- **The verify command inherits the harness's whole environment — including its
+  secrets.** `SubprocessCommandRunner` does not sanitize; under the launchd service
+  a repo's test command therefore runs with `GITHUB_TOKEN` set (the wrapper resolves
+  it from `gh auth token`). Deliberate — a verify command legitimately needs `PATH`,
+  `HOME` and often a token for integration tests — but it makes any
+  environment-sensitive test suite report a *different verdict under the gate than in
+  the operator's shell*. That is not theoretical: this repo's own suite had eight
+  `test_cli.py` tests asserting on the *absence* of harness configuration while the
+  service had it set, so running `pytest` as harness_v2's own verify command produced
+  a spurious `request_changes` and bounced a clean diff back to `development` — a
+  loop the development agent cannot fix, because the defect is not in the diff.
+  Fixed on the *test* side (`conftest.py`'s `hermetic_environment`), not by
+  sanitizing the runner; the config half of the leak was closed for good by moving
+  self-healing's enablement into `processes/autoheal.json` (ADR-0021), leaving only
+  genuine secrets in the inherited environment. When onboarding another repo to the
+  gate, a suite that reads config from the environment is the first thing to check.
 - **`Harness.recover()` always includes `done`, whether or not a reconciler is wired
   this run.** A `.processing/` file in `done/` can only have been left by a
   `MergeReconciler` claim, but it may outlive the run that created it (the operator

@@ -51,6 +51,9 @@ class AgentActivity:
     outcome: str | None
     summary: str | None
     reason: str | None
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    model: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -60,6 +63,9 @@ class AgentActivity:
             "outcome": self.outcome,
             "summary": self.summary,
             "reason": self.reason,
+            "inputTokens": self.input_tokens,
+            "outputTokens": self.output_tokens,
+            "model": self.model,
         }
 
 

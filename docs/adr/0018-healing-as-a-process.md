@@ -65,7 +65,9 @@ loop. `Healer`, `HealConfig`, and `Harness._heal_loop` are removed.
   (board-visible) once before the check's next tick retires it — a deliberate,
   recorded trade against the old "settle-note is the outcome" coupling.
 
-- **`--heal-repo` survives as a thin generator, not a code path.** Rather than
+- **`--heal-repo` survives as a thin generator, not a code path.**
+  *(Refined by ADR-0021: the flag is now purely a bootstrap — enablement moved
+  to the existence of `processes/autoheal.json`, so later runs need no flag.)* Rather than
   remove the flag, `harness run --heal-repo <owner/repo>` now (a) adds `heal`
   to the served set, (b) builds the `IssueTracker` with the unchanged
   token-presence logic (`MemoryIssueTracker` offline), (c) registers the

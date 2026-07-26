@@ -1,6 +1,37 @@
 # CHANGELOG
 
 
+## v0.21.2 (2026-07-26)
+
+### Bug Fixes
+
+- Don't restart the service when nothing was upgraded
+  ([`6d15952`](https://github.com/onpaj/harness_v2/commit/6d159520da8976c421f8d89e443131fdddee3b29))
+
+`harness update --restart` restarted the LaunchAgent unconditionally, gating only on idleness. The
+  `--restart-service` path has always gated on the version actually changing; `--restart` — the path
+  the autoupdate schedule uses — never got that gate.
+
+Consequence on a live install: the every-30-minutes autoupdate fires, uv reports "Nothing to
+  upgrade", and the service is SIGKILLed anyway. `com.harness` sits permanently at exit -9 and no
+  stage outliving 30 minutes can ever complete.
+
+Snapshot the pre-upgrade version whenever either restart path is selected and skip the restart when
+  it is unchanged. A plain `harness update` still takes no version snapshot at all, so it pays no
+  extra subprocess.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+
+
+## v0.21.1 (2026-07-25)
+
+### Bug Fixes
+
+- Spurious verify failures — hermetic test env, and autoheal enabled by its process file
+  ([#129](https://github.com/onpaj/harness_v2/pull/129),
+  [`e76edc4`](https://github.com/onpaj/harness_v2/commit/e76edc4278e5c5fb5fc5adc6520c850dae897324))
+
+
 ## v0.21.0 (2026-07-24)
 
 ### Bug Fixes

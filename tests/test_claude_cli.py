@@ -1,12 +1,16 @@
+import asyncio
 import json
+from pathlib import Path
 
 import pytest
 
 from harness.drivers.claude_cli import (
     AgentError,
+    ClaudeCliRunner,
     VerdictError,
     _drain,
     _iter_lines,
+    _usage_from_result,
     build_argv,
     fallback_verdict,
     parse_stream_line,
@@ -578,11 +582,241 @@ async def test_drain_renders_activity_and_captures_verdict():
     proc = _FakeProc((stream + "\n").encode(), stderr=b"warn")
     captured: list[str] = []
 
-    final, raw, stderr = await _drain(proc, captured.append)
+    final, raw, stderr, model = await _drain(proc, captured.append)
 
     assert captured == ["● session started (opus)", "Listing files.", "⏵ Bash: ls"]
     assert stderr == "warn"
     assert final is not None and final["type"] == "result"
+    assert model == "opus"
     run = verdict_from_final(final, allowed=(DONE,), raw=raw)
     assert run.outcome == DONE
     assert run.summary == "ok"
+
+
+# --- _usage_from_result (pure, tolerant) -------------------------------------
+
+
+def test_usage_from_result_reads_all_fields():
+    message = {
+        "type": "result",
+        "total_cost_usd": 0.0231,
+        "usage": {
+            "input_tokens": 1234,
+            "output_tokens": 567,
+            "cache_read_input_tokens": 10,
+            "cache_creation_input_tokens": 20,
+        },
+    }
+
+    usage = _usage_from_result(message)
+
+    assert usage == {
+        "input_tokens": 1234,
+        "output_tokens": 567,
+        "cache_read_tokens": 10,
+        "cache_creation_tokens": 20,
+        "total_cost_usd": 0.0231,
+    }
+
+
+def test_usage_from_result_degrades_when_usage_missing():
+    usage = _usage_from_result({"type": "result"})
+
+    assert usage == {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cache_read_tokens": 0,
+        "cache_creation_tokens": 0,
+        "total_cost_usd": None,
+    }
+
+
+def test_usage_from_result_degrades_on_malformed_fields():
+    message = {"usage": {"input_tokens": "not a number"}, "total_cost_usd": "free"}
+
+    usage = _usage_from_result(message)
+
+    assert usage["input_tokens"] == 0
+    assert usage["total_cost_usd"] is None
+
+
+def test_usage_from_result_ignores_non_dict_usage_block():
+    usage = _usage_from_result({"usage": "oops"})
+
+    assert usage["input_tokens"] == 0
+    assert usage["output_tokens"] == 0
+
+
+# --- ClaudeCliRunner.run — usage/model threading (fake subprocess) -----------
+
+
+class _FakeReadStream:
+    """Minimal StreamReader double used by the runner's own stdout/stderr."""
+
+    def __init__(self, data: bytes) -> None:
+        self._data = data
+
+    async def read(self, n: int = -1) -> bytes:
+        limit = len(self._data) if n < 0 else n
+        chunk, self._data = self._data[:limit], self._data[limit:]
+        return chunk
+
+
+class _FakeRunProc:
+    """Double for `asyncio.subprocess.Process`, enough for `ClaudeCliRunner.run`."""
+
+    def __init__(self, stdout: bytes, stderr: bytes = b"", returncode: int = 0) -> None:
+        self.stdout = _FakeReadStream(stdout)
+        self.stderr = _FakeReadStream(stderr)
+        self.returncode = returncode
+        self.killed = False
+
+    async def wait(self) -> int:
+        return self.returncode
+
+    def kill(self) -> None:
+        self.killed = True
+
+
+class _FakeCommunicateProc:
+    """Double for the reprompt's one-shot `communicate()` call."""
+
+    def __init__(self, stdout: bytes, stderr: bytes = b"", returncode: int = 0) -> None:
+        self._stdout = stdout
+        self._stderr = stderr
+        self.returncode = returncode
+
+    async def communicate(self) -> tuple[bytes, bytes]:
+        return self._stdout, self._stderr
+
+
+def _stream_json(*messages: dict) -> bytes:
+    return ("\n".join(json.dumps(message) for message in messages) + "\n").encode()
+
+
+async def test_run_populates_usage_and_resolved_model_from_the_stream(monkeypatch):
+    stdout = _stream_json(
+        {"type": "system", "subtype": "init", "model": "claude-sonnet-5"},
+        {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "Working."}],
+            },
+        },
+        {
+            "type": "result",
+            "subtype": "success",
+            "is_error": False,
+            "result": '```json\n{"outcome": "done", "summary": "ok"}\n```',
+            "session_id": "sess-1",
+            "total_cost_usd": 0.0231,
+            "usage": {
+                "input_tokens": 1234,
+                "output_tokens": 567,
+                "cache_read_input_tokens": 10,
+                "cache_creation_input_tokens": 20,
+            },
+        },
+    )
+    proc = _FakeRunProc(stdout)
+
+    async def fake_exec(*args, **kwargs):
+        return proc
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+
+    runner = ClaudeCliRunner()
+    spec = AgentSpec(name="dev", prompt="you are a developer")
+    run = await runner.run(prompt="do it", spec=spec, cwd=Path("."), timeout=5.0)
+
+    assert run.outcome == DONE
+    assert run.summary == "ok"
+    assert run.input_tokens == 1234
+    assert run.output_tokens == 567
+    assert run.cache_read_tokens == 10
+    assert run.cache_creation_tokens == 20
+    assert run.total_cost_usd == 0.0231
+    assert run.model == "claude-sonnet-5"
+
+
+async def test_run_missing_usage_degrades_to_zero_defaults(monkeypatch):
+    stdout = _stream_json(
+        {"type": "system", "subtype": "init", "model": "claude-sonnet-5"},
+        {
+            "type": "result",
+            "subtype": "success",
+            "is_error": False,
+            "result": '```json\n{"outcome": "done", "summary": "ok"}\n```',
+        },
+    )
+    proc = _FakeRunProc(stdout)
+
+    async def fake_exec(*args, **kwargs):
+        return proc
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+
+    runner = ClaudeCliRunner()
+    spec = AgentSpec(name="dev", prompt="you are a developer")
+    run = await runner.run(prompt="do it", spec=spec, cwd=Path("."), timeout=5.0)
+
+    assert run.outcome == DONE
+    assert run.input_tokens == 0
+    assert run.output_tokens == 0
+    assert run.total_cost_usd is None
+    assert run.model == "claude-sonnet-5"
+
+
+async def test_run_reprompt_path_carries_its_own_usage_but_original_model(
+    monkeypatch,
+):
+    # First call: the agent finishes but skips the verdict block; multi-outcome
+    # spec makes the miss ambiguous, so the runner re-prompts the session.
+    first_stdout = _stream_json(
+        {"type": "system", "subtype": "init", "model": "claude-opus"},
+        {
+            "type": "result",
+            "subtype": "success",
+            "is_error": False,
+            "result": "Done, no verdict block.",
+            "session_id": "sess-1",
+            "usage": {"input_tokens": 100, "output_tokens": 50},
+            "total_cost_usd": 0.01,
+        },
+    )
+    first_proc = _FakeRunProc(first_stdout)
+    reprompt_stdout = json.dumps(
+        {
+            "result": '```json\n{"outcome": "done", "summary": "recovered"}\n```',
+            "is_error": False,
+            "usage": {"input_tokens": 20, "output_tokens": 10},
+            "total_cost_usd": 0.001,
+        }
+    ).encode()
+    calls: list[tuple] = []
+
+    async def fake_exec(*args, **kwargs):
+        calls.append(args)
+        if len(calls) == 1:
+            return first_proc
+        return _FakeCommunicateProc(reprompt_stdout)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+
+    runner = ClaudeCliRunner()
+    spec = AgentSpec(
+        name="review", prompt="you review", allowed_outcomes=(DONE, REQUEST_CHANGES)
+    )
+    run = await runner.run(prompt="do it", spec=spec, cwd=Path("."), timeout=5.0)
+
+    assert len(calls) == 2  # the original call plus the resume re-prompt
+    assert run.outcome == DONE
+    assert run.summary == "recovered"
+    # The reprompt's own usage, not the original call's.
+    assert run.input_tokens == 20
+    assert run.output_tokens == 10
+    assert run.total_cost_usd == 0.001
+    # The resolved model can only come from the original call's system/init —
+    # a resumed session doesn't re-emit it.
+    assert run.model == "claude-opus"
