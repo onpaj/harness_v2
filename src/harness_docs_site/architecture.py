@@ -455,18 +455,24 @@ MODEL = ArchitectureModel(
                 Driver(
                     id="open-issue-behavior",
                     name="OpenIssueBehavior",
-                    tagline="The open-issue finisher: files the heal draft as an issue.",
+                    tagline="The open-issue finisher: files a step's drafts as issues.",
                     description=(
-                        "The finisher bound to the heal workflow's file-issue "
-                        "step: it reads the heal artifact and opens the issue "
-                        "through IssueTracker — the worker, never the LLM. "
-                        "Idempotent by the original failed-task id; which step "
-                        "finishes by which kind is workflow data."
+                        "Generic and config-driven, not heal-specific: its "
+                        "binding's label, from_step and allowed_labels decide "
+                        "which step's artifact it reads, what replace-vs-wrap "
+                        "shape it takes, and which draft labels pass through. "
+                        "It parses a fenced json array of issue drafts and "
+                        "opens each through IssueTracker — the worker, never "
+                        "the LLM — filing 0..N issues per run. The heal "
+                        "workflow's file-issue step is one binding of it: "
+                        '{"kind": "open-issue", "from_step": "heal", "label": '
+                        '"harness:self-heal"}.'
                     ),
                     sources=("src/harness/behaviors/open_issue.py",),
                     adrs=(
                         "0016-finisher-as-data",
                         "0018-healing-as-a-process",
+                        "0020-open-issue-is-a-generic-finisher",
                     ),
                 ),
                 Driver(
@@ -926,15 +932,16 @@ MODEL = ArchitectureModel(
             id="issue-tracker",
             name="IssueTracker",
             group="Reconciliation",
-            tagline="Opens the self-heal diagnostic issue, idempotently.",
+            tagline="Opens an advisory issue for a step's drafted findings, idempotently.",
             description=(
-                "The heal deliverable goes out through this port: when a failed "
-                "task looks like a fixable harness bug, the open-issue finisher "
-                "— not the LLM — opens an advisory issue. Idempotent by a "
-                "per-task marker, so a crash before the settle never files a "
-                "second issue."
+                "A finisher's deliverable goes out through this port: the "
+                "open-issue finisher — not the LLM — opens an advisory issue "
+                "for each of a step's drafted findings. The self-heal binding "
+                "is the first consumer, not the only one. Idempotent per "
+                "(repo, scope_label, marker), so a crash before the settle "
+                "never re-files the same draft."
             ),
-            adrs=("0018-healing-as-a-process",),
+            adrs=("0018-healing-as-a-process", "0020-open-issue-is-a-generic-finisher"),
             sources=(
                 "src/harness/ports/issues.py",
                 "src/harness/behaviors/open_issue.py",
@@ -945,8 +952,9 @@ MODEL = ArchitectureModel(
                     name="GithubIssueTracker",
                     tagline="Opens the issue on GitHub.",
                     description=(
-                        "Posts the healer's draft to the harness repo, deduped "
-                        "by an embedded harness-heal marker in the body."
+                        "Posts a step's draft to the harness repo, deduped "
+                        "by an embedded harness-issue marker in the body, "
+                        "scoped to the binding's label."
                     ),
                     sources=("src/harness/drivers/github_issues.py",),
                 ),
@@ -955,8 +963,9 @@ MODEL = ArchitectureModel(
                     name="MemoryIssueTracker",
                     tagline="The offline fallback and test double.",
                     description=(
-                        "Records opened issues in memory, so the heal loop runs "
-                        "harmlessly with no token."
+                        "Records opened issues in memory, so an open-issue "
+                        "finisher (e.g. self-heal's) runs harmlessly with no "
+                        "token."
                     ),
                     sources=("src/harness/drivers/memory.py",),
                 ),

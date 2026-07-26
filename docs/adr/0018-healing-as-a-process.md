@@ -76,6 +76,17 @@ loop. `Healer`, `HealConfig`, and `Harness._heal_loop` are removed.
   unconditionally, but not `autoheal.json` (a bare init has no repo to file
   against).
 
+  > **Superseded 2026-07-26 (ADR-0020).** `--heal-repo`/`HARNESS_HEAL_REPO` were
+  > removed outright, not kept as a generator: `harness run` no longer accepts
+  > the flag, `_ensure_autoheal_process` runs unconditionally from `harness
+  > init` (not from `run`), and it seeds `action.params: {}` rather than a
+  > resolved repo. `heal`/`file-issue` and `processes/autoheal.json` now both
+  > ship on every `init`, live, with self-healing inert only until an operator
+  > edits `action.params.repository`. The `open-issue` finisher is registered
+  > unconditionally in `_run`, not gated on the flag's presence. This bullet's
+  > description of the transitional `--heal-repo` generator was accurate for
+  > the state it recorded; it is not accurate for the harness today.
+
 - **Process compilation moves into `app.build()`.** The `failed-tasks` check
   must close over the harness's own live `events`/`failed`/`healed` queues,
   which only exist once `build()` has constructed them — a dependency the

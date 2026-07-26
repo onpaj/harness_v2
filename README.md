@@ -341,8 +341,10 @@ Self-healing is an ordinary Process, not bespoke machinery. The
 task, settles the original to a new terminal `healed/` queue, and fires a
 fresh task through the three-step `heal` workflow (`workflows/heal.json`:
 `heal` → `dedup` → `file-issue`). The `heal` step reads a **failure report**
-built from that task's reason and history — no worktree, no git — and decides
-whether the failure points at a fixable bug in the harness itself (a driver
+built from that task's reason and history, inside a worktree — a scratch one
+until `action.params.repository` names a repo, then that repo's own, the same
+way any ordinary agent step gets one — and decides whether the failure points
+at a fixable bug in the harness itself (a driver
 contract, a wiring gap, a missing workflow edge) as opposed to an external or
 expected failure (a flaky network, a task whose request was simply wrong).
 When it judges it a harness bug, it drafts a diagnosis and a concrete proposed
