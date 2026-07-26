@@ -156,11 +156,22 @@ def test_init_never_clobbers_an_existing_autoheal_process(tmp_path):
     assert json.loads((tmp_path / "processes" / "autoheal.json").read_text()) == {"mine": True}
 
 
-def test_the_heal_repo_flag_is_gone(tmp_path):
+def test_the_heal_repo_flag_is_gone(tmp_path, capsys):
     main(["init", "--root", str(tmp_path)])
+    capsys.readouterr()
 
-    with pytest.raises(SystemExit):
+    # Checks argparse's own rejection (exit code 2 + "unrecognized
+    # arguments"), never merely "some SystemExit happened" — that weaker
+    # shape would also pass if the flag were still accepted and a real
+    # serve() started and then died for an unrelated reason (e.g. the board
+    # port already being held by another process), which is exactly what
+    # the pre-fix version of the equivalent test for `--workflow`/
+    # `--all-workflows`/`--resolver-workflow` did before those flags were
+    # removed (see test_the_workflow_selection_flags_are_gone).
+    with pytest.raises(SystemExit) as exc:
         main(["run", "--root", str(tmp_path), "--heal-repo", "onpaj/harness_v2"])
+    assert exc.value.code == 2
+    assert "unrecognized arguments" in capsys.readouterr().err
 
 
 HEAL_FINISHER_CONFIG = {"from_step": "heal", "label": "harness:self-heal"}

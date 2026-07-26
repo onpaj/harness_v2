@@ -266,8 +266,13 @@ Dependencies flow strictly downward, no cycles.
   consumes — with one exception: when an autoheal Process is wired, `failed/` gets
   exactly one reader (the `failed-tasks` Check), and `healed/` becomes the
   never-consumed terminal (invariant 24).
-- **Self-healing is a Process** (opt-in), not a bespoke loop (ADR-0018/ADR-0019). Its
-  action, the `failed-tasks` Check, drains `failed/`: it claims each failed task,
+- **Self-healing is a Process, seeded and live on every root** (not opt-in, not a
+  bespoke loop, ADR-0018/ADR-0019). `harness init` writes `processes/autoheal.json`
+  on a 30s interval, so `failed/` drains and `heal`/`dedup` run on any root running
+  the default `--agent claude` — but it seeds `action.params.repository` empty, so
+  nothing gets filed anywhere until an operator points that value at a registered
+  repo (a `repos.json` name). Its action, the `failed-tasks` Check, drains
+  `failed/`: it claims each failed task,
   settles it to `healed/`, and fires a fresh task through the three-step `heal`
   workflow. The `heal` step runs the `heal` persona over the failure report (reason +
   history, no worktree) and triages it, returning `file` (a fixable harness bug —

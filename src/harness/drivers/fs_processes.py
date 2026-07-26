@@ -148,6 +148,7 @@ def compile_process(
     interval, cron = _parse_cadence(where, raw.get("trigger"))
     _check_trigger_kind(where, raw.get("trigger"))
     check = _parse_action(where, raw.get("action"), checks)
+    _validate_action_repository_param(where, raw.get("action"), known_repositories)
     workflow, step = _parse_target(where, raw.get("target"), known_targets)
     dedup = _parse_dedup(where, raw.get("dedup", "per-interval"))
     sink = _parse_sink(where, raw.get("sink"))
@@ -220,6 +221,36 @@ def _parse_action(where: str, action: object, checks: dict[str, CheckFactory]):
             f"process {where} has invalid params for check {check_name!r}: {error}",
             field="params",
         ) from None
+
+
+def _validate_action_repository_param(
+    where: str, action: object, known_repositories: set[str] | None
+) -> None:
+    """`action.params.repository` is now the primary surface an operator
+    points self-healing (or any other `failed-tasks` process) at a repo
+    through — the `failed-tasks` check stamps it onto every fresh task it
+    fires (invariant #25), and nothing else validated it once the old
+    `--heal-repo` startup warning was removed. Validated the same way the
+    top-level `repository` key is by `_parse_repository`: a missing or empty
+    value is the seeded default and stays valid; a present value must be a
+    member of `known_repositories` when a registry is reachable
+    (`known_repositories=None` stays lenient, matching every other
+    `known_*=None` escape hatch in this module). `_parse_action` has already
+    validated `action` is a dict naming a known check by the time this runs."""
+    if not isinstance(action, dict) or action.get("check") != "failed-tasks":
+        return
+    params = action.get("params")
+    if not isinstance(params, dict):
+        return
+    repository = params.get("repository")
+    if not repository:
+        return
+    if known_repositories is not None and repository not in known_repositories:
+        raise ProcessValidationError(
+            f"process {where} names params.repository {repository!r}, which "
+            "is not in the repository registry",
+            field="params",
+        )
 
 
 def _parse_target(

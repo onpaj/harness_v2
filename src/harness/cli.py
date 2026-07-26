@@ -237,16 +237,18 @@ def _init(args: argparse.Namespace) -> int:
 
     # Queues/tasks/done/failed directories, previously a side effect of
     # calling `build()` here — reproduced directly now that `build()` is no
-    # longer called. Scoped to `args.workflow`'s own steps only, exactly as
-    # before: `resolver`/`heal` get their queues the first time a `harness
-    # run` actually serves them (every workflow file on disk, invariant #24).
-    layout.tasks.mkdir(parents=True, exist_ok=True)
-    layout.done.mkdir(parents=True, exist_ok=True)
-    layout.failed.mkdir(parents=True, exist_ok=True)
-    layout.healed.mkdir(parents=True, exist_ok=True)
-    layout.archived.mkdir(parents=True, exist_ok=True)
+    # longer called, including each queue's `.processing/` subdirectory
+    # (`FilesystemTaskQueue.__init__`, `drivers/fs_queue.py`). Scoped to
+    # `args.workflow`'s own steps only, exactly as before: `resolver`/`heal`
+    # get their queues the first time a `harness run` actually serves them
+    # (every workflow file on disk, invariant #24).
+    for queue_dir in (layout.tasks, layout.done, layout.failed, layout.healed, layout.archived):
+        queue_dir.mkdir(parents=True, exist_ok=True)
+        (queue_dir / ".processing").mkdir(parents=True, exist_ok=True)
     for step in workflow.steps():
-        (layout.queues / step).mkdir(parents=True, exist_ok=True)
+        step_dir = layout.queues / step
+        step_dir.mkdir(parents=True, exist_ok=True)
+        (step_dir / ".processing").mkdir(parents=True, exist_ok=True)
 
     _write_default_agents(layout, workflow)
     _write_default_agents(layout, resolver_workflow)
@@ -983,9 +985,10 @@ AUTOHEAL_PROCESS_DEFINITION = {
 """Target is `{"workflow": "heal"}`, not `{"step": "heal"}`: a workflow-less
 (bare `step`) task finishes after a single hop through `route()` (see
 `router.py`) — `file-issue` and its `open-issue` finisher would never run,
-silently. `heal`/`file-issue` is a genuine two-step workflow, so it needs a
-real `Workflow` in scope on the *second* `route()` call, which only happens
-when `task.workflow_template` is set (ADR-0018)."""
+silently. `heal` is a genuine three-step workflow (`heal` → `dedup` →
+`file-issue`, invariant #26), so it needs a real `Workflow` in scope on every
+`route()` call past the first, which only happens when `task.workflow_template`
+is set (ADR-0018)."""
 
 
 def _ensure_autoheal_process(layout: HarnessLayout) -> None:
@@ -1008,9 +1011,11 @@ def _ensure_autoheal_process(layout: HarnessLayout) -> None:
     to run before `_scheduled_sources(...)` compiled `processes/*.json`, or the
     file it just wrote would sit unread until the next restart. Now that the
     seeding lives here, in `_init` — a separate command from `run` — that
-    constraint is gone entirely: nothing writes a process file during `run`
-    any more, so there is no ordering left to preserve between this call and
-    anything `run` does.
+    constraint is gone entirely: nothing writes a process file during `run`'s
+    startup wiring any more, so there is no ordering left to preserve between
+    this call and anything `run`'s startup does. (`FilesystemProcessAdmin.write`
+    still writes `processes/*.json` from the dashboard while `run` is live —
+    those are picked up on the next restart, by design.)
     """
     path = layout.processes / "autoheal.json"
     if path.exists():
