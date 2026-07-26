@@ -1369,6 +1369,8 @@ def _ensure_autoheal_process(layout: HarnessLayout) -> None:
 
 Call `_ensure_autoheal_process(layout)` from `_init`, next to where `HEAL_DEFINITION` is written. Delete the call from `_run`.
 
+**Restore an ordering constraint whose comment was lost in Task 5.** The deleted heal block used to say `_ensure_autoheal_process` "must run *before* `known_targets` is computed below". The served-set half of that reason is gone, but the real constraint survives: it must still run before `_scheduled_sources(...)` compiles `processes/*.json`, or the file it just wrote is not picked up until the next restart. Task 5's reviewer flagged this as undocumented. You are rewriting the prose immediately above it — say it there, in whatever form survives your changes. If moving the seeding into `_init` removes the constraint entirely (because nothing writes a process file during `run` any more), say *that* instead, explicitly, rather than leaving the reader to infer it.
+
 - [ ] **Step 4: Delete the flag and the env var**
 
 Delete `run.add_argument("--heal-repo", dest="heal_repo", ...)` (~line 2029) and every remaining reference to `args.heal_repo`, `heal_repo` and `HARNESS_HEAL_REPO` in `src/harness/cli.py` — including the `registry.resolve(heal_repo)` warning block and the `--heal-repo needs --agent claude` error.
