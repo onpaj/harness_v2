@@ -240,6 +240,42 @@ def test_a_binding_without_a_label_fails_the_build(monkeypatch, tmp_path, capsys
     assert "label" in capsys.readouterr().err
 
 
+def test_run_reports_an_unregistered_process_repository_cleanly(monkeypatch, tmp_path, capsys):
+    """`ProcessValidationError` (raised by `build()` compiling
+    `processes/*.json`, invariant #39) must land in the same `error: ...` /
+    exit-2 path as `WorkflowNotFound`/`ValueError`, not escape `main()` as a
+    raw traceback — under launchd a traceback means a crash-loop. The seeded
+    `processes/autoheal.json` ships with an empty `action.params.repository`
+    (valid, the seeded default); pointing it at a name absent from the empty
+    seeded `repos.json` reproduces the failure a typo in that one
+    operator-facing field would cause.
+
+    `build()` raises before `serve()` is ever reached (mirroring
+    `test_a_binding_without_a_label_fails_the_build` above), so `serve` is
+    monkeypatched only as a belt-and-suspenders guard against starting a real
+    server / binding a port, matching the pattern the neighbouring `run`
+    tests in this file use. If `main()` were to let the exception escape
+    instead of handling it, this test would fail with that traceback rather
+    than reaching the assertions below.
+    """
+    main(["init", "--root", str(tmp_path)])
+    autoheal_path = tmp_path / "processes" / "autoheal.json"
+    definition = json.loads(autoheal_path.read_text())
+    definition["action"]["params"]["repository"] = "harness_v2"
+    autoheal_path.write_text(json.dumps(definition))
+
+    async def fake_serve(harness, port, poll_interval, source_interval=30.0, pr_poll_interval=0.0, reconcile_interval=300.0, registry=None):
+        raise AssertionError("serve() must not be reached")
+
+    monkeypatch.setattr("harness.cli.serve", fake_serve)
+    capsys.readouterr()
+
+    assert main(["run", "--root", str(tmp_path)]) == 2
+    err = capsys.readouterr().err
+    assert err.startswith("error:")
+    assert "harness_v2" in err
+
+
 def test_run_registers_open_issue_with_github_tracker_when_a_token_is_set(monkeypatch, tmp_path):
     from harness.drivers.github_issues import GithubIssueTracker
 

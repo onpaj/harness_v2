@@ -230,13 +230,20 @@ def _validate_action_repository_param(
     points self-healing (or any other `failed-tasks` process) at a repo
     through — the `failed-tasks` check stamps it onto every fresh task it
     fires (invariant #25), and nothing else validated it once the old
-    `--heal-repo` startup warning was removed. Validated the same way the
-    top-level `repository` key is by `_parse_repository`: a missing or empty
-    value is the seeded default and stays valid; a present value must be a
-    member of `known_repositories` when a registry is reachable
+    `--heal-repo` startup warning was removed. Validated *almost* the same
+    way the top-level `repository` key is by `_parse_repository`, but the two
+    diverge in two ways: a present value must be a member of
+    `known_repositories` when a registry is reachable
     (`known_repositories=None` stays lenient, matching every other
-    `known_*=None` escape hatch in this module). `_parse_action` has already
-    validated `action` is a dict naming a known check by the time this runs."""
+    `known_*=None` escape hatch in this module) — but (1) unlike
+    `_parse_repository`, a missing *or empty-string* value is the seeded
+    default and stays valid (`_parse_repository` rejects `""` outright), and
+    (2) unlike `_parse_repository`, a truthy non-string value is not rejected
+    up front — it falls through to the membership test below and still fails
+    there, just with a "not in the repository registry" message instead of
+    `_parse_repository`'s "invalid repository" one. `_parse_action` has
+    already validated `action` is a dict naming a known check by the time
+    this runs."""
     if not isinstance(action, dict) or action.get("check") != "failed-tasks":
         return
     params = action.get("params")

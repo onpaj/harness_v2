@@ -23,7 +23,7 @@ from harness.behaviors.open_issue import OpenIssueBehavior
 from harness.drivers.claude_cli import ClaudeCliRunner
 from harness.drivers.fake_forge import FakeForge
 from harness.drivers.fs_agents import FilesystemAgentAdmin, FilesystemAgentCatalog
-from harness.drivers.fs_processes import FilesystemProcessAdmin
+from harness.drivers.fs_processes import FilesystemProcessAdmin, ProcessValidationError
 from harness.drivers.github_issues import GithubIssueTracker
 from harness.drivers.memory import MemoryIssueTracker
 from harness.drivers.fs_repos import FilesystemRepositoryRegistry
@@ -1846,6 +1846,12 @@ def _run(args: argparse.Namespace) -> int:
         # e.g. a served workflow names a finisher kind nothing registered, or
         # binds one (like "open-issue") without the config it requires — a
         # binding with no `label` fails here too (see `_open_issue` above).
+        print(f"error: {error}", file=sys.stderr)
+        return 2
+    except ProcessValidationError as error:
+        # e.g. a process file's action.params.repository names a repo missing
+        # from repos.json (invariant #25/#39) — a malformed process file must
+        # not crash the service with a raw traceback under launchd.
         print(f"error: {error}", file=sys.stderr)
         return 2
 
