@@ -313,36 +313,45 @@ per `dirty` PR, deduped per conflicted head commit.
 
 By default a task that fails comes to rest in `failed/` and stays there — an
 operator has to notice, read its history, and decide whether the harness itself
-was at fault. Point the harness at a repo to file heal issues on and `failed/`
-becomes a queue that drains, via an **autoheal Process** (ADR-0018). Two ways to
-name that repo:
+was at fault. `harness init` seeds `processes/autoheal.json`, an **autoheal
+Process** (ADR-0018) that drains `failed/` — but with an empty
+`action.params.repository`, so it fires heal tasks with nowhere to file an
+issue until you point it at one:
 
-```sh
-# one-off / interactive: the flag also writes processes/autoheal.json for you
-harness run --root ~/harness-root --agent claude --heal-repo onpaj/harness_v2
-
-# unattended service: config in the env, no run flag (mirrors SLACK_WEBHOOK_URL)
-HARNESS_HEAL_REPO=onpaj/harness_v2 harness run --root ~/harness-root --agent claude
+```json
+{
+  "trigger": {"interval": "30s"},
+  "action": {"check": "failed-tasks", "params": {"repository": "harness_v2"}},
+  "target": {"workflow": "heal"},
+  "dedup": "per-state",
+  "sink": {"kind": "none"}
+}
 ```
 
-`HARNESS_HEAL_REPO` is the flag-free path — set it in the service's env
-(`secrets.env`) and the launchd service self-heals with no CLI flag at all. Both
-paths do the same thing: serve the `heal` workflow, register the `open-issue`
-finisher on that repo, and materialize `processes/autoheal.json` if it's absent.
+Edit `processes/autoheal.json` directly (or through the dashboard's process
+editor) and set `action.params.repository` to a repo *name* — a key in
+`repos.json` (e.g. `"harness_v2"`), not an `owner/repo` slug like
+`"onpaj/harness_v2"` — then `harness run --agent claude`
+(the heal step is a claude agent) picks it up on the next tick. This is
+config, not a CLI flag: the launchd service self-heals with no run flag
+needed, once the file names a repo.
 
 Self-healing is an ordinary Process, not bespoke machinery. The
-`processes/autoheal.json` whose `failed-tasks` action drains `failed/`: on each
-tick it claims one failed task, settles the original to a new terminal `healed/`
-queue, and fires a fresh task through the two-step `heal` workflow
-(`workflows/heal.json`: `heal` → `file-issue`). The `heal` step reads a **failure
-report** built from that task's reason and history — no worktree, no git — and
-decides whether the failure points at a fixable bug in the harness itself (a
-driver contract, a wiring gap, a missing workflow edge) as opposed to an external
-or expected failure (a flaky network, a task whose request was simply wrong).
+`failed-tasks` action drains `failed/`: on each tick it claims one failed
+task, settles the original to a new terminal `healed/` queue, and fires a
+fresh task through the three-step `heal` workflow (`workflows/heal.json`:
+`heal` → `dedup` → `file-issue`). The `heal` step reads a **failure report**
+built from that task's reason and history — no worktree, no git — and decides
+whether the failure points at a fixable bug in the harness itself (a driver
+contract, a wiring gap, a missing workflow edge) as opposed to an external or
+expected failure (a flaky network, a task whose request was simply wrong).
 When it judges it a harness bug, it drafts a diagnosis and a concrete proposed
-change and returns `done`; the `file-issue` step's **`open-issue` finisher** then
-opens the diagnostic **issue** on the repo you named. Otherwise it returns
-`request_changes` and no issue is filed.
+change and returns `file`, routing to `dedup`; otherwise it returns `skip` and
+nothing more happens. `dedup` reads the target repo's open issues and returns
+`unique` (routes to `file-issue`) or `duplicate` (settles silently — no
+issue). Only on the `unique` path does the `file-issue` step's **`open-issue`
+finisher** open the diagnostic **issue** on the repo named in
+`action.params.repository`.
 
 The heal step's persona only ever drafts an *issue* — never a PR, never a new
 task. Recursion is guarded by a marker: the check stamps `data.heal` on the heal
@@ -351,13 +360,18 @@ once before the check retires it to `healed/` without re-observing it, so nothin
 loops. The issue is idempotent per original failed task (a hidden marker in its
 body), so a restart mid-heal never files a second one.
 
-`--heal-repo` needs `--agent claude` — the heal step is a claude agent. Its
-persona lives in `agents/heal.json`, and `workflows/heal.json` is written by
-`harness init` alongside the step personas (data, not code); `autoheal.json`
-itself is written by `--heal-repo`, but only if absent — a hand-edited process is
-never clobbered. With a `GITHUB_TOKEN` present the issue is opened on GitHub;
-offline it falls back to an in-memory tracker so the finisher runs harmlessly.
-Without `--heal-repo`, `failed/` stays a dead-end terminal exactly as before.
+The `heal`/`dedup` personas live in `agents/heal.json`/`agents/dedup.json`,
+and `workflows/heal.json` is written by `harness init` alongside the step
+personas (data, not code) — all of it shipped dormant, regardless of whether
+`processes/autoheal.json` names a repo yet. With a `GITHUB_TOKEN` present the
+issue is opened on GitHub; offline it falls back to an in-memory tracker so
+the finisher runs harmlessly. Until `action.params.repository` is set,
+`failed/` still drains into `healed/` on each tick and `heal`/`dedup` still
+run (a repo-less task gets a scratch worktree, not a failure) — only on the
+`unique` path does `file-issue`'s `open-issue` finisher hit a repo-less task
+and fail it, with a message saying exactly that ("set the process's
+params.repository"); that failed heal task is retired to `healed/` on the
+next tick without re-observing it (invariant 25), so it doesn't loop.
 
 ## How work flows
 

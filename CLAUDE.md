@@ -65,7 +65,7 @@ swapped out later.
 22. **`todo` is the board's name for the inbox's fresh tasks** (`status is None`) — the first column. It is a view concern only: the router and dispatcher never see a `todo` queue, and auto-flow is unchanged (a fresh task passes through `todo` into `start`).
 23. **Operator control is a write-side port `TaskControl`, mirroring the read-side `BoardView`.** `restart` is a reset, not a routing decision: it clears `status`/`lastOutcome` and re-inboxes a `failed` task, then the dispatcher decides where next (invariant #3 holds). `TaskControl` is touched only by `TaskControlService` (core), `api/` and wiring — `dispatcher.py`/`consumer.py` don't import it; guarded by `test_architecture.py`. See ADR-0011 and ADR-0012.
 24. **`failed/` has one reader — the `failed-tasks` Check; `healed/` is the never-consumed terminal.** This refines "terminal states are queues nobody consumes": `done`/`end`/`healed` are terminal, while `failed/` is drained by the `failed-tasks` Check (an action of an operator-authored Process, typically `processes/autoheal.json`) and by nothing else. The router and dispatcher never learn about `failed`/`healed` as steps. Both queues are now built **unconditionally** — with no `failed-tasks`-driving process configured, `failed/` simply has no reader, exactly as before wiring one up. See ADR-0018.
-25. **The check produces at most one fresh task per claimed failure and never writes a claimed task back to `failed/`.** Every claim settles to `healed/` in the same `evaluate()` call. Recursion is guarded by a marker (`data.heal`), not by construction: a heal task that itself fails **does** pass through `failed/` normally (board-visible) before the check's next tick retires it to `healed/` without a new `Observation`. So no failure is healed twice and nothing loops. The check also stamps its own `params.repository` (the `--heal-repo`/`HARNESS_HEAL_REPO` value) onto the fresh task it fires, so the `heal` step gets a worktree the same way any ordinary agent step does (invariant #15) — an autoheal process with no `repository` param fires a repository-less heal task, unchanged from before this stamp existed. See ADR-0018 and ADR-0019.
+25. **The check produces at most one fresh task per claimed failure and never writes a claimed task back to `failed/`.** Every claim settles to `healed/` in the same `evaluate()` call. Recursion is guarded by a marker (`data.heal`), not by construction: a heal task that itself fails **does** pass through `failed/` normally (board-visible) before the check's next tick retires it to `healed/` without a new `Observation`. So no failure is healed twice and nothing loops. The check also stamps its own `params.repository` — a plain field of the `failed-tasks` action, set in `processes/autoheal.json` like any other Process action param, the operator's own responsibility to fill in — onto the fresh task it fires, so the `heal` step gets a worktree the same way any ordinary agent step does (invariant #15) — `harness init` seeds that file with an empty `repository` param, so a freshly initialized root fires a repository-less heal task until the operator edits it. See ADR-0018 and ADR-0019.
 26. **The heal *workflow* is three steps — `heal` triages, `dedup` forks on novelty, `file-issue` is the only one that opens anything, and it isn't the LLM.** `heal`'s persona (persona as data) diagnoses the failure and returns `file` (a fixable harness bug or an operational problem worth filing — drafts the issue, routes to `dedup`) or `skip` (external/transient/impossible — routes straight to `end`, nothing filed). `dedup`'s persona reads the harness repo's open issues and returns `unique` (routes to `file-issue`) or `duplicate` (routes straight to `end`, silently — no issue, no board-visible failure). Only on the `unique` path does the `file-issue` step's `open-issue` finisher (a `ConsumerBehavior`, same footing as `open-pr`/`LandingBehavior`) read the drafted issue and call `IssueTracker.open_issue` (invariant 9) — neither persona ever opens anything itself. `IssueTracker` is a third port distinct from `Forge` (opens PRs) and `TaskSource.finish` (relabels), idempotent by a per-task marker. Both steps' outcome vocabularies (`file`/`skip`, `unique`/`duplicate`) are declared as workflow edges, not hardcoded in the personas — invariant #42 governs which outcomes each step may actually report. See ADR-0018 and ADR-0019.
 27. **`IssueTracker` and `FailedTasksCheck` are unknown to the dispatcher and consumer.** `IssueTracker` is touched only by the `open-issue` finisher (wired via `build()`'s `finishers=`); `FailedTasksCheck` is a `Check` registered inside `app.build()`'s internal checks dict. Neither is imported by `dispatcher.py`/`consumer.py`; guarded by `test_architecture.py`. See ADR-0018 and ADR-0019.
 28. **A task's workspace branch is `harness/<task.id>` unless `task.data["branch"]` overrides it.** The override exists for exactly one case (the resolver workflow fixing an existing PR): `GitWorkspace.attach` checks out that *existing* branch instead of creating a fresh one from HEAD. Absent the key, every path is unchanged.
@@ -276,18 +276,18 @@ Dependencies flow strictly downward, no cycles.
   `duplicate` (settles silently — no issue). Only the `unique` path's `file-issue`
   step's `open-issue` finisher opens the drafted issue on the harness repo via
   `IssueTracker`. `harness init` ships `workflows/heal.json` + `agents/heal.json` +
-  `agents/dedup.json`. The `open-issue` finisher kind is registered
-  unconditionally (it derives its repo from `task.repository` and its label
-  from the binding — invariant 26 — so it needs no wiring-time
-  configuration); what still needs naming a heal repo, either `--heal-repo
-  <owner/repo>` (interactive) or the `HARNESS_HEAL_REPO` env var (the flag-free
-  path for the launchd service, mirroring how `SLACK_WEBHOOK_URL` gates the slack
-  sink) — needs `--agent claude` — is serving `heal` itself, writing
-  `processes/autoheal.json` if absent (a hand-edited process is never
-  clobbered), and stamping that repo as `params.repository` on every fresh
-  heal task, which is what gives the `heal` step a worktree and, through
-  `open-issue`'s `slug_for`, a repo to file onto. Recursion is guarded by the
-  `data.heal` marker, not by construction (invariant 25).
+  `agents/dedup.json` + `processes/autoheal.json` (seeded with an empty
+  `action.params.repository`, never clobbering a hand-edited file). The
+  `open-issue` finisher kind is registered unconditionally (it derives its
+  repo from `task.repository` and its label from the binding — invariant 26 —
+  so it needs no wiring-time configuration), and `heal` is served the same as
+  any other workflow file on disk (invariant 24) — so self-healing is
+  configured entirely through `processes/autoheal.json`, like every other
+  Process: an operator points `action.params.repository` at a registered repo
+  (a `repos.json` name) by editing the file directly or through the
+  dashboard's process editor. Until they do, a heal task is repository-less,
+  and `open-issue` fails it with a message saying exactly that. Recursion is
+  guarded by the `data.heal` marker, not by construction (invariant 25).
 - **`claim()`** is an atomic `rename` into `<queue>/.processing/`. A single operation
   handles the lease, idempotency and provenance after a crash.
 - **A step's concurrency is workflow config, not wiring.** `Workflow.max_parallel`
@@ -402,7 +402,8 @@ Dependencies flow strictly downward, no cycles.
   — sees only the primitives it already knows, and every invariant holds unchanged.
   The `sink` names the outbound destination — `none` or `slack`, the GitHub-in/
   Slack-out (source ≠ destination) split made real (invariant #40). `harness init`
-  writes an empty `processes/`; the operator defines several, each an independent file.
+  seeds `processes/` with one file, `autoheal.json` (self-healing's own Process,
+  invariant 25); the operator adds any others, each an independent file.
   A Process compiles to the same `ScheduledTrigger` a bare `triggers/*.json` does, so
   both surfaces coexist — the Process is the richer primary surface, the trigger file
   the low-level primitive. A structured board editor exists (`ProcessAdmin`), wired in

@@ -201,29 +201,53 @@ def _init(args: argparse.Namespace) -> int:
         )
 
     # `heal`/`file-issue` (ADR-0018): dormant data, shipped unconditionally
-    # exactly like the resolver workflow — the process that actually drives it
-    # (`processes/autoheal.json`) is gated behind `--heal-repo` instead (a bare
-    # `harness init` has no repo to file issues against).
+    # exactly like the resolver workflow. `processes/autoheal.json` is shipped
+    # unconditionally too — self-healing is now configured entirely through
+    # that file, like every other Process; a bare `harness init` seeds it
+    # with an empty `action.params.repository`, and the operator points it
+    # at a registered repo by editing the file or through the dashboard's
+    # process editor.
     heal_definition_path = layout.workflows / f"{DEFAULT_HEAL_WORKFLOW}.json"
     if not heal_definition_path.exists():
         heal_definition_path.write_text(
             json.dumps(HEAL_DEFINITION, indent=2, ensure_ascii=False),
             encoding="utf-8",
         )
+    _ensure_autoheal_process(layout)
 
+    # Workflows are read straight off the filesystem here, not through
+    # `build()`: `build()` also compiles `processes/*.json` (ADR-0018), and
+    # the autoheal process just seeded above targets `{"workflow": "heal"}` —
+    # a target `build()` only accepts from a harness that *serves* `heal`.
+    # This call only ever wants to serve `args.workflow`, so widening the
+    # served set just to satisfy that one process's validation would be
+    # backwards, and it wouldn't even work: `heal`'s `file-issue` step binds
+    # the `open-issue` finisher, which nothing here registers (that wiring is
+    # `_run`-only), so serving `heal` through `build()` fails a *second*
+    # validation on top of the first. Reading the workflow definitions
+    # directly avoids both.
     try:
-        harness = build(root, args.workflow)
-        resolver_workflow = FilesystemWorkflowRepository(layout.workflows).get(
-            DEFAULT_RESOLVER_WORKFLOW
-        )
-        heal_workflow = FilesystemWorkflowRepository(layout.workflows).get(
-            DEFAULT_HEAL_WORKFLOW
-        )
+        raw_workflows = FilesystemWorkflowRepository(layout.workflows)
+        workflow = raw_workflows.get(args.workflow)
+        resolver_workflow = raw_workflows.get(DEFAULT_RESOLVER_WORKFLOW)
+        heal_workflow = raw_workflows.get(DEFAULT_HEAL_WORKFLOW)
     except WorkflowNotFound as error:
         print(f"error: {error}", file=sys.stderr)
         return 2
 
-    workflow = harness.workflows[args.workflow]
+    # Queues/tasks/done/failed directories, previously a side effect of
+    # calling `build()` here — reproduced directly now that `build()` is no
+    # longer called. Scoped to `args.workflow`'s own steps only, exactly as
+    # before: `resolver`/`heal` get their queues the first time a `harness
+    # run` actually serves them (every workflow file on disk, invariant #24).
+    layout.tasks.mkdir(parents=True, exist_ok=True)
+    layout.done.mkdir(parents=True, exist_ok=True)
+    layout.failed.mkdir(parents=True, exist_ok=True)
+    layout.healed.mkdir(parents=True, exist_ok=True)
+    layout.archived.mkdir(parents=True, exist_ok=True)
+    for step in workflow.steps():
+        (layout.queues / step).mkdir(parents=True, exist_ok=True)
+
     _write_default_agents(layout, workflow)
     _write_default_agents(layout, resolver_workflow)
     _write_default_agents(layout, heal_workflow)
@@ -964,27 +988,36 @@ real `Workflow` in scope on the *second* `route()` call, which only happens
 when `task.workflow_template` is set (ADR-0018)."""
 
 
-def _ensure_autoheal_process(layout: HarnessLayout, heal_repo: str) -> None:
-    """`--heal-repo`'s thin-generator half: write `processes/autoheal.json`
-    unless one already exists — never clobbering an operator's hand-edited
-    file. Written directly (like `_init`'s `HEAL_DEFINITION`/
-    `RESOLVER_DEFINITION`), **not** through `FilesystemProcessAdmin.write`:
-    validating `"failed-tasks"` needs the merged registry `app.build()`
-    assembles (`harness.process_checks` — which `serve()` *does* hand the
-    dashboard's admin), and at this point in `_run` no harness exists yet.
-    The real validation this file needs to pass happens when `build()`
-    compiles it moments later, not at write time.
+def _ensure_autoheal_process(layout: HarnessLayout) -> None:
+    """Seed `processes/autoheal.json` unless one already exists — never
+    clobbering an operator's hand-edited file.
+
+    Self-healing is configured like every other Process: this file. Its
+    `action.params.repository` is deliberately empty here — an operator points
+    it at a registered repo (by name, as in `repos.json`) by editing this file
+    or through the dashboard's process editor. Until they do, a heal task is
+    repository-less, and the `open-issue` finisher fails it with a message
+    saying exactly that.
+
+    Written directly (like `_init`'s `HEAL_DEFINITION`/`RESOLVER_DEFINITION`),
+    **not** through `FilesystemProcessAdmin.write`: validating `"failed-tasks"`
+    needs the merged registry `app.build()` assembles, which does not exist at
+    init time. The real validation happens when `build()` compiles it.
+
+    Ordering note: a previous version of this function ran from `_run` and had
+    to run before `_scheduled_sources(...)` compiled `processes/*.json`, or the
+    file it just wrote would sit unread until the next restart. Now that the
+    seeding lives here, in `_init` — a separate command from `run` — that
+    constraint is gone entirely: nothing writes a process file during `run`
+    any more, so there is no ordering left to preserve between this call and
+    anything `run` does.
     """
     path = layout.processes / "autoheal.json"
     if path.exists():
         return
     layout.processes.mkdir(parents=True, exist_ok=True)
-    definition = {
-        **AUTOHEAL_PROCESS_DEFINITION,
-        "action": {"check": "failed-tasks", "params": {"repository": heal_repo}},
-    }
     path.write_text(
-        json.dumps(definition, indent=2, ensure_ascii=False),
+        json.dumps(AUTOHEAL_PROCESS_DEFINITION, indent=2, ensure_ascii=False),
         encoding="utf-8",
     )
 
@@ -1726,50 +1759,6 @@ def _run(args: argparse.Namespace) -> int:
     merge_checker = _build_merge_checker(args)
     issue_checker = _build_issue_checker(args)
 
-    # Self-healing (ADR-0018): a heal repo — `--heal-repo <owner/repo>` OR the
-    # `HARNESS_HEAL_REPO` env var, the flag-free path that mirrors how
-    # `SLACK_WEBHOOK_URL` gates the slack sink (config in the service's env,
-    # never a run flag) — writes `processes/autoheal.json`. The seeded `heal`
-    # workflow is already served by the serve-everything-on-disk rule above,
-    # and the `open-issue` finisher is registered unconditionally, so neither
-    # needs `heal_repo` to switch on. What `heal_repo` still controls is the
-    # value stamped as `params.repository` on every fresh heal task
-    # (invariant #25), which is what gives the `heal` step a worktree and,
-    # through the generic `slug_for` above, a repo to file onto. It reuses the
-    # claude agent, so it needs `--agent claude`.
-    heal_repo = args.heal_repo or os.environ.get("HARNESS_HEAL_REPO")
-    if heal_repo:
-        if args.heal_repo and not use_agent:
-            print(
-                "error: --heal-repo needs --agent claude (the healer is a claude agent)",
-                file=sys.stderr,
-            )
-            return 2
-        if not use_agent:
-            print(
-                "warning: HARNESS_HEAL_REPO is set but --agent is not claude; the"
-                " heal step cannot run and failed tasks will settle unhealed.",
-                file=sys.stderr,
-            )
-        # `heal_repo` is a repo *name*, resolved through the same `registry`
-        # `GitWorkspace.attach` and `slug_for` above both use — an
-        # unregistered name raises `RepositoryNotFound` at attach time. That
-        # failure lands the heal task in `failed/`, which the recursion guard
-        # (invariant #25/#26) then retires straight to `healed/` with no
-        # issue filed — self-healing goes silently inert. Warn up front
-        # rather than let the operator discover it that way; this must never
-        # block startup (a WARNING, not an error).
-        try:
-            registry.resolve(heal_repo)
-        except RepositoryNotFound:
-            print(
-                f"warning: heal repo {heal_repo!r} is not registered in"
-                f" {layout.repos} — heal tasks will fail to attach a worktree"
-                " until it is added there, so self-healing will file nothing.",
-                file=sys.stderr,
-            )
-        _ensure_autoheal_process(layout, heal_repo)
-
     # Scheduled triggers (`triggers/*.json`) are `TaskSource`s that ride the
     # existing `sources` list — no new loop, no `build()` parameter. A trigger's
     # target must be a served workflow or a known step; `known_targets` (served
@@ -2038,13 +2027,6 @@ def main(argv: list[str] | None = None) -> int:
         "mutually exclusive with --github-workflow)",
     )
     run.add_argument("--worktree-root", default=None, help="root of the task worktrees")
-    run.add_argument(
-        "--heal-repo",
-        default=None,
-        dest="heal_repo",
-        help="enable self-healing: assign a healer agent to the failed queue that "
-        "opens diagnostic issues on this repo (owner/repo); needs --agent claude",
-    )
     run.add_argument(
         "--api-port",
         type=int,
