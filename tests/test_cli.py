@@ -2999,6 +2999,20 @@ def test_active_stages_lists_claimed_tasks(tmp_path):
     assert active_stages(tmp_path) == ["tsk_a", "tsk_b"]
 
 
+def _bumping_version(before: str = "harness 0.9.0", after: str = "harness 0.10.0"):
+    """Stub `installed_version_report` reporting an actual upgrade.
+
+    The first call is the pre-upgrade snapshot, every later one the post-upgrade
+    reading — so `before != after` and the restart gate opens.
+    """
+    reports = iter([before])
+
+    def report() -> str:
+        return next(reports, after)
+
+    return report
+
+
 def test_update_restart_only_if_idle_skips_when_busy(tmp_path, monkeypatch, capsys):
     from harness import cli
 
@@ -3013,7 +3027,7 @@ def test_update_restart_only_if_idle_skips_when_busy(tmp_path, monkeypatch, caps
 
     monkeypatch.setattr(cli, "uv_executable", lambda: Path("/uv"))
     monkeypatch.setattr(cli.subprocess, "run", lambda cmd, **k: Ok())
-    monkeypatch.setattr(cli, "installed_version_report", lambda: "harness 0.9.0")
+    monkeypatch.setattr(cli, "installed_version_report", _bumping_version())
     restarted = []
     monkeypatch.setattr(cli, "kickstart", lambda uid, label: restarted.append(label))
 
@@ -3036,7 +3050,7 @@ def test_update_restart_only_if_idle_restarts_when_quiet(tmp_path, monkeypatch, 
 
     monkeypatch.setattr(cli, "uv_executable", lambda: Path("/uv"))
     monkeypatch.setattr(cli.subprocess, "run", lambda cmd, **k: Ok())
-    monkeypatch.setattr(cli, "installed_version_report", lambda: "harness 0.9.0")
+    monkeypatch.setattr(cli, "installed_version_report", _bumping_version())
     monkeypatch.setattr("harness.cli.sys.platform", "darwin")
     restarted = []
     monkeypatch.setattr(cli, "kickstart", lambda uid, label: restarted.append(label))
@@ -3044,6 +3058,38 @@ def test_update_restart_only_if_idle_restarts_when_quiet(tmp_path, monkeypatch, 
     assert main(["update", "--root", str(tmp_path), "--restart", "--only-if-idle"]) == 0
     assert restarted == ["com.harness"]
     assert "restarted service com.harness" in capsys.readouterr().out
+
+
+def test_update_restart_leaves_service_alone_when_nothing_upgraded(
+    tmp_path, monkeypatch, capsys
+):
+    """A no-op poll must not restart the service.
+
+    The autoupdate schedule fires every 30 minutes; restarting unconditionally
+    SIGKILLs the running harness each time, so no stage outliving the schedule's
+    period can ever finish. Idleness is not the gate — a pointless restart is
+    pointless whether or not a stage happens to be claimed right now.
+    """
+    from harness import cli
+
+    main(["init", "--root", str(tmp_path)])  # idle: nothing claimed
+    capsys.readouterr()
+
+    class Ok:
+        returncode = 0
+        stdout = "Nothing to upgrade\n"
+        stderr = ""
+
+    monkeypatch.setattr(cli, "uv_executable", lambda: Path("/uv"))
+    monkeypatch.setattr(cli.subprocess, "run", lambda cmd, **k: Ok())
+    monkeypatch.setattr(cli, "installed_version_report", lambda: "harness 0.9.0")
+    monkeypatch.setattr("harness.cli.sys.platform", "darwin")
+    restarted = []
+    monkeypatch.setattr(cli, "kickstart", lambda uid, label: restarted.append(label))
+
+    assert main(["update", "--root", str(tmp_path), "--restart", "--only-if-idle"]) == 0
+    assert restarted == []
+    assert "left running (no version change)" in capsys.readouterr().out
 
 
 def test_update_without_restart_still_only_prints_the_hint(monkeypatch, capsys):
