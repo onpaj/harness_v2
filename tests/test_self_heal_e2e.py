@@ -7,7 +7,7 @@ ordinary dispatcher/consumer path — now three steps: `heal`
 (`ClaudeCliBehavior` + the `healer` persona) triages the failure and returns
 `file` (a harness bug worth filing) or `skip` (nothing to file); `file` routes
 into `dedup` (`ClaudeCliBehavior` + the `dedup` persona), which reads the
-harness repo's open issues and returns `unique` (routes to `file-issue`) or
+task's repository's open issues and returns `unique` (routes to `file-issue`) or
 `duplicate` (routes straight to `end`, silently); `file-issue` (the
 `open-issue` finisher) opens the issue. No disk except the queues
 (`FilesystemTaskQueue` under `tmp_path`), no real waiting — `FakeClock` gates
@@ -58,7 +58,7 @@ HEAL_DEFINITION = {
     ],
     "descriptions": {
         "heal": "diagnose the failed task from its report; decide whether it warrants a GitHub issue",
-        "dedup": "read the harness repo's open issues; decide whether the drafted issue is new",
+        "dedup": "read the task's repository's open issues; decide whether the drafted issue is new",
     },
     "finishers": {
         "file-issue": {

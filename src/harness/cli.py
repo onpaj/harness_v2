@@ -148,7 +148,7 @@ HEAL_DEFINITION = {
     ],
     "descriptions": {
         "heal": "diagnose the failed task from its report; decide whether it warrants a GitHub issue",
-        "dedup": "read the harness repo's open issues; decide whether the drafted issue is new",
+        "dedup": "read the task's repository's open issues; decide whether the drafted issue is new",
     },
     "finishers": {
         "file-issue": {
