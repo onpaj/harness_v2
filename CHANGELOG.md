@@ -1,6 +1,122 @@
 # CHANGELOG
 
 
+## v1.0.0 (2026-07-26)
+
+### Bug Fixes
+
+- Keep an unknown finisher kind fatal, make dropped-workflow Processes inert
+  ([`403274d`](https://github.com/onpaj/harness_v2/commit/403274d1c410ce33b30fa11e441d8e8b88e32050))
+
+Two Important findings against 274a5a5's warn-instead-of-crash-loop change:
+
+1. `_validate_served_workflows` caught every `ValueError` from `validate_workflow_finishers`, so an
+  unknown finisher kind (a value that's set and wrong, e.g. a typo or `label-issue` with no
+  `GITHUB_TOKEN`) silently dropped its workflow instead of failing the run — the wrong side of the
+  operator's fail-fast/warn-only-on-missing rule, and it made `build()`'s own unknown-kind check
+  unreachable via the CLI. Fixed with a distinct type, `UnknownFinisherKind`, raised only for the
+  unregistered-kind case and re-raised (not caught) by the served-set filter; `build()`'s own
+  diagnostic enumeration (`known: ...`) is restored in the fatal message.
+
+2. Dropping `heal` from the served set left `processes/autoheal.json` targeting a workflow that no
+  longer exists in the served set — `FilesystemProcessRepository`'s flat membership test only still
+  passed by coincidence (the `heal` *agent* catalog entry shares the name), so `--agent dummy` or
+  `--agent claude` with no `agents/heal.json` still crash-looped exactly as before. Fixed by
+  threading the dropped-workflow set from `cli._run` through `build()` into
+  `FilesystemProcessRepository.build()`, which now skips a process targeting one of them instead of
+  failing the whole build; the served-workflow drop warning now also names the dependent
+  process(es).
+
+Test changes: the heal-drop test in test_cli.py no longer mocks `build` (only `serve`), is
+  parametrized over `--agent claude`/`--agent dummy`, and a new test covers `agents/heal.json`
+  removed — the composite path these tests claim to prove is now actually exercised. Added coverage
+  for the unknown-kind and label-issue-without-a-token fatal paths. test_app.py's factory-call test
+  now asserts a call count, not just an in-factory assertion.
+
+Corrected three documentation sites that asserted an unknown kind still fails the build while the
+  shipped code had stopped doing that: CLAUDE.md's finisher invariant, cli.py's
+  `_validate_served_workflows` docstring, and ADR-0022.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+
+- Make unknown-finisher-kind fatality order-independent, reconcile autoheal warnings
+  ([`947ae2a`](https://github.com/onpaj/harness_v2/commit/947ae2aa0b577c2b0eb0599609e0524e9fac8542))
+
+validate_workflow_finishers did the unknown-kind lookup and the factory invocation in a single loop
+  over a workflow's finisher bindings, so whichever binding a dict iterated first decided the
+  outcome: a config-shaped ValueError from an earlier binding could escape before a later binding's
+  unknown kind was ever seen, silently dropping the workflow (exit 0) instead of failing the whole
+  run (exit 2) purely depending on JSON key order. Restored build()'s own two-pass shape: a complete
+  unknown-kind check over every binding first, then a separate pass invoking factories.
+
+Also stop _warn_missing_autoheal_repository from warning about a "failed-tasks" process whose target
+  workflow was already dropped by _validate_served_workflows -- that process is inert once its
+  workflow is gone, so claiming it "will run heal/dedup on every failure" directly contradicted the
+  drop warning already printed for the same root.
+
+Updated two stale test docstring cross-references to a since-removed test name
+  (test_a_binding_without_a_label_fails_the_build) to point at the tests that now cover that
+  behavior.
+
+- Warn instead of crash-loop on an unwirable workflow or repo-less autoheal
+  ([`274a5a5`](https://github.com/onpaj/harness_v2/commit/274a5a5605add3a08afbe5aef93c9ddbf53e8026))
+
+Two places violated ADR-0021/0022's own principle that a value set but wrong is a typo and fails
+  fast, while a value that's absent is "not configured yet" and only warns.
+
+1. `app.build()` eagerly constructs the finisher for every bound step of every served workflow, so
+  one workflow with an unwirable binding exits the whole run with 2. Combined with "serve every
+  workflow on disk", a single stale file crash-loops a launchd-supervised service — confirmed
+  against the reference install's own `workflows/heal.json`, still carrying the pre-generic string
+  form `"file-issue": "open-issue"`, which parses to an empty config and fails the `open-issue`
+  factory's `label` check.
+
+`cli._run` now validates each served workflow's own finisher bindings against the finisher registry
+  before calling `build()` (`_validate_served_workflows`, using a new `app.validate_workflow_
+  finishers` that mirrors `build()`'s per-step resolution without duplicating its registry
+  construction or its queue/catalog/workspace machinery) and drops one that can't be wired, printing
+  a `warning:` naming the file, the step and the reason. `build()`'s own fail-fast is unchanged for
+  everything that survives the filter — an unknown kind, or a genuine cross-workflow binding
+  conflict.
+
+2. A compiled `failed-tasks` process with no `action.params.repository` is valid (the seeded
+  `harness init` default) but silently inert: self-healing spends an agent call on `heal` and one on
+  `dedup` per drained failure and files nothing, with the token bill as the only signal.
+  `cli._warn_missing_autoheal_repository` now warns about it at startup, mirroring
+  `_declared_sink_kinds`'s raw-JSON prescan pattern. A *present but wrong* repository is unchanged —
+  still a `ProcessValidationError` at process-compile time.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+
+### Documentation
+
+- Renumber ADR-0021 to ADR-0022, superseding PR #129's autoheal ADR-0021
+  ([`ada4f9c`](https://github.com/onpaj/harness_v2/commit/ada4f9c26cec6bea4dc4ecaa3a1f12b4befeaa6b))
+
+`main` merged docs/adr/0021-autoheal-enabled-by-its-process-file.md (PR #129) while this branch's
+  own ADR-0021 (open-issue-is-a-generic-finisher) was in flight, claiming the number for a different
+  decision. Renumber this branch's ADR to 0022 and update every reference that refers to it: the
+  heading, CLAUDE.md invariant 26, the superseded-note blockquotes in 0018-healing-as-a-process.md
+  and 0019-heal-triage-and-dedup.md, the two ADR slugs in harness_docs_site/architecture.py, and the
+  historical plan document that specified creating it — mirroring the precedent set by commit
+  8d42497 for the previous 0020->0021 renumbering.
+
+ADR-0022 also now records, explicitly, that it supersedes PR #129's ADR-0021: both reached the same
+  diagnosis (HARNESS_HEAL_REPO's ambient,
+
+two-place configuration was the problem) but different fixes. Agreed: the environment variable is
+  gone and processes/autoheal.json is the right home. Reversed: ADR-0021 keeps --heal-repo as a
+  bootstrap that writes the process file; this branch deletes it outright, since `harness init`
+  already seeds the file unconditionally. The substantive difference is what
+  action.params.repository means: ADR-0021 leaves it a GitHub slug doing two jobs (a repos.json key
+  and a GitHub API identity) that silently disagreed on the reference install; this branch makes it
+  a repos.json name and derives the slug from the clone's origin, so the field has exactly one
+  meaning. Reciprocal blockquotes were added to PR #129's own ADR-0021 file, matching this repo's
+  established partial-supersession style (inline blockquotes, Status line unchanged).
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+
+
 ## v0.21.2 (2026-07-26)
 
 ### Bug Fixes
@@ -31,10 +147,85 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
   ([#129](https://github.com/onpaj/harness_v2/pull/129),
   [`e76edc4`](https://github.com/onpaj/harness_v2/commit/e76edc4278e5c5fb5fc5adc6520c850dae897324))
 
+### Documentation
+
+- Reconcile the Jira check's heal-repo reference with its removal
+  ([`96be6b8`](https://github.com/onpaj/harness_v2/commit/96be6b81b2b0ac364f98f310282106c6c1ec2bfc))
+
 
 ## v0.21.0 (2026-07-24)
 
 ### Bug Fixes
+
+- Address review findings on the open-issue finisher rewrite
+  ([`ab88c54`](https://github.com/onpaj/harness_v2/commit/ab88c5495f611013de2b4dca7ebbb62ced919354))
+
+- Restore the self-heal e2e's tripwire assertions (one issue opened, a marker derived by formula,
+  the Origin footer) and mark it xfail(strict=True) naming Task 4, instead of the placeholder
+  `assert tracker.opened == []` that certified the currently-broken outcome and would stay green
+  forever. - Rewrite the interim open-issue binding's comment in cli.py: it no longer claims to be
+  behavior-preserving. With the heal persona still unchanged, a real heal run today either raises
+  DraftError -> IssueError or files nothing. - Resolve OpenIssueBehavior's repo slug lazily, only
+  once there is a draft to file, so a repository-less task with zero drafts settles done instead of
+  raising (invariant 25). - Collapse the duplicated allowlist-partitioning comprehensions into one
+  loop and annotate refs/_summary's first parameter.
+
+- Drop the dead --resolver-workflow flag, tighten related tests
+  ([`5752298`](https://github.com/onpaj/harness_v2/commit/57522987b524f7d62f9651d5e82ea689b0e1c167))
+
+--resolver-workflow lost its only reader when Task 5 deleted the resolver force-add — the resolver
+  workflow is now served because workflows/resolver.json exists, exactly like any other workflow, so
+  the flag's help text was already false. Delete the declaration.
+
+Also: correct test_run_heal_via_env_var_wires_everything_without_a_flag's docstring, which still
+  claimed HARNESS_HEAL_REPO serves `heal` (it doesn't since Task 5 — disk presence does; the env var
+  only stamps params.repository and materializes processes/autoheal.json). Drop the two now-vacuous
+  `DEFAULT_HEAL_WORKFLOW in served_names` assertions that held regardless of heal wiring. Strengthen
+  test_the_workflow_selection_flags_are_gone to assert argparse's own rejection (exit code 2 +
+  "unrecognized arguments") for --workflow, --all-workflows and --resolver-workflow, instead of
+  accepting any SystemExit — the old form passed even under the pre-Task-5 code because a real
+  serve() started and died on a busy port, silently never exercising flag rejection and violating
+  the no-real-serve()-in-tests rule.
+
+BREAKING CHANGE: `harness run --resolver-workflow` no longer exists; the resolver workflow is served
+  automatically whenever workflows/resolver.json is present, same as every other workflow.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+
+- Exit 2 on a malformed process file instead of a raw traceback
+  ([`c911572`](https://github.com/onpaj/harness_v2/commit/c9115720ec726fd28b28d9b1cd11a93332c17a33))
+
+ProcessValidationError subclasses Exception, not ValueError, so `_run`'s except clause around
+  build() never caught it — a process file naming an unregistered action.params.repository (e.g. a
+  typo in processes/autoheal.json, the field operators are told to configure) crashed main() with a
+  traceback instead of printing error: ... and returning 2. Under launchd that means a crash-loop
+  with no readable cause.
+
+Also tightens _validate_action_repository_param's docstring: it claimed to validate the same way
+  _parse_repository does, but a truthy non-string value takes a different path through the two (an
+  up-front "invalid repository" rejection there vs. falling through to the membership check here,
+  still rejected but with a different message).
+
+- Key the self-heal xfail tripwire's marker off the running task
+  ([`49af3d9`](https://github.com/onpaj/harness_v2/commit/49af3d97478a0fb837074837c80c8c8e11f00958))
+
+The strict-xfail tripwire on test_heal_file_dedup_unique_opens_exactly_one_issue compared the filed
+  issue's marker against marker_for("tsk_e2e", ...) — the original failed task's id — but
+  OpenIssueBehavior.run actually derives the marker from the fresh heal task FailedTasksCheck fires,
+  a different id. That made the assertion unsatisfiable no matter what Task 4 does to the heal
+  persona, so xfail(strict=True) could never flip to XPASS(strict) and force the marker's removal
+  once the real gap closes.
+
+Hoist the done/ read above the tracker assertions and key the marker off the heal task that actually
+  ran; correct the comment that wrongly described the marker as scoped to the original task's id.
+  The test still reports xfailed — the persona gap is genuinely still open — but is now capable of
+  passing.
+
+Also: restore the pre-narrowing test name (test_heal_file_dedup_unique_opens_exactly_one_issue),
+  reconcile cli.py's open-issue wiring comment with the TODO block that already says the wiring is
+  temporarily broken, and annotate the one unannotated local in OpenIssueBehavior.run.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
 
 - Kill the whole process group on verify command timeout
   ([`c963dfa`](https://github.com/onpaj/harness_v2/commit/c963dfa54c01fb0de10ee225f3c31497a92d7354))
@@ -44,12 +235,119 @@ process.kill() only signalled the shell PID; a compound verify command's childre
   timeout, kill the whole process group before falling back to process.kill(), both wrapped against
   ProcessLookupError once the group/process is already gone.
 
+- Reject wrongly-typed body/labels in parse_drafts instead of coercing
+  ([`3a6e1db`](https://github.com/onpaj/harness_v2/commit/3a6e1db15b70c70d772e3f4a0d19c28d87f42a11))
+
+A draft with {"body": 5} silently produced body="" and {"labels": "oops"} silently produced
+  labels=(), while every other malformation in parse_drafts already raised DraftError. Per the
+  module's own docstring, a persona that wrote a report but malformed its block is a real fault
+  worth surfacing, not silently swallowing a diagnosis and filing an empty-bodied issue. Raise
+  DraftError for both cases, naming the draft index and the offending field; a missing body/labels
+  key still defaults as before.
+
+Add tests for wrong-typed body, wrong-typed labels, and a draft with no body key (which must still
+  succeed with the "" default).
+
+- Stop naming a fixed "harness repo" in the dedup step's description
+  ([`97bc9ef`](https://github.com/onpaj/harness_v2/commit/97bc9efe6d0a6145dfb284fd6742aa3456d5d69c))
+
+The `dedup` step's workflow description named a fixed "harness repo", but heal now files onto
+  whatever repository processes/autoheal.json's action.params.repository names -- there is no more
+  fixed heal repo since --heal-repo/HARNESS_HEAL_REPO were removed. This is prompt data, not a
+  comment: ClaudeCliBehavior reads it into the composed prompt (invariant 42), so the stale text
+  misdirected the agent at run time. Reworded to name the task's own repository instead, and updated
+  the test's mirrored copy of HEAL_DEFINITION to match.
+
+- Sweep remaining "fixed harness repo" staleness in heal docs/prompt
+  ([`3b2b931`](https://github.com/onpaj/harness_v2/commit/3b2b9316d8f41aa27b11b25b22af9bc57dd7025f))
+
+Four stragglers from making the open-issue finisher generic (repo now comes from
+  action.params.repository, not a fixed harness repo):
+
+- architecture.py's IssueTracker port description blamed idempotency on "a crash before the settle",
+  which is wrong — FailedTasksCheck.evaluate settles the claim before returning the Observation, so
+  no issue can be filed at that point. Reworded to match CLAUDE.md's verified wording: idempotency
+  protects a re-run of the same heal task. - HEAL_DEFINITION's dedup->file-issue hint (cli.py,
+  prompt-visible) and its test mirror (test_self_heal_e2e.py) still said "the harness repo". -
+  architecture.py's GithubIssueTracker driver description likewise said "the harness repo" instead
+  of the task's own repository. - README.md overclaimed the original failed task's id "survives only
+  as data.heal.of" — it also survives in the heal task's dedup_key, since FailedTasksCheck emits
+  Observation(state_key=task.id, ...) and ScheduledTrigger folds state_key into the dedup_key.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+
+- Warn the healer persona against echoing its drafts array in the final message
+  ([`5b7ac82`](https://github.com/onpaj/harness_v2/commit/5b7ac8253823dbd6672f186d8acf5fc6e12b260f))
+
+_HEALER_PERSONA tells the agent to end its artifact file with a fenced json array of issue drafts,
+  but _extract_verdict (drivers/claude_cli.py) takes the last fenced json block of the agent's final
+  *message* and returns None for a list, which becomes a VerdictError and fails the task. An agent
+  that helpfully echoes its drafts array in its closing message would fail for that reason alone.
+  Name the hazard explicitly: the drafts array belongs in the artifact file, never in the final
+  message.
+
 ### Documentation
+
+- Add a stray-workflow-JSON pre-flight to the live migration task
+  ([`609bdcf`](https://github.com/onpaj/harness_v2/commit/609bdcff69803c7b0c12ae49d3d594a98985f97f))
+
+- Adr-0020, generic open-issue finisher and data-driven serving
+  ([`cf4e2e8`](https://github.com/onpaj/harness_v2/commit/cf4e2e80da6d202359e315073d2e88e237be3df8))
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+
+- Correct IssueError docstrings to match actual failure handling
+  ([`a9b44d4`](https://github.com/onpaj/harness_v2/commit/a9b44d4b7ee6d66a4f71badf434eb3571adde6f9))
+
+ports/issues.py claimed a `Healer` loop catches IssueError and settles the task to healed/, and that
+  the module opens issues on "the harness repo". Neither is true: there is no Healer loop
+  (self-healing is a Process), nothing catches IssueError, and Consumer.tick's blanket except
+  Exception sends the task to failed/ instead (consumer.py:80). Recursion is prevented by
+  FailedTasksCheck's data.heal marker guard (invariant 25), not by in-behavior handling. Rewrite
+  both docstrings to describe the real path.
+
+- Fix review findings on the open-issue/ADR-0020 doc sweep
+  ([`0bc1478`](https://github.com/onpaj/harness_v2/commit/0bc14780a37f5bb52c5953f74ed2c880db1f6d80))
+
+Corrects the eight remaining prose findings from Task 7's review: the open-issue idempotency marker
+  is scoped to the heal task, not the original failed task (README.md, CLAUDE.md); the autoheal
+  posture is seeded live on every root, not shipped dormant (README.md); a literal mid-sentence
+  triple backtick that inverted code/prose parity in the rendered docs site is rephrased in both
+  CLAUDE.md and ADR-0020; three lagging statements (marker shape, seed params, singular/wrong-repo
+  issue filing) are brought in line with the code; and ADR-0020's Context now names the
+  ADR-0018/0019 decisions it supersedes.
+
+- Fold the docs-site marker sweep into the plan's Task 7
+  ([`6c10753`](https://github.com/onpaj/harness_v2/commit/6c10753c5dd544da9823834ca5fa16d82603ed5f))
+
+- Fold the issue_drafts module-map wording fix into the plan's Task 7
+  ([`6bfbf10`](https://github.com/onpaj/harness_v2/commit/6bfbf1032568e8cfba65756399ecdd25429b7270))
+
+- Give Task 4 the proven e2e recipe and the Origin-carrying draft body
+  ([`b7c8e93`](https://github.com/onpaj/harness_v2/commit/b7c8e939e9e4094e7a7df2dedcce6c83faee64c7))
+
+- Give Task 7 the stale-ADR sweep and the default-on posture change
+  ([`824472a`](https://github.com/onpaj/harness_v2/commit/824472a04910a0c549fe15beaf30332df31d0e53))
+
+- Hand Task 6 the ordering constraint Task 5 left undocumented
+  ([`020a3f6`](https://github.com/onpaj/harness_v2/commit/020a3f60c86db0dbbf377cff6bd88acdb5358540))
+
+- Implementation plan for the generic open-issue finisher
+  ([`8d714f2`](https://github.com/onpaj/harness_v2/commit/8d714f29563ace7c04f824d59c60760d64c68aa5))
+
+Eight TDD tasks: scope_label through the issue port, a pure issue_drafts module, the config-driven
+  behavior rewrite, cli wiring plus the healer's rebinding, data-driven workflow serving,
+  --heal-repo removal, the ADR, and the live-root migration.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
 
 - Implementation plan for the verify gate (increment 1)
   ([`4848f1f`](https://github.com/onpaj/harness_v2/commit/4848f1f715372bf0d94724ca4a5c65ebef5e3788))
 
 Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+
+- Order the live migration repos.json before autoheal.json
+  ([`ff4a1ed`](https://github.com/onpaj/harness_v2/commit/ff4a1edef0821f895de065224e9e2f31667944d3))
 
 - Regenerate-persona operator step, persona paragraph fix, verify_command JSON test
   ([`8ca5141`](https://github.com/onpaj/harness_v2/commit/8ca51415a9c6cae24cce44ec8cf60fdc954fae29))
@@ -60,15 +358,116 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
   instead of being glued to the closing instruction paragraph. - Add a direct test: malformed
   repos.json JSON -> verify_command() is None.
 
+- Rename an ambiguous loop variable in the open-issue plan snippet
+  ([`16f30da`](https://github.com/onpaj/harness_v2/commit/16f30da9c9ec9b2996bd8c72db1cc9fb5e35344b))
+
+- Renumber ADR-0020 to ADR-0021 to avoid collision with main
+  ([`8d42497`](https://github.com/onpaj/harness_v2/commit/8d42497ac9b4c1673a724f4747bb5ee17cfea217))
+
+origin/main merged docs/adr/0020-jira-second-ingestion-source.md (PR #126) while this branch was in
+  flight, claiming ADR-0020 for a different decision. Renumber this branch's open-issue-finisher ADR
+  to 0021 and update every reference: the heading, CLAUDE.md invariant 26, the superseded-note
+  blockquotes in 0018-healing-as-a-process.md and 0019-heal-triage-and-dedup.md, the two ADR slugs
+  in harness_docs_site/architecture.py, and the historical plan document that specified creating it.
+
+- Spec a generic open-issue finisher and data-driven workflow serving
+  ([`33444ce`](https://github.com/onpaj/harness_v2/commit/33444cedb0133436c772acd0bb7d8b63da3f41ad))
+
+Makes `open-issue` a real finisher kind driven by its FinisherBinding config (from_step / label /
+  allowed_labels), files 0..N issues from a fenced JSON array in the step's artifact, and derives
+  the target repo from task.repository via the clone's origin remote instead of the
+  slug-and-registry-key conflation of --heal-repo. The healer becomes one binding of the generic
+  kind.
+
+Rides along: `harness run` serves every workflows/*.json and the --workflow / --all-workflows flags
+  are removed. That only becomes safe once the finisher stops needing --heal-repo to register its
+  kind.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+
 - Spec for development-flow hardening (verify gate, loop caps, early gates)
   ([`3d14825`](https://github.com/onpaj/harness_v2/commit/3d14825f42d35398e21444b2582bcede8b6c0eeb))
 
 Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
 
+- Task 4 must clear the xfail tripwire Task 3's fix wave added
+  ([`586fbe7`](https://github.com/onpaj/harness_v2/commit/586fbe7db3e594cc6a1fd886d9f99839db7fc647))
+
 ### Features
 
 - Commandrunner port with subprocess driver and memory fake
   ([`63b3dd8`](https://github.com/onpaj/harness_v2/commit/63b3dd8326cbe9e00fb73e583997fa27741a53cd))
+
+- Configure self-healing through its process file only
+  ([`badb966`](https://github.com/onpaj/harness_v2/commit/badb966534fcbdca54c6b664bb71a8b54c39428f))
+
+--heal-repo/HARNESS_HEAL_REPO gated nothing left: not serving the heal workflow, not registering the
+  finisher kind, not the issue repo. `harness init` now seeds processes/autoheal.json and the
+  operator sets its action.params.repository to a registered repo name.
+
+BREAKING CHANGE: --heal-repo and HARNESS_HEAL_REPO are removed. Set action.params.repository in
+  processes/autoheal.json instead — and note it is a repos.json *name* now, not an owner/repo slug.
+
+- Open-issue finisher files 0..N issues, driven by its binding config
+  ([`41e7450`](https://github.com/onpaj/harness_v2/commit/41e7450199926e8ba70f225c442d48ffca92bb70))
+
+from_step selects replace-vs-wrap, label scopes the idempotency search, allowed_labels filters the
+  agent's per-draft labels, and the repo is derived from task.repository through an injected slug
+  resolver.
+
+Also carries the minimal, behavior-preserving adjustments needed to keep the suite green against the
+  renamed constructor: cli.py's heal-repo wiring now passes slug_for/label/from_step instead of the
+  removed repo/clock kwargs (TODO(Task 4): thread this through the finisher registry's own
+  config/binding shape and update the heal persona to emit a fenced json draft block); test_cli.py's
+  private-attribute assertions follow suit. test_self_heal_e2e.py is adjusted to the new
+  artifact-driven drafting: the in-memory fixture writes no heal artifact, so the one test asserting
+  an issue got filed now documents that as a known gap for Task 4 rather than asserting stale
+  content.
+
+- Parse a step's issue drafts from a fenced json array
+  ([`0e96a30`](https://github.com/onpaj/harness_v2/commit/0e96a3006ba2d0512905138881b96f72b741bfe5))
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+
+- Register open-issue unconditionally and rebind the healer to it
+  ([`0c8fabc`](https://github.com/onpaj/harness_v2/commit/0c8fabcbefc0075b04fec155dd4419ec0c3ac351))
+
+The healer becomes one binding of the generic kind ({kind, from_step: heal, label:
+  harness:self-heal}); its persona now emits the fenced json draft array the finisher reads.
+
+- Serve every workflow on disk; drop --workflow and --all-workflows
+  ([`a0ba8a4`](https://github.com/onpaj/harness_v2/commit/a0ba8a47fe23826df647a02d2d563cb11196034f))
+
+Serving becomes data: the served set is exactly what workflows/ holds, and an empty directory is
+  workflow-less mode rather than an error. The resolver and heal force-adds were hand-rolled
+  approximations of that rule and are deleted.
+
+BREAKING CHANGE: `harness run --workflow` and `--all-workflows` are removed. Remove a workflow's
+  file to stop serving it.
+
+- Validate autoheal params.repository at compile time, fix stale docs/tests
+  ([`0711be4`](https://github.com/onpaj/harness_v2/commit/0711be49826cf9d9437bbb5eeed0fa6caf1bf309))
+
+Six review findings on Task 6 (badb966), each fixed as scoped:
+
+- cli.py: `_init`'s reproduced queue-directory block now also creates each queue's `.processing/`
+  subdirectory (`FilesystemTaskQueue.__init__` creates both unconditionally), matching the comment's
+  "exactly as before" claim, which was previously false. - CLAUDE.md: reworded the "Self-healing is
+  a Process (opt-in)" line — it's seeded and live on every root since Task 6, not opt-in; docs now
+  match the code and README. - test_cli.py: strengthened `test_the_heal_repo_flag_is_gone` to assert
+  argparse's own rejection (exit code 2 + "unrecognized arguments") instead of a bare SystemExit,
+  which a live serve() dying on a held port could also satisfy — same treatment already applied to
+  the equivalent --workflow/--all-workflows/--resolver-workflow test one task ago. -
+  fs_processes.py: added compile-time validation of a failed-tasks process's
+  action.params.repository against the repository registry, mirroring _parse_repository's handling
+  of the top-level key. This value is now the primary surface an operator configures self-healing
+  through, and was completely unvalidated after the old --heal-repo startup warning was removed — a
+  typo silently produced a repository-less heal task that fails with no issue filed. - cli.py:
+  corrected two stale comments — the heal workflow is three steps (heal -> dedup -> file-issue), not
+  two; and nothing writes a process file during run's *startup wiring*, not "during run" outright
+  (the dashboard's FilesystemProcessAdmin.write still does, picked up on next restart).
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
 
 - Verifybehavior — deterministic verify step over CommandRunner
   ([`d8424c1`](https://github.com/onpaj/harness_v2/commit/d8424c14e9a05edf10edc88f41ba94e4e0f05676))
@@ -79,10 +478,65 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
 - **repos**: Optional object-form entries with a verify command
   ([`d2d2519`](https://github.com/onpaj/harness_v2/commit/d2d2519031e8020c0b9100e21e1bc988fea5080f))
 
+### Refactoring
+
+- Issuetracker.open_issue takes an explicit scope_label
+  ([`031344d`](https://github.com/onpaj/harness_v2/commit/031344dd149c9359ac385d1e698c999e3829f6aa))
+
+The label an issue carries, and the label the marker search scopes to, stop being the
+  SELF_HEAL_LABEL constant. The marker prefix becomes harness-issue:. Preparation for a generic
+  open-issue finisher.
+
+BREAKING CHANGE: IssueTracker.open_issue and GithubClient.search_issue_by_marker gained a required
+  keyword argument.
+
 ### Testing
 
 - E2e for the verify gate's request_changes loop
   ([`adaa5e6`](https://github.com/onpaj/harness_v2/commit/adaa5e64c667252a69c20e137bfb2f0e43771732))
+
+- Fix stale test/doc claims from the open-issue rewiring
+  ([`70b8426`](https://github.com/onpaj/harness_v2/commit/70b8426caae3278ffae20eb626bce1debc4a6fd1))
+
+Task 4 registered the open-issue finisher unconditionally and rebound the healer to it, but three
+  test comments/docstrings still described the old repo-gated, step-replacing behavior, and
+  CLAUDE.md invariant 25 still claimed the finisher was wired identically to --heal-repo.
+
+- Delete test_open_issue_is_registered_without_any_heal_configuration: a bare `main(["run"])` never
+  serves `heal`, so it gated nothing;
+  test_run_all_workflows_without_heal_repo_still_builds_the_heal_workflow already covers the real
+  requirement with a genuine build(). - Fix the stale "ignores step/config/inner" comment:
+  _open_issue now reads label/from_step/allowed_labels off the binding's config. - Fix the stale
+  "registers open-issue on that repo" docstring on the HARNESS_HEAL_REPO env-var test: registration
+  is unconditional now, the env var only serves heal and writes processes/autoheal.json. - Drop
+  CLAUDE.md invariant 25's parenthetical, which contradicted the sibling "Self-healing is a Process"
+  paragraph the same commit fixed. - Add direct unit tests for _slug_resolver covering all four
+  paths (resolved slug, missing name, unregistered name, non-GitHub origin), each asserting
+  IssueError with a message naming its cause.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+
+- Pin harness init's seeded HEAL_DEFINITION/AUTOHEAL_PROCESS_DEFINITION to a real build()
+  ([`cd9c326`](https://github.com/onpaj/harness_v2/commit/cd9c3260bd3f01a11556b8c7a03db7bc0f305543))
+
+No test ran a real, unmonkeypatched build() over a freshly-initialized root specifically to prove
+  the seeded workflow, agents and process compile together: every test_cli.py `run` test reaching a
+  successful exit monkeypatches build, and the two tests with a real build() over a comparable setup
+  assert exit 2. This duplication already drifted once (97bc9ef, HEAL_DEFINITION edited in cli.py
+  but not in its old hand-copied mirror in test_self_heal_e2e.py).
+
+Add test_run_over_a_fresh_init_builds_successfully_with_a_real_build: harness init into a tmp root,
+  then harness run with only harness.cli.serve monkeypatched (no port bound, no network), asserting
+  exit 0 and that every scaffolded workflow and the autoheal process compiled.
+
+Also make test_self_heal_e2e.py import HEAL_DEFINITION from harness.cli instead of keeping a
+  hand-copied literal (confirmed byte-for-byte identical and read-only in that file), closing the
+  exact gap that let the two copies drift apart before.
+
+### Breaking Changes
+
+- Issuetracker.open_issue and GithubClient.search_issue_by_marker gained a required keyword
+  argument.
 
 
 ## v0.20.0 (2026-07-24)
