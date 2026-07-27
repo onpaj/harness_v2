@@ -30,7 +30,10 @@ from harness.drivers.memory import (
 from harness.drivers.checks import BUILTIN_CHECKS
 from harness.drivers.failed_tasks_check import SPEC as FAILED_TASKS_SPEC
 from harness.drivers.failed_tasks_check import FailedTasksCheck
-from harness.drivers.fs_processes import FilesystemProcessRepository
+from harness.drivers.fs_processes import (
+    FilesystemProcessRepository,
+    MissingCredential,
+)
 from harness.drivers.projection_events import ProjectionSink
 from harness.drivers.source_reflector import SourceReflectorSink
 from harness.drivers.stage_output import StageOutputProjection
@@ -51,7 +54,7 @@ from harness.ports.merge import MergeChecker
 from harness.ports.queue import TaskQueue
 from harness.ports.repos import RepositoryRegistry
 from harness.ports.source import TaskSource
-from harness.ports.triggers import CheckDefinition, CheckFactory
+from harness.ports.triggers import Check, CheckDefinition, CheckFactory
 from harness.ports.workflows import WorkflowNotFound
 from harness.ports.workspace import Workspace
 from harness.projection import BoardProjection
@@ -70,6 +73,98 @@ landing exactly as it always did (ADR-0016)."""
 RESOLVE_STEP = "resolve"
 """The step to which the wiring assigns ResolveConflictBehavior, when a catalog
 is configured — the resolver workflow's first step."""
+
+_ALWAYS_WIRABLE_FINISHER_KINDS = frozenset({"open-pr", "verify"})
+"""The two kinds `build()` always registers itself (see `finisher_registry`
+inside `build()`, below) — both ignore `step`/`config`/`inner` entirely and
+return a pre-built singleton, so neither can ever fail to construct. Kept as a
+named constant so `validate_workflow_finishers` doesn't need to duplicate
+`build()`'s own `landing`/`verify` wiring just to prove that."""
+
+
+class UnknownFinisherKind(ValueError):
+    """Raised by `validate_workflow_finishers` when a binding names a finisher
+    kind that isn't registered anywhere — as opposed to a plain `ValueError`,
+    raised when the kind *is* known but the factory rejects the binding's own
+    `config` (e.g. `open-issue` with no `label`).
+
+    The distinction is the operator's governing rule: an unknown kind is a
+    value that is *set and wrong* (a typo, or a binding authored against a
+    finisher that was never registered — e.g. `label-issue` when
+    `GITHUB_TOKEN` isn't set) and must fail the whole run, exactly as
+    `build()` itself has always failed it (invariant #41). A known kind with
+    incomplete config is closer to a *missing* value — that one binding is
+    unwirable, but nothing about the finisher registry itself is wrong — so
+    `cli._validate_served_workflows` only ever drops the served workflow with
+    a warning for a plain `ValueError`; it re-raises `UnknownFinisherKind`
+    (a `ValueError` subclass, so `isinstance` still holds for any caller that
+    only checks the base type) unchanged, so it keeps failing the whole
+    build via `cli._run`'s own `except UnknownFinisherKind` — see ADR-0022.
+    """
+
+
+def validate_workflow_finishers(
+    workflow: Workflow,
+    finishers: dict[str, Callable[[str, dict, Callable[[], ConsumerBehavior]], ConsumerBehavior]]
+    | None = None,
+) -> None:
+    """Raise `UnknownFinisherKind` if `workflow` binds a step to a finisher
+    kind that is not registered anywhere, or a plain `ValueError` if the kind
+    *is* registered but its factory rejects the binding's own `config` —
+    against `finishers`, the same custom registry `cli._run` hands `build()`
+    (e.g. `open-issue`, `label-issue`). `open-issue` fails the second way when
+    a binding's config carries no `label`.
+
+    A lighter-weight mirror of the per-step resolution `build()` performs
+    eagerly while constructing its consumers (`behavior_for`/the inline
+    `finisher_registry`), scoped to one workflow's own bindings and without
+    any of `build()`'s surrounding machinery (queues, catalog, workspace,
+    live processes). The thunk handed to a factory as its "inner behavior"
+    callback is inert — it returns `None` rather than a real behavior — so a
+    *wrap*-shaped finisher (e.g. `label-issue`, which calls the thunk eagerly
+    to embed the result) is still exercised for its own kind/config
+    resolution without needing a catalog agent or a live workspace to exist
+    yet; neither `OpenIssueBehavior` nor `LabelIssueBehavior` inspects the
+    type of what they're handed at construction. That means this check
+    cannot see a failure that would only surface from constructing the real
+    inner behavior (e.g. a step with no catalog entry) — `build()`'s own
+    fail-fast, unchanged, is still the final word for those.
+
+    `cli._run` calls this once per served workflow, before calling `build()`,
+    to decide which workflows are wirable at all: a workflow whose own
+    binding fails with a plain `ValueError` (known kind, bad config) is
+    dropped from the served set with a warning rather than failing the whole
+    run; `UnknownFinisherKind` propagates unchanged and still fails the whole
+    run, exactly as `build()`'s own check always has — see ADR-0022.
+    """
+    registry = finishers or {}
+    known_kinds = _ALWAYS_WIRABLE_FINISHER_KINDS | set(registry)
+
+    def _inert_inner() -> None:
+        return None
+
+    # First pass: every binding's kind must be known, over the *whole*
+    # workflow, before any factory runs — mirrors build()'s own two-pass
+    # shape (the step_bindings loop above raising UnknownFinisherKind, then
+    # a separate pass invoking factories via behavior_for). Collapsing this
+    # into one loop made "unknown kind is fatal" depend on JSON key order: a
+    # config-shaped ValueError from an earlier binding's factory would win
+    # the race and mask a later binding's unknown kind in the same workflow.
+    for step, binding in workflow.finishers.items():
+        if binding.kind in _ALWAYS_WIRABLE_FINISHER_KINDS:
+            continue
+        if binding.kind not in registry:
+            raise UnknownFinisherKind(
+                f"step {step!r} names unknown finisher kind {binding.kind!r} "
+                f"(known: {', '.join(sorted(known_kinds))})"
+            )
+
+    # Second pass: every binding's kind is now known to resolve, so invoke
+    # each one's own factory against its own config.
+    for step, binding in workflow.finishers.items():
+        if binding.kind in _ALWAYS_WIRABLE_FINISHER_KINDS:
+            continue
+        registry[binding.kind](step, binding.config, _inert_inner)
 
 
 @dataclass(frozen=True)
@@ -146,6 +241,7 @@ class Harness:
         issue_reconciler: IssueReconciler | None = None,
         healed: TaskQueue | None = None,
         process_checks: dict[str, CheckFactory] | None = None,
+        skipped_processes: list[tuple[str, str]] | None = None,
         issue_import: IssueImport | None = None,
     ) -> None:
         self.layout = layout
@@ -182,6 +278,10 @@ class Harness:
         self.process_checks = (
             process_checks if process_checks is not None else dict(BUILTIN_CHECKS)
         )
+        self.skipped_processes: list[tuple[str, str]] = list(skipped_processes or [])
+        """(file, reason) per process skipped for a missing credential — the
+        harness runs degraded rather than not at all. `cli._run` warns per
+        entry; see `fs_processes.MissingCredential`."""
 
     def recover(self) -> int:
         # `done` is included because it is the one write-into queue that also
@@ -340,6 +440,25 @@ class Harness:
             else:
                 await asyncio.sleep(0)
 
+_CREDENTIAL_GATED_CHECKS = {
+    "github-issues": "GITHUB_TOKEN",
+    "github-conflicts": "GITHUB_TOKEN",
+    "github-mergeable": "GITHUB_TOKEN",
+    "jira-issues": "JIRA_BASE_URL/JIRA_EMAIL/JIRA_API_TOKEN",
+}
+"""Action names that exist but need a credential `build()` itself never holds.
+`cli._run` replaces each with a working factory through `extra_checks` when the
+environment supplies one; otherwise the placeholder below keeps the name known
+(so a process file naming it reads as "not configured", not "typo")."""
+
+
+def _missing_credential_check(name: str, requirement: str) -> CheckFactory:
+    def factory(params: dict) -> Check:
+        raise MissingCredential(f"{name} action requires {requirement}", field="check")
+
+    return factory
+
+
 def build(
     root: Path,
     workflows: str | Sequence[str] | None = None,
@@ -369,6 +488,7 @@ def build(
     issue_import_factory: IssueImportFactory | None = None,
     repository_registry: RepositoryRegistry | None = None,
     command_runner: CommandRunner | None = None,
+    dropped_workflows: set[str] | None = None,
 ) -> Harness:
     layout = HarnessLayout(Path(root))
     events = events or StdoutEventSink()
@@ -591,7 +711,7 @@ def build(
     # from inside behavior_for once tasks are already flowing.
     for step, binding in step_bindings.items():
         if binding.kind not in finisher_registry:
-            raise ValueError(
+            raise UnknownFinisherKind(
                 f"step {step!r} names unknown finisher kind {binding.kind!r} "
                 f"(known: {', '.join(sorted(finisher_registry))})"
             )
@@ -670,16 +790,27 @@ def build(
     # constructs, not something `cli.py` can hand it independently.
     checks: dict[str, CheckFactory] = {
         **BUILTIN_CHECKS,
+        # The credential-gated action names are part of the *vocabulary* even
+        # when this build has no client for them: `cli._run` overrides each
+        # with a real factory via `extra_checks` once the credential exists.
+        # Without these placeholders a seeded `processes/*.json` naming one
+        # would fail a bare `build()` as an "unknown check" — the fatal,
+        # set-and-wrong shape — when the truth is simply that the credential
+        # is absent, which must warn and skip (`MissingCredential`).
+        **{
+            name: _missing_credential_check(name, requirement)
+            for name, requirement in _CREDENTIAL_GATED_CHECKS.items()
+        },
         **(extra_checks or {}),
         # A `CheckDefinition`, not a bare lambda: it carries `failed-tasks`'
         # declarative spec (no user-facing parameters) alongside the factory, so
         # the process form treats it as a fully-defined action rather than an
         # unknown one. `repository` is still accepted at call time — it isn't a
-        # form field; it's the slug `processes/autoheal.json` carries in its own
-        # `action.params` (written there by the `--heal-repo` bootstrap, and read
-        # back by `cli._autoheal_repo` to wire the `open-issue` finisher against
-        # the same repo — invariant #25/#39, ADR-0021), never entered by an
-        # operator through the UI.
+        # form field; self-healing is configured entirely through
+        # `processes/autoheal.json` (`harness init` seeds it with an empty
+        # `action.params.repository`), so an operator sets it there directly —
+        # by hand-editing the file or through the dashboard's process editor —
+        # never through the UI's process form (invariant #25/#39).
         "failed-tasks": CheckDefinition(
             spec=FAILED_TASKS_SPEC,
             factory=lambda params: FailedTasksCheck(
@@ -708,6 +839,14 @@ def build(
         worktree_root=str(layout.worktrees),
         known_targets=known_targets,
         known_repositories=known_repositories,
+        # A Process targeting a workflow `cli._run` already dropped from the
+        # served set (an unwirable finisher binding, ADR-0022) is made inert
+        # here too, rather than failing the whole build the way an
+        # unresolvable target normally would: the workflow itself is already
+        # the reason it can't work, not a mistake in this file. Callers other
+        # than `cli._run` (e.g. `build()` invoked directly, as most tests do)
+        # pass nothing here and get the unchanged, fully fail-fast behavior.
+        dropped_workflows=dropped_workflows,
     )
     # `all_sources` feeds `pollers` ONLY — never `SourceReflectorSink`, which
     # was already constructed above, over the caller's own `sources`. Safe:
@@ -754,4 +893,5 @@ def build(
         healed=healed_queue,
         process_checks=checks,
         issue_import=issue_import,
+        skipped_processes=process_repo.skipped,
     )

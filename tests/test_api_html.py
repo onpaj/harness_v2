@@ -4,7 +4,17 @@ from fastapi.testclient import TestClient
 from harness.api.app import create_app
 from harness.drivers.memory import FakeClock
 from harness.models import HistoryEntry, Task
-from harness.ports.board import Board, BoardColumn, BoardTab
+from harness.ports.board import (
+    COLUMN_INBOX,
+    COLUMN_STEP,
+    COLUMN_TERMINAL,
+    UNKNOWN_WORKFLOW,
+    UNKNOWN_WORKFLOW_LABEL,
+    UNKNOWN_WORKFLOW_NOTE,
+    Board,
+    BoardColumn,
+    BoardTab,
+)
 from tests.fakes import FakeBoardView, FakeTaskControl
 
 WORKING = Task(
@@ -399,9 +409,105 @@ def test_multiple_workflows_render_a_tab_per_workflow():
 
     assert 'data-workflow="default"' in body
     assert 'data-workflow="hotfix"' in body
-    assert body.index('class="tab" data-workflow="default"') < body.index(
-        'class="tab" data-workflow="hotfix"'
+    assert body.index('role="tab" data-workflow="default"') < body.index(
+        'role="tab" data-workflow="hotfix"'
     )
+
+
+def test_tab_strip_shows_a_per_tab_task_count():
+    view = FakeBoardView(_two_tab_board(), {"tsk_1": WORKING})
+    api = TestClient(create_app(view=view, clock=FakeClock()))
+
+    body = api.get("/fragment/board").text
+
+    assert '<span class="tab__count">1</span>' in body
+    assert '<span class="tab__count">0</span>' in body
+
+
+# --- Column kinds, descriptions and the "no workflow" tab -------------------
+
+
+def _kinded_board(*, unknown_tasks: tuple[Task, ...] = ()) -> Board:
+    """A board shaped the way the projection actually builds one: lifecycle
+    columns carry their kind, step columns carry the workflow's description."""
+    return Board(
+        revision=1,
+        workflows=(
+            BoardTab(
+                name="default",
+                columns=(
+                    BoardColumn(name="todo", tasks=(), kind=COLUMN_INBOX,
+                                description="waiting for the dispatcher"),
+                    BoardColumn(name="plan", tasks=(), kind=COLUMN_STEP,
+                                description="break the request down"),
+                    BoardColumn(name="development", tasks=(WORKING,), kind=COLUMN_STEP),
+                    BoardColumn(name="done", tasks=(), kind=COLUMN_TERMINAL),
+                    BoardColumn(name="failed", tasks=(), kind=COLUMN_TERMINAL),
+                ),
+            ),
+            BoardTab(
+                name=UNKNOWN_WORKFLOW,
+                columns=(
+                    BoardColumn(name="todo", tasks=(), kind=COLUMN_INBOX),
+                    BoardColumn(name="development", tasks=unknown_tasks, kind=COLUMN_STEP),
+                    BoardColumn(name="zzz-idle-step", tasks=(), kind=COLUMN_STEP),
+                    BoardColumn(name="done", tasks=(), kind=COLUMN_TERMINAL),
+                ),
+            ),
+        ),
+    )
+
+
+def _board_client(board: Board) -> TestClient:
+    return TestClient(create_app(view=FakeBoardView(board, {}), clock=FakeClock()))
+
+
+def test_columns_are_grouped_by_kind_with_labels():
+    body = _board_client(_kinded_board()).get("/fragment/board").text
+
+    assert "board-group--inbox" in body
+    assert "board-group--steps" in body
+    assert "board-group--terminal" in body
+    assert ">Waiting<" in body
+    assert ">Finished<" in body
+    # The steps group is labelled with the workflow it belongs to, so a step
+    # column is never read as one of the harness's own lifecycle queues.
+    assert "default workflow" in body
+
+
+def test_column_description_is_rendered_under_the_head():
+    body = _board_client(_kinded_board()).get("/fragment/board").text
+
+    assert '<p class="column__desc">break the request down</p>' in body
+    assert '<p class="column__desc">waiting for the dispatcher</p>' in body
+
+
+def test_consecutive_step_columns_are_joined_by_a_flow_arrow():
+    body = _board_client(_kinded_board()).get("/fragment/board").text
+
+    # Two step columns in the default tab -> exactly one arrow between them
+    # (none before the first, and none in the unordered unknown tab).
+    assert body.count('class="board-flow"') == 1
+
+
+def test_unknown_tab_is_labelled_no_workflow_and_explained():
+    body = _board_client(_kinded_board(unknown_tasks=(WORKFLOW_LESS,))).get(
+        "/fragment/board"
+    ).text
+
+    assert UNKNOWN_WORKFLOW_LABEL in body
+    assert UNKNOWN_WORKFLOW_NOTE[:40] in body
+    # The tab's key is still the internal name, so board.html's tab switching
+    # and Board.workflow() keep working.
+    assert 'data-workflow="unknown"' in body
+
+
+def test_unknown_tab_renders_only_occupied_columns():
+    body = _board_client(_kinded_board(unknown_tasks=(WORKFLOW_LESS,))).get(
+        "/fragment/board"
+    ).text
+
+    assert "zzz-idle-step" not in body
 
 
 def test_index_marks_default_tab_active_via_data_attribute():

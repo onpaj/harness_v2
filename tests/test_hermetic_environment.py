@@ -43,13 +43,26 @@ _ENV_READ = re.compile(
 # wrong.
 _NOT_HARNESS_CONFIGURATION = {"HARNESS_SMOKE_CLAUDE"}
 
-# The exact tests that went red under the service environment. Cheap to run
-# (they monkeypatch `build`/`serve`, so nothing is actually served) and they
-# are the real reproduction, not a proxy for one.
+# The tests that went red under the service environment. Cheap to run (they
+# monkeypatch `build`/`serve`, so nothing is actually served) and they are the
+# real reproduction, not a proxy for one.
+#
+# Two of the original four are gone, for reasons that make this list *stronger*
+# rather than weaker, so they were dropped rather than substituted:
+#
+# - `test_run_without_heal_repo_wires_no_open_issue_finisher` guarded against
+#   `HARNESS_HEAL_REPO` leaking in from the service environment. That variable
+#   no longer exists (ADR-0022), and the `open-issue` finisher is now registered
+#   unconditionally, so there is no longer an environment value for it to be
+#   sensitive to. The failure mode was removed at the source, not relocated.
+# - `test_run_resolves_default_workflow_when_omitted` asserted the old
+#   probe-for-`development` serving rule. The served set is now every workflow
+#   file on disk and reads no environment at all;
+#   `test_run_serves_every_scaffolded_workflow_for_an_ordinary_init` is its
+#   successor and is listed below in its place.
 _PREVIOUSLY_ENVIRONMENT_SENSITIVE = (
     "tests/test_cli.py::test_run_registers_label_issue_finisher_only_with_a_token",
-    "tests/test_cli.py::test_run_without_heal_repo_wires_no_open_issue_finisher",
-    "tests/test_cli.py::test_run_resolves_default_workflow_when_omitted",
+    "tests/test_cli.py::test_run_serves_every_scaffolded_workflow_for_an_ordinary_init",
     "tests/test_cli.py::test_run_with_no_workflow_harness_defaults_to_none",
 )
 

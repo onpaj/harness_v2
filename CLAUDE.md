@@ -18,6 +18,8 @@ Generic triggers spec: `docs/superpowers/specs/2026-07-22-generic-triggers-desig
 Generic triggers plan: `docs/superpowers/plans/2026-07-22-generic-triggers.md`
 Processes spec: `docs/superpowers/specs/2026-07-22-processes-design.md`
 Processes plan: `docs/superpowers/plans/2026-07-22-processes.md`
+Automerge spec: `docs/superpowers/specs/2026-07-27-automerge-design.md`
+Automerge plan: `docs/superpowers/plans/2026-07-27-automerge.md`
 
 The project is built **phase by phase**. Phase 1 is a POC of the orchestration loop.
 Phase 2 adds **worktrees, artifacts and landing**: each phase works in a worktree,
@@ -62,11 +64,11 @@ swapped out later.
 19. **A task's origin lives in `task.data.source`** (`{kind, repo, issue, url}`). The outward projection reads it from there, not from side state. Neither router nor dispatcher reads `data.source`. See ADR-0010.
 20. **`TaskSource` is touched only by `SourcePoller` (core) and `SourceReflectorSink` (driver)**, wired in `app.py`. `dispatcher.py`/`consumer.py` don't import the port — guarded by `test_architecture.py`. See ADR-0010.
 21. **The outward projection is idempotent and doesn't block decision-making.** `report_progress` twice is a no-op; a source failure is isolated by `CompositeEventSink` (and `SourcePoller.tick` catches the exception from `poll()`).
-22. **`todo` is the board's name for the inbox's fresh tasks** (`status is None`) — the first column. It is a view concern only: the router and dispatcher never see a `todo` queue, and auto-flow is unchanged (a fresh task passes through `todo` into `start`).
+22. **`todo` is the board's name for the inbox's fresh tasks** (`status is None`) — the first column. It is a view concern only: the router and dispatcher never see a `todo` queue, and auto-flow is unchanged (a fresh task passes through `todo` into `start`). Every column carries a **kind** — `inbox` (`todo`), `step` (a place in the tab's workflow) or `terminal` (`done`/`failed`/`healed`) — and the board renders the three as separate labelled zones, because a step column and a lifecycle queue are different kinds of thing and looked identical. `BoardColumn.kind`/`.description` are pure view data, filled by the projection and read only by `api/`; nothing in `route()` or the dispatcher has ever read a column (invariant #8). A step's description is the workflow's own `descriptions[step]` — the same authored sentence the agent's prompt gets (invariant #42), shown to the operator; a lifecycle column's is fixed (`LIFECYCLE_DESCRIPTIONS`) and identical on every tab. The `unknown` tab is labelled **"No workflow"** in the UI (its internal name stays `unknown` — the tab key, the DOM attribute and `Board.workflow()`'s argument) and renders only its *occupied* columns: its column set is the union of every step in the harness, so an empty column there means nothing, unlike an idle step of a real workflow. `BoardTab.visible_columns()` does that filtering — deliberately in the view, not in the projection, since `routes._target_option_groups`/`_new_step_warnings` read the full step set out of the same snapshot.
 23. **Operator control is a write-side port `TaskControl`, mirroring the read-side `BoardView`.** `restart` is a reset, not a routing decision: it clears `status`/`lastOutcome` and re-inboxes a `failed` task, then the dispatcher decides where next (invariant #3 holds). `TaskControl` is touched only by `TaskControlService` (core), `api/` and wiring — `dispatcher.py`/`consumer.py` don't import it; guarded by `test_architecture.py`. See ADR-0011 and ADR-0012.
-24. **`failed/` has one reader — the `failed-tasks` Check; `healed/` is the never-consumed terminal.** This refines "terminal states are queues nobody consumes": `done`/`end`/`healed` are terminal, while `failed/` is drained by the `failed-tasks` Check (an action of an operator-authored Process, typically `processes/autoheal.json`) and by nothing else. The router and dispatcher never learn about `failed`/`healed` as steps. Both queues are now built **unconditionally** — with no `failed-tasks`-driving process configured, `failed/` simply has no reader, exactly as before wiring one up. See ADR-0018.
-25. **The check produces at most one fresh task per claimed failure and never writes a claimed task back to `failed/`.** Every claim settles to `healed/` in the same `evaluate()` call. Recursion is guarded by a marker (`data.heal`), not by construction: a heal task that itself fails **does** pass through `failed/` normally (board-visible) before the check's next tick retires it to `healed/` without a new `Observation`. So no failure is healed twice and nothing loops. The check also stamps its own `params.repository` (read straight out of `processes/autoheal.json`, the same value `cli._autoheal_repo` hands the `open-issue` finisher below — one source, so they cannot drift) onto the fresh task it fires, so the `heal` step gets a worktree the same way any ordinary agent step does (invariant #15) — an autoheal process with no `repository` param fires a repository-less heal task, unchanged from before this stamp existed. See ADR-0018 and ADR-0019.
-26. **The heal *workflow* is three steps — `heal` triages, `dedup` forks on novelty, `file-issue` is the only one that opens anything, and it isn't the LLM.** `heal`'s persona (persona as data) diagnoses the failure and returns `file` (a fixable harness bug or an operational problem worth filing — drafts the issue, routes to `dedup`) or `skip` (external/transient/impossible — routes straight to `end`, nothing filed). `dedup`'s persona reads the harness repo's open issues and returns `unique` (routes to `file-issue`) or `duplicate` (routes straight to `end`, silently — no issue, no board-visible failure). Only on the `unique` path does the `file-issue` step's `open-issue` finisher (a `ConsumerBehavior`, same footing as `open-pr`/`LandingBehavior`) read the drafted issue and call `IssueTracker.open_issue` (invariant 9) — neither persona ever opens anything itself. `IssueTracker` is a third port distinct from `Forge` (opens PRs) and `TaskSource.finish` (relabels), idempotent by a per-task marker. Both steps' outcome vocabularies (`file`/`skip`, `unique`/`duplicate`) are declared as workflow edges, not hardcoded in the personas — invariant #42 governs which outcomes each step may actually report. See ADR-0018 and ADR-0019.
+24. **`failed/` has one reader — the `failed-tasks` Check; `healed/` is the never-consumed terminal.** This refines "terminal states are queues nobody consumes": `done`/`end`/`healed` are terminal, while `failed/` is drained by the `failed-tasks` Check (an action of `processes/autoheal.json`, which `harness init` seeds on every root; its `action.params.repository` is the only place self-healing names a repo) and by nothing else. The router and dispatcher never learn about `failed`/`healed` as steps. Both queues are now built **unconditionally** — with no `failed-tasks`-driving process configured, `failed/` simply has no reader, exactly as before wiring one up. See ADR-0018.
+25. **The check produces at most one fresh task per claimed failure and never writes a claimed task back to `failed/`.** Every claim settles to `healed/` in the same `evaluate()` call. Recursion is guarded by a marker (`data.heal`), not by construction: a heal task that itself fails **does** pass through `failed/` normally (board-visible) before the check's next tick retires it to `healed/` without a new `Observation`. So no failure is healed twice and nothing loops. The check also stamps its own `params.repository` — a plain field of the `failed-tasks` action, set in `processes/autoheal.json` like any other Process action param, the operator's own responsibility to fill in — onto the fresh task it fires, so the `heal` step gets a worktree the same way any ordinary agent step does (invariant #15) — `harness init` seeds that file with `params == {}`, so a freshly initialized root fires a repository-less heal task until the operator edits it. See ADR-0018 and ADR-0019.
+26. **The heal *workflow* is three steps — `heal` triages, `dedup` forks on novelty, `file-issue` is the only one that opens anything, and it isn't the LLM.** `heal`'s persona (persona as data) diagnoses the failure and returns `file` (a fixable harness bug or an operational problem worth filing — drafts the issue, routes to `dedup`) or `skip` (external/transient/impossible — routes straight to `end`, nothing filed). `dedup`'s persona reads the target repo's open issues and returns `unique` (routes to `file-issue`) or `duplicate` (routes straight to `end`, silently — no issue, no board-visible failure). Only on the `unique` path does the `file-issue` step's `open-issue` finisher run. `open-issue` is a generic, config-driven `ConsumerBehavior` (same footing as `open-pr`/`LandingBehavior`) — the healer is just one binding of it, `{"kind": "open-issue", "from_step": "heal", "label": "harness:self-heal"}`. It reads `from_step`'s artifact for a fenced `json` block holding an array of issue drafts and calls `IssueTracker.open_issue` once per draft, filing 0..N issues (invariant 9) — neither persona ever opens anything itself. `IssueTracker` is a third port distinct from `Forge` (opens PRs) and `TaskSource.finish` (relabels), idempotent per `(repo, scope_label, marker)`. Both steps' outcome vocabularies (`file`/`skip`, `unique`/`duplicate`) are declared as workflow edges, not hardcoded in the personas — invariant #42 governs which outcomes each step may actually report. See ADR-0018, ADR-0019 and ADR-0022.
 27. **`IssueTracker` and `FailedTasksCheck` are unknown to the dispatcher and consumer.** `IssueTracker` is touched only by the `open-issue` finisher (wired via `build()`'s `finishers=`); `FailedTasksCheck` is a `Check` registered inside `app.build()`'s internal checks dict. Neither is imported by `dispatcher.py`/`consumer.py`; guarded by `test_architecture.py`. See ADR-0018 and ADR-0019.
 28. **A task's workspace branch is `harness/<task.id>` unless `task.data["branch"]` overrides it.** The override exists for exactly one case (the resolver workflow fixing an existing PR): `GitWorkspace.attach` checks out that *existing* branch instead of creating a fresh one from HEAD. Absent the key, every path is unchanged.
 29. **Conflict resolution is always a merge, never a rebase.** `WorkspaceHandle.merge()` produces a two-parent merge commit, deliberately — a rebase would rewrite history on a branch that may already be pushed, breaking the no-force-push invariant `GitWorkspaceHandle.push()` relies on (a plain `push -u`, no `--force`).
@@ -81,9 +83,10 @@ swapped out later.
 38. **A scheduled trigger's `dedup_key` is occurrence-keyed, giving at-most-once per occurrence across restarts.** The key includes the occurrence identity (the interval bucket, or the cron occurrence timestamp — and, for `per-state` dedup, an observed `state_key` instead, cadence-blind), so the existing `SourcePoller._seen` seeding makes one period/occurrence yield one task even across a restart — the same exactly-once mechanism as GitHub ingestion (ADR-0010), with a non-constant key. A restart mid-occurrence fires at most once more ("fire-once-on-catchup"): the occurrence a missed poll would have caught is still the one `occurrence_at_or_before` returns on the first poll after restart, suppressed by `_seen` if it already fired, emitted once if it never did. See ADR-0018.
 39. **A Process is a compile-time authoring aggregate, never a runtime object.** `processes/*.json` bundles a trigger (cadence), an action (a named `Check`), a target (workflow **or** step) and a `sink`, and `FilesystemProcessRepository` **compiles each into a `ScheduledTrigger`** that joins the existing `sources` list. Nothing under orchestration (`dispatcher`/`consumer`/`router`/`source_poller`) imports or names "process"; it is `cli.py`/`app.py` wiring turned into data. Most process compilation is a `cli.py` concern, but the `failed-tasks` check (ADR-0018) forced compilation itself inside `app.build()` — it must close over the harness's own live `events`/`failed`/`healed` queues, which only exist once `build()` has constructed them — so `build()` gained `extra_checks` and `processes_root` (and lost the old `heal`/`issue_tracker`). `triggers/*.json` is unchanged — a Process compiles to the *same* `ScheduledTrigger` a bare trigger file does, so the two surfaces coexist. Guarded by `test_architecture.py`. See ADR-0015. The `github-issues` action's `label`/`claimed_label` params are both author-configurable (`claimed_label` defaults `"harness:queued"`), so a second, upstream Process (e.g. triage, scanning `harness:triage` and claiming into `harness:validating`) can compose with the ingestion Process without touching it — `FilesystemProcessRepository.build()` rejects a batch where two `github-issues` processes share a literal `label`/`claimed_label` value (a static, exact-string check only; an agent-authored or logically-incompatible-but-textually-different collision is not caught).
 40. **Outbound reflection routes on one effective sink kind: `data.sink.kind`, defaulting to `data.source.kind`.** `ports/source.py::effective_sink_kind(task)` is the single routing rule every reflecting `TaskSource` compares its own `kind` against — a pure dict lookup, no I/O. Accepted **sink** kinds (what a Process's own `sink` field may declare, gated by `fs_processes.py::_ACCEPTED_SINK_KINDS`) are `none`, `slack` and `github`. `slack` is a destination genuinely independent of origin (GitHub in, Slack out): a non-`none`/non-`github` sink is stamped by the compiled trigger as `data.sink = {"kind": ...}` (after the observation merge, so a check can never clobber it), and `SlackWebhookSink` (an outbound-only `TaskSource`, `poll()` always `[]`, registered in `cli._run` only when `SLACK_WEBHOOK_URL` is set; the URL is a secret and never enters a JSON file) matches on the effective kind, posting a stateless webhook message per report (deduped per-run by an in-process ledger, invariant #21; the stateful create-then-update refinement stays open). `github` is the *degenerate, same-as-origin* case, not an independently addressable destination: `GithubLabelReflector` can only ever target a task's origin issue (`data.source.issue`), so it is the default a task falls back to when no explicit `data.sink` is set — never a destination a Process can point at a GitHub repo the task didn't originate from. A sink only reflects state and can never fail or route a task (ADR-0018 — contrast a finisher, invariant #41, which can). Separately, `data.source.kind` (the *origin*, not the sink) may also legitimately be `jira` now (`JiraIssuesCheck`, ADR-0020) — `effective_sink_kind` is an unconditional dict lookup with no allow-list on that fallback path, so a `jira`-sourced task with no reflector wired simply falls through every existing reflector's kind check as a no-op, exactly like `slack`-only or any other foreign kind. `jira` is deliberately *not* added to `_ACCEPTED_SINK_KINDS` yet — there is no `JiraReflector` to route a declared `sink: {"kind": "jira"}` to; adding it now would let a process compile with a silently inert sink, the failure mode `_parse_sink`'s own docstring already warns against for `github`. See ADR-0015, ADR-0020.
-41. **A finisher is data, not a step name.** A step's finishing behavior is chosen via the workflow's `finishers` mapping (step → a `FinisherBinding{kind, config}`, parsed either as a plain string — `"open-pr"`, `config={}` — or an object — `{"kind": "label-issue", "labels": {...}}`, everything but `"kind"` becomes `config`) resolved against a registry of **factories** wired in `build()` (`{"open-pr": lambda step, config, inner: landing}` by default). A factory receives the step name, that binding's own `config`, and a zero-arg thunk that *lazily* builds the "inner" behavior `behavior_for` would otherwise have returned for that step — so a finisher can either fully **replace** the step's behavior (`open-pr`: ignores `step`/`config`/`inner`, `land` never runs an agent) or **wrap** it (`label-issue`: calls the thunk, lets the step's own persona run, then acts on the outcome it returned). The thunk is lazy, not an eagerly-built behavior, because a step exclusively finished by `open-pr` (the landing step) typically has no catalog agent at all — eagerly resolving it for every bound step would raise `AgentNotFound` for a perfectly normal deployment. `behavior_for` has no branch on a step's name for finishing. Conflicting bindings across served workflows (comparing the whole `FinisherBinding`, kind *and* config) and unknown kinds fail at build, never at consume time; a workflow with no `finishers` key defaults `landing_step` to `open-pr` and behaves exactly as before. See ADR-0016 and ADR-0018.
+41. **A finisher is data, not a step name.** A step's finishing behavior is chosen via the workflow's `finishers` mapping (step → a `FinisherBinding{kind, config}`, parsed either as a plain string — `"open-pr"`, `config={}` — or an object — `{"kind": "label-issue", "labels": {...}}`, everything but `"kind"` becomes `config`) resolved against a registry of **factories** wired in `build()` (`{"open-pr": lambda step, config, inner: landing}` by default). A factory receives the step name, that binding's own `config`, and a zero-arg thunk that *lazily* builds the "inner" behavior `behavior_for` would otherwise have returned for that step — so a finisher can either fully **replace** the step's behavior (`open-pr`: ignores `step`/`config`/`inner`, `land` never runs an agent) or **wrap** it (`label-issue`: calls the thunk, lets the step's own persona run, then acts on the outcome it returned). The thunk is lazy, not an eagerly-built behavior, because a step exclusively finished by `open-pr` (the landing step) typically has no catalog agent at all — eagerly resolving it for every bound step would raise `AgentNotFound` for a perfectly normal deployment. `behavior_for` has no branch on a step's name for finishing. Conflicting bindings across served workflows (comparing the whole `FinisherBinding`, kind *and* config) and unknown kinds fail at build, never at consume time; a workflow with no `finishers` key defaults `landing_step` to `open-pr` and behaves exactly as before. This is still true only of the workflows `build()` actually receives, though: `cli._run` (`_validate_served_workflows`) checks each served workflow's own bindings against the same custom `finishers` registry first, and drops one whose binding names a *known* kind that rejects its own config (e.g. `open-issue` bound with no `label`) — printing a `warning:` naming the file, step, reason and any Process left targeting the now-dropped workflow — before `served_names` ever reaches `build()`. An *unknown* kind (`UnknownFinisherKind`, a distinct `ValueError` subclass — e.g. a typo, or `label-issue` bound while `GITHUB_TOKEN` is unset) is a different failure shape and is deliberately not dropped here: the operator's rule is that a value which is *set and wrong* fails fast while only a *missing* one warns, so this exception propagates out of the pre-filter unchanged and still fails the whole run there (exit 2), before `build()` is ever called. So one stale workflow file (invariant #24's `heal.json`, say, left over in the pre-generic string form) no longer takes the whole service down, and a `processes/*.json` Process that targets only that now-dropped workflow is skipped right along with it (a warning, not a build failure) rather than crash-looping on "not a known workflow or step"; `build()`'s own equivalent fail-fasts are unchanged for a genuine cross-workflow conflict among the workflows still being served, and for any caller that constructs `build()` directly without going through this pre-filter at all. See ADR-0016, ADR-0018 and ADR-0022.
 42. **A step's outcome vocabulary is the workflow's, derived live.** `Workflow.outcomes_for(step)` — the unique `on` values of the edges leaving `step`, in definition order — is the single, authoritative declaration of what a step may report, computed from the graph itself on every run, never frozen. `AgentSpec.allowed_outcomes` is only the fallback for a workflow-less task (no `workflow_template`, an unresolvable one, or a step with no outgoing edges) and for any behavior with no `WorkflowRepository` wired at all — it is not the primary declaration once a workflow is driving the step. Two hints exist to steer an agent's choice and are BOTH prompt-only, read only by `ClaudeCliBehavior`'s prompt composition, and never touched by `route()` or the dispatcher: `Transition.hint` (per outcome) and `Workflow.descriptions` (per step). See ADR-0018.
 43. **A component needing both a live harness queue and an external-system dependency is built inside `build()` from a factory `cli.py` supplies.** Neither wired standalone in `cli.py`'s `serve()` (that shape needs no queue — the admin ports) nor built directly by name inside `build()` (that shape needs no external client — `FailedTasksCheck`). `IssueImport`/`GithubIssueImportService` (the Ahanas board's manual "Add issue" button) follows this: `cli.py` closes the `GithubClient`/`RepositoryRegistry` it already built into an `IssueImportFactory`, and `build()` invokes it once `inbox`/`step_queues`/`done`/`failed`/`healed`/`archived`/`events` exist, exposing the result as `harness.issue_import` — always concrete, mirroring `harness.control`. `IssueImport` is touched only by `api/routes.py`'s `POST /issues/import` handler and `build()`'s own wiring — `dispatcher.py`/`consumer.py` don't import it; guarded by `test_architecture.py` the same way invariants #23/#32/#34 guard `TaskControl`/`MergeChecker`/`IssueChecker`.
+44. **Merging a PR is a fourth port, and the operator sets the bar — not the agent.** `PullRequestMerger` (`ports/pr_merge.py`) is distinct from `Forge` (opens PRs), `MergeChecker` (reads PR state) and `IssueTracker` (creates issues) — the port is where ADR-0009's "the harness never touches `main`, it only proposes" is deliberately relaxed, so the relaxation stays explicit and revocable: wire no merger and nothing can merge. `dispatcher.py`/`consumer.py` don't import it (guarded by `test_architecture.py`, mirroring invariants #27/#32/#34), so "only a bound finisher can merge" is structural. Two safety properties belong to the **contract**, not to a driver: (a) **the merge is pinned to a sha** — `expected_sha` is the head the reviewer read, and a driver MUST refuse when the head moved past it, which is what makes merging unreviewed code structurally impossible; (b) **a refusal is not a failure** — a moved head / red check / protection rule raises `MergeRefused` (settled benignly, the next scan re-reviews the new head), only a genuine fault raises `MergeError` (fails the task); `MergeRefused` subclasses `MergeError` so a forgetful driver author fails *safe*. The `merge-review` persona supplies a **confidence** in a fenced json block (`merge_verdict.py`, `issue_drafts.py`'s twin); the `merge-pr` finisher compares it against `min_confidence` **from the workflow binding** — the agent never supplies the threshold it is judged against and has no tool that can merge (invariant #9's philosophy at its most consequential). The whole path is **asymmetric by design**: many states refuse (no source, no head sha, unreadable verdict, confidence below the bar, a moved head), none merges by accident. See ADR-0023.
 
 ## Working here
 
@@ -151,16 +154,17 @@ Dependencies flow strictly downward, no cycles.
 |---|---|
 | Base | `models` (imports nothing from the package), `ids` |
 | Logic | `router` (knows only `models`) |
-| Base (package-free) | `models`, `ids`, `artifacts_layout` (the `.artifacts/<id>/<step>-NN` convention) |
-| Ports | `ports/{queue,workflows,strategy,behavior,events,clock,workspace,artifacts,forge,board,agent,repos,source,control,logs,issues,merge,issue_state,triggers,updater,process_admin,issue_import,command}` |
+| Base (package-free) | `models`, `ids`, `artifacts_layout` (the `.artifacts/<id>/<step>-NN` convention), `issue_drafts`, `merge_verdict` |
+| Ports | `ports/{queue,workflows,strategy,behavior,events,clock,workspace,artifacts,forge,board,agent,repos,source,control,logs,issues,merge,pr_merge,issue_state,triggers,updater,process_admin,issue_import,command}` |
 | Orchestration | `dispatcher`, `consumer`, `source_poller`, `task_control`, `pr_watcher`, `merge_reconciler`, `issue_reconciler` — know only ports (and, for `pr_watcher`/`merge_reconciler`/`issue_reconciler`, the base `ids` module — not `workspace`/`forge`/`artifacts`/`agent`/`repos`/`drivers`) |
-| Behaviors | `behaviors/{landing,agent,resolve_conflict,verify,open_issue}` — touch ports, not drivers |
-| Drivers | `drivers/{fs_queue,fs_workflows,fifo_strategy,dummy_behavior,stdout_events,system_clock,memory,git_workspace,fake_forge,claude_cli,fs_agents,fs_repos,worktree_artifacts,source_reflector,github_client,github_source,github_forge,github_issues,github_issues_check,github_conflicts_check,jira_client,jira_issues_check,failed_tasks_check,github_merge_checker,github_issue_checker,launchd,composite_events,git_remote,projection_events,stage_output,scheduled_trigger,checks,fs_triggers,fs_processes,slack_sink,uv_updater,label_issue,github_issue_import,subprocess_command}` |
+| Behaviors | `behaviors/{landing,agent,resolve_conflict,verify,open_issue,merge_pr}` — touch ports, not drivers |
+| Drivers | `drivers/{fs_queue,fs_workflows,fifo_strategy,dummy_behavior,stdout_events,system_clock,memory,git_workspace,fake_forge,claude_cli,fs_agents,fs_repos,worktree_artifacts,source_reflector,github_client,github_source,github_forge,github_issues,github_issues_check,github_conflicts_check,github_mergeable_check,github_pr_merger,jira_client,jira_issues_check,failed_tasks_check,github_merge_checker,github_issue_checker,launchd,composite_events,git_remote,projection_events,stage_output,scheduled_trigger,checks,fs_triggers,fs_processes,slack_sink,uv_updater,label_issue,github_issue_import,subprocess_command}` |
 | UI | `api/{app,routes}` — reads through `BoardView`/`ArtifactView`/`StageOutputView`, writes through `TaskControl`; never a driver |
 | Edges | `app` (wiring), `cli` |
 
 - `projection.py` — in-memory read model of the board; hydration from queues + event stream
 - `artifacts_layout.py` — the single source of truth for artifact placement in the worktree (`next_attempt`, `artifacts_dir`); read by both the behavior and `WorktreeArtifactView`
+- `issue_drafts.py` — parse a step's issue drafts from a fenced JSON array in its artifact; derives idempotency markers (`IssueDraft`, `parse_drafts`, `marker_for`, `DraftError`); imports nothing from the `harness` package, like `models`/`ids`/`artifacts_layout`
 - `ports/board.py` — the `BoardView` port through which the UI looks
 - `ports/artifacts.py` — `ArtifactStore` (writing, phase 2) and `ArtifactView` (reading for the UI); phase 3 reads via `WorktreeArtifactView`
 - `ports/workspace.py` — `Workspace.attach(task) -> WorkspaceHandle` (worktree + commit; `merge`/`abort_merge` for the base-sync)
@@ -173,9 +177,9 @@ Dependencies flow strictly downward, no cycles.
 - `source_poller.py` — `SourcePoller`: the core that fills the inbox from the source (knows only ports)
 - `pr_watcher.py` — `PrWatcher`: the core loop that claims a landed task out of `done/` once its PR has resolved (merged or closed unmerged) and archives it into `archived/`, dropping it from the board while keeping it gettable by id (knows only ports/models/ids)
 - `drivers/failed_tasks_check.py` — `FailedTasksCheck(Check)`: the single reader of `failed/`, expressed as a Process action (the `failed-tasks` check). Claims each failed task via the atomic `claim()`, settles it to `healed/` in the same `evaluate()`, and emits one `Observation` carrying the rendered failure report (reason + history) with `state_key` = the failed task id (`per-state` dedup). Stamps a `data.heal` marker on what it produces and skips a failed task already carrying one, so a failed heal is retired to `healed/` without being re-observed (invariant 25). Registered as the `failed-tasks` check inside `app.build()` (it closes over the live `failed`/`healed`/`events` queues). See ADR-0018
-- `behaviors/open_issue.py` — `OpenIssueBehavior(ConsumerBehavior)`: the `open-issue` finisher, the heal workflow's mirror of `open-pr`/`LandingBehavior`. Bound to the `file-issue` step; reads the drafted heal artifact and opens the issue via `IssueTracker` (the worker, never the LLM — invariant 9/26), idempotent by the original failed-task id. Fully replaces the step's behavior, so `file-issue` needs no catalog agent; wired via `build()`'s `finishers=` override. Generic — future observer/architect/QA processes reuse it. See ADR-0016, ADR-0018
-- `ports/issues.py` — `IssueTracker.open_issue(...)` (opens a fresh advisory issue, idempotent by marker) + `IssueRef`/`IssueError`
-- `drivers/github_issues.py` — `GithubIssueTracker`: opens the heal issue on GitHub over `GithubClient`, dedup by an embedded `<!-- harness-heal:<id> -->` marker
+- `behaviors/open_issue.py` — `OpenIssueBehavior(ConsumerBehavior)`: the `open-issue` finisher kind, fully config-driven — no notion of healing, reviewing or any other purpose baked in. Reads a step's artifact for a fenced json array of `IssueDraft`s (`harness.issue_drafts.parse_drafts`) and opens each via `IssueTracker` (the worker, never the LLM — invariant 9/26). `from_step`'s presence picks the shape: given, it fully *replaces* the bound step's behavior (the heal workflow's agent-less `file-issue`, reading `heal`'s artifact); omitted, it *wraps* the step's own behavior (`inner` runs first, then its own artifact is filed) — the shape a future 0..N-issue architecture-review process uses. `label` is carried by every issue and scopes the idempotency marker search; `allowed_labels` filters a draft's own per-issue labels. The repo comes from `task.repository` via an injected `slug_for` (never an import of a driver — `behaviors/` may not import `drivers/`). Wired via `build()`'s `finishers=` override. See ADR-0016, ADR-0018
+- `ports/issues.py` — `IssueTracker.open_issue(...)` (opens a fresh advisory issue, idempotent per `(repo, scope_label, marker)`) + `IssueRef`/`IssueError`
+- `drivers/github_issues.py` — `GithubIssueTracker`: opens the issue on GitHub over `GithubClient`, dedup by an embedded `<!-- harness-issue:<marker> -->` marker, scoped to `(repo, scope_label)`
 - `drivers/source_reflector.py` — `SourceReflectorSink(EventSink)`: event stream → projection into the source
 - `drivers/github_client.py` — `GithubClient` (ABC), `Issue`, `FakeGithubClient`, `HttpGithubClient` (stdlib `urllib`)
 - `drivers/github_source.py` — `GithubTaskSource`: issue → task, state → label
@@ -260,7 +264,7 @@ Dependencies flow strictly downward, no cycles.
 - `drivers/github_issues_check.py` — `GithubIssuesCheck(Check)`: the inbound `harness:todo` scan as a process `Check` — lists issues by label across the repo registry, claims each via the label swap (default `todo`→`queued`, both configurable per process as `label`/`claimed_label` — invariant #39), and emits one provenance-stamped `Observation` (`data.source`) per issue. Registered as the `github-issues` action by closing a `GithubClient` + registry into a factory in `cli._process_sources`; `BUILTIN_CHECKS` stays client-free. The inbound half of ADR-0015's action seam (the outbound half is a sink, e.g. `SlackWebhookSink`)
 - `drivers/github_conflicts_check.py` — `GithubConflictsCheck(Check)`: conflict detection as a process `Check`, the resolver's mirror of `GithubIssuesCheck`. Lists harness-authored open PRs across the registry; auto-updates a `behind` PR server-side (a side effect, no task) and emits one `Observation` per `dirty` PR carrying `data.branch`/`data.source.base` for the `resolver` workflow, keyed `slug:pr:head_sha` for per-state dedup. Registered as the `github-conflicts` action in `cli._process_sources`; the check-based replacement for the bespoke `mergeability_watcher` detection
 - `drivers/jira_client.py` — `JiraClient` (ABC), `JiraIssue`, `FakeJiraClient`, `HttpJiraClient` (stdlib `urllib`, Jira Cloud `/rest/api/3`, Basic auth with an email + API token). Structurally `GithubClient`'s twin — no dedicated port, same as `GithubClient` — with one real difference: a Jira issue's `key` is a string (`"PROJ-123"`), not GitHub's int `number`. `HttpJiraClient` extracts plain text from the Atlassian Document Format `description` field rather than passing the raw ADF JSON through
-- `drivers/jira_issues_check.py` — `JiraIssuesCheck(Check)`: the inbound Jira label scan as a process `Check`, `GithubIssuesCheck`'s Jira twin. Runs a JQL query (a `project`+`label` convenience form, or an explicit `jql` override), claims each matching issue via the label swap (default `harness-todo`→`harness-queued`), and emits one provenance-stamped `Observation` (`data.source = {kind: "jira", site, key, url, project}`) per issue, `state_key = "jira:{key}"`. Unlike GitHub's per-repo slug, a Jira issue has no intrinsic repo axis — every `Observation` is stamped with the single `repository` param configured on the check, the same mechanism `--heal-repo` uses (invariant #25). Registered as the `jira-issues` action by closing a `JiraClient` + registry into a factory in `cli._process_check_factories`, gated on `JIRA_BASE_URL`/`JIRA_EMAIL`/`JIRA_API_TOKEN` exactly as `github-issues` is gated on `GITHUB_TOKEN`; `BUILTIN_CHECKS` stays client-free. Ingestion-only in this increment — outbound reflection (`JiraReflector`) is a deferred follow-up (ADR-0020)
+- `drivers/jira_issues_check.py` — `JiraIssuesCheck(Check)`: the inbound Jira label scan as a process `Check`, `GithubIssuesCheck`'s Jira twin. Runs a JQL query (a `project`+`label` convenience form, or an explicit `jql` override), claims each matching issue via the label swap (default `harness-todo`→`harness-queued`), and emits one provenance-stamped `Observation` (`data.source = {kind: "jira", site, key, url, project}`) per issue, `state_key = "jira:{key}"`. Unlike GitHub's per-repo slug, a Jira issue has no intrinsic repo axis — every `Observation` is stamped with the single `repository` param configured on the check, the same mechanism the `failed-tasks` check's own `params.repository` uses (invariant #25). Registered as the `jira-issues` action by closing a `JiraClient` + registry into a factory in `cli._process_check_factories`, gated on `JIRA_BASE_URL`/`JIRA_EMAIL`/`JIRA_API_TOKEN` exactly as `github-issues` is gated on `GITHUB_TOKEN`; `BUILTIN_CHECKS` stays client-free. Ingestion-only in this increment — outbound reflection (`JiraReflector`) is a deferred follow-up (ADR-0020)
 - `ports/triggers.py` — the `Check` (ABC) protocol (`evaluate() -> list[Observation]`), `Observation` (optional `state_key` + task `data`), `CheckFactory`, and the declarative action definition (`ParamSpec`/`CheckSpec` — an action's UI-facing metadata + parameter schema, `CheckDefinition` — a callable `spec`+`factory` bundle that IS a `CheckFactory`, and `check_spec_of` — the spec for any registry entry, generic fallback for a bare factory), plus `parse_interval` (a duration string → seconds) and `parse_cron`/`CronSchedule` — a stdlib-only 5-field cron parser and occurrence function, the cron twin of `parse_interval`. A trigger's condition is code behind this port; the schedule and the parameter schema are data
 - `drivers/scheduled_trigger.py` — `ScheduledTrigger(Trigger)`: composes a cadence (an `interval` **or** a `cron`, data) × a `Check` (code) × a `target` (workflow **or** step) behind one occurrence seam serving both cadences. Cadence is a clock-gate on the occurrence identity (the interval bucket, or the cron occurrence timestamp); `dedup_key` is occurrence-keyed (`per-interval`) or state-keyed (`per-state`), never constant, for either cadence. A non-`none` `sink` is stamped into each fired task as `data.sink = {"kind": ...}` — after the observation merge, so a check can't clobber it; still no `data.source` (a trigger reflects nothing outward)
 - `drivers/checks.py` — the built-in `Check`s (`AlwaysCheck`, `DiskThresholdCheck`, `FileGlobCheck` as `fs-files` — one observation per file matching a glob, `CommandCheck` as `command` — one observation per non-empty stdout line of a shell command) and the `BUILTIN_CHECKS` registry mapping a check name → factory; a bespoke condition is a new factory registered by name. `command` is the data-only escape hatch: an operator can author a simple action without Python
@@ -276,29 +280,40 @@ Dependencies flow strictly downward, no cycles.
   consumes — with one exception: when an autoheal Process is wired, `failed/` gets
   exactly one reader (the `failed-tasks` Check), and `healed/` becomes the
   never-consumed terminal (invariant 24).
-- **Self-healing is a Process** (opt-in), not a bespoke loop (ADR-0018/ADR-0019). Its
-  action, the `failed-tasks` Check, drains `failed/`: it claims each failed task,
+- **Self-healing is a Process, seeded and live on every root** (not opt-in, not a
+  bespoke loop, ADR-0018/ADR-0019). `harness init` writes `processes/autoheal.json`
+  on a 30s interval, so `failed/` drains and `heal`/`dedup` run on any root running
+  the default `--agent claude` — but it seeds `action.params.repository` empty, so
+  nothing gets filed anywhere until an operator points that value at a registered
+  repo (a `repos.json` name). `cli._run` warns about exactly that at startup
+  (`_warn_missing_autoheal_repository`, never an error — a missing value is
+  "not configured yet", not a typo; a present-but-unregistered one still fails
+  process-compile validation with `ProcessValidationError`, unchanged — see
+  ADR-0022), so the first signal isn't the token bill. Its action, the
+  `failed-tasks` Check, drains
+  `failed/`: it claims each failed task,
   settles it to `healed/`, and fires a fresh task through the three-step `heal`
   workflow. The `heal` step runs the `heal` persona over the failure report (reason +
-  history, no worktree) and triages it, returning `file` (a fixable harness bug —
+  history) inside a worktree — a scratch one until `action.params.repository` names
+  a repo, then that repo's own, the same way any ordinary agent step gets one
+  (invariant #15/#25) — and triages it, returning `file` (a fixable harness bug —
   drafts an issue and routes to `dedup`) or `skip` (nothing to file). `dedup` reads
-  the harness repo's open issues and returns `unique` (routes to `file-issue`) or
+  the target repo's open issues and returns `unique` (routes to `file-issue`) or
   `duplicate` (settles silently — no issue). Only the `unique` path's `file-issue`
-  step's `open-issue` finisher opens the drafted issue on the harness repo via
-  `IssueTracker`. `harness init` ships `workflows/heal.json` + `agents/heal.json` +
-  `agents/dedup.json`. **Enabled by `processes/autoheal.json`** — a file in
-  `processes/`, exactly like every other automation here — and configured by that
-  process's own `action.params.repository`, which `cli._autoheal_repo` reads back
-  to wire the `open-issue` finisher. `--heal-repo <owner/repo>` is the interactive
-  *bootstrap* that writes the file (only if absent — a hand-edited process is never
-  clobbered) and serves `heal`; every later run needs no flag, which is how the
-  launchd service self-heals despite `wrapper_script` exec'ing a fixed argv. Needs
-  `--agent claude`: with the flag that's a hard error, config-driven it's only a
-  warning (an unattended service must not crash-loop). There is deliberately **no
-  environment variable** — the slug is a public repo name, not a secret, and one
-  source of truth means the check's `repository` param and the finisher's file-to
-  repo cannot drift. Recursion is guarded by the `data.heal` marker, not by
-  construction (invariant 25).
+  step's `open-issue` finisher opens the drafted issue(s) on the repo named in
+  `action.params.repository`, via `IssueTracker`. `harness init` ships `workflows/heal.json` + `agents/heal.json` +
+  `agents/dedup.json` + `processes/autoheal.json` (seeded with an empty
+  `action.params.repository`, never clobbering a hand-edited file). The
+  `open-issue` finisher kind is registered unconditionally (it derives its
+  repo from `task.repository` and its label from the binding — invariant 26 —
+  so it needs no wiring-time configuration), and `heal` is served the same as
+  any other workflow file on disk (invariant 24) — so self-healing is
+  configured entirely through `processes/autoheal.json`, like every other
+  Process: an operator points `action.params.repository` at a registered repo
+  (a `repos.json` name) by editing the file directly or through the
+  dashboard's process editor. Until they do, a heal task is repository-less,
+  and `open-issue` fails it with a message saying exactly that. Recursion is
+  guarded by the `data.heal` marker, not by construction (invariant 25).
 - **`claim()`** is an atomic `rename` into `<queue>/.processing/`. A single operation
   handles the lease, idempotency and provenance after a crash.
 - **A step's concurrency is workflow config, not wiring.** `Workflow.max_parallel`
@@ -403,6 +418,31 @@ Dependencies flow strictly downward, no cycles.
   from `BUILTIN_CHECKS` — with the schedule as data and the condition as code (the same
   split as personas). `FilesystemTriggerRepository` reads them and validates fast at
   build; `harness init` writes an empty `triggers/`.
+- **Automatic merging is a Process the operator opts into** (ADR-0023) — the
+  one place the harness disposes of a proposal rather than making one. Its
+  action, `GithubMergeableCheck` (`github-mergeable`), is the exact complement
+  of `github-conflicts`: the two partition the same harness-authored open PRs
+  with no overlap — `behind` → update the branch server-side, `dirty` → the
+  `resolver` workflow, **`clean`** → the `automerge` workflow. `clean` is
+  GitHub's own verdict that the PR merges cleanly with every *required* check
+  green and *required* review present, so the harness never re-implements
+  branch protection — an operator tightens the gate by tightening the repo's
+  protection rules. Two further exclusions fail closed: a draft PR is never a
+  candidate, and a PR labelled `harness:no-automerge` is vetoed (a per-PR
+  override needing no config change). The `automerge` workflow is two steps:
+  `merge-review` runs the reviewer persona in a worktree checked out on the
+  PR's own branch (invariant #28's `data.branch` override, the resolver's
+  path) and returns `approve`/`reject`; only `approve` reaches `merge`, whose
+  `merge-pr` finisher reads the review's confidence and merges — or refuses.
+  `harness init` seeds `workflows/automerge.json`, `agents/merge-review.json`
+  **and** `processes/automerge.json`, so automerge runs on every registered
+  repository out of the box — one Process covers them all, since the check
+  iterates `RepositoryRegistry.names()` and there is nothing per-repo to
+  author. What withholds the merge is not the absence of the file but
+  `dry_run: true` in the workflow binding: the step reviews every clean PR and
+  records what it *would* have merged until an operator flips that one field.
+  The seeded process uses `dedup: per-state` (required — see the gotcha) and
+  is skipped with a warning, not fatally, when no `GITHUB_TOKEN` is set.
 - **A Process** is the operator's top-level authoring aggregate — the "tie it all
   together" surface. A `processes/*.json` file names four distinct roles: a
   **trigger** (cadence), an **action** (a named `Check` + params — the inbound
@@ -413,7 +453,8 @@ Dependencies flow strictly downward, no cycles.
   — sees only the primitives it already knows, and every invariant holds unchanged.
   The `sink` names the outbound destination — `none` or `slack`, the GitHub-in/
   Slack-out (source ≠ destination) split made real (invariant #40). `harness init`
-  writes an empty `processes/`; the operator defines several, each an independent file.
+  seeds `processes/` with one file, `autoheal.json` (self-healing's own Process,
+  invariant 25); the operator adds any others, each an independent file.
   A Process compiles to the same `ScheduledTrigger` a bare `triggers/*.json` does, so
   both surfaces coexist — the Process is the richer primary surface, the trigger file
   the low-level primitive. A structured board editor exists (`ProcessAdmin`), wired in
@@ -461,8 +502,16 @@ Dependencies flow strictly downward, no cycles.
   task that itself fails passes through `failed/` normally (board-visible once), but
   the check skips any failed task already carrying `data.heal` and retires it straight
   to `healed/` — so there is no "healing the healer" loop. `IssueTracker` is
-  idempotent by the failed task id (an embedded `<!-- harness-heal:<id> -->` marker),
-  so a crash before the settle won't file a second issue. The `heal` step needs a
+  idempotent per `(repo, scope_label, marker)` — an embedded
+  `<!-- harness-issue:<marker> -->` marker, `marker = <task id>:<sha1(title)[:8]>` —
+  so a re-run of the same heal task won't re-file the same draft (the marker's
+  task id is the heal task's, not the original failure's, so a fresh
+  observation of the same failure gets a different heal task and therefore a
+  different marker). What protects the claim window itself is that
+  `FailedTasksCheck.evaluate()` settles a claim to `healed/` *before* it
+  returns the `Observation` for it, backed by the trigger's per-state dedup
+  key — no issue can ever have been filed by the time a claim could crash and
+  retry. The `heal` step needs a
   runner and a catalog (the persona is data); offline the issue tracker falls back to
   the in-memory fake so the finisher runs harmlessly.
 - **`ArtifactStore.begin(task, step)` allocates the next attempt.** Writing into one
@@ -552,6 +601,50 @@ Dependencies flow strictly downward, no cycles.
   in `cli._process_sources` by closing a `GithubClient` + registry into a
   factory, exactly the dependency-bag shape the spec's action seam planned.
   See the spec's "sink seam" / "action seam" sections and their dated notes.
+- **`FakeGithubClient.merge_pull_request` changed meaning — check which one you
+  want.** It used to be a *test helper* simulating GitHub merging a PR out of
+  band (a human clicked the button); that is now `mark_merged`. The name
+  `merge_pull_request` is a real `GithubClient` verb: the harness merging a PR
+  itself, through `PullRequestMerger` (ADR-0023). Both write the same
+  `merged` set, so `get_pull_request`/`MergeChecker` read them identically —
+  the difference is only who did it, and only the new one records to `merges`.
+- **A merge refusal must never be widened into a failure — or vice versa.**
+  `MergeRefused` (settle, re-review next scan) subclasses `MergeError` (fail
+  the task) deliberately, so a driver that forgets the distinction fails safe.
+  A `except MergeError` placed before `except MergeRefused` silently turns
+  every ordinary race into a failed task; the reverse — treating a 5xx as a
+  refusal — silently hides real breakage behind "not mergeable right now".
+- **A missing credential disables one Process; a wrong value still kills the
+  run.** `fs_processes.MissingCredential` (a `ProcessValidationError` subclass)
+  is raised by the credential-gated action factories — `github-issues`,
+  `github-conflicts`, `github-mergeable`, `jira-issues` — when the environment
+  has no token. `FilesystemProcessRepository.build()` skips that file and
+  records it in `skipped`; `cli._run` warns per entry. This is what keeps "no
+  token is not fatal" true now that `harness init` seeds a `github-*` Process:
+  without it, one seeded file made every tokenless run exit 2. `build()` also
+  registers placeholder factories for those four names, so a bare `build()`
+  (most tests) reports "not configured" instead of the fatal "unknown check".
+  Every other `ProcessValidationError` — an unknown check, a malformed cadence,
+  a bad param — is still fatal, and a test pins both directions.
+- **A multi-observation check left on the default `per-interval` dedup silently
+  drops all but one observation per tick.** `per-interval` is the default when
+  a `processes/*.json` omits `dedup`, and `ScheduledTrigger._dedup_key` ignores
+  the observation entirely for it — every observation in one tick collapses
+  onto the same `(kind, target, occurrence)` key, so `SourcePoller._seen` keeps
+  the first and discards the rest, with no error and nothing on the board. Any
+  action that emits one observation *per external thing* — `github-issues`
+  (per issue), `github-conflicts` (per conflicted PR), `github-mergeable` (per
+  candidate PR), `jira-issues`, `fs-files`, `command` — therefore **requires**
+  `"dedup": "per-state"`, and it is not decorative: measured on three
+  mergeable PRs, `per-state` yields three tasks and `per-interval` yields one.
+  `per-interval` is correct only for a genuinely single-shot cadence (an
+  `always` heartbeat, a nightly sweep that fires one task).
+- **The automerge gate is only as strong as the repo's branch protection.**
+  `GithubMergeableCheck` trusts `mergeable_state == "clean"` to mean "required
+  checks green, required reviews present". On a repo with *no* protection
+  rules, `clean` means only "merges without conflict" — so an unprotected repo
+  hands the persona's confidence score the entire decision. Protect the branch
+  first, then enable the Process.
 - **`AgentSpec.allowed_outcomes` is now the workflow-less fallback, not the
   primary declaration.** A workflow-backed step's real vocabulary comes from
   `Workflow.outcomes_for`, derived live from its outgoing transitions — so

@@ -12,9 +12,13 @@ from collections.abc import AsyncIterator, Iterable, Sequence
 
 from harness.models import END, Task, Workflow
 from harness.ports.board import (
+    COLUMN_INBOX,
+    COLUMN_STEP,
+    COLUMN_TERMINAL,
     DONE_COLUMN,
     FAILED_COLUMN,
     HEALED_COLUMN,
+    LIFECYCLE_DESCRIPTIONS,
     TODO_COLUMN,
     UNKNOWN_WORKFLOW,
     AgentActivity,
@@ -23,6 +27,22 @@ from harness.ports.board import (
     BoardTab,
     BoardView,
 )
+
+_TERMINAL_COLUMNS = (DONE_COLUMN, FAILED_COLUMN, HEALED_COLUMN)
+
+
+def column_kind(name: str) -> str:
+    """Which of the three kinds a column is, by name.
+
+    `todo`/`done`/`failed`/`healed` are the harness's own lifecycle queues and
+    are never step names (a workflow referencing one would collide with the
+    reserved column, which is why they read as a fixed set here); everything
+    else on a board is a step."""
+    if name == TODO_COLUMN:
+        return COLUMN_INBOX
+    if name in _TERMINAL_COLUMNS:
+        return COLUMN_TERMINAL
+    return COLUMN_STEP
 from harness.ports.queue import TaskQueue
 
 
@@ -90,6 +110,14 @@ class BoardProjection(BoardView):
         # order (including the unconditional `healed` terminal column).
         self._orders: dict[str, tuple[str, ...]] = {
             workflow.name: column_order((), [workflow]) for workflow in workflows
+        }
+        # Per-tab step descriptions, straight off each workflow's own
+        # `descriptions` map. Prompt-side that map steers the agent (invariant
+        # #42); here it is the same authored sentence shown to the operator, so
+        # a column head says what the step is for instead of only naming it.
+        # The `unknown` tab has no workflow to ask, so its steps carry none.
+        self._descriptions: dict[str, dict[str, str]] = {
+            workflow.name: dict(workflow.descriptions) for workflow in workflows
         }
         # The UNKNOWN tab catches tasks whose template isn't a served workflow —
         # a dispatch failure, historical done/failed data from a removed
@@ -161,9 +189,16 @@ class BoardProjection(BoardView):
                 )
             ):
                 continue  # FR-4: omit the empty unknown tab, unless it is the board
+            descriptions = self._descriptions.get(tab_name, {})
             columns = tuple(
                 BoardColumn(
                     name=column_name,
+                    kind=column_kind(column_name),
+                    description=(
+                        LIFECYCLE_DESCRIPTIONS.get(column_name)
+                        if column_kind(column_name) != COLUMN_STEP
+                        else descriptions.get(column_name)
+                    ),
                     tasks=tuple(
                         sorted(
                             (

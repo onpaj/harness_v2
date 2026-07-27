@@ -28,6 +28,7 @@ from harness.ports.board import (
     DONE_COLUMN,
     FAILED_COLUMN,
     TODO_COLUMN,
+    UNKNOWN_WORKFLOW_NOTE,
     AgentActivity,
     BoardView,
 )
@@ -46,6 +47,11 @@ from harness.ports.workflow_admin import WorkflowAdmin, WorkflowValidationError
 from harness.ports.workflows import WorkflowNotFound
 
 TEMPLATES = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
+
+# A global, not a per-render context entry: `_columns.html` is rendered both
+# inside board.html and standalone as the /fragment/board swap target, and the
+# note is a fixed string either way.
+TEMPLATES.env.globals["unknown_workflow_note"] = UNKNOWN_WORKFLOW_NOTE
 
 
 def _basename(value: str | None) -> str:
