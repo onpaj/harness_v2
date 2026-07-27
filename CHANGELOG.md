@@ -1,6 +1,121 @@
 # CHANGELOG
 
 
+## v1.4.0 (2026-07-27)
+
+### Bug Fixes
+
+- Widen the self-heal brake to PR-borne tasks
+  ([`ac6e216`](https://github.com/onpaj/harness_v2/commit/ac6e216c9ecca33749ca557515659f5176499fee))
+
+Two Checks mint failed-queue tasks from the harness's own pull requests carrying neither a body nor
+  data.heal: GithubConflictsCheck stamps source.kind "mergeability" on resolver tasks,
+  GithubMergeableCheck stamps "pull-request" on automerge-review tasks. FailedTasksCheck's one-hop
+  brake only recognised the issue-body marker, so once the config half of self-heal lands, a
+  resolver/automerge failure could re-enter the pipeline unbounded.
+
+Add a third decline path keyed on a new PR_BORN_SOURCE_KINDS constant, alongside the existing
+  data.heal and marker guards (unchanged notes and ordering). Also documents allowed_labels'
+  deliberate omission from HEAL_DEFINITION's file-issue binding, with a pinning test, mirroring the
+  existing AUTOMERGE_DEFINITION dry_run comment.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+
+### Documentation
+
+- Correct spec and plan against the real tree
+  ([`2f403cb`](https://github.com/onpaj/harness_v2/commit/2f403cb9f4c4f092caf9497129353c4be1401007))
+
+The first draft was researched against ~/harness-app, a worktree base that had drifted behind main.
+  The marker is harness-issue:, not harness-heal:; the file-issue binding's label is also the
+  idempotency search scope, so flipping it to a label the ingester deletes would open duplicate
+  issues. Route via allowed_labels instead, and widen the brake to every harness-filed issue.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+
+- Correct spec references and sync stale plan strings
+  ([`c4978dc`](https://github.com/onpaj/harness_v2/commit/c4978dc164a4778b0e512560cf46350071a9a167))
+
+The spec's §1 claimed cli._autoheal_repo reads back processes/autoheal.json's
+  action.params.repository; no such function exists. State the real path instead: app.build() passes
+  it to FailedTasksCheck(repository=...), it rides Observation.repository, ScheduledTrigger stamps
+  it onto the task, and OpenIssueBehavior resolves it via slug_for(task.repository).
+
+The plan's Task 6 verification steps quoted settle-note text and a heal-declined occurrence count
+  that no longer match what ships after the brake was widened to PR-borne tasks. Sync both so an
+  operator's grep still matches. Also state plainly that the brake takes effect the moment the
+  release installs, not only once the config half (Task 5) lands.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+
+- Describe all three failed-tasks recursion guards
+  ([`38cf07a`](https://github.com/onpaj/harness_v2/commit/38cf07a94b9de1f87d074fda53b4ab40b9fccf8e))
+
+Invariant 25 and the failed-tasks Gotchas bullet still said "two markers guard two distinct cycles"
+  and only described the data.heal and harness-issue-marker guards. A third guard (PR-born
+  source.kind, added when the brake was widened to resolver/automerge tasks) was missing from both.
+  Updated both to describe all three declines and the one rule they express, keeping the existing
+  monotonic-drain claims intact.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+
+- Implementation plan for routing self-heal into the pipeline
+  ([`5fe2489`](https://github.com/onpaj/harness_v2/commit/5fe24899d09aeadf724837d234d688c5884383cb))
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+
+- Record the second recursion guard in invariant 25
+  ([`b59aada`](https://github.com/onpaj/harness_v2/commit/b59aada69a56e217c674049512209c0d99edc41f))
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+
+- Spec for routing self-heal issues into the development pipeline
+  ([`dad0cde`](https://github.com/onpaj/harness_v2/commit/dad0cde4dc3dbd44c4b3d9423240b3becbb4201a))
+
+The healer files a diagnosed issue and stops; the operator's relabel to harness:todo is the only
+  thing between a harness failure and a proposed fix. Point the file-issue finisher at harness:todo
+  directly, and pair it with a one-hop brake so a failed fix attempt cannot file a fresh issue and
+  feed the pipeline itself.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+
+### Features
+
+- Bound self-healing to one hop per root failure
+  ([`8f16bb6`](https://github.com/onpaj/harness_v2/commit/8f16bb6536a26de26f9472ca55d0af5e501c244b))
+
+A fix task born from a healer-filed issue carries no data.heal, so once the healer files into an
+  ingested label its own output can fail back into failed/ and file a fresh issue, unbounded.
+  Decline any failed task whose body carries the healer's marker, settling it to healed/ with a
+  distinct note.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+
+- Draft self-heal issues as work orders
+  ([`1fa7203`](https://github.com/onpaj/harness_v2/commit/1fa720380ff1c11f6d7a05a7301e9ebf438567b0))
+
+The healer's issue is becoming the input to the development pipeline's plan step rather than
+  something a person reads first, so specify the body's shape: symptom, reproduction, proposed
+  change, acceptance criteria, and which kind of finding it is.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+
+### Refactoring
+
+- Single-source the PR-born source.kind constants
+  ([`9f522db`](https://github.com/onpaj/harness_v2/commit/9f522db407fa213723304dc5fb09a92ca806d742))
+
+FailedTasksCheck's PR_BORN_SOURCE_KINDS was an independent copy of the "mergeability"/"pull-request"
+  literals each owning driver stamped inline, so a rename in either driver could silently disarm the
+  recursion guard with no test catching it. GithubConflictsCheck and GithubMergeableCheck each now
+  export their own SOURCE_KIND constant, used at the stamp site; failed_tasks_check.py builds
+  PR_BORN_SOURCE_KINDS by importing both, mirroring how MARKER_PREFIX is already shared. Two tests
+  in test_failed_tasks_check.py now reference the imported constants instead of bare strings, so
+  renaming either identifier breaks import/collection immediately.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+
+
 ## v1.3.0 (2026-07-27)
 
 ### Features
