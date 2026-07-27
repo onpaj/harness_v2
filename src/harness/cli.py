@@ -130,6 +130,19 @@ DEFAULT_DEFINITION = {
         {"from": "land", "on": "done", "to": "end"},
         {"from": "review", "on": "request_changes", "to": "development"},
     ],
+    # Prompt-side these steer the agent (invariant #42); board-side they are what
+    # a column head says the step is *for*, instead of only naming it. Seeded
+    # here so a fresh root's board explains itself; an existing workflow file is
+    # never rewritten, so add them there through the workflow editor.
+    "descriptions": {
+        "plan": "break the request down into the work it actually implies",
+        "design": "decide how it will be built, before any of it is",
+        "architecture": "check the design against the codebase's invariants",
+        "development": "write the code and the tests",
+        "verify": "run the repository's own checks against the diff",
+        "review": "read the diff as a reviewer would; send it back or pass it on",
+        "land": "sync the base branch in and open the pull request",
+    },
     "finishers": {"verify": "verify"},
 }
 
