@@ -43,6 +43,13 @@ DEFAULT_SKIP_LABEL = "harness:no-automerge"
 """The per-PR veto. A human who wants one PR kept out of the automerger's
 reach adds this label; nothing else about the process needs to change."""
 
+SOURCE_KIND = "pull-request"
+"""The `source.kind` this check stamps on every automerge-review task it
+mints. Named so `failed_tasks_check.py`'s recursion guard
+(`PR_BORN_SOURCE_KINDS`) can import it rather than carry a second,
+independent copy of the literal — a rename here then either propagates there
+or breaks an import immediately, instead of silently disarming the guard."""
+
 SPEC = CheckSpec(
     name="github-mergeable",
     label="GitHub mergeable PRs",
@@ -120,7 +127,7 @@ class GithubMergeableCheck(Check):
                             "branch": pr.head_branch,
                             "title": f"review PR #{pr.number} for automatic merge",
                             "source": {
-                                "kind": "pull-request",
+                                "kind": SOURCE_KIND,
                                 "repo": slug,
                                 "pr": pr.number,
                                 "url": pr.url,

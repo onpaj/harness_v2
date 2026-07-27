@@ -6,6 +6,8 @@ recursion guard), now exercised directly against the `Check` port.
 """
 
 from harness.drivers.failed_tasks_check import FailedTasksCheck
+from harness.drivers.github_conflicts_check import SOURCE_KIND as MERGEABILITY_SOURCE_KIND
+from harness.drivers.github_mergeable_check import SOURCE_KIND as PULL_REQUEST_SOURCE_KIND
 from harness.drivers.memory import FakeClock, MemoryEventSink, MemoryTaskQueue
 from harness.models import FAILED, HEALED, HistoryEntry, Task
 
@@ -245,15 +247,20 @@ def test_the_two_recursion_guards_record_distinct_notes():
 
 def test_brake_declines_a_failed_resolver_task_born_from_a_harness_pr():
     """`GithubConflictsCheck` mints resolver tasks with `source.kind ==
-    "mergeability"` and no body/`data.heal` — the brake must still catch
-    them, or the resolver half of the cycle in the review's diagram is
-    unbounded."""
+    github_conflicts_check.SOURCE_KIND` ("mergeability") and no body/
+    `data.heal` — the brake must still catch them, or the resolver half of
+    the cycle in the review's diagram is unbounded. Sourcing the literal
+    from the owning driver's own constant means renaming it there fails
+    this test instead of silently disarming the guard."""
     failed = MemoryTaskQueue("failed")
     healed = MemoryTaskQueue("healed")
     failed.put(
         failed_task(
             "tsk_resolver_1",
-            data={"request": "resolve merge conflict", "source": {"kind": "mergeability"}},
+            data={
+                "request": "resolve merge conflict",
+                "source": {"kind": MERGEABILITY_SOURCE_KIND},
+            },
         )
     )
     check = make_check(failed=failed, healed=healed)
@@ -270,13 +277,19 @@ def test_brake_declines_a_failed_resolver_task_born_from_a_harness_pr():
 
 def test_brake_declines_a_failed_automerge_review_task_born_from_a_harness_pr():
     """`GithubMergeableCheck` mints automerge-review tasks with `source.kind
-    == "pull-request"` and no body/`data.heal` — the brake's twin case."""
+    == github_mergeable_check.SOURCE_KIND` ("pull-request") and no body/
+    `data.heal` — the brake's twin case. Sourcing the literal from the
+    owning driver's own constant means renaming it there fails this test
+    instead of silently disarming the guard."""
     failed = MemoryTaskQueue("failed")
     healed = MemoryTaskQueue("healed")
     failed.put(
         failed_task(
             "tsk_automerge_1",
-            data={"request": "review PR for automatic merge", "source": {"kind": "pull-request"}},
+            data={
+                "request": "review PR for automatic merge",
+                "source": {"kind": PULL_REQUEST_SOURCE_KIND},
+            },
         )
     )
     check = make_check(failed=failed, healed=healed)

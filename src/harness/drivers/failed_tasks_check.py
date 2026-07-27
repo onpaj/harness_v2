@@ -30,7 +30,9 @@ from __future__ import annotations
 
 from dataclasses import replace
 
+from harness.drivers.github_conflicts_check import SOURCE_KIND as MERGEABILITY_SOURCE_KIND
 from harness.drivers.github_issues import MARKER_PREFIX
+from harness.drivers.github_mergeable_check import SOURCE_KIND as PULL_REQUEST_SOURCE_KIND
 from harness.models import FAILED, HEALED, HistoryEntry, Task, append_history
 from harness.ids import new_lock_id
 from harness.ports.board import HEALED_COLUMN
@@ -41,16 +43,17 @@ from harness.ports.triggers import Check, CheckSpec, Observation
 
 ACTOR = "failed-tasks"
 
-PR_BORN_SOURCE_KINDS = frozenset({"mergeability", "pull-request"})
+PR_BORN_SOURCE_KINDS = frozenset({MERGEABILITY_SOURCE_KIND, PULL_REQUEST_SOURCE_KIND})
 """`source.kind` values stamped by the two Checks that mint tasks from the
 harness's own pull requests rather than a filed issue: `GithubConflictsCheck`
-(`drivers/github_conflicts_check.py`) stamps `"mergeability"` on resolver
-tasks, `GithubMergeableCheck` (`drivers/github_mergeable_check.py`) stamps
-`"pull-request"` on automerge-review tasks. Neither carries a body or
+(`drivers/github_conflicts_check.py`) stamps its own `SOURCE_KIND`
+(`"mergeability"`) on resolver tasks, `GithubMergeableCheck`
+(`drivers/github_mergeable_check.py`) stamps its own `SOURCE_KIND`
+(`"pull-request"`) on automerge-review tasks. Neither carries a body or
 `data.heal`, so without this the one-hop limit (invariant 25) wouldn't cover
-them. Extracted as a constant for the same reason `MARKER_PREFIX` was: these
-strings are owned by those two driver files, and a silent rename there must
-not silently disarm the guard here."""
+them. Built from those two drivers' own constants for the same reason
+`MARKER_PREFIX` was extracted: these strings are owned by those two driver
+files, and a silent rename there must not silently disarm the guard here."""
 
 SPEC = CheckSpec(
     name="failed-tasks",
