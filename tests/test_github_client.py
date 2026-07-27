@@ -634,7 +634,7 @@ def test_fake_get_pull_request_reports_merged_state():
 
     assert client.get_pull_request("o/r", created.number).merged is False
 
-    client.merge_pull_request(created.number)
+    client.mark_merged(created.number)
 
     assert client.get_pull_request("o/r", created.number).merged is True
 

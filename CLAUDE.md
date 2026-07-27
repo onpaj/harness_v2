@@ -18,6 +18,8 @@ Generic triggers spec: `docs/superpowers/specs/2026-07-22-generic-triggers-desig
 Generic triggers plan: `docs/superpowers/plans/2026-07-22-generic-triggers.md`
 Processes spec: `docs/superpowers/specs/2026-07-22-processes-design.md`
 Processes plan: `docs/superpowers/plans/2026-07-22-processes.md`
+Automerge spec: `docs/superpowers/specs/2026-07-27-automerge-design.md`
+Automerge plan: `docs/superpowers/plans/2026-07-27-automerge.md`
 
 The project is built **phase by phase**. Phase 1 is a POC of the orchestration loop.
 Phase 2 adds **worktrees, artifacts and landing**: each phase works in a worktree,
@@ -84,6 +86,7 @@ swapped out later.
 41. **A finisher is data, not a step name.** A step's finishing behavior is chosen via the workflow's `finishers` mapping (step → a `FinisherBinding{kind, config}`, parsed either as a plain string — `"open-pr"`, `config={}` — or an object — `{"kind": "label-issue", "labels": {...}}`, everything but `"kind"` becomes `config`) resolved against a registry of **factories** wired in `build()` (`{"open-pr": lambda step, config, inner: landing}` by default). A factory receives the step name, that binding's own `config`, and a zero-arg thunk that *lazily* builds the "inner" behavior `behavior_for` would otherwise have returned for that step — so a finisher can either fully **replace** the step's behavior (`open-pr`: ignores `step`/`config`/`inner`, `land` never runs an agent) or **wrap** it (`label-issue`: calls the thunk, lets the step's own persona run, then acts on the outcome it returned). The thunk is lazy, not an eagerly-built behavior, because a step exclusively finished by `open-pr` (the landing step) typically has no catalog agent at all — eagerly resolving it for every bound step would raise `AgentNotFound` for a perfectly normal deployment. `behavior_for` has no branch on a step's name for finishing. Conflicting bindings across served workflows (comparing the whole `FinisherBinding`, kind *and* config) and unknown kinds fail at build, never at consume time; a workflow with no `finishers` key defaults `landing_step` to `open-pr` and behaves exactly as before. This is still true only of the workflows `build()` actually receives, though: `cli._run` (`_validate_served_workflows`) checks each served workflow's own bindings against the same custom `finishers` registry first, and drops one whose binding names a *known* kind that rejects its own config (e.g. `open-issue` bound with no `label`) — printing a `warning:` naming the file, step, reason and any Process left targeting the now-dropped workflow — before `served_names` ever reaches `build()`. An *unknown* kind (`UnknownFinisherKind`, a distinct `ValueError` subclass — e.g. a typo, or `label-issue` bound while `GITHUB_TOKEN` is unset) is a different failure shape and is deliberately not dropped here: the operator's rule is that a value which is *set and wrong* fails fast while only a *missing* one warns, so this exception propagates out of the pre-filter unchanged and still fails the whole run there (exit 2), before `build()` is ever called. So one stale workflow file (invariant #24's `heal.json`, say, left over in the pre-generic string form) no longer takes the whole service down, and a `processes/*.json` Process that targets only that now-dropped workflow is skipped right along with it (a warning, not a build failure) rather than crash-looping on "not a known workflow or step"; `build()`'s own equivalent fail-fasts are unchanged for a genuine cross-workflow conflict among the workflows still being served, and for any caller that constructs `build()` directly without going through this pre-filter at all. See ADR-0016, ADR-0018 and ADR-0022.
 42. **A step's outcome vocabulary is the workflow's, derived live.** `Workflow.outcomes_for(step)` — the unique `on` values of the edges leaving `step`, in definition order — is the single, authoritative declaration of what a step may report, computed from the graph itself on every run, never frozen. `AgentSpec.allowed_outcomes` is only the fallback for a workflow-less task (no `workflow_template`, an unresolvable one, or a step with no outgoing edges) and for any behavior with no `WorkflowRepository` wired at all — it is not the primary declaration once a workflow is driving the step. Two hints exist to steer an agent's choice and are BOTH prompt-only, read only by `ClaudeCliBehavior`'s prompt composition, and never touched by `route()` or the dispatcher: `Transition.hint` (per outcome) and `Workflow.descriptions` (per step). See ADR-0018.
 43. **A component needing both a live harness queue and an external-system dependency is built inside `build()` from a factory `cli.py` supplies.** Neither wired standalone in `cli.py`'s `serve()` (that shape needs no queue — the admin ports) nor built directly by name inside `build()` (that shape needs no external client — `FailedTasksCheck`). `IssueImport`/`GithubIssueImportService` (the Ahanas board's manual "Add issue" button) follows this: `cli.py` closes the `GithubClient`/`RepositoryRegistry` it already built into an `IssueImportFactory`, and `build()` invokes it once `inbox`/`step_queues`/`done`/`failed`/`healed`/`archived`/`events` exist, exposing the result as `harness.issue_import` — always concrete, mirroring `harness.control`. `IssueImport` is touched only by `api/routes.py`'s `POST /issues/import` handler and `build()`'s own wiring — `dispatcher.py`/`consumer.py` don't import it; guarded by `test_architecture.py` the same way invariants #23/#32/#34 guard `TaskControl`/`MergeChecker`/`IssueChecker`.
+44. **Merging a PR is a fourth port, and the operator sets the bar — not the agent.** `PullRequestMerger` (`ports/pr_merge.py`) is distinct from `Forge` (opens PRs), `MergeChecker` (reads PR state) and `IssueTracker` (creates issues) — the port is where ADR-0009's "the harness never touches `main`, it only proposes" is deliberately relaxed, so the relaxation stays explicit and revocable: wire no merger and nothing can merge. `dispatcher.py`/`consumer.py` don't import it (guarded by `test_architecture.py`, mirroring invariants #27/#32/#34), so "only a bound finisher can merge" is structural. Two safety properties belong to the **contract**, not to a driver: (a) **the merge is pinned to a sha** — `expected_sha` is the head the reviewer read, and a driver MUST refuse when the head moved past it, which is what makes merging unreviewed code structurally impossible; (b) **a refusal is not a failure** — a moved head / red check / protection rule raises `MergeRefused` (settled benignly, the next scan re-reviews the new head), only a genuine fault raises `MergeError` (fails the task); `MergeRefused` subclasses `MergeError` so a forgetful driver author fails *safe*. The `merge-review` persona supplies a **confidence** in a fenced json block (`merge_verdict.py`, `issue_drafts.py`'s twin); the `merge-pr` finisher compares it against `min_confidence` **from the workflow binding** — the agent never supplies the threshold it is judged against and has no tool that can merge (invariant #9's philosophy at its most consequential). The whole path is **asymmetric by design**: many states refuse (no source, no head sha, unreadable verdict, confidence below the bar, a moved head), none merges by accident. See ADR-0023.
 
 ## Working here
 
@@ -151,11 +154,11 @@ Dependencies flow strictly downward, no cycles.
 |---|---|
 | Base | `models` (imports nothing from the package), `ids` |
 | Logic | `router` (knows only `models`) |
-| Base (package-free) | `models`, `ids`, `artifacts_layout` (the `.artifacts/<id>/<step>-NN` convention), `issue_drafts` |
-| Ports | `ports/{queue,workflows,strategy,behavior,events,clock,workspace,artifacts,forge,board,agent,repos,source,control,logs,issues,merge,issue_state,triggers,updater,process_admin,issue_import,command}` |
+| Base (package-free) | `models`, `ids`, `artifacts_layout` (the `.artifacts/<id>/<step>-NN` convention), `issue_drafts`, `merge_verdict` |
+| Ports | `ports/{queue,workflows,strategy,behavior,events,clock,workspace,artifacts,forge,board,agent,repos,source,control,logs,issues,merge,pr_merge,issue_state,triggers,updater,process_admin,issue_import,command}` |
 | Orchestration | `dispatcher`, `consumer`, `source_poller`, `task_control`, `pr_watcher`, `merge_reconciler`, `issue_reconciler` — know only ports (and, for `pr_watcher`/`merge_reconciler`/`issue_reconciler`, the base `ids` module — not `workspace`/`forge`/`artifacts`/`agent`/`repos`/`drivers`) |
-| Behaviors | `behaviors/{landing,agent,resolve_conflict,verify,open_issue}` — touch ports, not drivers |
-| Drivers | `drivers/{fs_queue,fs_workflows,fifo_strategy,dummy_behavior,stdout_events,system_clock,memory,git_workspace,fake_forge,claude_cli,fs_agents,fs_repos,worktree_artifacts,source_reflector,github_client,github_source,github_forge,github_issues,github_issues_check,github_conflicts_check,jira_client,jira_issues_check,failed_tasks_check,github_merge_checker,github_issue_checker,launchd,composite_events,git_remote,projection_events,stage_output,scheduled_trigger,checks,fs_triggers,fs_processes,slack_sink,uv_updater,label_issue,github_issue_import,subprocess_command}` |
+| Behaviors | `behaviors/{landing,agent,resolve_conflict,verify,open_issue,merge_pr}` — touch ports, not drivers |
+| Drivers | `drivers/{fs_queue,fs_workflows,fifo_strategy,dummy_behavior,stdout_events,system_clock,memory,git_workspace,fake_forge,claude_cli,fs_agents,fs_repos,worktree_artifacts,source_reflector,github_client,github_source,github_forge,github_issues,github_issues_check,github_conflicts_check,github_mergeable_check,github_pr_merger,jira_client,jira_issues_check,failed_tasks_check,github_merge_checker,github_issue_checker,launchd,composite_events,git_remote,projection_events,stage_output,scheduled_trigger,checks,fs_triggers,fs_processes,slack_sink,uv_updater,label_issue,github_issue_import,subprocess_command}` |
 | UI | `api/{app,routes}` — reads through `BoardView`/`ArtifactView`/`StageOutputView`, writes through `TaskControl`; never a driver |
 | Edges | `app` (wiring), `cli` |
 
@@ -415,6 +418,29 @@ Dependencies flow strictly downward, no cycles.
   from `BUILTIN_CHECKS` — with the schedule as data and the condition as code (the same
   split as personas). `FilesystemTriggerRepository` reads them and validates fast at
   build; `harness init` writes an empty `triggers/`.
+- **Automatic merging is a Process the operator opts into** (ADR-0023) — the
+  one place the harness disposes of a proposal rather than making one. Its
+  action, `GithubMergeableCheck` (`github-mergeable`), is the exact complement
+  of `github-conflicts`: the two partition the same harness-authored open PRs
+  with no overlap — `behind` → update the branch server-side, `dirty` → the
+  `resolver` workflow, **`clean`** → the `automerge` workflow. `clean` is
+  GitHub's own verdict that the PR merges cleanly with every *required* check
+  green and *required* review present, so the harness never re-implements
+  branch protection — an operator tightens the gate by tightening the repo's
+  protection rules. Two further exclusions fail closed: a draft PR is never a
+  candidate, and a PR labelled `harness:no-automerge` is vetoed (a per-PR
+  override needing no config change). The `automerge` workflow is two steps:
+  `merge-review` runs the reviewer persona in a worktree checked out on the
+  PR's own branch (invariant #28's `data.branch` override, the resolver's
+  path) and returns `approve`/`reject`; only `approve` reaches `merge`, whose
+  `merge-pr` finisher reads the review's confidence and merges — or refuses.
+  `harness init` seeds `workflows/automerge.json` + `agents/merge-review.json`
+  as dormant data (like `resolver`/`heal`) but seeds **no**
+  `processes/automerge.json`: unlike autoheal, which drains a queue the
+  harness fills itself, automerging is a posture, so the Process stays the
+  operator's to create. And even once created, the seeded binding ships
+  `dry_run: true` — the step reviews and records what it *would* have merged
+  until an operator flips one field.
 - **A Process** is the operator's top-level authoring aggregate — the "tie it all
   together" surface. A `processes/*.json` file names four distinct roles: a
   **trigger** (cadence), an **action** (a named `Check` + params — the inbound
@@ -573,6 +599,25 @@ Dependencies flow strictly downward, no cycles.
   in `cli._process_sources` by closing a `GithubClient` + registry into a
   factory, exactly the dependency-bag shape the spec's action seam planned.
   See the spec's "sink seam" / "action seam" sections and their dated notes.
+- **`FakeGithubClient.merge_pull_request` changed meaning — check which one you
+  want.** It used to be a *test helper* simulating GitHub merging a PR out of
+  band (a human clicked the button); that is now `mark_merged`. The name
+  `merge_pull_request` is a real `GithubClient` verb: the harness merging a PR
+  itself, through `PullRequestMerger` (ADR-0023). Both write the same
+  `merged` set, so `get_pull_request`/`MergeChecker` read them identically —
+  the difference is only who did it, and only the new one records to `merges`.
+- **A merge refusal must never be widened into a failure — or vice versa.**
+  `MergeRefused` (settle, re-review next scan) subclasses `MergeError` (fail
+  the task) deliberately, so a driver that forgets the distinction fails safe.
+  A `except MergeError` placed before `except MergeRefused` silently turns
+  every ordinary race into a failed task; the reverse — treating a 5xx as a
+  refusal — silently hides real breakage behind "not mergeable right now".
+- **The automerge gate is only as strong as the repo's branch protection.**
+  `GithubMergeableCheck` trusts `mergeable_state == "clean"` to mean "required
+  checks green, required reviews present". On a repo with *no* protection
+  rules, `clean` means only "merges without conflict" — so an unprotected repo
+  hands the persona's confidence score the entire decision. Protect the branch
+  first, then enable the Process.
 - **`AgentSpec.allowed_outcomes` is now the workflow-less fallback, not the
   primary declaration.** A workflow-backed step's real vocabulary comes from
   `Workflow.outcomes_for`, derived live from its outgoing transitions — so

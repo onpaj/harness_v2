@@ -15,6 +15,16 @@ from dataclasses import dataclass, replace
 from typing import Any
 
 
+class PullRequestNotMergeable(Exception):
+    """The server refused to merge the PR as-is: its head moved past the sha
+    the caller pinned, a required check is red, or branch protection said no.
+
+    A state of the world, not a fault — `GithubPullRequestMerger` translates it
+    into the port's `MergeRefused`. It lives here rather than in `ports/` so
+    `GithubClient` stays a self-contained driver with no port import.
+    """
+
+
 @dataclass(frozen=True)
 class Issue:
     number: int
@@ -58,6 +68,15 @@ class PullRequestInfo:
     head_sha: str
     base_branch: str
     mergeable_state: str  # "behind" | "dirty" | "clean" | "blocked" | "unstable" | "unknown"
+    # The fields below serve `GithubMergeableCheck`, which — unlike the
+    # conflicts check — has to decide whether a PR is a *candidate for merging*,
+    # not merely whether it needs a rebase. All defaulted, so every existing
+    # construction site (the conflicts check's tests, the fakes) compiles
+    # unchanged.
+    title: str = ""
+    body: str = ""
+    labels: tuple[str, ...] = ()
+    draft: bool = False
 
 
 class GithubClient(ABC):
@@ -126,6 +145,28 @@ class GithubClient(ABC):
         """
 
     @abstractmethod
+    def merge_pull_request(
+        self,
+        repo: str,
+        number: int,
+        *,
+        method: str,
+        sha: str,
+        title: str = "",
+        body: str = "",
+    ) -> str:
+        """Merge PR `number`, but only while its head is exactly `sha`.
+
+        Returns the merge commit's sha. `sha` is not an optimization — it is
+        the guarantee that only reviewed code merges (see `ports/pr_merge.py`);
+        a driver must pass it through to the API rather than dropping it.
+
+        Raises `PullRequestNotMergeable` when the server refuses (the head
+        moved, a check is red, branch protection said no) — a state of the
+        world, not a fault. Every other error path propagates unchanged.
+        """
+
+    @abstractmethod
     def create_issue(
         self, repo: str, *, title: str, body: str, labels: tuple[str, ...]
     ) -> Issue:
@@ -161,9 +202,14 @@ class FakeGithubClient(GithubClient):
         # ("open", False); close_pull_request flips it for tests that simulate
         # GitHub resolving the PR.
         self._pr_state: dict[int, tuple[str, bool]] = {}
-        # `merge_pull_request` (the merge-reconciler's test helper) records
-        # merged PR numbers here; `get_pull_request` unions it with `_pr_state`.
+        # `mark_merged` (the merge-reconciler's test helper) records merged PR
+        # numbers here; `get_pull_request` unions it with `_pr_state`. The real
+        # `merge_pull_request` verb writes here too, so a PR merged through the
+        # port reads back as merged exactly as one merged out-of-band does.
         self.merged: set[int] = set()
+        # Every merge performed through `merge_pull_request`, in order — what
+        # the automerge tests assert on (method, pinned sha, commit message).
+        self.merges: list[dict[str, Any]] = []
         # Separate store from `pulls`: `PullRequestInfo` answers "is this PR
         # ours, does it need action" (mergeable_state), a different question
         # from `pulls`' "does a PR already exist for this branch".
@@ -253,10 +299,56 @@ class FakeGithubClient(GithubClient):
         if merged:
             self.merged.add(number)
 
-    def merge_pull_request(self, number: int) -> None:
-        """Test helper: mark a PR as merged (the merge-reconciler's simulation)."""
+    def mark_merged(self, number: int) -> None:
+        """Test helper: mark a PR as merged (the merge-reconciler's simulation).
+
+        Renamed from `merge_pull_request` when that name became a real verb of
+        the `GithubClient` ABC — this one fakes GitHub merging a PR *for*
+        reasons outside the harness (a human clicked the button), which is a
+        different thing from the harness merging it through the port.
+        """
         self.merged.add(number)
         self._pr_state[number] = ("closed", True)
+
+    def merge_pull_request(
+        self,
+        repo: str,
+        number: int,
+        *,
+        method: str,
+        sha: str,
+        title: str = "",
+        body: str = "",
+    ) -> str:
+        # Already merged → return the existing merge rather than refusing, the
+        # idempotency the port's contract requires of every driver.
+        if number in self.merged:
+            return f"merged{number}"
+
+        info = self._pull_requests.get(number)
+        if info is not None:
+            if sha and info.head_sha != sha:
+                raise PullRequestNotMergeable(
+                    f"{repo}#{number}: head moved from {sha} to {info.head_sha}"
+                )
+            if info.mergeable_state not in ("clean", "unstable", "has_hooks"):
+                raise PullRequestNotMergeable(
+                    f"{repo}#{number}: mergeable_state is {info.mergeable_state!r}"
+                )
+
+        self.merges.append(
+            {
+                "repo": repo,
+                "number": number,
+                "method": method,
+                "sha": sha,
+                "title": title,
+                "body": body,
+            }
+        )
+        self.merged.add(number)
+        self._pr_state[number] = ("closed", True)
+        return f"merged{number}"
 
     def add_pull_request(self, info: PullRequestInfo) -> None:
         """Test helper: register a PR the watcher will see via `list_pull_requests`."""
@@ -502,9 +594,56 @@ class HttpGithubClient(GithubClient):
                     head_sha=head_detail.get("sha", ""),
                     base_branch=base.get("ref", ""),
                     mergeable_state=detail.get("mergeable_state") or "unknown",
+                    title=detail.get("title") or item.get("title") or "",
+                    body=detail.get("body") or item.get("body") or "",
+                    labels=tuple(
+                        label["name"]
+                        for label in (detail.get("labels") or item.get("labels") or [])
+                        if isinstance(label, dict) and "name" in label
+                    ),
+                    draft=bool(detail.get("draft", item.get("draft", False))),
                 )
             )
         return infos
+
+    def merge_pull_request(
+        self,
+        repo: str,
+        number: int,
+        *,
+        method: str,
+        sha: str,
+        title: str = "",
+        body: str = "",
+    ) -> str:
+        url = f"{self._api}/repos/{repo}/pulls/{number}/merge"
+        payload: dict[str, Any] = {"merge_method": method}
+        # `sha` is the safety pin: GitHub 409s if the head has moved past it.
+        if sha:
+            payload["sha"] = sha
+        if title:
+            payload["commit_title"] = title
+        if body:
+            payload["commit_message"] = body
+        request = urllib.request.Request(
+            url,
+            data=json.dumps(payload).encode("utf-8"),
+            headers=self._json_headers(),
+            method="PUT",
+        )
+        try:
+            with self._opener.open(request) as response:
+                item = json.loads(response.read())
+        except urllib.error.HTTPError as error:
+            # 405 "not mergeable", 409 "head sha mismatch"/"not up to date",
+            # 422 "invalid merge method for this repo" — all states of the
+            # world, none a fault to fail the task over.
+            if error.code in (405, 409, 422):
+                raise PullRequestNotMergeable(
+                    f"{repo}#{number}: GitHub refused the merge ({error.code})"
+                ) from None
+            raise
+        return item.get("sha", "")
 
     def update_branch(self, repo: str, number: int) -> None:
         url = f"{self._api}/repos/{repo}/pulls/{number}/update-branch"
