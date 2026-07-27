@@ -612,6 +612,19 @@ Dependencies flow strictly downward, no cycles.
   A `except MergeError` placed before `except MergeRefused` silently turns
   every ordinary race into a failed task; the reverse — treating a 5xx as a
   refusal — silently hides real breakage behind "not mergeable right now".
+- **A multi-observation check left on the default `per-interval` dedup silently
+  drops all but one observation per tick.** `per-interval` is the default when
+  a `processes/*.json` omits `dedup`, and `ScheduledTrigger._dedup_key` ignores
+  the observation entirely for it — every observation in one tick collapses
+  onto the same `(kind, target, occurrence)` key, so `SourcePoller._seen` keeps
+  the first and discards the rest, with no error and nothing on the board. Any
+  action that emits one observation *per external thing* — `github-issues`
+  (per issue), `github-conflicts` (per conflicted PR), `github-mergeable` (per
+  candidate PR), `jira-issues`, `fs-files`, `command` — therefore **requires**
+  `"dedup": "per-state"`, and it is not decorative: measured on three
+  mergeable PRs, `per-state` yields three tasks and `per-interval` yields one.
+  `per-interval` is correct only for a genuinely single-shot cadence (an
+  `always` heartbeat, a nightly sweep that fires one task).
 - **The automerge gate is only as strong as the repo's branch protection.**
   `GithubMergeableCheck` trusts `mergeable_state == "clean"` to mean "required
   checks green, required reviews present". On a repo with *no* protection

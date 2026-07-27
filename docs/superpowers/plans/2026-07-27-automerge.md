@@ -84,9 +84,19 @@ Status: **done** (single increment).
   "trigger": { "interval": "5m" },
   "action": { "check": "github-mergeable", "params": { "head_prefix": "harness/" } },
   "target": { "workflow": "automerge" },
+  "dedup": "per-state",
   "sink": { "kind": "none" }
 }
 ```
+
+`"dedup": "per-state"` is **required, not decorative** — it is not the default.
+`github-mergeable` emits one observation per candidate PR, and under the
+default `per-interval` every observation in a tick collapses onto the same
+dedup key, so `SourcePoller._seen` keeps the first and silently drops the rest:
+three mergeable PRs would yield one reviewed PR per tick, with no error
+anywhere. `per-state` keys each task on `slug:pr:head_sha`, which is also what
+makes a re-pushed PR a fresh review and an unchanged one not re-reviewed every
+five minutes.
 
 3. Watch the board. Each candidate PR gets a review and a recorded decision;
    nothing merges while `dry_run` is true.

@@ -219,3 +219,21 @@ async def test_a_vetoed_or_draft_pr_never_becomes_a_task(tmp_path):
     )
 
     assert merger.merged == []
+
+
+async def test_every_candidate_pr_gets_its_own_task(tmp_path):
+    """The `per-state` dedup in the Process file is load-bearing, not
+    decorative: `github-mergeable` emits one observation per candidate PR, and
+    under the default `per-interval` they would all collapse onto one dedup key
+    — `SourcePoller._seen` keeping the first and silently discarding the rest.
+
+    Measured: `per-state` merges all three, `per-interval` merges one. This
+    test fails if the Process the docs hand the operator ever loses its
+    `"dedup": "per-state"`."""
+    merger, _ = await _run(
+        tmp_path,
+        [_pr(1, "s1"), _pr(2, "s2"), _pr(3, "s3")],
+        {1: ("approve", 0.99), 2: ("approve", 0.99), 3: ("approve", 0.99)},
+    )
+
+    assert sorted(m["number"] for m in merger.merged) == [1, 2, 3]
