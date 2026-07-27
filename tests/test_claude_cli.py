@@ -11,6 +11,7 @@ from harness.drivers.claude_cli import (
     _drain,
     _iter_lines,
     _usage_from_result,
+    _verdict_reprompt,
     build_argv,
     fallback_verdict,
     parse_stream_line,
@@ -517,6 +518,18 @@ def test_build_argv_without_resume_keeps_persona():
     assert "--append-system-prompt" in argv
 
 
+def test_verdict_reprompt_tells_the_agent_not_to_wait_on_background_work():
+    text = _verdict_reprompt((DONE, REQUEST_CHANGES))
+
+    assert "will not check on it or resume this session again" in text
+    # unchanged: still ends with the same fenced template
+    assert text.endswith(
+        '```json\n'
+        '{"outcome": "<one of: done, request_changes>", "summary": "<short summary>"}\n'
+        '```'
+    )
+
+
 # --- _iter_lines / _drain (the subprocess shell, with a fake process) --------
 
 
@@ -820,3 +833,74 @@ async def test_run_reprompt_path_carries_its_own_usage_but_original_model(
     # The resolved model can only come from the original call's system/init —
     # a resumed session doesn't re-emit it.
     assert run.model == "claude-opus"
+
+
+async def test_run_rescues_single_outcome_deferral_narration(monkeypatch):
+    stdout = _stream_json(
+        {"type": "system", "subtype": "init", "model": "claude-sonnet-5"},
+        {
+            "type": "result",
+            "subtype": "success",
+            "is_error": False,
+            "result": (
+                "Waiting for the two background verification commands "
+                "(dotnet format --verify-no-changes and the targeted test "
+                "run) to finish — will resume once notified."
+            ),
+            "session_id": "sess-1",
+        },
+    )
+    proc = _FakeRunProc(stdout)
+
+    async def fake_exec(*args, **kwargs):
+        return proc
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+
+    runner = ClaudeCliRunner()
+    spec = AgentSpec(name="development", prompt="you develop")  # allowed=(DONE,)
+    run = await runner.run(prompt="do it", spec=spec, cwd=Path("."), timeout=5.0)
+
+    assert run.outcome == DONE
+    assert "will resume once notified" in run.summary
+
+
+async def test_run_raises_when_multi_outcome_deferral_persists_through_reprompt(
+    monkeypatch,
+):
+    first_stdout = _stream_json(
+        {"type": "system", "subtype": "init", "model": "claude-opus"},
+        {
+            "type": "result",
+            "subtype": "success",
+            "is_error": False,
+            "result": "Waiting for the background test run to finish.",
+            "session_id": "sess-1",
+        },
+    )
+    first_proc = _FakeRunProc(first_stdout)
+    reprompt_stdout = json.dumps(
+        {
+            "result": "Still waiting on that background command.",
+            "is_error": False,
+        }
+    ).encode()
+    calls: list[tuple] = []
+
+    async def fake_exec(*args, **kwargs):
+        calls.append(args)
+        if len(calls) == 1:
+            return first_proc
+        return _FakeCommunicateProc(reprompt_stdout)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+
+    runner = ClaudeCliRunner()
+    spec = AgentSpec(
+        name="review", prompt="you review", allowed_outcomes=(DONE, REQUEST_CHANGES)
+    )
+
+    with pytest.raises(VerdictError):
+        await runner.run(prompt="do it", spec=spec, cwd=Path("."), timeout=5.0)
+
+    assert len(calls) == 2  # original call + the one resume re-prompt, no more
