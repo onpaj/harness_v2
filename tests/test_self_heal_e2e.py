@@ -7,14 +7,16 @@ ordinary dispatcher/consumer path — now three steps: `heal`
 (`ClaudeCliBehavior` + the `healer` persona) triages the failure and returns
 `file` (a harness bug worth filing) or `skip` (nothing to file); `file` routes
 into `dedup` (`ClaudeCliBehavior` + the `dedup` persona), which reads the
-harness repo's open issues and returns `unique` (routes to `file-issue`) or
+task's repository's open issues and returns `unique` (routes to `file-issue`) or
 `duplicate` (routes straight to `end`, silently); `file-issue` (the
 `open-issue` finisher) opens the issue. No disk except the queues
 (`FilesystemTaskQueue` under `tmp_path`), no real waiting — `FakeClock` gates
 the process's interval bucket.
 
-`HEAL_DEFINITION` here mirrors `src/harness/cli.py`'s shipped definition
-exactly, and the two `FakeAgentRunner`-scripted outcomes per test
+`HEAL_DEFINITION` is imported straight from `src/harness/cli.py` — the exact
+definition `harness init` seeds — so this file can't drift from it the way a
+hand-copied literal did once (commit `97bc9ef`). The two `FakeAgentRunner`-scripted
+outcomes per test
 (`heal` -> `file`/`skip`, `dedup` -> `unique`/`duplicate`) are only accepted
 by the dispatcher because the workflow itself declares those edges
 (`Workflow.outcomes_for`, invariant #42) — so driving these three routing
@@ -23,9 +25,13 @@ that invariant, not just of the heal/dedup wiring.
 """
 
 import json
+from pathlib import Path
+
+import pytest
 
 from harness.app import HarnessLayout, build
 from harness.behaviors.open_issue import OpenIssueBehavior
+from harness.cli import HEAL_DEFINITION
 from harness.drivers.memory import (
     FakeAgentRunner,
     FakeClock,
@@ -35,29 +41,9 @@ from harness.drivers.memory import (
     MemoryIssueTracker,
     MemoryWorkspace,
 )
+from harness.issue_drafts import marker_for
 from harness.models import HEALED, Task
 from harness.ports.agent import AgentRun, AgentSpec
-
-HEAL_DEFINITION = {
-    "name": "heal",
-    "start": "heal",
-    "transitions": [
-        {"from": "heal", "on": "file", "to": "dedup",
-         "hint": "a harness bug, or an operational/tuning problem worth filing"},
-        {"from": "heal", "on": "skip", "to": "end",
-         "hint": "external/transient, or the task's own request was impossible — nothing to file"},
-        {"from": "dedup", "on": "unique", "to": "file-issue",
-         "hint": "nothing similar is open in the harness repo"},
-        {"from": "dedup", "on": "duplicate", "to": "end",
-         "hint": "a correlated issue is already open — settle silently"},
-        {"from": "file-issue", "on": "done", "to": "end"},
-    ],
-    "descriptions": {
-        "heal": "diagnose the failed task from its report; decide whether it warrants a GitHub issue",
-        "dedup": "read the harness repo's open issues; decide whether the drafted issue is new",
-    },
-    "finishers": {"file-issue": "open-issue"},
-}
 
 HEAL_SPEC = AgentSpec(
     name="heal",
@@ -109,15 +95,16 @@ async def drive_until_quiet(harness) -> int:
     raise AssertionError("loop did not settle")
 
 
-def build_harness(tmp_path, *, runner, clock, tracker=None):
-    artifacts = MemoryArtifactStore()
+def build_harness(tmp_path, *, runner, clock, tracker=None, artifacts=None):
+    artifacts = artifacts if artifacts is not None else MemoryArtifactStore()
     tracker = tracker if tracker is not None else MemoryIssueTracker()
     finishers = {
         "open-issue": lambda step, config, inner: OpenIssueBehavior(
             tracker=tracker,
-            repo="onpaj/harness_v2",
             artifacts=artifacts,
-            clock=clock,
+            slug_for=lambda _repository: "onpaj/harness_v2",
+            label="harness:self-heal",
+            from_step="heal",
         )
     }
     harness = build(
@@ -150,22 +137,68 @@ def put_failed_task(tmp_path, task_id="tsk_e2e", *, data=None) -> None:
     (failed_dir / f"{task_id}.json").write_text(json.dumps(task.to_dict()))
 
 
+class _HealDraftRunner(FakeAgentRunner):
+    """`FakeAgentRunner`, plus: when it runs the `heal` step, it also writes
+    the fenced-JSON draft directly into the shared `MemoryArtifactStore`,
+    under the *running* heal task's id.
+
+    That id isn't known ahead of time — the heal task is fired fresh by
+    `FailedTasksCheck`, not by this test — but it doesn't need to be
+    predicted: `MemoryWorkspaceHandle.path` is `/memory/worktrees/<id>`, so
+    the id the harness actually used is simply the last path segment of the
+    `cwd` the runner is handed for this call. Writing straight into the
+    store (rather than onto `cwd`, the way `FakeAgentRunner(writes=...)`
+    would) is deliberate too: with `MemoryWorkspace`, `cwd` is a synthetic
+    path, and nothing ever copies files written there into an `ArtifactView`
+    the way a real worktree's commit would — the store IS the artifact view
+    here (`build_harness` passes one `MemoryArtifactStore` as both), so a
+    write meant for `OpenIssueBehavior` to read has to land there directly.
+    """
+
+    def __init__(self, *, artifacts: MemoryArtifactStore, draft: str, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self._artifacts = artifacts
+        self._draft = draft
+
+    async def run(self, *, prompt, spec, cwd, timeout, on_output=None):
+        if spec.name == "heal":
+            task_id = Path(cwd).name
+            self._artifacts.begin(task_id, "heal").put("heal-01.md", self._draft)
+        return await super().run(
+            prompt=prompt, spec=spec, cwd=cwd, timeout=timeout, on_output=on_output
+        )
+
+
 async def test_heal_file_dedup_unique_opens_exactly_one_issue(tmp_path):
     """Path 1: `heal` -> `file` -> `dedup` -> `unique` -> `file-issue`. The
     dispatcher only accepts `file`/`unique` because `HEAL_DEFINITION` declares
-    those exact edges (invariant #42) — this is the full triage+dedup path."""
+    those exact edges (invariant #42) — this is the full triage+dedup path,
+    including the issue actually getting filed.
+
+    `OpenIssueBehavior` reads a fenced ```json``` draft block from the `heal`
+    step's *artifact* (`harness.issue_drafts`), so this drives the real
+    `_HEALER_PERSONA` shape end to end: `_HealDraftRunner` above stands in for
+    the agent and writes that block where `OpenIssueBehavior` will look for
+    it, using the fresh heal task's id recovered from the worktree `cwd` it
+    is handed (see that class's docstring for why that recovery works and
+    why the write targets the store directly)."""
     seed(tmp_path)
     put_failed_task(
         tmp_path, data={"request": "Do the thing", "source": {"url": "https://gh/i/9"}}
     )
-    runner = FakeAgentRunner(
+    artifacts = MemoryArtifactStore()
+    runner = _HealDraftRunner(
+        artifacts=artifacts,
+        draft='```json\n[{"title": "Fix it", "body": "diagnosis\\n\\nOrigin: https://gh/i/9"}]\n```',
         runs={
             "heal": AgentRun("file", "Add the missing edge"),
             "dedup": AgentRun("unique", "nothing similar is open"),
-        }
+        },
     )
     clock = FakeClock()
-    harness, tracker = build_harness(tmp_path, runner=runner, clock=clock)
+    harness, tracker = build_harness(
+        tmp_path, runner=runner, clock=clock, artifacts=artifacts
+    )
 
     await drive_until_quiet(harness)
 
@@ -187,18 +220,24 @@ async def test_heal_file_dedup_unique_opens_exactly_one_issue(tmp_path):
     assert "tsk_e2e" in heal_call["prompt"]
     assert "## Failure report" in heal_call["prompt"]
 
-    # exactly one issue filed, keyed by the *original* failed task's id,
-    # carrying the Origin footer sourced from the original task's
-    # data.source (FR-3).
-    assert len(tracker.opened) == 1
-    opened = tracker.opened[0]
-    assert opened["marker"] == "tsk_e2e"
-    assert "Origin: https://gh/i/9" in opened["body"]
-
     # the fresh heal-workflow task itself reached a clean end.
     done_files = list((tmp_path / "done").glob("*.json"))
     assert len(done_files) == 1
-    assert Task.from_dict(json.loads(done_files[0].read_text())).status == "end"
+    heal_task = Task.from_dict(json.loads(done_files[0].read_text()))
+    assert heal_task.status == "end"
+
+    # exactly one issue filed, marker derived from the *running* heal task's
+    # id — `OpenIssueBehavior.run` calls `marker_for(task.id, draft.title)`
+    # against the task it is handed, which is the fresh heal task fired by
+    # `FailedTasksCheck`, not the original failed task ("tsk_e2e") that
+    # spawned it (invariant #26's idempotency scoping — `marker_for` also
+    # folds in the draft's own title, which this fixture cannot predict, see
+    # the docstring above), carrying the Origin footer sourced from the
+    # original task's data.source (FR-3).
+    assert len(tracker.opened) == 1
+    opened = tracker.opened[0]
+    assert opened["marker"] == marker_for(heal_task.id, opened["title"])
+    assert "Origin: https://gh/i/9" in opened["body"]
 
 
 async def test_heal_file_dedup_duplicate_settles_silently(tmp_path):

@@ -46,7 +46,7 @@ def test_returns_true_once_merged():
     created = client.create_pull_request(
         "o/r", head="o:harness/tsk_1", base="main", title="T", body="B"
     )
-    client.merge_pull_request(created.number)
+    client.mark_merged(created.number)
     checker = GithubMergeChecker(client)
     task = make_task({"repo": "o/r", "number": created.number})
 

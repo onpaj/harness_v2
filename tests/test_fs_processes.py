@@ -875,3 +875,91 @@ def test_observation_repository_wins_over_the_process_default(tmp_path: Path) ->
     (task,) = trigger.poll()
 
     assert task.repository == "obs-repo"
+
+
+# --- action.params.repository (failed-tasks) --------------------------------
+#
+# A `failed-tasks` process's `action.params.repository` is now the primary
+# surface an operator points self-healing at a repo through (it replaced the
+# old `--heal-repo` startup flag). It is validated against the repository
+# registry the same way the top-level `repository` key is. A real
+# `failed-tasks` check needs the live harness queues `app.build()` assembles
+# (it isn't in `BUILTIN_CHECKS`), so — same trick as the github-issues
+# collision tests above — a trivial stand-in factory is registered under the
+# "failed-tasks" name; these tests only exercise the compile-time validation.
+
+_FAILED_TASKS_CHECKS = {**BUILTIN_CHECKS, "failed-tasks": lambda params: AlwaysCheck()}
+
+
+def _build_with_failed_tasks(root: Path, **kwargs) -> list[ScheduledTrigger]:
+    return FilesystemProcessRepository(root).build(
+        clock=SystemClock(), checks=_FAILED_TASKS_CHECKS, **kwargs
+    )
+
+
+def test_failed_tasks_unknown_params_repository_fails_the_build(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "autoheal",
+        {
+            "trigger": {"interval": "30s"},
+            "action": {"check": "failed-tasks", "params": {"repository": "ghost"}},
+            "target": {"workflow": "heal"},
+        },
+    )
+
+    with pytest.raises(ProcessValidationError) as excinfo:
+        _build_with_failed_tasks(tmp_path, known_repositories={"harness_v2"})
+    assert "autoheal" in str(excinfo.value)
+    assert "ghost" in str(excinfo.value)
+    assert excinfo.value.field == "params"
+
+
+def test_failed_tasks_registered_params_repository_compiles(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "autoheal",
+        {
+            "trigger": {"interval": "30s"},
+            "action": {"check": "failed-tasks", "params": {"repository": "harness_v2"}},
+            "target": {"workflow": "heal"},
+        },
+    )
+
+    triggers = _build_with_failed_tasks(tmp_path, known_repositories={"harness_v2"})
+
+    assert len(triggers) == 1
+
+
+def test_failed_tasks_no_params_repository_compiles(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "autoheal",
+        {
+            "trigger": {"interval": "30s"},
+            "action": {"check": "failed-tasks", "params": {}},
+            "target": {"workflow": "heal"},
+        },
+    )
+
+    triggers = _build_with_failed_tasks(tmp_path, known_repositories={"harness_v2"})
+
+    assert len(triggers) == 1
+
+
+def test_failed_tasks_params_repository_accepted_when_known_repositories_is_none(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path,
+        "autoheal",
+        {
+            "trigger": {"interval": "30s"},
+            "action": {"check": "failed-tasks", "params": {"repository": "whatever"}},
+            "target": {"workflow": "heal"},
+        },
+    )
+
+    triggers = _build_with_failed_tasks(tmp_path)
+
+    assert len(triggers) == 1

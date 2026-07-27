@@ -421,7 +421,7 @@ def test_served_repository_message_lists_the_served_set(tmp_path):
 
 
 def test_served_repository_dedupes_names(tmp_path):
-    """A duplicated served name (e.g. --workflow default --workflow default)
+    """A duplicated served name (e.g. a caller passing ["default", "default"])
     must not show up twice in the error message."""
     inner = FilesystemWorkflowRepository(tmp_path)
     served = ServedWorkflowRepository(inner, ["default", "default"])
