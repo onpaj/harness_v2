@@ -1,6 +1,15 @@
 # CHANGELOG
 
 
+## v1.3.0 (2026-07-27)
+
+### Features
+
+- **board**: Group columns by kind and explain what each one means
+  ([#133](https://github.com/onpaj/harness_v2/pull/133),
+  [`33097ad`](https://github.com/onpaj/harness_v2/commit/33097ad87e21d0901ad2d6870b909d7882b92896))
+
+
 ## v1.2.0 (2026-07-27)
 
 ### Features
