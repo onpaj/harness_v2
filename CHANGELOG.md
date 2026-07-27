@@ -1,6 +1,15 @@
 # CHANGELOG
 
 
+## v1.1.0 (2026-07-27)
+
+### Features
+
+- Automatic PR merging as a Process, gated by an operator-set threshold
+  ([#130](https://github.com/onpaj/harness_v2/pull/130),
+  [`24dd015`](https://github.com/onpaj/harness_v2/commit/24dd0157b16b5fb1a3b47d1bab072fdd3b2f1e8b))
+
+
 ## v1.0.0 (2026-07-26)
 
 ### Bug Fixes
