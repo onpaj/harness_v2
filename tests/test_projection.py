@@ -3,9 +3,13 @@ import asyncio
 from harness.drivers.memory import MemoryTaskQueue
 from harness.models import END, HistoryEntry, Task, Transition, Workflow
 from harness.ports.board import (
+    COLUMN_INBOX,
+    COLUMN_STEP,
+    COLUMN_TERMINAL,
     DONE_COLUMN,
     FAILED_COLUMN,
     HEALED_COLUMN,
+    LIFECYCLE_DESCRIPTIONS,
     TODO_COLUMN,
     UNKNOWN_WORKFLOW,
 )
@@ -547,6 +551,68 @@ def test_hydrate_puts_unrecognized_template_inbox_task_in_unknown_todo():
 
     board = projection.snapshot()
     assert board.workflow(UNKNOWN_WORKFLOW).column(TODO_COLUMN).tasks[0].id == "tsk_1"
+
+
+def test_columns_carry_their_kind():
+    projection = BoardProjection((), [WORKFLOW])
+
+    tab = projection.snapshot().workflow("default")
+
+    assert tab.column(TODO_COLUMN).kind == COLUMN_INBOX
+    assert tab.column("plan").kind == COLUMN_STEP
+    assert tab.column("review").kind == COLUMN_STEP
+    for name in (DONE_COLUMN, FAILED_COLUMN, HEALED_COLUMN):
+        assert tab.column(name).kind == COLUMN_TERMINAL
+
+
+def test_step_columns_carry_the_workflows_own_description():
+    described = Workflow(
+        name="default",
+        start="plan",
+        transitions=WORKFLOW.transitions,
+        descriptions={"plan": "break the request down"},
+    )
+    projection = BoardProjection((), [described])
+
+    tab = projection.snapshot().workflow("default")
+
+    assert tab.column("plan").description == "break the request down"
+    # A step the workflow says nothing about carries no description — never a
+    # placeholder, so the head stays clean.
+    assert tab.column("design").description is None
+
+
+def test_lifecycle_columns_carry_a_fixed_description_on_every_tab():
+    projection = BoardProjection((), [WORKFLOW, HOTFIX])
+
+    board = projection.snapshot()
+
+    for name in ("default", "hotfix"):
+        tab = board.workflow(name)
+        for column_name, text in LIFECYCLE_DESCRIPTIONS.items():
+            assert tab.column(column_name).description == text
+
+
+def test_unknown_tab_renders_only_its_occupied_columns():
+    """Its column set is the union of every step in the harness, so an empty
+    column there says nothing about anything — unlike a workflow tab's, where an
+    idle step is still part of the graph. The snapshot keeps them all (callers
+    read the full step set out of it); only the rendering drops them."""
+    projection = BoardProjection(("plan", "design"), [WORKFLOW])
+
+    projection.apply("plan", make_task("tsk_1", "plan", workflow_template="ghost"))
+
+    tab = projection.snapshot().workflow(UNKNOWN_WORKFLOW)
+    assert [column.name for column in tab.visible_columns()] == ["plan"]
+    assert "design" in [column.name for column in tab.columns]
+
+
+def test_workflow_tab_renders_every_column_including_the_empty_ones():
+    projection = BoardProjection((), [WORKFLOW])
+
+    tab = projection.snapshot().workflow("default")
+
+    assert tab.visible_columns() == tab.columns
 
 
 def test_snapshot_tabs_are_sorted_alphabetically():
