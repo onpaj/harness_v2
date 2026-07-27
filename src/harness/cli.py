@@ -538,8 +538,8 @@ _HEALER_PERSONA = (
     "to the file the harness told you to write your output to above, and end "
     "that file with a fenced ```json block holding a one-element array:\n"
     '```json\n'
-    '[{"title": "<concise title>", "body": "<diagnosis, then a concrete '
-    'proposed change>"}]\n'
+    '[{"title": "<concise title>", "labels": ["harness:todo"], '
+    '"body": "<the work order — see below>"}]\n'
     "```\n"
     "The harness reads that block by machine and opens the issue itself — you "
     "must never open one. That drafts array belongs only in the artifact "
@@ -550,6 +550,20 @@ _HEALER_PERSONA = (
     "the two levers available — raising the step's per-agent `timeout`, or "
     "decomposing the step into smaller ones — without prescribing a specific "
     "number. Then finish with the outcome that files it.\n\n"
+    "The issue you draft is consumed by an automated development pipeline, "
+    "not read by a person before work starts — its first step turns your body "
+    "into numbered requirements with acceptance criteria. So write the body "
+    "as a work order, with these sections:\n"
+    "- **Symptom** — what failed, quoting the exact error.\n"
+    "- **Reproduction** — the sequence that produces it, or plainly why it "
+    "cannot be reproduced on demand.\n"
+    "- **Proposed change** — the concrete change, naming files and functions "
+    "wherever you can.\n"
+    "- **Acceptance criteria** — what must be true for the fix to be done, "
+    "stated testably.\n\n"
+    "State in the body which kind of finding this is. A code defect is scoped "
+    "as a code change; an operational/tuning finding must be scoped as a "
+    "configuration change and never as a refactor.\n\n"
     "For an external or transient failure, write nothing and finish with the "
     "outcome that skips — its summary saying briefly why there is nothing to "
     "file.\n\n"
