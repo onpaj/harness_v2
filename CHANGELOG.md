@@ -1,6 +1,15 @@
 # CHANGELOG
 
 
+## v1.2.0 (2026-07-27)
+
+### Features
+
+- Ship a working automerge Process on every repo, fix dedup, keep a missing credential non-fatal
+  ([#131](https://github.com/onpaj/harness_v2/pull/131),
+  [`854a54a`](https://github.com/onpaj/harness_v2/commit/854a54a34330a3c049fdb375670176d8375312c6))
+
+
 ## v1.1.0 (2026-07-27)
 
 ### Features
