@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from harness.app import HarnessLayout
+from harness.behaviors.merge_pr import MergePrBehavior
 from harness.cli import (
     AGENT_PERSONAS,
     AUTOHEAL_PROCESS_DEFINITION,
@@ -260,7 +261,7 @@ def test_a_binding_without_a_label_is_dropped_from_the_served_set(monkeypatch, t
     # `open-issue` must already be a known finisher kind here.
     assert "label" in err
     assert "review" not in captured["served_names"]
-    assert set(captured["served_names"]) == {DEFAULT_WORKFLOW, DEFAULT_HEAL_WORKFLOW, "resolver"}
+    assert set(captured["served_names"]) == {DEFAULT_WORKFLOW, DEFAULT_HEAL_WORKFLOW, "resolver", "automerge"}
 
 
 def _make_stale_heal_root(tmp_path) -> Path:
@@ -333,7 +334,7 @@ def test_the_stale_pre_generic_heal_workflow_is_dropped_not_fatal(
     assert "label" in err
     harness = captured["harness"]
     assert DEFAULT_HEAL_WORKFLOW not in harness.workflows
-    assert set(harness.workflows) == {DEFAULT_WORKFLOW, "resolver"}
+    assert set(harness.workflows) == {DEFAULT_WORKFLOW, "resolver", "automerge"}
     # The seeded autoheal Process targets the now-dropped `heal` workflow, so
     # it must be skipped rather than crashing `build()` with "not a known
     # workflow or step" — the same warning above names it.
@@ -402,7 +403,7 @@ def test_unknown_finisher_kind_still_fails_the_whole_run(monkeypatch, tmp_path, 
     assert "call-a-webhook" in err
     # The one hint that tells an operator a kind is token-gated rather than
     # misspelled — `build()`'s own diagnostic, restored here too.
-    assert "known: open-issue, open-pr, verify" in err
+    assert "known: merge-pr, open-issue, open-pr, verify" in err
 
 
 @pytest.mark.parametrize(
@@ -487,7 +488,7 @@ def test_label_issue_binding_without_a_token_still_fails_the_whole_run(
     err = capsys.readouterr().err
     assert err.startswith("error:")
     assert "label-issue" in err
-    assert "known: open-issue, open-pr, verify" in err
+    assert "known: merge-pr, open-issue, open-pr, verify" in err
 
 
 def test_run_reports_an_unregistered_process_repository_cleanly(monkeypatch, tmp_path, capsys):
@@ -573,11 +574,11 @@ def test_run_registers_label_issue_finisher_only_with_a_token(monkeypatch, tmp_p
     monkeypatch.delenv("HARNESS_HEAL_REPO", raising=False)
 
     assert main(["run", "--root", str(tmp_path)]) == 0
-    assert set(captured["finishers"]) == {"open-issue"}
+    assert set(captured["finishers"]) == {"open-issue", "merge-pr"}
 
     monkeypatch.setenv("GITHUB_TOKEN", "tok")
     assert main(["run", "--root", str(tmp_path)]) == 0
-    assert set(captured["finishers"]) == {"open-issue", "label-issue"}
+    assert set(captured["finishers"]) == {"open-issue", "merge-pr", "label-issue"}
 
 
 def test_run_passes_issue_import_factory_to_build_only_with_a_token(monkeypatch, tmp_path):
@@ -708,7 +709,7 @@ def test_run_wires_open_issue_and_still_serves_heal(monkeypatch, tmp_path):
     monkeypatch.delenv("GITHUB_TOKEN", raising=False)
 
     assert main(["run", "--root", str(tmp_path)]) == 0
-    assert set(captured["finishers"]) == {"open-issue"}
+    assert set(captured["finishers"]) == {"open-issue", "merge-pr"}
     assert DEFAULT_HEAL_WORKFLOW in captured["served_names"]
 
 
@@ -1191,7 +1192,7 @@ def test_run_serves_every_workflow_definition_on_disk(monkeypatch, tmp_path):
 
     assert main(["run", "--root", str(tmp_path)]) == 0
     assert set(captured["harness"].workflows) == {
-        "development", "hotfix", "resolver", "heal"
+        "development", "hotfix", "resolver", "heal", "automerge"
     }
 
 
@@ -1292,7 +1293,7 @@ def test_run_without_a_default_workflow_ignores_github_workflow_default(
     assert err == ""
     # `development` isn't on disk, so it isn't served; `hotfix`, `resolver`
     # and `heal` are, because their files are.
-    assert set(captured["harness"].workflows) == {"hotfix", "resolver", "heal"}
+    assert set(captured["harness"].workflows) == {"hotfix", "resolver", "heal", "automerge"}
 
 
 def test_init_rejects_workflow_name_with_path_separator(tmp_path, capsys):
@@ -1735,7 +1736,7 @@ def test_process_check_factories_stays_dependency_free_for_builtin_checks(tmp_pa
     registry = MemoryRepositoryRegistry({})
     checks = _process_check_factories(_process_args(), registry, client=None)
 
-    assert set(checks) == {"github-issues", "github-conflicts", "jira-issues"}
+    assert set(checks) == {"github-issues", "github-conflicts", "github-mergeable", "jira-issues"}
 
 
 def test_process_check_factories_builds_a_jira_issues_process(tmp_path):
@@ -2062,7 +2063,7 @@ def test_run_serves_every_scaffolded_workflow_for_an_ordinary_init(tmp_path, mon
     with pytest.raises(SystemExit):
         main(["run", "--root", str(tmp_path), "--api-port", "0"])
 
-    assert list(seen["served"]) == ["development", "heal", "resolver"]
+    assert list(seen["served"]) == ["automerge", "development", "heal", "resolver"]
 
 
 def test_run_over_a_fresh_init_builds_successfully_with_a_real_build(monkeypatch, tmp_path):
@@ -2102,7 +2103,7 @@ def test_run_over_a_fresh_init_builds_successfully_with_a_real_build(monkeypatch
 
     # `HEAL_DEFINITION` compiled: `heal` (and every other scaffolded workflow)
     # is being served.
-    assert set(captured["harness"].workflows) == {"development", "heal", "resolver"}
+    assert set(captured["harness"].workflows) == {"development", "heal", "resolver", "automerge"}
     # `AUTOHEAL_PROCESS_DEFINITION` compiled: the seeded `processes/autoheal.json`
     # became one live poller alongside the scaffolded `triggers/` (empty by
     # default, so this is exactly the autoheal process).
@@ -3410,3 +3411,102 @@ def test_autoupdate_plist_runs_the_idle_gated_update():
     ]
     assert d["StartCalendarInterval"] == [{"Hour": 2, "Minute": 0}, {"Hour": 14, "Minute": 0}]
     assert "KeepAlive" not in d  # a periodic one-shot, not a daemon
+
+
+# --- automerge (ADR-0023) --------------------------------------------------
+
+
+def test_init_seeds_the_automerge_workflow_and_its_persona(tmp_path):
+    """Dormant data, exactly like `resolver`/`heal`: the workflow and the
+    reviewer persona ship on every root, and the `merge` step gets no persona
+    because it is finisher-driven."""
+    main(["init", "--root", str(tmp_path)])
+
+    definition = json.loads(
+        (tmp_path / "workflows" / "automerge.json").read_text()
+    )
+    assert definition["start"] == "merge-review"
+    assert definition["finishers"]["merge"]["kind"] == "merge-pr"
+    assert (tmp_path / "agents" / "merge-review.json").exists()
+    assert not (tmp_path / "agents" / "merge.json").exists()
+
+
+def test_init_does_not_seed_an_automerge_process(tmp_path):
+    """Unlike autoheal, automerging is a posture the operator opts into — the
+    Process stays theirs to create, so a bare init merges nothing anywhere."""
+    main(["init", "--root", str(tmp_path)])
+
+    assert not (tmp_path / "processes" / "automerge.json").exists()
+
+
+def test_the_seeded_automerge_binding_ships_in_dry_run(tmp_path):
+    """Configuring the Process is not the same as trusting it: even once an
+    operator wires the Process, nothing merges until they flip this."""
+    main(["init", "--root", str(tmp_path)])
+
+    definition = json.loads((tmp_path / "workflows" / "automerge.json").read_text())
+    binding = definition["finishers"]["merge"]
+    assert binding["dry_run"] is True
+    assert binding["min_confidence"] == 0.8
+    assert binding["method"] == "squash"
+
+
+@pytest.mark.parametrize(
+    ("config", "message"),
+    [
+        ({"method": "cherry-pick"}, "unknown merge method"),
+        ({"min_confidence": "high"}, "non-numeric 'min_confidence'"),
+        ({"min_confidence": 1.5}, "outside 0.0"),
+        ({"dry_run": "yes"}, "non-boolean 'dry_run'"),
+    ],
+)
+def test_a_bad_merge_pr_binding_is_rejected_at_wiring_time(
+    monkeypatch, tmp_path, config, message
+):
+    """A misconfigured merge gate must fail at build, never silently at merge
+    time — the one place where a permissive default would be dangerous."""
+    main(["init", "--root", str(tmp_path)])
+    captured = {}
+
+    def fake_build(*args, **kwargs):
+        captured["finishers"] = kwargs.get("finishers")
+        return object()
+
+    async def fake_serve(harness, port, poll_interval, source_interval=30.0,
+                         pr_poll_interval=0.0, reconcile_interval=300.0, registry=None):
+        pass
+
+    monkeypatch.setattr("harness.cli.build", fake_build)
+    monkeypatch.setattr("harness.cli.serve", fake_serve)
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    assert main(["run", "--root", str(tmp_path)]) == 0
+
+    factory = captured["finishers"]["merge-pr"]
+    with pytest.raises(ValueError, match=message):
+        factory("merge", {"from_step": "merge-review", **config}, lambda: None)
+
+
+def test_the_merge_pr_finisher_works_without_a_github_token(monkeypatch, tmp_path):
+    """Registered unconditionally, like `open-issue`: without a token the
+    merger is the in-memory fake, so the seeded workflow stays servable — and
+    harmless — on a root with no GitHub access at all."""
+    main(["init", "--root", str(tmp_path)])
+    captured = {}
+
+    def fake_build(*args, **kwargs):
+        captured["finishers"] = kwargs.get("finishers")
+        return object()
+
+    async def fake_serve(harness, port, poll_interval, source_interval=30.0,
+                         pr_poll_interval=0.0, reconcile_interval=300.0, registry=None):
+        pass
+
+    monkeypatch.setattr("harness.cli.build", fake_build)
+    monkeypatch.setattr("harness.cli.serve", fake_serve)
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    assert main(["run", "--root", str(tmp_path)]) == 0
+
+    behavior = captured["finishers"]["merge-pr"](
+        "merge", {"from_step": "merge-review"}, lambda: None
+    )
+    assert isinstance(behavior, MergePrBehavior)

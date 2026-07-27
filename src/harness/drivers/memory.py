@@ -29,6 +29,7 @@ from harness.ports.forge import Forge, PullRequest, PullRequestState
 from harness.ports.issue_state import IssueChecker
 from harness.ports.issues import IssueRef, IssueTracker
 from harness.ports.merge import MergeChecker
+from harness.ports.pr_merge import MergeRef, MergeRefused, PullRequestMerger
 from harness.ports.queue import TaskQueue
 from harness.ports.repos import RepositoryNotFound, RepositoryRegistry
 from harness.ports.source import FinishResult, Progress, TaskSource, dedup_key
@@ -516,3 +517,57 @@ class MemoryCommandRunner(CommandRunner):
         if len(self._results) > 1:
             return self._results.pop(0)
         return self._results[0]
+
+
+class MemoryPullRequestMerger(PullRequestMerger):
+    """Records merges in a list. The `PullRequestMerger` twin of
+    `MemoryIssueTracker` — for unit/e2e/smoke, no network.
+
+    Honours the two contract properties a real driver must (`ports/pr_merge.py`):
+    a moved head raises `MergeRefused`, and merging an already-merged PR
+    returns the existing merge instead of raising.
+
+    `heads` lets a test declare the current head sha per `(repo, number)`; a PR
+    absent from it accepts any pin, so the common case stays a one-liner.
+    """
+
+    def __init__(self, heads: dict[tuple[str, int], str] | None = None) -> None:
+        self.merged: list[dict[str, Any]] = []
+        self.heads: dict[tuple[str, int], str] = dict(heads or {})
+
+    def merge(
+        self,
+        repo: str,
+        number: int,
+        *,
+        method: str,
+        expected_sha: str,
+        title: str = "",
+        body: str = "",
+    ) -> MergeRef:
+        for existing in self.merged:
+            if existing["repo"] == repo and existing["number"] == number:
+                return existing["ref"]
+
+        head = self.heads.get((repo, number))
+        if head is not None and expected_sha and head != expected_sha:
+            raise MergeRefused(
+                f"{repo}#{number}: head moved from {expected_sha} to {head}"
+            )
+
+        ref = MergeRef(
+            sha=f"merge{len(self.merged) + 1}",
+            url=f"https://forge.local/{repo}/pull/{number}",
+        )
+        self.merged.append(
+            {
+                "repo": repo,
+                "number": number,
+                "method": method,
+                "expected_sha": expected_sha,
+                "title": title,
+                "body": body,
+                "ref": ref,
+            }
+        )
+        return ref

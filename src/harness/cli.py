@@ -25,13 +25,19 @@ from harness.app import (
     build,
     validate_workflow_finishers,
 )
+from harness.behaviors.merge_pr import (
+    DEFAULT_METHOD,
+    DEFAULT_MIN_CONFIDENCE,
+    MergePrBehavior,
+)
 from harness.behaviors.open_issue import OpenIssueBehavior
 from harness.drivers.claude_cli import ClaudeCliRunner
 from harness.drivers.fake_forge import FakeForge
 from harness.drivers.fs_agents import FilesystemAgentAdmin, FilesystemAgentCatalog
 from harness.drivers.fs_processes import FilesystemProcessAdmin, ProcessValidationError
 from harness.drivers.github_issues import GithubIssueTracker
-from harness.drivers.memory import MemoryIssueTracker
+from harness.drivers.github_pr_merger import GithubPullRequestMerger
+from harness.drivers.memory import MemoryIssueTracker, MemoryPullRequestMerger
 from harness.drivers.fs_repos import FilesystemRepositoryRegistry
 from harness.drivers.fs_workflows import (
     FilesystemWorkflowAdmin,
@@ -76,6 +82,7 @@ from harness.ports.clock import Clock
 from harness.ports.issue_state import IssueChecker
 from harness.ports.issues import IssueError
 from harness.ports.merge import MergeChecker
+from harness.ports.pr_merge import MERGE_METHODS
 from harness.ports.repos import RepositoryNotFound, RepositoryRegistry
 from harness.ports.source import TaskSource
 from harness.ports.triggers import CheckFactory
@@ -167,6 +174,39 @@ HEAL_DEFINITION = {
 }
 
 
+DEFAULT_AUTOMERGE_WORKFLOW = "automerge"
+
+AUTOMERGE_DEFINITION = {
+    "name": "automerge",
+    "start": "merge-review",
+    "transitions": [
+        {"from": "merge-review", "on": "approve", "to": "merge",
+         "hint": "you would merge this yourself without asking anyone"},
+        {"from": "merge-review", "on": "reject", "to": "end",
+         "hint": "anything less than that — leave the PR for a human, nothing is merged"},
+        {"from": "merge", "on": "done", "to": "end"},
+    ],
+    "descriptions": {
+        "merge-review": (
+            "review the pull request checked out in your worktree and decide "
+            "whether it is safe to merge unattended"
+        ),
+    },
+    "finishers": {
+        "merge": {
+            "kind": "merge-pr",
+            "from_step": "merge-review",
+            "min_confidence": 0.8,
+            "method": "squash",
+            # Ships withheld: configuring the Process is not the same as
+            # trusting it. The operator flips this to false once the recorded
+            # decisions on real PRs justify it (ADR-0023).
+            "dry_run": True,
+        }
+    },
+}
+
+
 def _root(value: str | None) -> Path:
     if value:
         return Path(value).expanduser()
@@ -220,6 +260,20 @@ def _init(args: argparse.Namespace) -> int:
             json.dumps(HEAL_DEFINITION, indent=2, ensure_ascii=False),
             encoding="utf-8",
         )
+    # `automerge`/`merge-review` (ADR-0023): dormant data, shipped
+    # unconditionally exactly like the resolver and heal workflows. No
+    # `processes/automerge.json` is seeded — unlike autoheal, which drains a
+    # queue the harness fills itself, automerging is a posture an operator
+    # opts into deliberately, so the Process stays theirs to create (by hand
+    # or in the dashboard's process editor). Until they do, this workflow
+    # never runs; when they do, it still only records its decisions until
+    # `finishers.merge.dry_run` is flipped to false.
+    automerge_definition_path = layout.workflows / f"{DEFAULT_AUTOMERGE_WORKFLOW}.json"
+    if not automerge_definition_path.exists():
+        automerge_definition_path.write_text(
+            json.dumps(AUTOMERGE_DEFINITION, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
     _ensure_autoheal_process(layout)
 
     # Workflows are read straight off the filesystem here, not through
@@ -238,6 +292,7 @@ def _init(args: argparse.Namespace) -> int:
         workflow = raw_workflows.get(args.workflow)
         resolver_workflow = raw_workflows.get(DEFAULT_RESOLVER_WORKFLOW)
         heal_workflow = raw_workflows.get(DEFAULT_HEAL_WORKFLOW)
+        automerge_workflow = raw_workflows.get(DEFAULT_AUTOMERGE_WORKFLOW)
     except WorkflowNotFound as error:
         print(f"error: {error}", file=sys.stderr)
         return 2
@@ -260,6 +315,9 @@ def _init(args: argparse.Namespace) -> int:
     _write_default_agents(layout, workflow)
     _write_default_agents(layout, resolver_workflow)
     _write_default_agents(layout, heal_workflow)
+    # Writes `agents/merge-review.json` only — `merge` binds the `merge-pr`
+    # finisher, so `_write_default_agents` skips it (no persona, no agent).
+    _write_default_agents(layout, automerge_workflow)
 
     print(f"harness ready at {root}")
     print(f"steps: {', '.join(workflow.steps())}")
@@ -498,6 +556,48 @@ _DEDUP_PERSONA = (
 )
 
 
+_MERGE_REVIEW_PERSONA = (
+    "You are the last reviewer before a pull request merges into the default "
+    "branch with no human in the loop. Your worktree is checked out on the "
+    "PR's own branch.\n\n"
+    "Read the change before you judge it. `git diff origin/<base>...HEAD` is "
+    "the change; `git log origin/<base>..HEAD` is how it got there. Read the "
+    "PR body and the issue it closes, then read the surrounding source of "
+    "every file it touches — a diff that looks clean in isolation can still be "
+    "wrong in context.\n\n"
+    "Ask, in this order:\n"
+    "1. Does the change do what its PR and issue say it does — no more, no "
+    "less? Unrelated scope is a reason to withhold, even when the code is "
+    "good.\n"
+    "2. Is it correct? Look for the failure cases the tests do not cover, not "
+    "just the ones they do.\n"
+    "3. Does it touch anything with blast radius — auth, secrets, migrations, "
+    "deletion, payments, CI/release config, public API shape?\n"
+    "4. Is it consistent with the conventions of the code around it, and does "
+    "it respect the project's documented invariants?\n\n"
+    "Then decide. Approve only when you would merge it yourself without asking "
+    "anyone. Anything else — an unreviewable diff, a missing test you would "
+    "have asked for, a risk you cannot rule out by reading — is a rejection, "
+    "and a rejection costs nothing but a human's glance. A wrong merge costs "
+    "the default branch.\n\n"
+    "Confidence is your own estimate that merging this is the right call, from "
+    "0.0 to 1.0. It is not a measure of how well you understood the diff, and "
+    "it is not a formality: report it honestly, because the harness merges on "
+    "it. Large, cross-cutting or infrastructural changes should rarely clear "
+    "0.9 no matter how clean they read. If you did not read every changed "
+    "file, say so and stay below the bar.\n\n"
+    "Write your review to the artifact and end it with a fenced json block — "
+    "the last one in the file wins:\n"
+    "```json\n"
+    '{"confidence": 0.0, "reasoning": "one or two sentences", '
+    '"risks": ["..."]}\n'
+    "```\n"
+    "You never merge anything yourself and you have no tool that can. The "
+    "harness merges only if your confidence clears the operator's threshold; "
+    "your job is the judgement, not the button."
+)
+
+
 # Step → (persona, default tools). The tools are names of Claude Code tools,
 # which `claude_cli` passes through via `--allowedTools`.
 AGENT_PERSONAS: dict[str, tuple[str, list[str]]] = {
@@ -512,6 +612,7 @@ AGENT_PERSONAS: dict[str, tuple[str, list[str]]] = {
     "resolve": (_RESOLVE_PERSONA, ["Read", "Edit", "Bash", "Grep", "Glob"]),
     "heal": (_HEALER_PERSONA, ["Read", "Write"]),
     "dedup": (_DEDUP_PERSONA, ["Read", "Bash"]),
+    "merge-review": (_MERGE_REVIEW_PERSONA, ["Read", "Grep", "Glob", "Bash"]),
 }
 
 
@@ -535,6 +636,9 @@ AGENT_MODELS: dict[str, str] = {
     "resolve": "sonnet",
     "heal": "opus",
     "dedup": "opus",
+    # The most consequential judgement the harness makes unattended — the one
+    # step where paying for the top tier is obviously worth it.
+    "merge-review": "opus",
 }
 
 
@@ -899,6 +1003,9 @@ def _process_check_factories(
     from harness.drivers.github_conflicts_check import GithubConflictsCheck
     from harness.drivers.github_issues_check import SPEC as GITHUB_ISSUES_SPEC
     from harness.drivers.github_issues_check import GithubIssuesCheck
+    from harness.drivers.github_mergeable_check import DEFAULT_SKIP_LABEL
+    from harness.drivers.github_mergeable_check import SPEC as GITHUB_MERGEABLE_SPEC
+    from harness.drivers.github_mergeable_check import GithubMergeableCheck
     from harness.drivers.jira_issues_check import JiraIssuesCheck
     from harness.ports.triggers import CheckDefinition
 
@@ -944,6 +1051,18 @@ def _process_check_factories(
             client=client,
             registry=registry,
             head_prefix=params.get("head_prefix", "harness/"),
+        )
+
+    def github_mergeable_factory(params: dict) -> GithubMergeableCheck:
+        if client is None:
+            raise ProcessValidationError(
+                "github-mergeable action requires GITHUB_TOKEN", field="check"
+            )
+        return GithubMergeableCheck(
+            client=client,
+            registry=registry,
+            head_prefix=params.get("head_prefix", "harness/"),
+            skip_label=params.get("skip_label", DEFAULT_SKIP_LABEL),
         )
 
     def jira_issues_factory(params: dict) -> JiraIssuesCheck:
@@ -1004,6 +1123,9 @@ def _process_check_factories(
         ),
         "github-conflicts": CheckDefinition(
             spec=GITHUB_CONFLICTS_SPEC, factory=github_conflicts_factory
+        ),
+        "github-mergeable": CheckDefinition(
+            spec=GITHUB_MERGEABLE_SPEC, factory=github_mergeable_factory
         ),
         "jira-issues": jira_issues_factory,
     }
@@ -1991,9 +2113,62 @@ def _run(args: argparse.Namespace) -> int:
             inner=None if from_step else inner(),
         )
 
+    # The `merge-pr` finisher kind (ADR-0023), registered unconditionally for
+    # the same reason `open-issue` is: it takes every deployment-specific
+    # value from the task (`data.source`) and the binding (threshold, method,
+    # dry_run), so it needs no wiring-time configuration. Without a token the
+    # merger is the in-memory fake, so the seeded `automerge` workflow is
+    # servable — and harmless — on a root with no GitHub access at all,
+    # exactly like the seeded `heal` workflow.
+    pr_merger = (
+        GithubPullRequestMerger(HttpGithubClient(issue_token))
+        if issue_token
+        else MemoryPullRequestMerger()
+    )
+
+    def _merge_pr(step, config, inner):
+        method = config.get("method", DEFAULT_METHOD)
+        if method not in MERGE_METHODS:
+            raise ValueError(
+                f"step {step!r} binds the 'merge-pr' finisher with an unknown "
+                f"merge method {method!r} (known: {', '.join(MERGE_METHODS)})"
+            )
+        min_confidence = config.get("min_confidence", DEFAULT_MIN_CONFIDENCE)
+        if isinstance(min_confidence, bool) or not isinstance(
+            min_confidence, (int, float)
+        ):
+            raise ValueError(
+                f"step {step!r} binds the 'merge-pr' finisher with a "
+                f"non-numeric 'min_confidence': {min_confidence!r}"
+            )
+        if not 0.0 <= float(min_confidence) <= 1.0:
+            raise ValueError(
+                f"step {step!r} binds the 'merge-pr' finisher with a "
+                f"'min_confidence' outside 0.0–1.0: {min_confidence!r}"
+            )
+        dry_run = config.get("dry_run", True)
+        if not isinstance(dry_run, bool):
+            raise ValueError(
+                f"step {step!r} binds the 'merge-pr' finisher with a non-boolean "
+                f"'dry_run': {dry_run!r} — omit it to keep the safe default"
+            )
+        from_step = config.get("from_step")
+        return MergePrBehavior(
+            merger=pr_merger,
+            artifacts=artifact_view,
+            from_step=from_step,
+            min_confidence=float(min_confidence),
+            method=method,
+            dry_run=dry_run,
+            # Replace shape when a step is named (the seeded `automerge`
+            # workflow's agent-less `merge` step, reading `merge-review`'s
+            # artifact); wrap shape otherwise — the same split as `open-issue`.
+            inner=None if from_step else inner(),
+        )
+
     finishers: dict[
         str, Callable[[str, dict, Callable[[], ConsumerBehavior]], ConsumerBehavior]
-    ] = {"open-issue": _open_issue}
+    ] = {"open-issue": _open_issue, "merge-pr": _merge_pr}
 
     # A single GitHub client threads into both the process check factories
     # (`github-issues`/`github-conflicts`) and the `label-issue` finisher —
