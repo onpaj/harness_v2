@@ -482,12 +482,33 @@ def test_column_description_is_rendered_under_the_head():
     assert '<p class="column__desc">waiting for the dispatcher</p>' in body
 
 
-def test_consecutive_step_columns_are_joined_by_a_flow_arrow():
+def test_step_columns_are_numbered_in_workflow_order():
     body = _board_client(_kinded_board()).get("/fragment/board").text
 
-    # Two step columns in the default tab -> exactly one arrow between them
-    # (none before the first, and none in the unordered unknown tab).
-    assert body.count('class="board-flow"') == 1
+    # The columns wrap onto several rows, so each step head carries its own
+    # position instead of relying on being next to its neighbour.
+    assert '<span class="column__index">1</span>' in body
+    assert '<span class="column__index">2</span>' in body
+    assert '<span class="column__index">3</span>' not in body  # only two steps
+
+
+def test_inbox_and_terminal_columns_are_not_numbered():
+    body = _board_client(_kinded_board()).get("/fragment/board").text
+
+    head = body[: body.index("board-group--steps")]
+    assert "column__index" not in head
+
+
+def test_unknown_tab_steps_are_not_numbered():
+    """Its columns are an unordered catch-all, not a sequence."""
+    body = _board_client(_kinded_board(unknown_tasks=(WORKFLOW_LESS,))).get(
+        "/fragment/board"
+    ).text
+
+    # Slice from the panel, not from the tab-strip button of the same name —
+    # the strip comes first and the default tab's numbered columns sit between.
+    unknown_panel = body[body.index('class="workflow-panel" data-workflow="unknown"') :]
+    assert "column__index" not in unknown_panel
 
 
 def test_unknown_tab_is_labelled_no_workflow_and_explained():

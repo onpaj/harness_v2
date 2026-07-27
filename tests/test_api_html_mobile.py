@@ -85,11 +85,25 @@ def test_stylesheet_paints_safe_area_insets(client):
 
 
 def test_stylesheet_switches_board_layout_at_768px(client):
+    """Phone: one column per row. Desktop: the columns of each group wrap into
+    a multi-track grid — not a horizontal strip, which put the occupied columns
+    of an 11-column workflow off-screen behind a scrollbar."""
     css = client.get("/static/app.css").text
 
     assert "flex-direction: column" in css
     assert "@media (min-width: 768px)" in css
-    assert "flex-direction: row" in css
+    assert "grid-template-columns: 1fr" in css
+    assert "repeat(auto-fill, minmax(240px, 1fr))" in css
+
+
+def test_the_board_never_scrolls_sideways(client):
+    """`overflow-x: auto` on the board is what the wrapping grid replaced. A
+    board that scrolls horizontally hides whichever columns hold the work."""
+    css = client.get("/static/app.css").text
+
+    board_rules = [line for line in css.splitlines() if ".board {" in line or ".board  {" in line]
+    assert board_rules, "the .board rule disappeared — update this test"
+    assert "overflow-x: auto" not in css[css.index(".board {"):css.index(".board-group")]
 
 
 def test_nav_renders_a_board_entry_for_both_appbar_and_tabbar(client):

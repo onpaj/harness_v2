@@ -163,21 +163,18 @@ h3 {
 
 /* Column groups: `Waiting` (inbox) / the workflow's own steps / `Finished`
  * (terminals). Three visually separated zones so a step column is never read as
- * a lifecycle queue, or the other way round. */
+ * a lifecycle queue, or the other way round. The groups stack vertically at
+ * every width and each group's columns wrap into a grid — a workflow has as
+ * many columns as it has steps, and a single horizontal strip of eleven of them
+ * puts the occupied ones off-screen behind a scrollbar. */
 .board-group { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
 .board-group__label {
   font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .08em;
   color: var(--text-3); padding: 0 4px;
 }
 .board-group--steps > .board-group__label { color: var(--text-2); }
-.board-group__columns { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
-.board-group--steps { flex: 1 1 auto; }
-
-/* The edge between two consecutive steps. Points down in the phone's stacked
- * layout, right in the desktop row — one glyph, rotated. */
-.board-flow {
-  align-self: center; color: var(--text-3); font-size: 15px; line-height: 1;
-  transform: rotate(90deg);
+.board-group__columns {
+  display: grid; grid-template-columns: 1fr; gap: 16px; align-items: start; min-width: 0;
 }
 
 .board-note {
@@ -201,6 +198,12 @@ h3 {
   font-size: 12px; font-weight: 700; color: var(--text-3);
   background: var(--surface-2); border: 1px solid var(--border);
   border-radius: var(--radius-pill); padding: 1px 9px; min-width: 22px; text-align: center;
+}
+.column__index {
+  font-size: 11px; font-weight: 700; color: var(--text-3);
+  border: 1px solid var(--border); border-radius: 50%;
+  width: 18px; height: 18px; flex: 0 0 18px;
+  display: inline-flex; align-items: center; justify-content: center;
 }
 .column__desc {
   color: var(--text-3); font-size: 12px; line-height: 1.4;
@@ -409,29 +412,22 @@ td.wrap, th.wrap { white-space: normal; }
   .tabbar { display: none; }
   .appbar__links { display: flex; }
 
-  /* The board scrolls horizontally as one strip; each group sizes to its own
-   * columns (`min-width: auto` — the mobile `min-width: 0` would let a group
-   * shrink below its content and the columns would overlap). */
-  .board {
-    flex-direction: row; align-items: stretch; gap: 18px;
-    overflow-x: auto; -webkit-overflow-scrolling: touch;
-  }
-  .board-group { flex: 0 0 auto; min-width: auto; }
+  /* The three groups stay stacked; only the columns inside each one go
+   * multi-track. `auto-fill` + `minmax` keeps a column readable (240px floor)
+   * and wraps the rest onto the next row instead of off-screen — the board
+   * never scrolls sideways, and a step's position is carried by its number. */
+  .board { gap: 22px; }
   .board-group__columns {
-    flex-direction: row; align-items: flex-start; gap: 14px; min-width: auto;
+    grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 14px;
   }
-  /* A vertical rule between the three zones — the same separation the group
-   * labels carry, for the eye that scans the columns and not the labels. */
-  .board-group + .board-group { border-left: 1px solid var(--border); padding-left: 18px; }
-  .board-flow { transform: none; align-self: flex-start; padding-top: 14px; }
+  /* A rule between the three zones — the same separation the group labels
+   * carry, for the eye that scans the columns and not the labels. */
+  .board-group + .board-group { border-top: 1px solid var(--border); padding-top: 18px; }
 
   .column {
-    flex: 0 0 auto; width: 280px;
     background: var(--surface-2); border: 1px solid var(--border);
     border-radius: var(--radius); padding: 10px;
   }
-  /* Lifecycle columns are narrower: they are terminals, not workstations. */
-  .board-group--inbox .column, .board-group--terminal .column { width: 220px; }
   .column__head { position: static; top: auto; background: none; margin-bottom: 10px; padding: 4px 6px; }
   .column__desc { margin: -6px 0 10px; }
   .column--empty { opacity: .7; }

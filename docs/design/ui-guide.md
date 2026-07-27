@@ -134,16 +134,20 @@ Layout constants: 44px minimum tap target (`.btn`, inputs, tabbar links),
   zones per workflow tab, one per column *kind* (`ports/board.py`'s
   `COLUMN_INBOX` / `COLUMN_STEP` / `COLUMN_TERMINAL`): **Waiting**
   (`.board-group--inbox`, the `todo` queue), the workflow's own steps
-  (`.board-group--steps`, labelled `<name> workflow` and joined by
-  `.board-flow` arrows in edge order) and **Finished**
+  (`.board-group--steps`, labelled `<name> workflow`, each head numbered with
+  its `.column__index` position in the graph) and **Finished**
   (`.board-group--terminal`: `done`/`failed`/`healed`). The zones exist
   because a step column is a place *inside* a workflow while an
   inbox/terminal column is a state of the task *relative to* one — rendering
   the two identically was what made a column row unreadable. A column head
   may carry a `.column__desc` line: for a step it is the workflow's own
   `descriptions[step]`, for a lifecycle column the fixed text in
-  `LIFECYCLE_DESCRIPTIONS`. Desktop scrolls the whole strip horizontally;
-  phone stacks it and rotates the arrows to point down.
+  `LIFECYCLE_DESCRIPTIONS`. The groups stack vertically at every width and
+  each group's columns are a `repeat(auto-fill, minmax(240px, 1fr))` grid —
+  a workflow has one column per step, and a single horizontal strip of
+  eleven of them puts the occupied ones off-screen behind a scrollbar. The
+  board never scrolls sideways; the step numbers, not left-to-right
+  adjacency, are what carry the order across a wrap.
 
 ## 6. Navigation
 
