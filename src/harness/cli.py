@@ -182,6 +182,12 @@ HEAL_DEFINITION = {
             "kind": "open-issue",
             "from_step": "heal",
             "label": "harness:self-heal",
+            # Ships withheld: configuring the Process is not the same as
+            # trusting it. `allowed_labels` is deliberately absent — adding
+            # it here would switch on unattended auto-fixing (the
+            # `harness:todo` label the persona now drafts, cli.py's
+            # `heal` prompt) for every `harness init` deployment. The
+            # operator opts in per repo by editing this binding themselves.
         }
     },
 }

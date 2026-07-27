@@ -241,3 +241,71 @@ def test_the_two_recursion_guards_record_distinct_notes():
     notes = {task.id: task.history[-1].summary for task in healed.list()}
     assert "heal-failed" in notes["tsk_heal_1"]
     assert "heal-declined" in notes["tsk_fix_1"]
+
+
+def test_brake_declines_a_failed_resolver_task_born_from_a_harness_pr():
+    """`GithubConflictsCheck` mints resolver tasks with `source.kind ==
+    "mergeability"` and no body/`data.heal` — the brake must still catch
+    them, or the resolver half of the cycle in the review's diagram is
+    unbounded."""
+    failed = MemoryTaskQueue("failed")
+    healed = MemoryTaskQueue("healed")
+    failed.put(
+        failed_task(
+            "tsk_resolver_1",
+            data={"request": "resolve merge conflict", "source": {"kind": "mergeability"}},
+        )
+    )
+    check = make_check(failed=failed, healed=healed)
+
+    observations = check.evaluate()
+
+    assert observations == []
+    assert failed.list() == []
+    settled = healed.list()
+    assert len(settled) == 1
+    assert settled[0].status == HEALED
+    assert "heal-declined" in settled[0].history[-1].summary
+
+
+def test_brake_declines_a_failed_automerge_review_task_born_from_a_harness_pr():
+    """`GithubMergeableCheck` mints automerge-review tasks with `source.kind
+    == "pull-request"` and no body/`data.heal` — the brake's twin case."""
+    failed = MemoryTaskQueue("failed")
+    healed = MemoryTaskQueue("healed")
+    failed.put(
+        failed_task(
+            "tsk_automerge_1",
+            data={"request": "review PR for automatic merge", "source": {"kind": "pull-request"}},
+        )
+    )
+    check = make_check(failed=failed, healed=healed)
+
+    observations = check.evaluate()
+
+    assert observations == []
+    assert failed.list() == []
+    settled = healed.list()
+    assert len(settled) == 1
+    assert settled[0].status == HEALED
+    assert "heal-declined" in settled[0].history[-1].summary
+
+
+def test_an_ordinary_github_issue_sourced_task_is_still_healed():
+    """`GithubIssuesCheck` stamps ordinary issue-borne tasks with
+    `source.kind == "github"` and no marker — the widened guard must not
+    swallow those; only the two PR-borne kinds are declined."""
+    failed = MemoryTaskQueue("failed")
+    healed = MemoryTaskQueue("healed")
+    failed.put(
+        failed_task(
+            "tsk_issue_1",
+            data={"request": "fix the bug", "source": {"kind": "github"}},
+        )
+    )
+    check = make_check(failed=failed, healed=healed)
+
+    (observation,) = check.evaluate()
+
+    assert observation.state_key == "tsk_issue_1"
+    assert "queued for healing" in healed.list()[0].history[-1].summary

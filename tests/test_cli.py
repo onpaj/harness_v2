@@ -15,6 +15,7 @@ from harness.cli import (
     DEFAULT_DEFINITION,
     DEFAULT_HEAL_WORKFLOW,
     DEFAULT_WORKFLOW,
+    HEAL_DEFINITION,
     _REVIEW_PERSONA,
     _agent_definition_template,
     _declared_sink_kinds,
@@ -140,6 +141,16 @@ def test_heal_workflow_transitions_and_descriptions(tmp_path):
     assert workflow.target("dedup", "duplicate") == END
     assert workflow.description_for("dedup")
     assert workflow.description_for("heal")
+
+
+def test_heal_definitions_file_issue_binding_withholds_allowed_labels():
+    """Pins a deliberate omission: the shipped `heal` persona now tells the
+    model to emit `labels: ["harness:todo"]`, but `HEAL_DEFINITION`'s
+    `file-issue` binding carries no `allowed_labels`, so that label is
+    dropped rather than applied — every `harness init` deployment gets
+    unattended fix-attempt healing only once an operator opts in by editing
+    the binding themselves. See the binding's own comment."""
+    assert "allowed_labels" not in HEAL_DEFINITION["finishers"]["file-issue"]
 
 
 def test_init_seeds_the_autoheal_process(tmp_path):

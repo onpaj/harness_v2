@@ -13,10 +13,17 @@ Unlike `GithubIssuesCheck`, this needs no external client — it needs the
 harness's own live `failed`/`healed` queues and event sink, so it is
 registered inside `app.build()` itself (§FR-6), not via a `cli.py` factory.
 
-Recursion guard: a claimed task carrying `data.heal` is itself a `heal`
-workflow task that failed — it is settled straight to `healed/` with a
-`heal-failed` note and yields no `Observation`, so a stuck healer can never
-re-enter `failed/` a second time (invariant 25).
+Recursion guard: a claimed task is declined — settled straight to `healed/`
+with no `Observation` — in three cases. `data.heal` marks it as itself a
+`heal` workflow task that failed (`heal-failed`, so a stuck healer can never
+re-enter `failed/` a second time). `data["body"]` carrying the
+`<!-- harness-issue:… -->` marker marks it as a fix attempt for an issue the
+harness itself filed (`heal-declined`). `data["source"]["kind"]` being
+`"mergeability"` or `"pull-request"` marks it as a resolver or
+automerge-review task minted from the harness's own pull request, which
+carries neither a body nor `data.heal` (also `heal-declined`). All three
+express one rule: the harness does not heal a failure of work it filed for
+itself (invariant 25).
 """
 
 from __future__ import annotations
@@ -33,6 +40,17 @@ from harness.ports.queue import TaskQueue
 from harness.ports.triggers import Check, CheckSpec, Observation
 
 ACTOR = "failed-tasks"
+
+PR_BORN_SOURCE_KINDS = frozenset({"mergeability", "pull-request"})
+"""`source.kind` values stamped by the two Checks that mint tasks from the
+harness's own pull requests rather than a filed issue: `GithubConflictsCheck`
+(`drivers/github_conflicts_check.py`) stamps `"mergeability"` on resolver
+tasks, `GithubMergeableCheck` (`drivers/github_mergeable_check.py`) stamps
+`"pull-request"` on automerge-review tasks. Neither carries a body or
+`data.heal`, so without this the one-hop limit (invariant 25) wouldn't cover
+them. Extracted as a constant for the same reason `MARKER_PREFIX` was: these
+strings are owned by those two driver files, and a silent rename there must
+not silently disarm the guard here."""
 
 SPEC = CheckSpec(
     name="failed-tasks",
@@ -83,6 +101,18 @@ class FailedTasksCheck(Check):
                 self._settle(
                     task,
                     "heal-declined: fix attempt for a harness-filed issue "
+                    "failed (one-hop limit)",
+                )
+                continue
+            if _born_from_a_harness_pull_request(task):
+                # A resolver or automerge-review task minted from the
+                # harness's own open PR, which then failed. These carry
+                # neither a body nor `data.heal`, so the two guards above
+                # miss them — same one-hop limit, closed for the PR-borne
+                # half of the cycle (invariant 25).
+                self._settle(
+                    task,
+                    "heal-declined: fix attempt for harness-filed PR work "
                     "failed (one-hop limit)",
                 )
                 continue
@@ -209,6 +239,26 @@ def _descends_from_a_harness_filed_issue(task: Task) -> bool:
     harness does not heal a failure of work it filed for itself, which is the
     same runaway shape wherever it appears, and it is the cycle `data.heal`
     does not cover.
+
+    This match is a heuristic, not proof of provenance: an issue body that
+    merely quotes `<!-- harness-issue:` — say, in a bug report about this
+    very check — is declined too. The direction is fail-safe (one lost
+    diagnosis, never a loop), which is why a substring match is acceptable
+    here.
     """
     body = task.data.get("body")
     return isinstance(body, str) and MARKER_PREFIX in body
+
+
+def _born_from_a_harness_pull_request(task: Task) -> bool:
+    """True when this failed task was minted by a Check that scans the
+    harness's own open pull requests rather than ingesting a filed issue —
+    a resolver task (`GithubConflictsCheck`) or an automerge-review task
+    (`GithubMergeableCheck`). See `PR_BORN_SOURCE_KINDS` for the two
+    `source.kind` values this recognises.
+
+    Unlike `_descends_from_a_harness_filed_issue`, this is exact, not a
+    heuristic: only the two Check drivers named above stamp these kinds.
+    """
+    source = task.data.get("source")
+    return isinstance(source, dict) and source.get("kind") in PR_BORN_SOURCE_KINDS
