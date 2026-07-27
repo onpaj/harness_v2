@@ -75,24 +75,49 @@ Status: **done** (single increment).
 
 ## Enabling it (operator)
 
-1. Protect the target branch first — `clean` is only as strong as the repo's
-   protection rules (see the gotcha in CLAUDE.md).
-2. Create `processes/automerge.json` (dashboard process editor, or by hand):
+`harness init` now seeds `processes/automerge.json`, so after `harness update
+&& harness init` automerge is already **running** on every repository in
+`repos.json` — one Process covers them all, because `GithubMergeableCheck`
+iterates `RepositoryRegistry.names()`. Adding a repo later puts it under review
+automatically; a non-GitHub repo is skipped.
+
+What it does *not* do yet is merge. That gate is `dry_run`:
+
+1. **Protect the target branch first.** `clean` is only as strong as the repo's
+   protection rules — unprotected, it means merely "no conflict", which hands
+   the persona's confidence the entire decision (see the CLAUDE.md gotcha).
+2. Watch the board. Every clean harness PR gets a review and a recorded
+   decision, with the confidence, and nothing merges.
+3. When the record justifies it, set `workflows/automerge.json` →
+   `finishers.merge.dry_run` to `false`. Tune `min_confidence` in the same
+   place.
+
+The seeded file:
 
 ```json
 {
   "trigger": { "interval": "5m" },
   "action": { "check": "github-mergeable", "params": { "head_prefix": "harness/" } },
   "target": { "workflow": "automerge" },
+  "dedup": "per-state",
   "sink": { "kind": "none" }
 }
 ```
 
-3. Watch the board. Each candidate PR gets a review and a recorded decision;
-   nothing merges while `dry_run` is true.
-4. When the recorded decisions justify it, set
-   `workflows/automerge.json` → `finishers.merge.dry_run` to `false`.
-   Tune `min_confidence` in the same place.
+`"dedup": "per-state"` is **required, not decorative** — it is not the default.
+`github-mergeable` emits one observation per candidate PR, and under the
+default `per-interval` every observation in a tick collapses onto the same
+dedup key, so `SourcePoller._seen` keeps the first and silently drops the rest:
+three mergeable PRs would yield one reviewed PR per tick, with no error
+anywhere. `per-state` keys each task on `slug:pr:head_sha`, which is also what
+makes a re-pushed PR a fresh review and an unchanged one not re-reviewed every
+five minutes.
+
+Without a `GITHUB_TOKEN` the process is skipped with a warning and the rest of
+the harness runs normally — it is never fatal (`MissingCredential`).
+
+To opt out entirely, delete the file; to exempt one PR, label it
+`harness:no-automerge`.
 
 ## Follow-ups (not built)
 

@@ -30,7 +30,10 @@ from harness.drivers.memory import (
 from harness.drivers.checks import BUILTIN_CHECKS
 from harness.drivers.failed_tasks_check import SPEC as FAILED_TASKS_SPEC
 from harness.drivers.failed_tasks_check import FailedTasksCheck
-from harness.drivers.fs_processes import FilesystemProcessRepository
+from harness.drivers.fs_processes import (
+    FilesystemProcessRepository,
+    MissingCredential,
+)
 from harness.drivers.projection_events import ProjectionSink
 from harness.drivers.source_reflector import SourceReflectorSink
 from harness.drivers.stage_output import StageOutputProjection
@@ -51,7 +54,7 @@ from harness.ports.merge import MergeChecker
 from harness.ports.queue import TaskQueue
 from harness.ports.repos import RepositoryRegistry
 from harness.ports.source import TaskSource
-from harness.ports.triggers import CheckDefinition, CheckFactory
+from harness.ports.triggers import Check, CheckDefinition, CheckFactory
 from harness.ports.workflows import WorkflowNotFound
 from harness.ports.workspace import Workspace
 from harness.projection import BoardProjection
@@ -238,6 +241,7 @@ class Harness:
         issue_reconciler: IssueReconciler | None = None,
         healed: TaskQueue | None = None,
         process_checks: dict[str, CheckFactory] | None = None,
+        skipped_processes: list[tuple[str, str]] | None = None,
         issue_import: IssueImport | None = None,
     ) -> None:
         self.layout = layout
@@ -274,6 +278,10 @@ class Harness:
         self.process_checks = (
             process_checks if process_checks is not None else dict(BUILTIN_CHECKS)
         )
+        self.skipped_processes: list[tuple[str, str]] = list(skipped_processes or [])
+        """(file, reason) per process skipped for a missing credential — the
+        harness runs degraded rather than not at all. `cli._run` warns per
+        entry; see `fs_processes.MissingCredential`."""
 
     def recover(self) -> int:
         # `done` is included because it is the one write-into queue that also
@@ -431,6 +439,25 @@ class Harness:
                 await asyncio.sleep(reconcile_interval)
             else:
                 await asyncio.sleep(0)
+
+_CREDENTIAL_GATED_CHECKS = {
+    "github-issues": "GITHUB_TOKEN",
+    "github-conflicts": "GITHUB_TOKEN",
+    "github-mergeable": "GITHUB_TOKEN",
+    "jira-issues": "JIRA_BASE_URL/JIRA_EMAIL/JIRA_API_TOKEN",
+}
+"""Action names that exist but need a credential `build()` itself never holds.
+`cli._run` replaces each with a working factory through `extra_checks` when the
+environment supplies one; otherwise the placeholder below keeps the name known
+(so a process file naming it reads as "not configured", not "typo")."""
+
+
+def _missing_credential_check(name: str, requirement: str) -> CheckFactory:
+    def factory(params: dict) -> Check:
+        raise MissingCredential(f"{name} action requires {requirement}", field="check")
+
+    return factory
+
 
 def build(
     root: Path,
@@ -763,6 +790,17 @@ def build(
     # constructs, not something `cli.py` can hand it independently.
     checks: dict[str, CheckFactory] = {
         **BUILTIN_CHECKS,
+        # The credential-gated action names are part of the *vocabulary* even
+        # when this build has no client for them: `cli._run` overrides each
+        # with a real factory via `extra_checks` once the credential exists.
+        # Without these placeholders a seeded `processes/*.json` naming one
+        # would fail a bare `build()` as an "unknown check" — the fatal,
+        # set-and-wrong shape — when the truth is simply that the credential
+        # is absent, which must warn and skip (`MissingCredential`).
+        **{
+            name: _missing_credential_check(name, requirement)
+            for name, requirement in _CREDENTIAL_GATED_CHECKS.items()
+        },
         **(extra_checks or {}),
         # A `CheckDefinition`, not a bare lambda: it carries `failed-tasks`'
         # declarative spec (no user-facing parameters) alongside the factory, so
@@ -855,4 +893,5 @@ def build(
         healed=healed_queue,
         process_checks=checks,
         issue_import=issue_import,
+        skipped_processes=process_repo.skipped,
     )

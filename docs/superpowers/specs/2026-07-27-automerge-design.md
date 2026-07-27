@@ -19,6 +19,7 @@ processes/automerge.json
   trigger : every 5m
   action  : github-mergeable   ──▶ one Observation per clean, harness-authored PR
   target  : workflow "automerge"
+  dedup   : per-state          ◀── required; the default per-interval drops PRs
   sink    : none
 
 workflows/automerge.json
