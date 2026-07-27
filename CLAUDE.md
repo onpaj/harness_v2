@@ -434,13 +434,15 @@ Dependencies flow strictly downward, no cycles.
   PR's own branch (invariant #28's `data.branch` override, the resolver's
   path) and returns `approve`/`reject`; only `approve` reaches `merge`, whose
   `merge-pr` finisher reads the review's confidence and merges — or refuses.
-  `harness init` seeds `workflows/automerge.json` + `agents/merge-review.json`
-  as dormant data (like `resolver`/`heal`) but seeds **no**
-  `processes/automerge.json`: unlike autoheal, which drains a queue the
-  harness fills itself, automerging is a posture, so the Process stays the
-  operator's to create. And even once created, the seeded binding ships
-  `dry_run: true` — the step reviews and records what it *would* have merged
-  until an operator flips one field.
+  `harness init` seeds `workflows/automerge.json`, `agents/merge-review.json`
+  **and** `processes/automerge.json`, so automerge runs on every registered
+  repository out of the box — one Process covers them all, since the check
+  iterates `RepositoryRegistry.names()` and there is nothing per-repo to
+  author. What withholds the merge is not the absence of the file but
+  `dry_run: true` in the workflow binding: the step reviews every clean PR and
+  records what it *would* have merged until an operator flips that one field.
+  The seeded process uses `dedup: per-state` (required — see the gotcha) and
+  is skipped with a warning, not fatally, when no `GITHUB_TOKEN` is set.
 - **A Process** is the operator's top-level authoring aggregate — the "tie it all
   together" surface. A `processes/*.json` file names four distinct roles: a
   **trigger** (cadence), an **action** (a named `Check` + params — the inbound
@@ -612,6 +614,18 @@ Dependencies flow strictly downward, no cycles.
   A `except MergeError` placed before `except MergeRefused` silently turns
   every ordinary race into a failed task; the reverse — treating a 5xx as a
   refusal — silently hides real breakage behind "not mergeable right now".
+- **A missing credential disables one Process; a wrong value still kills the
+  run.** `fs_processes.MissingCredential` (a `ProcessValidationError` subclass)
+  is raised by the credential-gated action factories — `github-issues`,
+  `github-conflicts`, `github-mergeable`, `jira-issues` — when the environment
+  has no token. `FilesystemProcessRepository.build()` skips that file and
+  records it in `skipped`; `cli._run` warns per entry. This is what keeps "no
+  token is not fatal" true now that `harness init` seeds a `github-*` Process:
+  without it, one seeded file made every tokenless run exit 2. `build()` also
+  registers placeholder factories for those four names, so a bare `build()`
+  (most tests) reports "not configured" instead of the fatal "unknown check".
+  Every other `ProcessValidationError` — an unknown check, a malformed cadence,
+  a bad param — is still fatal, and a test pins both directions.
 - **A multi-observation check left on the default `per-interval` dedup silently
   drops all but one observation per tick.** `per-interval` is the default when
   a `processes/*.json` omits `dedup`, and `ScheduledTrigger._dedup_key` ignores

@@ -106,6 +106,28 @@ class ProcessValidationError(Exception):
         super().__init__(message)
 
 
+class MissingCredential(ProcessValidationError):
+    """The action is named correctly, but a credential it needs is not
+    configured (no `GITHUB_TOKEN`, no `JIRA_*`).
+
+    A distinct shape because it lands on the *missing* side of the operator's
+    rule that ADR-0022 already applies to workflows: **a value that is set and
+    wrong fails fast; a value that is merely absent warns.** The check name is
+    set and correct here — what is absent is the environment.
+
+    This is not a nicety. Without it, a single `github-*` process file makes a
+    tokenless run exit 2, which contradicts the harness's documented promise
+    that "no token is not fatal: GitHub ingestion goes quiet and `harness
+    submit` still works" — and turns an expired token, or a launchd service
+    that cannot reach the keychain, into a dead service rather than a degraded
+    one. `FilesystemProcessRepository.build()` therefore skips the process and
+    records it in `skipped`, and `cli._run` prints one warning per entry.
+
+    Every *other* `ProcessValidationError` (an unknown check, a malformed
+    cadence, a bad param) stays fatal, exactly as before.
+    """
+
+
 def invalid_process_name(name: str) -> bool:
     """The name must not carry a path separator and must not be "", "." or ".."."""
     return "/" in name or "\\" in name or name in ("", ".", "..")
@@ -362,6 +384,10 @@ def _parse_sink(where: str, sink: object) -> dict | None:
 class FilesystemProcessRepository:
     def __init__(self, root: Path) -> None:
         self._root = Path(root)
+        self.skipped: list[tuple[str, str]] = []
+        """(file name, reason) for each process `build()` skipped because a
+        credential it needs is not configured (`MissingCredential`). The caller
+        prints one warning per entry; an empty list is the normal case."""
 
     def build(
         self,
@@ -395,17 +421,24 @@ class FilesystemProcessRepository:
                 path, dropped_workflows
             ):
                 continue
-            triggers.append(
-                self._build_one(
-                    path,
-                    clock=clock,
-                    checks=checks,
-                    repository=repository,
-                    worktree_root=worktree_root,
-                    known_targets=known_targets,
-                    known_repositories=known_repositories,
+            try:
+                triggers.append(
+                    self._build_one(
+                        path,
+                        clock=clock,
+                        checks=checks,
+                        repository=repository,
+                        worktree_root=worktree_root,
+                        known_targets=known_targets,
+                        known_repositories=known_repositories,
+                    )
                 )
-            )
+            except MissingCredential as error:
+                # Missing environment, not a malformed file: skip this one
+                # process and let the rest of the harness run degraded. Every
+                # other ProcessValidationError still propagates and is fatal.
+                self.skipped.append((path.name, str(error)))
+                continue
             self._check_github_issues_collision(
                 path, seen, default_github_issues_label=default_github_issues_label
             )

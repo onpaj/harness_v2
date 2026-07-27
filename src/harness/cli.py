@@ -275,6 +275,7 @@ def _init(args: argparse.Namespace) -> int:
             encoding="utf-8",
         )
     _ensure_autoheal_process(layout)
+    _ensure_automerge_process(layout)
 
     # Workflows are read straight off the filesystem here, not through
     # `build()`: `build()` also compiles `processes/*.json` (ADR-0018), and
@@ -998,7 +999,10 @@ def _process_check_factories(
     dependency this function has no reason to carry: that check needs the
     harness's own live `failed`/`healed` queues, not an external client).
     """
-    from harness.drivers.fs_processes import ProcessValidationError
+    from harness.drivers.fs_processes import (
+        MissingCredential,
+        ProcessValidationError,
+    )
     from harness.drivers.github_conflicts_check import SPEC as GITHUB_CONFLICTS_SPEC
     from harness.drivers.github_conflicts_check import GithubConflictsCheck
     from harness.drivers.github_issues_check import SPEC as GITHUB_ISSUES_SPEC
@@ -1025,7 +1029,7 @@ def _process_check_factories(
 
     def github_issues_factory(params: dict) -> GithubIssuesCheck:
         if client is None:
-            raise ProcessValidationError(
+            raise MissingCredential(
                 "github-issues action requires GITHUB_TOKEN", field="check"
             )
         label = params.get("label", args.github_label)
@@ -1044,7 +1048,7 @@ def _process_check_factories(
 
     def github_conflicts_factory(params: dict) -> GithubConflictsCheck:
         if client is None:
-            raise ProcessValidationError(
+            raise MissingCredential(
                 "github-conflicts action requires GITHUB_TOKEN", field="check"
             )
         return GithubConflictsCheck(
@@ -1055,7 +1059,7 @@ def _process_check_factories(
 
     def github_mergeable_factory(params: dict) -> GithubMergeableCheck:
         if client is None:
-            raise ProcessValidationError(
+            raise MissingCredential(
                 "github-mergeable action requires GITHUB_TOKEN", field="check"
             )
         return GithubMergeableCheck(
@@ -1067,7 +1071,7 @@ def _process_check_factories(
 
     def jira_issues_factory(params: dict) -> JiraIssuesCheck:
         if jira_client is None:
-            raise ProcessValidationError(
+            raise MissingCredential(
                 "jira-issues action requires JIRA_BASE_URL/JIRA_EMAIL/JIRA_API_TOKEN",
                 field="check",
             )
@@ -1243,6 +1247,60 @@ silently. `heal` is a genuine three-step workflow (`heal` → `dedup` →
 `file-issue`, invariant #26), so it needs a real `Workflow` in scope on every
 `route()` call past the first, which only happens when `task.workflow_template`
 is set (ADR-0018)."""
+
+
+AUTOMERGE_PROCESS_DEFINITION = {
+    "trigger": {"interval": "5m"},
+    "action": {"check": "github-mergeable", "params": {"head_prefix": "harness/"}},
+    "target": {"workflow": "automerge"},
+    "dedup": "per-state",
+    "sink": {"kind": "none"},
+}
+"""One Process covers **every** repository: `GithubMergeableCheck.evaluate()`
+iterates `RepositoryRegistry.names()` and scans each repo's open PRs, so there
+is nothing per-repo to author — adding a repo to `repos.json` puts it under
+automerge review automatically, and a non-GitHub repo is skipped.
+
+`dedup` is `per-state`, and that is load-bearing rather than stylistic: the
+check emits one observation *per candidate PR*, and under the default
+`per-interval` every observation in a tick collapses onto the same dedup key,
+so `SourcePoller._seen` would keep the first and silently drop the rest (three
+mergeable PRs → one review). `per-state` keys each task on `slug:pr:head_sha`,
+which is also what re-reviews a re-pushed PR and leaves an unchanged one alone.
+
+Seeding this file makes automerge *run*; it does not make it *merge*. The
+`merge` step's `dry_run` lives in `workflows/automerge.json`'s finisher binding
+and ships `true`, so a seeded root reviews every clean PR and records what it
+would have merged until the operator flips that one field (ADR-0023).
+
+Safe to seed even with no `GITHUB_TOKEN`: the `github-mergeable` factory raises
+`MissingCredential`, which `FilesystemProcessRepository.build()` skips with a
+warning instead of failing the run — without that, this file alone would make
+every tokenless run exit 2 and break the harness's "no token is not fatal"
+promise."""
+
+
+def _ensure_automerge_process(layout: HarnessLayout) -> None:
+    """Seed `processes/automerge.json` unless one already exists — never
+    clobbering an operator's hand-edited file, exactly like the autoheal seeder.
+
+    ADR-0023 originally seeded no Process at all, on the reasoning that
+    automerging is a posture rather than a queue that needs draining. That held
+    while the *only* safety gate was "the operator must author a file". It no
+    longer needs to: `dry_run: true` in the workflow binding is the real gate,
+    and it is a strictly better one — it exercises the whole path on real PRs
+    and shows the operator what this persona would have done, which authoring a
+    file from scratch never did. So the Process ships, and the withholding
+    moves entirely to `dry_run`.
+    """
+    path = layout.processes / "automerge.json"
+    if path.exists():
+        return
+    layout.processes.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(AUTOMERGE_PROCESS_DEFINITION, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
 
 
 def _ensure_autoheal_process(layout: HarnessLayout) -> None:
@@ -2337,6 +2395,19 @@ def _run(args: argparse.Namespace) -> int:
         # not crash the service with a raw traceback under launchd.
         print(f"error: {error}", file=sys.stderr)
         return 2
+
+    # A process whose action needs a credential this run does not have is
+    # skipped, not fatal (`fs_processes.MissingCredential`): the harness runs
+    # degraded — everything else still flows — rather than not at all, which
+    # is what keeps "no token is not fatal" true once a `github-*` Process
+    # exists on the root. A set-and-wrong value still exits 2 just above.
+    # `getattr`: `build()` is a public seam a number of tests stub out with a
+    # bare object; a real `Harness` always carries the attribute.
+    for file_name, reason in getattr(harness, "skipped_processes", ()):
+        print(
+            f"warning: {file_name} is disabled for this run — {reason}",
+            file=sys.stderr,
+        )
 
     try:
         asyncio.run(

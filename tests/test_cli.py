@@ -1167,7 +1167,10 @@ def test_init_creates_processes_directory(tmp_path):
     assert main(["init", "--root", str(tmp_path)]) == 0
 
     assert (tmp_path / "processes").is_dir()
-    assert [p.name for p in (tmp_path / "processes").glob("*.json")] == ["autoheal.json"]
+    assert sorted(p.name for p in (tmp_path / "processes").glob("*.json")) == [
+        "autoheal.json",
+        "automerge.json",
+    ]
 
 
 HOTFIX_DEFINITION = {
@@ -1274,11 +1277,14 @@ def test_run_without_a_default_workflow_ignores_github_workflow_default(
     main(["init", "--root", str(tmp_path)])
     (tmp_path / "workflows" / f"{DEFAULT_WORKFLOW}.json").unlink()
     (tmp_path / "workflows" / "hotfix.json").write_text(json.dumps(HOTFIX_DEFINITION))
-    # Unrelated to this test's own regression: the seeded, repository-less
-    # `processes/autoheal.json` (ADR-0022) would otherwise print its own
-    # startup warning here and break the `err == ""` assertion below, which
-    # exists to check for the *github-workflow* regression specifically.
+    # Unrelated to this test's own regression: the two seeded processes would
+    # otherwise print their own startup warnings here and break the
+    # `err == ""` assertion below, which exists to check for the
+    # *github-workflow* regression specifically — `autoheal.json` because it
+    # is repository-less (ADR-0022), `automerge.json` because this run has no
+    # GITHUB_TOKEN for its `github-mergeable` action (ADR-0023).
     (tmp_path / "processes" / "autoheal.json").unlink()
+    (tmp_path / "processes" / "automerge.json").unlink()
     captured = {}
 
     async def fake_serve(harness, port, poll_interval, source_interval=30.0, pr_poll_interval=0.0, reconcile_interval=300.0, registry=None):
@@ -1625,13 +1631,32 @@ def _compile_processes(tmp_path, *, checks, known_targets, clock):
     from harness.drivers.checks import BUILTIN_CHECKS
     from harness.drivers.fs_processes import FilesystemProcessRepository
 
-    return FilesystemProcessRepository(tmp_path / "processes").build(
+    repo = FilesystemProcessRepository(tmp_path / "processes")
+    return repo.build(
         clock=clock,
         checks={**BUILTIN_CHECKS, **checks},
         repository=None,
         worktree_root=str(tmp_path / "worktrees"),
         known_targets=known_targets,
     )
+
+
+def _compile_processes_with_repo(tmp_path, *, checks, known_targets, clock):
+    """As `_compile_processes`, but also returns the repository, so a test can
+    inspect `skipped` — the credential-less processes that were warned about
+    and left out rather than failing the build (`MissingCredential`)."""
+    from harness.drivers.checks import BUILTIN_CHECKS
+    from harness.drivers.fs_processes import FilesystemProcessRepository
+
+    repo = FilesystemProcessRepository(tmp_path / "processes")
+    triggers = repo.build(
+        clock=clock,
+        checks={**BUILTIN_CHECKS, **checks},
+        repository=None,
+        worktree_root=str(tmp_path / "worktrees"),
+        known_targets=known_targets,
+    )
+    return triggers, repo
 
 
 def test_process_check_factories_builds_a_github_issues_process(tmp_path):
@@ -1658,8 +1683,14 @@ def test_process_check_factories_builds_a_github_issues_process(tmp_path):
     assert sources[0].kind == "scheduled:harness-todo"
 
 
-def test_process_check_factories_github_issues_fails_fast_without_a_client(tmp_path, monkeypatch):
-    from harness.drivers.fs_processes import ProcessValidationError
+def test_a_github_issues_process_is_skipped_not_fatal_without_a_credential(
+    tmp_path, monkeypatch
+):
+    """A missing credential is on the *absent* side of the operator's rule, so
+    it warns and skips rather than failing the whole run — otherwise one
+    `github-issues` process file would make every credential-less run exit 2
+    and break the harness's "no token is not fatal" promise. A set-and-wrong
+    value (an unknown check, a bad param) is still fatal."""
     from harness.drivers.memory import FakeClock
 
     monkeypatch.delenv("GITHUB_TOKEN", raising=False)
@@ -1672,14 +1703,16 @@ def test_process_check_factories_github_issues_fails_fast_without_a_client(tmp_p
     registry = MemoryRepositoryRegistry({"heblo": Path("/repos/heblo")})
     checks = _process_check_factories(_process_args(), registry, client=None)
 
-    with pytest.raises(ProcessValidationError) as exc:
-        _compile_processes(
-            tmp_path,
-            checks=checks,
-            known_targets={"default"},
-            clock=FakeClock("2026-07-22T10:00:00Z"),
-        )
-    assert "GITHUB_TOKEN" in str(exc.value)
+    triggers, repo = _compile_processes_with_repo(
+        tmp_path,
+        checks=checks,
+        known_targets={"default"},
+        clock=FakeClock("2026-07-22T10:00:00Z"),
+    )
+
+    assert triggers == []
+    assert [name for name, _ in repo.skipped] == ["harness-todo.json"]
+    assert "GITHUB_TOKEN" in repo.skipped[0][1]
 
 
 def test_process_check_factories_builds_a_resolve_conflicts_process(tmp_path):
@@ -1706,8 +1739,14 @@ def test_process_check_factories_builds_a_resolve_conflicts_process(tmp_path):
     assert sources[0].kind == "scheduled:resolve-conflicts"
 
 
-def test_process_check_factories_github_conflicts_fails_fast_without_a_client(tmp_path, monkeypatch):
-    from harness.drivers.fs_processes import ProcessValidationError
+def test_a_github_conflicts_process_is_skipped_not_fatal_without_a_credential(
+    tmp_path, monkeypatch
+):
+    """A missing credential is on the *absent* side of the operator's rule, so
+    it warns and skips rather than failing the whole run — otherwise one
+    `github-conflicts` process file would make every credential-less run exit 2
+    and break the harness's "no token is not fatal" promise. A set-and-wrong
+    value (an unknown check, a bad param) is still fatal."""
     from harness.drivers.memory import FakeClock
 
     monkeypatch.delenv("GITHUB_TOKEN", raising=False)
@@ -1717,17 +1756,19 @@ def test_process_check_factories_github_conflicts_fails_fast_without_a_client(tm
         ' "action": {"check": "github-conflicts"},'
         ' "target": {"workflow": "resolver"}}'
     )
-    registry = MemoryRepositoryRegistry({"harness_v2": Path("/repos/harness_v2")})
+    registry = MemoryRepositoryRegistry({"heblo": Path("/repos/heblo")})
     checks = _process_check_factories(_process_args(), registry, client=None)
 
-    with pytest.raises(ProcessValidationError) as exc:
-        _compile_processes(
-            tmp_path,
-            checks=checks,
-            known_targets={"resolver"},
-            clock=FakeClock("2026-07-23T10:00:00Z"),
-        )
-    assert "GITHUB_TOKEN" in str(exc.value)
+    triggers, repo = _compile_processes_with_repo(
+        tmp_path,
+        checks=checks,
+        known_targets={"default"},
+        clock=FakeClock("2026-07-22T10:00:00Z"),
+    )
+
+    assert triggers == []
+    assert [name for name, _ in repo.skipped] == ["resolve-conflicts.json"]
+    assert "GITHUB_TOKEN" in repo.skipped[0][1]
 
 
 def test_process_check_factories_stays_dependency_free_for_builtin_checks(tmp_path):
@@ -1765,8 +1806,14 @@ def test_process_check_factories_builds_a_jira_issues_process(tmp_path):
     assert sources[0].kind == "scheduled:jira-todo"
 
 
-def test_process_check_factories_jira_issues_fails_fast_without_a_client(tmp_path, monkeypatch):
-    from harness.drivers.fs_processes import ProcessValidationError
+def test_a_jira_issues_process_is_skipped_not_fatal_without_a_credential(
+    tmp_path, monkeypatch
+):
+    """A missing credential is on the *absent* side of the operator's rule, so
+    it warns and skips rather than failing the whole run — otherwise one
+    `jira-issues` process file would make every credential-less run exit 2
+    and break the harness's "no token is not fatal" promise. A set-and-wrong
+    value (an unknown check, a bad param) is still fatal."""
     from harness.drivers.memory import FakeClock
 
     monkeypatch.delenv("JIRA_BASE_URL", raising=False)
@@ -1779,18 +1826,19 @@ def test_process_check_factories_jira_issues_fails_fast_without_a_client(tmp_pat
         '            "params": {"project": "PROJ", "repository": "my-service"}},'
         ' "target": {"workflow": "default"}}'
     )
-    registry = MemoryRepositoryRegistry({"my-service": Path("/repos/my-service")})
+    registry = MemoryRepositoryRegistry({"heblo": Path("/repos/heblo")})
     checks = _process_check_factories(_process_args(), registry, jira_client=None)
 
-    with pytest.raises(ProcessValidationError) as exc:
-        _compile_processes(
-            tmp_path,
-            checks=checks,
-            known_targets={"default"},
-            clock=FakeClock("2026-07-24T10:00:00Z"),
-        )
-    assert "JIRA_BASE_URL" in str(exc.value)
-    assert exc.value.field == "check"
+    triggers, repo = _compile_processes_with_repo(
+        tmp_path,
+        checks=checks,
+        known_targets={"default"},
+        clock=FakeClock("2026-07-22T10:00:00Z"),
+    )
+
+    assert triggers == []
+    assert [name for name, _ in repo.skipped] == ["jira-todo.json"]
+    assert "JIRA_BASE_URL" in repo.skipped[0][1]
 
 
 def test_process_check_factories_jira_issues_requires_a_known_repository(tmp_path):
@@ -3431,12 +3479,32 @@ def test_init_seeds_the_automerge_workflow_and_its_persona(tmp_path):
     assert not (tmp_path / "agents" / "merge.json").exists()
 
 
-def test_init_does_not_seed_an_automerge_process(tmp_path):
-    """Unlike autoheal, automerging is a posture the operator opts into — the
-    Process stays theirs to create, so a bare init merges nothing anywhere."""
+def test_init_seeds_a_working_automerge_process(tmp_path):
+    """The Process ships so automerge *runs* on every repo out of the box; what
+    withholds the merge is `dry_run` in the workflow binding, not the absence
+    of this file (see `_ensure_automerge_process`).
+
+    `dedup` must be `per-state`: `github-mergeable` emits one observation per
+    candidate PR, and the default `per-interval` would collapse them onto one
+    key and silently drop all but the first."""
     main(["init", "--root", str(tmp_path)])
 
-    assert not (tmp_path / "processes" / "automerge.json").exists()
+    process = json.loads((tmp_path / "processes" / "automerge.json").read_text())
+    assert process["action"]["check"] == "github-mergeable"
+    assert process["target"] == {"workflow": "automerge"}
+    assert process["dedup"] == "per-state"
+    # No per-repo params: the check iterates the whole repo registry.
+    assert set(process["action"]["params"]) <= {"head_prefix"}
+
+
+def test_a_seeded_automerge_process_never_clobbers_a_hand_edited_one(tmp_path):
+    main(["init", "--root", str(tmp_path)])
+    path = tmp_path / "processes" / "automerge.json"
+    path.write_text('{"mine": true}')
+
+    main(["init", "--root", str(tmp_path)])
+
+    assert json.loads(path.read_text()) == {"mine": True}
 
 
 def test_the_seeded_automerge_binding_ships_in_dry_run(tmp_path):
@@ -3510,3 +3578,62 @@ def test_the_merge_pr_finisher_works_without_a_github_token(monkeypatch, tmp_pat
         "merge", {"from_step": "merge-review"}, lambda: None
     )
     assert isinstance(behavior, MergePrBehavior)
+
+
+def test_a_credential_less_process_leaves_the_run_alive_and_warns(
+    monkeypatch, tmp_path, capsys
+):
+    """The whole point of `MissingCredential`: a seeded `github-mergeable`
+    process on a tokenless root must degrade, not kill the service.
+
+    Before this, one such file made `harness run` exit 2 — which would have
+    broken the documented promise that "no token is not fatal: GitHub
+    ingestion goes quiet and `harness submit` still works", and turned an
+    expired token or a launchd service that cannot reach the keychain into a
+    dead harness rather than a degraded one."""
+    main(["init", "--root", str(tmp_path)])
+    captured = {}
+
+    async def fake_serve(harness, port, poll_interval, source_interval=30.0,
+                         pr_poll_interval=0.0, reconcile_interval=300.0, registry=None):
+        captured["harness"] = harness
+
+    monkeypatch.setattr("harness.cli.serve", fake_serve)
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    capsys.readouterr()
+
+    assert main(["run", "--root", str(tmp_path)]) == 0
+
+    err = capsys.readouterr().err
+    assert "automerge.json is disabled for this run" in err
+    assert "GITHUB_TOKEN" in err
+    # Degraded, not dead: the rest of the harness is fully wired.
+    harness = captured["harness"]
+    assert "development" in harness.workflows
+    assert [name for name, _ in harness.skipped_processes] == ["automerge.json"]
+
+
+def test_a_genuinely_unknown_check_is_still_fatal(monkeypatch, tmp_path):
+    """The other half of the rule: only a *missing* value warns. A set-and-wrong
+    one (a typo'd action) must still fail the run outright."""
+    main(["init", "--root", str(tmp_path)])
+    (tmp_path / "processes" / "automerge.json").write_text(
+        json.dumps(
+            {
+                "trigger": {"interval": "5m"},
+                "action": {"check": "github-mergable", "params": {}},
+                "target": {"workflow": "automerge"},
+                "dedup": "per-state",
+                "sink": {"kind": "none"},
+            }
+        )
+    )
+
+    async def fake_serve(harness, port, poll_interval, source_interval=30.0,
+                         pr_poll_interval=0.0, reconcile_interval=300.0, registry=None):
+        pass
+
+    monkeypatch.setattr("harness.cli.serve", fake_serve)
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+
+    assert main(["run", "--root", str(tmp_path)]) == 2
