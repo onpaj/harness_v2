@@ -13,6 +13,7 @@ Spec: [docs/superpowers/specs/2026-07-27-self-heal-to-pipeline-design.md](../spe
 ## Global Constraints
 
 - **Ordering is load-bearing.** Task 5 (the label flip on the live root) must not be applied until Task 1's brake is running in the installed service. The routing change without the brake creates an unbounded issue→fix→failure→issue loop.
+- **The brake is not inert until Task 5 lands — it takes effect the moment the release installs.** Today's manual workflow (an operator relabelling a self-heal issue `harness:todo` by hand to route it into the pipeline) already produces a task whose body carries the marker, so from this release such a task failing is settled `heal-declined` instead of healed, with no config change required. This is strictly fail-safe (fewer autonomous actions, never more), so it is not a blocker to this plan's ordering — but it means the two halves are not "no effect / full effect," they are "narrower effect / broader effect."
 - **Commit straight into `main`.** This repo's convention (`CLAUDE.md` §Git conventions) — no branch, no PR, don't ask.
 - **Conventional commits are load-bearing.** `feat:` bumps the minor, `fix:` the patch, `docs:`/`chore:`/`test:` cut no release. A release is *required* for Task 5, so Task 1 must commit as `feat:`.
 - **Do not change the shipped default label** in `src/harness/cli.py`'s `heal.json` template (currently `"label": "harness:self-heal"`, around line 171). Auto-fixing is the operator's opt-in via their own root's workflow file, not a default every `harness init` inherits.
@@ -226,7 +227,7 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 - Modify: `CLAUDE.md` (invariant 25 in §Invariants; the `failed-tasks` bullet in §Gotchas)
 
 **Interfaces:**
-- Consumes: the note strings and helper name from Task 1 (`heal-declined`, `MARKER_PREFIX`, `_descends_from_a_heal_issue`).
+- Consumes: the note strings and helper name from Task 1 (`heal-declined`, `MARKER_PREFIX`, `_descends_from_a_harness_filed_issue`).
 - Produces: nothing code-facing. Documentation only.
 
 Invariant 25 currently asserts recursion "is guarded by a marker (`data.heal`), not by construction" — after Task 1 there are two guards and two markers, and after Task 5 the second one is what makes the design safe. Leaving it unamended leaves the file asserting something narrower than the code does.
@@ -450,7 +451,7 @@ Then confirm the *installed* code — not the dev checkout — actually carries 
 grep -c "heal-declined" ~/.local/share/uv/tools/harness/lib/python*/site-packages/harness/drivers/failed_tasks_check.py
 ```
 
-Expected: `1`. A `0` or "No such file" means the upgrade did not land; do not proceed to Step 4.
+Expected: `4` (one mention each in the module docstring's two guard descriptions, plus one in each of the two settle-note strings — the whole-branch review widened the brake to a third decline case, adding a second settle note and doc mentions). A `0` or "No such file" means the upgrade did not land; do not proceed to Step 4.
 
 - [ ] **Step 2: Mirror the retuned persona**
 
@@ -626,7 +627,7 @@ grep -o "heal-declined[^\"]*" ~/harness-root/healed/tsk_brake_probe.json
 gh issue list --repo onpaj/harness_v2 --state open --label harness:self-heal --json number --jq 'length'
 ```
 
-Expected: `failed/` is empty of the probe; `healed/tsk_brake_probe.json` exists and its last history entry contains `heal-declined: self-heal fix attempt failed (one-hop limit)`; and the issue count is **unchanged from `$BEFORE`**. A count that grew means the brake did not fire — stop and revert Task 5 Step 4 (label back to `harness:self-heal`) before investigating.
+Expected: `failed/` is empty of the probe; `healed/tsk_brake_probe.json` exists and its last history entry contains `heal-declined: fix attempt for a harness-filed issue failed (one-hop limit)`; and the issue count is **unchanged from `$BEFORE`**. A count that grew means the brake did not fire — stop and revert Task 5 Step 4 (label back to `harness:self-heal`) before investigating.
 
 - [ ] **Step 5b: Remove the probe**
 

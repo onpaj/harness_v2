@@ -81,10 +81,14 @@ This is configuration and persona data in the operator's root — no code change
 is needed for the routing half.
 
 Both the issue-filing repository and the ingestion scan already agree on
-`harness_v2`: `processes/autoheal.json`'s `action.params.repository` is read
-back by `cli._autoheal_repo` to wire the finisher, and `repos.json` registers
-`harness_v2` so `GithubIssuesCheck` scans it. No new configuration is needed for
-the two halves to meet.
+`harness_v2`: `app.build()` passes `processes/autoheal.json`'s
+`action.params.repository` to `FailedTasksCheck(repository=…)`
+(`app.py:776-778`), it rides out on `Observation.repository`,
+`ScheduledTrigger` stamps it onto the fired task (`drivers/scheduled_trigger.py:111`),
+and `OpenIssueBehavior` resolves it via `slug_for(task.repository)`
+(`behaviors/open_issue.py:81`) when it comes to file the issue. `repos.json`
+separately registers `harness_v2` so `GithubIssuesCheck` scans it. No new
+configuration is needed for the two halves to meet.
 
 ## 2. Provenance is the marker, not a label
 
