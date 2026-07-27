@@ -542,6 +542,8 @@ async def test_serve_passes_the_harness_issue_import_into_create_app(monkeypatch
             self.stage_output = StageOutputProjection()
             self.control = FakeTaskControl()
             self.process_checks = None
+            self.known_steps = frozenset()
+            self.workflows = {}
             self.issue_import = sentinel
 
         async def run(
@@ -1577,7 +1579,7 @@ def _process_args(**overrides):
     return argparse.Namespace(**base)
 
 
-def _compile_processes(tmp_path, *, checks, known_targets, clock):
+def _compile_processes(tmp_path, *, checks, known_workflows, clock, known_steps=None):
     """Test helper standing in for what `app.build()` now does internally
     (ADR-0018/architecture-02 §2.1): `_process_check_factories` only supplies
     the externally-dependent check factories, compilation itself happens
@@ -1591,7 +1593,8 @@ def _compile_processes(tmp_path, *, checks, known_targets, clock):
         checks={**BUILTIN_CHECKS, **checks},
         repository=None,
         worktree_root=str(tmp_path / "worktrees"),
-        known_targets=known_targets,
+        known_steps=known_steps,
+        known_workflows=known_workflows,
     )
 
 
@@ -1611,7 +1614,7 @@ def test_process_check_factories_builds_a_github_issues_process(tmp_path):
     sources = _compile_processes(
         tmp_path,
         checks=checks,
-        known_targets={"default"},
+        known_workflows={"default"},
         clock=FakeClock("2026-07-22T10:00:00Z"),
     )
 
@@ -1637,7 +1640,7 @@ def test_process_check_factories_github_issues_fails_fast_without_a_client(tmp_p
         _compile_processes(
             tmp_path,
             checks=checks,
-            known_targets={"default"},
+            known_workflows={"default"},
             clock=FakeClock("2026-07-22T10:00:00Z"),
         )
     assert "GITHUB_TOKEN" in str(exc.value)
@@ -1659,7 +1662,7 @@ def test_process_check_factories_builds_a_resolve_conflicts_process(tmp_path):
     sources = _compile_processes(
         tmp_path,
         checks=checks,
-        known_targets={"resolver"},
+        known_workflows={"resolver"},
         clock=FakeClock("2026-07-23T10:00:00Z"),
     )
 
@@ -1685,7 +1688,7 @@ def test_process_check_factories_github_conflicts_fails_fast_without_a_client(tm
         _compile_processes(
             tmp_path,
             checks=checks,
-            known_targets={"resolver"},
+            known_workflows={"resolver"},
             clock=FakeClock("2026-07-23T10:00:00Z"),
         )
     assert "GITHUB_TOKEN" in str(exc.value)
@@ -1718,7 +1721,7 @@ def test_process_check_factories_builds_a_jira_issues_process(tmp_path):
     sources = _compile_processes(
         tmp_path,
         checks=checks,
-        known_targets={"default"},
+        known_workflows={"default"},
         clock=FakeClock("2026-07-24T10:00:00Z"),
     )
 
@@ -1747,7 +1750,7 @@ def test_process_check_factories_jira_issues_fails_fast_without_a_client(tmp_pat
         _compile_processes(
             tmp_path,
             checks=checks,
-            known_targets={"default"},
+            known_workflows={"default"},
             clock=FakeClock("2026-07-24T10:00:00Z"),
         )
     assert "JIRA_BASE_URL" in str(exc.value)
@@ -1772,7 +1775,7 @@ def test_process_check_factories_jira_issues_requires_a_known_repository(tmp_pat
         _compile_processes(
             tmp_path,
             checks=checks,
-            known_targets={"default"},
+            known_workflows={"default"},
             clock=FakeClock("2026-07-24T10:00:00Z"),
         )
     assert exc.value.field == "params"
@@ -1795,7 +1798,7 @@ def test_process_check_factories_jira_issues_requires_jql_or_project(tmp_path):
         _compile_processes(
             tmp_path,
             checks=checks,
-            known_targets={"default"},
+            known_workflows={"default"},
             clock=FakeClock("2026-07-24T10:00:00Z"),
         )
     assert exc.value.field == "params"
@@ -2068,6 +2071,8 @@ async def test_serve_returns_when_uvicorn_stops_before_the_loop(monkeypatch, tmp
             self.stage_output = StageOutputProjection()
             self.control = FakeTaskControl()
             self.process_checks = None
+            self.known_steps = frozenset()
+            self.workflows = {}
             self.issue_import = NullIssueImport()
             self.stop_seen: asyncio.Event | None = None
 
@@ -2139,6 +2144,8 @@ async def test_serve_wires_the_filesystem_process_admin(monkeypatch, tmp_path):
                 **BUILTIN_CHECKS,
                 "github-issues": lambda params: AlwaysCheck(),
             }
+            self.known_steps = frozenset()
+            self.workflows = {}
             self.issue_import = NullIssueImport()
 
         async def run(
@@ -2191,6 +2198,8 @@ async def test_serve_wires_the_registry_into_the_filesystem_process_admin(
             self.stage_output = StageOutputProjection()
             self.control = FakeTaskControl()
             self.process_checks = None
+            self.known_steps = frozenset()
+            self.workflows = {}
             self.issue_import = NullIssueImport()
 
         async def run(
@@ -2207,6 +2216,71 @@ async def test_serve_wires_the_registry_into_the_filesystem_process_admin(
     admin = captured["process_admin"]
     assert isinstance(admin, FilesystemProcessAdmin)
     assert admin.repository_names() == ("harness_v2",)
+
+
+async def test_serve_wires_known_steps_and_workflows_into_the_process_admin(
+    monkeypatch, tmp_path
+):
+    """FR-4: `serve()` reaches `FilesystemProcessAdmin` with the harness's own
+    live `known_steps`/`workflows` — so a dashboard-authored process naming an
+    unreachable target is rejected at save time, closing the gap where
+    `write()` used to skip target validation entirely."""
+    from harness.drivers.fs_processes import FilesystemProcessAdmin
+    from harness.ports.process_admin import ProcessAdminValidationError, ProcessFields
+
+    captured = {}
+    real_create_app = __import__("harness.api.app", fromlist=["create_app"]).create_app
+
+    def capturing_create_app(**kwargs):
+        captured.update(kwargs)
+        return real_create_app(**kwargs)
+
+    class FakeUvicornServer:
+        def __init__(self, config):
+            pass
+
+        async def serve(self):
+            return
+
+    monkeypatch.setattr("harness.cli.create_app", capturing_create_app)
+    monkeypatch.setattr("harness.cli.uvicorn.Server", FakeUvicornServer)
+
+    class FakeHarness:
+        def __init__(self):
+            self.layout = HarnessLayout(tmp_path)
+            self.projection = BoardProjection(
+                SERVE_TEST_WORKFLOW.steps(), (SERVE_TEST_WORKFLOW,)
+            )
+            self.artifacts = MemoryArtifactStore()
+            self.stage_output = StageOutputProjection()
+            self.control = FakeTaskControl()
+            self.process_checks = None
+            self.known_steps = frozenset({"plan", "review"})
+            self.workflows = {"resolver": SERVE_TEST_WORKFLOW}
+            self.issue_import = NullIssueImport()
+
+        async def run(
+            self, poll_interval, source_interval=30.0, pr_poll_interval=0.0, reconcile_interval=300.0, stop=None
+        ):
+            while not stop.is_set():
+                await asyncio.sleep(0.01)
+
+    await asyncio.wait_for(serve(FakeHarness(), 8000, 0.01), timeout=2.0)
+
+    admin = captured["process_admin"]
+    assert isinstance(admin, FilesystemProcessAdmin)
+
+    with pytest.raises(ProcessAdminValidationError) as excinfo:
+        admin.write(
+            "bad",
+            ProcessFields(
+                interval="1h",
+                check="always",
+                target_kind="step",
+                target="resolver",
+            ),
+        )
+    assert "target" in excinfo.value.errors
 
 
 # --- harness service -------------------------------------------------------

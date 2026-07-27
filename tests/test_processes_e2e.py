@@ -240,7 +240,7 @@ def test_github_issues_observation_repository_beats_the_process_default(tmp_path
     try:
         checks = _process_check_factories(args, registry, client=client)
         (source,) = FilesystemProcessRepository(tmp_path / "processes").build(
-            clock=clock, checks=checks, known_targets={"default"}
+            clock=clock, checks=checks, known_workflows={"default"}
         )
 
         (task,) = source.poll()
@@ -310,7 +310,7 @@ def test_github_issues_process_ingests_a_labelled_issue_once_per_bucket(tmp_path
         # does internally.
         checks = _process_check_factories(args, registry, client=client)
         (source,) = FilesystemProcessRepository(tmp_path / "processes").build(
-            clock=clock, checks=checks, known_targets={"default"}
+            clock=clock, checks=checks, known_workflows={"default"}
         )
 
         first = source.poll()
@@ -468,7 +468,7 @@ def _build_autoresolver_sources(tmp_path: Path, client, registry, slug_of, clock
     return FilesystemProcessRepository(tmp_path / "processes").build(
         clock=clock,
         checks={**BUILTIN_CHECKS, "github-conflicts": github_conflicts_factory},
-        known_targets={"default", "resolver"},
+        known_workflows={"default", "resolver"},
     )
 
 

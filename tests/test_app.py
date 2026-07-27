@@ -94,6 +94,17 @@ def test_build_creates_one_queue_per_step(tmp_path):
     assert not (tmp_path / "queues" / "end").exists()
 
 
+def test_harness_known_steps_matches_the_live_step_queues(tmp_path):
+    """`Harness.known_steps` is derived from `_step_queues`, not a second
+    stored copy — it must always equal exactly the steps that have a live
+    dispatch queue, the same set `Dispatcher.tick` routes into."""
+    seed(tmp_path)
+
+    harness = build(tmp_path, "default", events=MemoryEventSink())
+
+    assert harness.known_steps == {"plan", "review"}
+
+
 def test_build_gives_every_discovered_workflow_a_board_tab(tmp_path):
     layout = seed(tmp_path)
     (layout.workflows / "hotfix.json").write_text(
@@ -965,12 +976,12 @@ def _write_process(tmp_path, name, body):
 
 
 def test_build_compiles_processes_root_targeting_a_served_workflow_by_name(tmp_path):
-    """architecture-02 §2.2's fix, made explicit and readable: `known_targets`
-    passed to `FilesystemProcessRepository.build()` must include served
-    *workflow* names, not just step names — a `{"workflow": "default"}`
-    target names the workflow itself, which is not one of DEFINITION's own
-    step names (plan/development/review/land). Before the fix this process
-    would fail `ProcessValidationError` at every `build()` call."""
+    """architecture-02 §2.2's fix, made explicit and readable: `known_workflows`
+    passed to `FilesystemProcessRepository.build()` must be the served
+    *workflow* name set — a `{"workflow": "default"}` target names the
+    workflow itself, which is not one of DEFINITION's own step names
+    (plan/development/review/land). Before the fix this process would fail
+    `ProcessValidationError` at every `build()` call."""
     seed_definition(tmp_path, DEFINITION)
     _write_process(
         tmp_path,
@@ -989,6 +1000,30 @@ def test_build_compiles_processes_root_targeting_a_served_workflow_by_name(tmp_p
         getattr(poller, "_source", None) is not None for poller in harness.pollers
     )
     assert len(harness.pollers) == 1
+
+
+def test_build_rejects_a_step_target_naming_a_served_workflow_name(tmp_path):
+    """The bug this change fixes, reproduced at the `build()` boundary: a
+    `{"step": "default"}` target where "default" is a served workflow's
+    *name*, not a queued step, used to pass the old merged `known_targets`
+    check and only fail later at dispatch (`step 'default' has no queue`).
+    It must now fail fast at `build()`, before any task is ever produced."""
+    from harness.drivers.fs_processes import ProcessValidationError
+
+    seed_definition(tmp_path, DEFINITION)
+    _write_process(
+        tmp_path,
+        "nightly",
+        {
+            "trigger": {"interval": "1h"},
+            "action": {"check": "always"},
+            "target": {"step": "default"},
+            "sink": {"kind": "none"},
+        },
+    )
+
+    with pytest.raises(ProcessValidationError):
+        build(tmp_path, "default", events=MemoryEventSink())
 
 
 def test_build_processes_root_defaults_to_layout_processes(tmp_path):
@@ -1115,7 +1150,8 @@ def test_build_processes_root_parameter_points_at_a_different_directory(tmp_path
 def test_build_repository_registry_validates_the_process_repository_field(tmp_path):
     """`repository_registry=` computes `known_repositories` for the internal
     `FilesystemProcessRepository.build()` call — a process naming a repository
-    outside the registry fails fast, matching `known_targets`'s shape."""
+    outside the registry fails fast, matching `known_steps`/`known_workflows`'s
+    shape."""
     from pathlib import Path
 
     from harness.drivers.fs_processes import ProcessValidationError

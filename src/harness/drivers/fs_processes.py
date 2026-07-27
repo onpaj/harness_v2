@@ -124,7 +124,8 @@ def compile_process(
     checks: dict[str, CheckFactory] = BUILTIN_CHECKS,
     repository: str | None = None,
     worktree_root: str | None = None,
-    known_targets: set[str] | None = None,
+    known_steps: set[str] | None = None,
+    known_workflows: set[str] | None = None,
     known_repositories: set[str] | None = None,
     where: str | None = None,
 ) -> ScheduledTrigger:
@@ -135,6 +136,17 @@ def compile_process(
     (defaults to `name`) is the label used in messages. Each failure raises
     `ProcessValidationError(msg, field=...)` with `field` one of
     ``interval|cron|check|params|target|dedup|sink|trigger|repository``.
+
+    `known_steps` and `known_workflows` are two independent namespaces, not
+    one merged set: `known_steps` is exactly the set `step_queues` is keyed
+    by (served workflow steps ∪ catalog agent names) — the only names a
+    `{"step": ...}` target can actually be dispatched into. `known_workflows`
+    is the served-workflow *name* set — the only names a `{"workflow": ...}`
+    target can resolve. A name that is a workflow's name but not a step (or
+    vice versa) must be rejected, not accepted because it happens to appear
+    in the other namespace (see `_parse_target`). Each is an independent
+    `None`-means-skip-this-half escape hatch, matching every other `known_*`
+    parameter in this module.
 
     `repository` is a fallback default (the caller's own wiring-time value,
     e.g. a global `--repository`); the file's own `"repository"` key, when
@@ -148,7 +160,7 @@ def compile_process(
     interval, cron = _parse_cadence(where, raw.get("trigger"))
     _check_trigger_kind(where, raw.get("trigger"))
     check = _parse_action(where, raw.get("action"), checks)
-    workflow, step = _parse_target(where, raw.get("target"), known_targets)
+    workflow, step = _parse_target(where, raw.get("target"), known_steps, known_workflows)
     dedup = _parse_dedup(where, raw.get("dedup", "per-interval"))
     sink = _parse_sink(where, raw.get("sink"))
     file_repository = _parse_repository(where, raw.get("repository"), known_repositories)
@@ -225,7 +237,8 @@ def _parse_action(where: str, action: object, checks: dict[str, CheckFactory]):
 def _parse_target(
     where: str,
     target: object,
-    known_targets: set[str] | None,
+    known_steps: set[str] | None,
+    known_workflows: set[str] | None,
 ) -> tuple[str | None, str | None]:
     if not isinstance(target, dict) or set(target) not in ({"workflow"}, {"step"}):
         raise ProcessValidationError(
@@ -236,13 +249,20 @@ def _parse_target(
 
     workflow = target.get("workflow")
     step = target.get("step")
-    value = workflow if workflow is not None else step
-    if known_targets is not None and value not in known_targets:
-        raise ProcessValidationError(
-            f"process {where} targets {value!r}, which is not a known "
-            f"workflow or step",
-            field="target",
-        )
+    if workflow is not None:
+        if known_workflows is not None and workflow not in known_workflows:
+            raise ProcessValidationError(
+                f"process {where} targets workflow {workflow!r}, which is "
+                f"not a served workflow",
+                field="target",
+            )
+    else:
+        if known_steps is not None and step not in known_steps:
+            raise ProcessValidationError(
+                f"process {where} targets step {step!r}, which has no "
+                f"dispatch queue",
+                field="target",
+            )
     return workflow, step
 
 
@@ -323,7 +343,8 @@ class FilesystemProcessRepository:
         checks: dict[str, CheckFactory] = BUILTIN_CHECKS,
         repository: str | None = None,
         worktree_root: str | None = None,
-        known_targets: set[str] | None = None,
+        known_steps: set[str] | None = None,
+        known_workflows: set[str] | None = None,
         known_repositories: set[str] | None = None,
         default_github_issues_label: str = "harness:todo",
     ) -> list[ScheduledTrigger]:
@@ -340,7 +361,8 @@ class FilesystemProcessRepository:
                     checks=checks,
                     repository=repository,
                     worktree_root=worktree_root,
-                    known_targets=known_targets,
+                    known_steps=known_steps,
+                    known_workflows=known_workflows,
                     known_repositories=known_repositories,
                 )
             )
@@ -387,7 +409,8 @@ class FilesystemProcessRepository:
         checks: dict[str, CheckFactory],
         repository: str | None,
         worktree_root: str | None,
-        known_targets: set[str] | None,
+        known_steps: set[str] | None,
+        known_workflows: set[str] | None,
         known_repositories: set[str] | None,
     ) -> ScheduledTrigger:
         try:
@@ -411,7 +434,8 @@ class FilesystemProcessRepository:
             checks=checks,
             repository=repository,
             worktree_root=worktree_root,
-            known_targets=known_targets,
+            known_steps=known_steps,
+            known_workflows=known_workflows,
             known_repositories=known_repositories,
             where=path.name,
         )
@@ -435,10 +459,21 @@ class FilesystemProcessAdmin(ProcessAdmin):
 
     `registry` is the same `RepositoryRegistry` (`repos.json`) the real run
     resolves repository names with — machine-local, static config, available
-    at both compile sites (unlike the served-workflow set `known_targets`
-    depends on). `None` means no registry was wired: `repository_names()`
-    returns `()` and `write()` validates any repository name leniently
-    (matching every other `known_*=None` escape hatch)."""
+    at both compile sites. `None` means no registry was wired:
+    `repository_names()` returns `()` and `write()` validates any repository
+    name leniently (matching every other `known_*=None` escape hatch).
+
+    `known_steps`/`known_workflows` are the same two target-validation sets
+    `FilesystemProcessRepository.build()` validates against at startup — the
+    live `harness.known_steps`/`harness.workflows` `serve()` already holds
+    once the harness is built. Threading them in here closes the gap that
+    used to leave `write()` validating a submission's target with no
+    reachability check at all: before this, a dashboard-authored process
+    naming an unreachable target (or a served workflow's name mistaken for a
+    step, and vice versa) was written to disk unchecked, to fail only later
+    at dispatch. `None` (the default) means no live snapshot was supplied and
+    `write()` skips target-reachability validation, matching every other
+    `known_*=None` escape hatch in this module."""
 
     def __init__(
         self,
@@ -446,11 +481,15 @@ class FilesystemProcessAdmin(ProcessAdmin):
         *,
         checks: dict[str, CheckFactory] | None = None,
         registry: RepositoryRegistry | None = None,
+        known_steps: set[str] | None = None,
+        known_workflows: set[str] | None = None,
     ) -> None:
         self._root = Path(root)
         self._root.mkdir(parents=True, exist_ok=True)
         self._checks = checks if checks is not None else BUILTIN_CHECKS
         self._registry = registry
+        self._known_steps = known_steps
+        self._known_workflows = known_workflows
 
     def list(self) -> tuple[str, ...]:
         return tuple(
@@ -494,7 +533,8 @@ class FilesystemProcessAdmin(ProcessAdmin):
                 raw,
                 clock=_LocalClock(),
                 checks=self._checks,
-                known_targets=None,
+                known_steps=self._known_steps,
+                known_workflows=self._known_workflows,
                 known_repositories=known_repositories,
             )
         except ProcessValidationError as error:
