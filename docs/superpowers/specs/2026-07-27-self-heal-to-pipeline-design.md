@@ -47,18 +47,38 @@ so the spec pairs the routing change with a hard one-hop brake.
 }
 ```
 
-The `label` becomes `harness:todo`. That is the entire routing change, and it is
-configuration in the operator's root (`~/harness-root/workflows/heal.json`), not
-code.
+**The binding's `label` may not simply be flipped to `harness:todo`.** That
+field is not only the label the issue carries — it is also the scope of the
+idempotency search: `OpenIssueBehavior` passes `scope_label=self._label`
+(`behaviors/open_issue.py`), and `GithubIssueTracker.open_issue` searches the
+open issues carrying `scope_label` for the marker before creating. The
+ingesting process *removes* `harness:todo` when it claims (swapping it for
+`harness:queued`), so a flipped `label` would put the idempotency scope on a
+label that disappears seconds later — and a re-run of `file-issue` after the
+claim would find nothing and open a **duplicate** issue.
 
-The resulting issue carries **both** labels: `GithubIssueTracker.open_issue`
-appends `SELF_HEAL_LABEL` to whatever the binding passes, because its
-idempotency search is scoped to that label
-(`drivers/github_issues.py`, `drivers/github_client.py::search_issue_by_marker`).
-Within 30s, `processes/harness-todo.json`'s `github-issues` Check claims the
-issue by swapping `harness:todo` → `harness:queued` and fires it into
-`development`. The swap does not touch `harness:self-heal`, so marker
-idempotency keeps working while the fix is in flight.
+The routing therefore rides on a second label instead, leaving the scope
+untouched:
+
+```json
+"file-issue": {
+  "kind": "open-issue",
+  "from_step": "heal",
+  "label": "harness:self-heal",
+  "allowed_labels": ["harness:todo"]
+}
+```
+
+`allowed_labels` is the allowlist a draft's own labels are filtered against
+(`behaviors/open_issue.py`, wired from the binding config at `cli.py`), so the
+`heal` persona adds `"labels": ["harness:todo"]` to its draft and the behavior
+lets it through. The issue is then born carrying `harness:self-heal` (stable,
+the idempotency scope) **and** `harness:todo` (the routing label, consumed on
+claim). Within 30s, `processes/harness-todo.json` claims it and fires it into
+`development`.
+
+This is configuration and persona data in the operator's root — no code change
+is needed for the routing half.
 
 Both the issue-filing repository and the ingestion scan already agree on
 `harness_v2`: `processes/autoheal.json`'s `action.params.repository` is read
@@ -68,18 +88,25 @@ the two halves to meet.
 
 ## 2. Provenance is the marker, not a label
 
-`open_issue` embeds `<!-- harness-heal:<failed-task-id> -->` in the issue body,
-and `GithubIssuesCheck` ingests the body verbatim into `task.data["body"]`.
-So a fix task carries, unmodified and without any new plumbing, the identity of
-the failure that spawned it.
+`open_issue` embeds `<!-- harness-issue:<marker> -->` in every issue body it
+opens, and `GithubIssuesCheck` ingests the body verbatim into
+`task.data["body"]` (it stamps `title`, `body` and `source` — never labels). So
+a task born from a harness-filed issue carries that provenance with no new
+plumbing.
 
-This is the mechanism the brake in §3 keys on. `harness:self-heal` is retained
-because it arrives for free, and its **only** reader is the pre-existing
-idempotency search, which uses it as a cheap index in place of GitHub's Search
-API. Nothing this spec adds reads it: the routing in §1 keys on `harness:todo`,
-the brake in §3 keys on the marker. It is otherwise legibility for the operator
-browsing GitHub, and it can be removed later — the cost of removal is re-keying
-`search_issue_by_marker` off the marker alone, nothing more.
+The marker prefix is **`harness-issue:`, not `harness-heal:`** — it was
+deliberately generalised when `open-issue` became a generic finisher
+(`docs/superpowers/plans/2026-07-25-generic-open-issue-finisher.md`), because
+the healer is no longer its only consumer. A brake matching the old spelling
+would never fire: a silent no-op, and the exact failure this design exists to
+prevent.
+
+That generality is a property of the brake, not a defect in it. See §3.
+
+`harness:self-heal` is genuinely load-bearing here — as the idempotency
+*scope*, not as provenance. It cannot be dropped without re-keying
+`search_issue_by_marker`, and §1 depends on it staying put precisely because it
+is the one label the ingestion process does not remove.
 
 ## 3. The one-hop brake
 
@@ -97,10 +124,19 @@ verify → review` run. Nothing terminates it, because the operator — today's
 terminator — has been removed from the loop.
 
 **The brake:** `FailedTasksCheck` also declines a failed task whose
-`data["body"]` carries a `harness-heal:` marker. Such a task is a self-heal fix
-attempt that failed. It is settled to `healed/` in the same `evaluate()` call
-with a distinct note — `heal-declined: self-heal fix attempt failed (one-hop
-limit)` — and yields no `Observation`.
+`data["body"]` carries a `harness-issue:` marker. It is settled to `healed/` in
+the same `evaluate()` call with a distinct note — `heal-declined: fix attempt
+for a harness-filed issue failed (one-hop limit)` — and yields no
+`Observation`.
+
+**The rule this states is broader than self-heal, deliberately.** Because the
+marker is generic, the brake reads as *the harness does not heal a failure of
+work it filed for itself* — which also covers the other `open-issue` consumers
+(the rotating architecture review filing on `Anela.Heblo`). That is the right
+scope: every one of those paths has the same runaway shape, where the harness's
+own output becomes its own input. Narrowing the brake to self-heal alone would
+require stamping issue labels at ingestion — new plumbing bought to make the
+guard *weaker*.
 
 Consequences, stated plainly:
 
@@ -113,12 +149,12 @@ Consequences, stated plainly:
 - The note is deliberately distinct from the existing `heal-failed` note, so the
   two decline reasons are separable when reading the board or grepping events.
 
-Detecting the marker should reuse the marker's own construction rather than a
-loose substring on `harness-heal:` — `drivers/github_issues.py::marker_comment`
-already renders it, and driver-to-driver imports are permitted
-(`github_issues_check.py` already imports sibling drivers). The exact seam is an
-implementation choice for the plan; the requirement is that the check does not
-re-derive the marker's spelling independently.
+Detecting the marker must reuse the marker's own construction rather than a
+loose substring literal — `drivers/github_issues.py::marker_comment` already
+renders it, and driver-to-driver imports are permitted
+(`github_issues_check.py` already imports sibling drivers). The spelling having
+already changed once, silently, under a design that assumed it stable is the
+whole argument: the check must not carry its own copy of the literal.
 
 ### Invariant 25 must be amended
 
@@ -138,6 +174,10 @@ criteria.
 
 Required prompt changes, in `agents/heal.json`:
 
+- The draft must carry `"labels": ["harness:todo"]`. This is what routes the
+  issue into the pipeline (§1) — the binding's `allowed_labels` permits it, and
+  without it the issue is filed but never ingested. It is the one change the
+  whole design fails silently without.
 - The drafted body must read as a **work order**: symptom, how to reproduce,
   the concrete proposed change, and acceptance criteria — the shape `plan`
   consumes. The current prompt asks for a diagnosis "then a concrete proposed
@@ -169,7 +209,7 @@ raises), then assert: exactly one issue appears carrying both `harness:todo` and
 **§3 needs unit coverage** in `tests/`, alongside the existing
 `FailedTasksCheck` recursion-guard tests:
 
-- A failed task whose `data["body"]` carries a `harness-heal:` marker yields no
+- A failed task whose `data["body"]` carries a `harness-issue:` marker yields no
   `Observation`, lands in `healed/`, and records the one-hop note.
 - A failed task with an unmarked body still yields exactly one `Observation`
   (the brake does not over-trigger on ordinary GitHub-issue tasks).
@@ -216,7 +256,18 @@ advisable.
 
 | Change | Where | Kind |
 |---|---|---|
-| `file-issue` label → `harness:todo` | `~/harness-root/workflows/heal.json` | operator config |
-| One-hop brake on the body marker | `src/harness/drivers/failed_tasks_check.py` | code + tests |
+| `allowed_labels: ["harness:todo"]` on the `file-issue` binding | `~/harness-root/workflows/heal.json` | operator config |
+| Draft emits `labels: ["harness:todo"]` | `~/harness-root/agents/heal.json` + the template in `src/harness/cli.py` | persona data + code |
+| One-hop brake on the `harness-issue:` marker | `src/harness/drivers/failed_tasks_check.py` | code + tests |
 | Invariant 25 wording | `CLAUDE.md` | docs |
-| Work-order prompt, operational flagging | `~/harness-root/agents/heal.json`, and the shipped template in `src/harness/cli.py` | persona data + code |
+| Work-order prompt, operational flagging | same persona files as above | persona data + code |
+
+## Correction note (2026-07-27)
+
+The first draft of this spec was researched against `~/harness-app`, a worktree
+base that had drifted behind `main`. Three claims were wrong and are corrected
+above: the marker prefix (`harness-issue:`, not `harness-heal:`), the effect of
+flipping the binding's `label` (it moves the idempotency scope onto a label the
+ingester deletes), and the belief that `harness:self-heal` is force-appended
+independent of config (it is the scope label, supplied by config). Research the
+tree you are going to change.

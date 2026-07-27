@@ -4,7 +4,7 @@
 
 **Goal:** Let a harness failure become a proposed fix with no human in the middle, by filing the healer's issue into the pipeline's own ingestion label and bounding the resulting loop to one hop.
 
-**Architecture:** Two halves that must land in a specific order. The *code* half adds a second recursion guard to `FailedTasksCheck`: a failed task whose `data["body"]` carries the healer's `<!-- harness-heal:… -->` marker is a self-heal fix attempt that failed, and is settled to `healed/` without producing a new `Observation`. The *config* half, applied to the operator's live root afterwards, flips the `file-issue` finisher's label from `harness:self-heal` to `harness:todo` so the existing `harness-todo` process ingests the issue. Landing the config half first is a regression against invariant 25 — see Global Constraints.
+**Architecture:** Two halves that must land in a specific order. The *code* half adds a second recursion guard to `FailedTasksCheck`: a failed task whose `data["body"]` carries the `<!-- harness-issue:… -->` marker is a fix attempt for an issue the harness itself filed, and is settled to `healed/` without producing a new `Observation`. The *config* half, applied to the operator's live root afterwards, adds `allowed_labels: ["harness:todo"]` to the `file-issue` binding and has the `heal` persona emit that label on its draft, so the existing `harness-todo` process ingests the filed issue. The binding's `label` stays `harness:self-heal` — it is the idempotency search scope, and the ingester deletes `harness:todo` on claim. Landing the config half first is a regression against invariant 25 — see Global Constraints.
 
 **Tech Stack:** Python 3, pytest, hexagonal ports/drivers layout (`src/harness/{ports,drivers,behaviors}`), python-semantic-release on push to `main`, launchd service `com.harness`.
 
@@ -42,7 +42,7 @@ Spec: [docs/superpowers/specs/2026-07-27-self-heal-to-pipeline-design.md](../spe
 
 **Interfaces:**
 - Consumes: `MemoryTaskQueue`, `MemoryEventSink`, `FakeClock` from `harness.drivers.memory`; the existing `failed_task(...)` and `make_check(...)` helpers at the top of `tests/test_failed_tasks_check.py`.
-- Produces: `harness.drivers.github_issues.MARKER_PREFIX: str` (the literal `"<!-- harness-heal:"`), and a settle note containing the substring `heal-declined` on any failed task whose `data["body"]` carries that prefix.
+- Produces: `harness.drivers.github_issues.MARKER_PREFIX: str` (the literal `"<!-- harness-issue:"`, extracted from the existing `marker_comment`), and a settle note containing the substring `heal-declined` on any failed task whose `data["body"]` carries that prefix.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -65,7 +65,7 @@ def test_one_hop_brake_declines_a_failed_self_heal_fix():
             "tsk_fix_1",
             data={
                 "request": "Fix the driver contract",
-                "body": "## Symptom\nboom\n\n<!-- harness-heal:tsk_boom -->\n",
+                "body": "## Symptom\nboom\n\n<!-- harness-issue:tsk_boom:ab12cd34 -->\n",
             },
         )
     )
@@ -103,7 +103,7 @@ def test_the_two_recursion_guards_record_distinct_notes():
     healed = MemoryTaskQueue("healed")
     failed.put(failed_task("tsk_heal_1", data={"heal": {"of": "tsk_boom"}}))
     failed.put(
-        failed_task("tsk_fix_1", data={"body": "<!-- harness-heal:tsk_boom -->"})
+        failed_task("tsk_fix_1", data={"body": "<!-- harness-issue:tsk_boom:ab12cd34 -->"})
     )
     check = make_check(failed=failed, healed=healed)
 
@@ -125,16 +125,20 @@ Expected: FAIL — `ImportError: cannot import name 'MARKER_PREFIX'` on the firs
 In `src/harness/drivers/github_issues.py`, replace the existing `marker_comment` definition (lines 18-20):
 
 ```python
-MARKER_PREFIX = "<!-- harness-heal:"
-"""The opening of the hidden idempotency marker. Exported so the self-heal
-one-hop brake (`failed_tasks_check`) can recognise *any* marker without
-re-deriving its spelling — one source for the literal, two readers."""
+MARKER_PREFIX = "<!-- harness-issue:"
+"""The opening of the hidden idempotency marker. Exported so the one-hop brake
+(`failed_tasks_check`) can recognise *any* marker without re-deriving its
+spelling — one source for the literal, two readers. The spelling has already
+changed once (it was `harness-heal:` before `open-issue` became generic); a
+second copy of it elsewhere would have silently disarmed the brake."""
 
 
 def marker_comment(marker: str) -> str:
     """The hidden idempotency marker embedded in an opened issue's body."""
     return f"{MARKER_PREFIX}{marker} -->"
 ```
+
+Verify nothing else pinned the old literal: `grep -rn "harness-heal" src/ tests/` should return no hits after this edit.
 
 - [ ] **Step 4: Add the brake**
 
@@ -152,13 +156,15 @@ In `evaluate()`, insert a second guard immediately after the existing `data.heal
                 # failed. Settle it, never re-observe it — the recursion guard.
                 self._settle(task, "heal-failed: the heal attempt itself failed")
                 continue
-            if _descends_from_a_heal_issue(task):
-                # A fix task born from a healer-filed issue, which then failed.
-                # Healing it again would file a fresh issue and feed the
-                # pipeline its own output — the one-hop limit (invariant 25).
+            if _descends_from_a_harness_filed_issue(task):
+                # A fix task born from an issue the harness itself filed, which
+                # then failed. Healing it again would file a fresh issue and
+                # feed the pipeline its own output — the one-hop limit
+                # (invariant 25).
                 self._settle(
                     task,
-                    "heal-declined: self-heal fix attempt failed (one-hop limit)",
+                    "heal-declined: fix attempt for a harness-filed issue "
+                    "failed (one-hop limit)",
                 )
                 continue
             self._settle(task, "queued for healing")
@@ -168,15 +174,20 @@ In `evaluate()`, insert a second guard immediately after the existing `data.heal
 Add the helper at module level, next to the other `_`-prefixed helpers at the bottom of the file:
 
 ```python
-def _descends_from_a_heal_issue(task: Task) -> bool:
-    """True when this failed task is a self-heal *fix* attempt.
+def _descends_from_a_harness_filed_issue(task: Task) -> bool:
+    """True when this failed task is a fix attempt for an issue the harness
+    itself filed.
 
-    The healer embeds `<!-- harness-heal:<failed-task-id> -->` in every issue
+    `OpenIssueBehavior` embeds `<!-- harness-issue:<marker> -->` in every issue
     body it opens, and `GithubIssuesCheck` ingests that body verbatim into
     `data["body"]` — so the marker is provenance that survives the round trip
-    through GitHub with no extra plumbing. A failed task carrying it descends
-    from a healer-filed issue, and healing it would start the second cycle
-    `data.heal` does not cover.
+    through GitHub with no extra plumbing.
+
+    The marker is deliberately generic: it covers the healer and every other
+    `open-issue` consumer. That breadth is the point — the rule is that the
+    harness does not heal a failure of work it filed for itself, which is the
+    same runaway shape wherever it appears, and it is the cycle `data.heal`
+    does not cover.
     """
     body = task.data.get("body")
     return isinstance(body, str) and MARKER_PREFIX in body
@@ -226,16 +237,19 @@ In `CLAUDE.md`, find invariant 25 (begins "**The check produces at most one fres
 
 ```markdown
 **Two markers guard two distinct cycles.** `data.heal` stops a failed *heal*
-task from being healed. Once the healer files into an ingested label
-(`harness:todo`) rather than one only a human reads, a *fix* task born from a
-heal-filed issue can also fail — and it carries no `data.heal` — so the check
-additionally declines any failed task whose `data["body"]` holds the healer's
-`<!-- harness-heal:… -->` marker (`MARKER_PREFIX`, exported from
-`drivers/github_issues.py` so the literal has one source and two readers). It
-settles to `healed/` with a distinct `heal-declined` note and yields no
-`Observation`, bounding the healer to **one** automated fix attempt per root
-failure; a failed fix waits for the operator. Both guards settle rather than
-skip, so `failed/` still drains monotonically.
+task from being healed. Once a filed issue also carries an ingested label
+(`harness:todo`) rather than only one a human reads, a *fix* task born from
+that issue can fail too — and it carries no `data.heal` — so the check
+additionally declines any failed task whose `data["body"]` holds the
+`<!-- harness-issue:… -->` marker (`MARKER_PREFIX`, exported from
+`drivers/github_issues.py` so the literal has one source and two readers; its
+spelling has already changed once). It settles to `healed/` with a distinct
+`heal-declined` note and yields no `Observation`. The rule is deliberately
+broader than self-heal: **the harness does not heal a failure of work it filed
+for itself**, which covers every `open-issue` consumer, not just the healer.
+One automated fix attempt per root failure; a failed fix waits for the
+operator. Both guards settle rather than skip, so `failed/` still drains
+monotonically.
 ```
 
 - [ ] **Step 2: Extend the gotcha**
@@ -244,10 +258,10 @@ In `CLAUDE.md` §Gotchas, find the bullet beginning "**The `failed-tasks` check 
 
 ```markdown
 A *second* marker guards the second cycle: a failed task whose `data["body"]`
-carries `<!-- harness-heal:… -->` is a self-heal fix attempt that failed, and is
-settled with a `heal-declined` note instead of being healed again. So a
-`heal-declined` in `healed/` means "the automated fix didn't work, it's yours
-now" — not an error.
+carries `<!-- harness-issue:… -->` is a fix attempt for an issue the harness
+itself filed, and is settled with a `heal-declined` note instead of being healed
+again. So a `heal-declined` in `healed/` means "the automated fix didn't work,
+it's yours now" — not an error.
 ```
 
 - [ ] **Step 3: Verify no code changed**
@@ -289,8 +303,16 @@ In `src/harness/cli.py`, inside `_HEALER_PERSONA`, replace this fragment:
 with:
 
 ```python
-    '[{"title": "<concise title>", "body": "<the work order — see below>"}]\n'
+    '[{"title": "<concise title>", "labels": ["harness:todo"], '
+    '"body": "<the work order — see below>"}]\n'
 ```
+
+The `labels` entry is what routes the issue into the development pipeline: the
+`file-issue` binding's `allowed_labels` permits exactly `harness:todo`, and
+without it the issue is filed but never ingested — the design's one silent
+failure mode. Verify against the current fragment before editing; if the shipped
+string already differs from what is quoted here, report DONE_WITH_CONCERNS
+rather than forcing a match.
 
 - [ ] **Step 2: Add the work-order specification**
 
@@ -325,7 +347,8 @@ from harness.cli import _HEALER_PERSONA as p
 print(p)
 print('---')
 for needed in ('Symptom', 'Reproduction', 'Proposed change', 'Acceptance criteria',
-               'diagnostically rather than prescriptively', 'never open one'):
+               'harness:todo', 'diagnostically rather than prescriptively',
+               'never open one'):
     assert needed in p, needed
 print('all sections present')
 "
@@ -460,12 +483,17 @@ print('ok:', spec.model, spec.allowed_tools)
 
 Expected: `ok: opus ['Read', 'Write']`. A load error here means the JSON write broke the file — restore it from `~/nanoclaw-backup` or re-run Step 2 before continuing.
 
-- [ ] **Step 4: Flip the label**
+- [ ] **Step 4: Allow the routing label**
 
-Edit `~/harness-root/workflows/heal.json`, in `finishers.file-issue`:
+Edit `~/harness-root/workflows/heal.json`, in `finishers.file-issue`. **Leave `label` as `harness:self-heal`** — it is the idempotency search scope, and the ingesting process deletes `harness:todo` on claim, so scoping to it would break duplicate suppression. Add one key:
 
 ```json
-      "label": "harness:todo"
+    "file-issue": {
+      "kind": "open-issue",
+      "from_step": "heal",
+      "label": "harness:self-heal",
+      "allowed_labels": ["harness:todo"]
+    }
 ```
 
 - [ ] **Step 5: Verify the workflow still compiles**
@@ -476,11 +504,15 @@ from harness.drivers.fs_workflows import FilesystemWorkflowRepository
 import pathlib
 repo = FilesystemWorkflowRepository(pathlib.Path.home() / 'harness-root/workflows')
 wf = repo.get('heal')
-print('finisher:', wf.finishers['file-issue'])
+b = wf.finishers['file-issue']
+print('binding:', b)
+assert b.config.get('label') == 'harness:self-heal', b.config
+assert 'harness:todo' in b.config.get('allowed_labels', ()), b.config
+print('ok')
 "
 ```
 
-Expected: the binding prints with `label` `harness:todo`. A raise here means the file is malformed — fix before restarting, since a bad workflow file crash-loops the service.
+Expected: the binding prints, then `ok`. A raise here means the file is malformed — fix before restarting, since a bad workflow file crash-loops the service.
 
 - [ ] **Step 6: Restart the service**
 
@@ -573,7 +605,7 @@ task = {
     "created": "2026-07-27T00:00:00Z",
     "data": {
         "title": "synthetic: brake probe",
-        "body": "## Symptom\nsynthetic\n\n<!-- harness-heal:tsk_synthetic -->\n",
+        "body": "## Symptom\nsynthetic\n\n<!-- harness-issue:tsk_synthetic:ab12cd34 -->\n",
     },
     "history": [
         {"at": "2026-07-27T00:00:00Z", "actor": "consumer:development",
