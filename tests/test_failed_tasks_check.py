@@ -174,3 +174,70 @@ def test_healing_and_healed_events_are_emitted():
 
     assert "healing" in events.names()
     assert "healed" in events.names()
+
+
+def test_marker_prefix_is_the_opening_of_a_rendered_marker():
+    """The brake matches on MARKER_PREFIX; this pins it to the real marker's
+    spelling, so changing `marker_comment` can never silently disarm it."""
+    from harness.drivers.github_issues import MARKER_PREFIX, marker_comment
+
+    assert marker_comment("tsk_boom").startswith(MARKER_PREFIX)
+
+
+def test_one_hop_brake_declines_a_failed_self_heal_fix():
+    failed = MemoryTaskQueue("failed")
+    healed = MemoryTaskQueue("healed")
+    failed.put(
+        failed_task(
+            "tsk_fix_1",
+            data={
+                "request": "Fix the driver contract",
+                "body": "## Symptom\nboom\n\n<!-- harness-issue:tsk_boom:ab12cd34 -->\n",
+            },
+        )
+    )
+    check = make_check(failed=failed, healed=healed)
+
+    observations = check.evaluate()
+
+    assert observations == []
+    assert failed.list() == []
+    settled = healed.list()
+    assert len(settled) == 1
+    assert settled[0].status == HEALED
+    assert "heal-declined" in settled[0].history[-1].summary
+
+
+def test_an_unmarked_issue_task_is_still_healed():
+    failed = MemoryTaskQueue("failed")
+    healed = MemoryTaskQueue("healed")
+    failed.put(
+        failed_task(
+            "tsk_plain",
+            data={"request": "Add a feature", "body": "## Context\nno marker here\n"},
+        )
+    )
+    check = make_check(failed=failed, healed=healed)
+
+    (observation,) = check.evaluate()
+
+    assert observation.state_key == "tsk_plain"
+    assert "queued for healing" in healed.list()[0].history[-1].summary
+
+
+def test_the_two_recursion_guards_record_distinct_notes():
+    failed = MemoryTaskQueue("failed")
+    healed = MemoryTaskQueue("healed")
+    failed.put(failed_task("tsk_heal_1", data={"heal": {"of": "tsk_boom"}}))
+    failed.put(
+        failed_task(
+            "tsk_fix_1", data={"body": "<!-- harness-issue:tsk_boom:ab12cd34 -->"}
+        )
+    )
+    check = make_check(failed=failed, healed=healed)
+
+    assert check.evaluate() == []
+
+    notes = {task.id: task.history[-1].summary for task in healed.list()}
+    assert "heal-failed" in notes["tsk_heal_1"]
+    assert "heal-declined" in notes["tsk_fix_1"]

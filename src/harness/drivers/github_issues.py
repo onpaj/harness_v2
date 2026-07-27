@@ -15,9 +15,17 @@ from harness.drivers.github_client import GithubClient
 from harness.ports.issues import IssueError, IssueRef, IssueTracker
 
 
+MARKER_PREFIX = "<!-- harness-issue:"
+"""The opening of the hidden idempotency marker. Exported so the one-hop brake
+(`failed_tasks_check`) can recognise *any* marker without re-deriving its
+spelling — one source for the literal, two readers. The spelling has already
+changed once (it was `harness-heal:` before `open-issue` became generic); a
+second copy of it elsewhere would have silently disarmed the brake."""
+
+
 def marker_comment(marker: str) -> str:
     """The hidden idempotency marker embedded in an opened issue's body."""
-    return f"<!-- harness-issue:{marker} -->"
+    return f"{MARKER_PREFIX}{marker} -->"
 
 
 class GithubIssueTracker(IssueTracker):

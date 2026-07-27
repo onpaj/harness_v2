@@ -23,6 +23,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 
+from harness.drivers.github_issues import MARKER_PREFIX
 from harness.models import FAILED, HEALED, HistoryEntry, Task, append_history
 from harness.ids import new_lock_id
 from harness.ports.board import HEALED_COLUMN
@@ -73,6 +74,17 @@ class FailedTasksCheck(Check):
                 # This claimed task is itself a `heal`-workflow task that
                 # failed. Settle it, never re-observe it — the recursion guard.
                 self._settle(task, "heal-failed: the heal attempt itself failed")
+                continue
+            if _descends_from_a_harness_filed_issue(task):
+                # A fix task born from an issue the harness itself filed, which
+                # then failed. Healing it again would file a fresh issue and
+                # feed the pipeline its own output — the one-hop limit
+                # (invariant 25).
+                self._settle(
+                    task,
+                    "heal-declined: fix attempt for a harness-filed issue "
+                    "failed (one-hop limit)",
+                )
                 continue
             self._settle(task, "queued for healing")
             observations.append(self._observation(task))
@@ -181,3 +193,22 @@ def _request_of(task: Task) -> str:
         if isinstance(value, str) and value.strip():
             return value.strip()
     return ""
+
+
+def _descends_from_a_harness_filed_issue(task: Task) -> bool:
+    """True when this failed task is a fix attempt for an issue the harness
+    itself filed.
+
+    `OpenIssueBehavior` embeds `<!-- harness-issue:<marker> -->` in every issue
+    body it opens, and `GithubIssuesCheck` ingests that body verbatim into
+    `data["body"]` — so the marker is provenance that survives the round trip
+    through GitHub with no extra plumbing.
+
+    The marker is deliberately generic: it covers the healer and every other
+    `open-issue` consumer. That breadth is the point — the rule is that the
+    harness does not heal a failure of work it filed for itself, which is the
+    same runaway shape wherever it appears, and it is the cycle `data.heal`
+    does not cover.
+    """
+    body = task.data.get("body")
+    return isinstance(body, str) and MARKER_PREFIX in body
