@@ -7,7 +7,8 @@ explicit edges for each outcome.
 Each step's work is done by a real agent (`claude -p`, or `--agent dummy` for
 testing the pipeline itself), running inside a git worktree the harness manages
 per task. The last step, landing, pushes the task's branch and opens a pull
-request — the harness proposes, a human decides the merge. Tasks arrive either
+request — the harness proposes, a human decides the merge, unless you hand that
+decision over too (see [Automatic merging](#automatic-merging)). Tasks arrive either
 by hand (`harness submit`) or ingested from GitHub issues; an operator board
 shows every task's state, its artifacts, its live stage output while a step is
 running, and a restart control for anything that failed.
@@ -301,13 +302,87 @@ authored the same way any other scheduled process is: drop a file under
 }
 ```
 
-This is not written by `harness init` — a `github-conflicts` process without a
-`GITHUB_TOKEN` fails the run fast (`ProcessValidationError`), so seeding it
-unconditionally would break every token-less `harness run`. Copy the block
-above once a token is configured (see
-[Running it as a service](#running-it-as-a-service)); `harness run` then
+This one is not written by `harness init` — copy the block above yourself, once
+a token is configured (see
+[Running it as a service](#running-it-as-a-service)). `harness run` then
 auto-updates a `behind` PR server-side and queues exactly one resolve→land task
-per `dirty` PR, deduped per conflicted head commit.
+per `dirty` PR, deduped per conflicted head commit. Without a token the process
+is skipped with a warning rather than failing the run.
+
+## Automatic merging
+
+The harness normally stops at the merge button: it proposes a PR and a human
+decides. The **automerge Process** (ADR-0023) is where you can hand that last
+step over — an agent reviews the PR's real diff and, if it is confident enough,
+the harness merges it.
+
+`harness init` seeds all three pieces, so it is already running on a fresh root:
+
+```json
+// ~/harness-root/processes/automerge.json
+{
+  "trigger": {"interval": "5m"},
+  "action": {"check": "github-mergeable", "params": {"head_prefix": "harness/"}},
+  "target": {"workflow": "automerge"},
+  "dedup": "per-state",
+  "sink": {"kind": "none"}
+}
+```
+
+**Running is not merging.** The seeded `workflows/automerge.json` binds its
+`merge` step with `dry_run: true`, so out of the box the harness reviews every
+candidate PR and records on the board exactly what it *would* have merged, with
+the confidence. Watch a few of those decisions on your own PRs, then flip one
+field to arm it:
+
+```jsonc
+// ~/harness-root/workflows/automerge.json
+"finishers": {
+  "merge": {
+    "kind": "merge-pr",
+    "from_step": "merge-review",
+    "min_confidence": 0.8,   // the bar; raise it to be stricter
+    "method": "squash",      // merge | squash | rebase
+    "dry_run": false         // ← this is the switch
+  }
+}
+```
+
+One Process covers **every** repository: the check iterates `repos.json`, so
+adding a repo puts it under review automatically and a non-GitHub repo is
+skipped. Without a `GITHUB_TOKEN` the process is skipped with a warning, never
+fatally.
+
+### What gets reviewed, and what merges
+
+A PR is a candidate only when **all four** hold:
+
+| Gate | Meaning |
+|---|---|
+| GitHub state `clean` | GitHub's own verdict: merges without conflict, every *required* check green, every *required* review present |
+| not a draft | draft PRs are never candidates |
+| no `harness:no-automerge` label | the per-PR veto — anyone can apply it, no config change, no restart |
+| head matches `head_prefix` | default `harness/`, so the harness only proposes to merge its own work |
+
+Each candidate becomes one task keyed `slug:pr:head_sha`, so a re-pushed PR is
+re-reviewed from scratch and an unchanged one is not reviewed twice. The
+`merge-review` persona runs in a worktree checked out on the PR's *own* branch
+— it reads the real diff and the surrounding source, not an API summary — and
+returns `approve`/`reject` plus a confidence.
+
+Only `approve` reaches the `merge` step, and the agent does not decide there:
+the `merge-pr` finisher compares the confidence against `min_confidence` **from
+the workflow file**, and the merge is pinned to the exact `head_sha` the
+reviewer read. A persona that learns to write `"confidence": 1.0` on everything
+still cannot lower the bar, and code no agent reviewed cannot be merged. Every
+other path refuses — a moved head, a below-bar confidence, a red check, a
+protection rule — and refusing is cheap: the next scan reviews the new head.
+
+> **The gate is only as strong as your branch protection.** `clean` means
+> "required checks green, required reviews present" — so on a repo with *no*
+> protection rules it means only "no conflict and nothing failing", and the
+> persona's confidence becomes the entire decision. Protect the branch first,
+> then set `dry_run: false`.
 
 ## Self-healing the failed queue
 

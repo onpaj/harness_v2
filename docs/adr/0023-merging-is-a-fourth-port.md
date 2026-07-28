@@ -86,7 +86,7 @@ Splitting *judgement* from *threshold* is also what makes the feature tunable
 without prompt surgery: raising the bar is a one-field edit in a JSON file, not
 a rewrite of a persona whose behavior would then have to be re-validated.
 
-### It ships withheld
+### It ships withheld — by `dry_run`, not by a missing file
 
 `AUTOMERGE_DEFINITION`'s binding sets `dry_run: true`. The step runs, reviews,
 and records what it *would* have merged, on the board and in the task's data —
@@ -94,11 +94,29 @@ but merges nothing until an operator flips one field.
 
 Configuring a Process is not the same as trusting it. The dry-run period is how
 an operator accumulates evidence about *this* persona on *their* PRs before
-granting it the button, and it costs one boolean to provide. `harness init`
-seeds the workflow and the persona (dormant data, like `resolver`/`heal`) but
-deliberately seeds **no** `processes/automerge.json`: unlike autoheal, which
-drains a queue the harness fills itself, automerging is a posture, so the
-Process stays the operator's to create.
+granting it the button, and it costs one boolean to provide.
+
+`harness init` seeds all three pieces: `workflows/automerge.json`,
+`agents/merge-review.json` **and** `processes/automerge.json`. One Process
+covers every repository — `GithubMergeableCheck.evaluate()` iterates
+`RepositoryRegistry.names()`, so there is nothing per-repo to author and adding
+a repo to `repos.json` puts it under review automatically.
+
+This revises the decision as originally accepted, which seeded the workflow and
+the persona but deliberately **no** Process, reasoning that automerging is a
+posture rather than a queue that needs draining. That held only while "the
+operator must author a file" was the sole safety gate. It no longer is:
+`dry_run` is the real gate and a strictly better one, because it exercises the
+whole path on real PRs and *shows* the operator what this persona would have
+done — which authoring a file from scratch never did. So the Process ships and
+the withholding moves entirely to `dry_run`. The seeder never clobbers an
+existing file, exactly like the autoheal one.
+
+Seeding a `github-*` Process by default only stays compatible with the
+harness's "no token is not fatal" promise because the `github-mergeable`
+factory raises `MissingCredential`, which `FilesystemProcessRepository.build()`
+skips with a warning rather than failing the run. Without that, this one seeded
+file would make every tokenless run exit 2.
 
 ### GitHub's `clean` is the gate we defer to
 
@@ -119,6 +137,12 @@ PR is never a candidate, and any PR carrying `harness:no-automerge` is vetoed
 
 - A fourth GitHub-touching port, and a fourth entry in the "unknown to
   orchestration" family of architecture tests (invariant #44).
+- The seeded Process must declare `"dedup": "per-state"`, and that is
+  load-bearing rather than stylistic: the check emits one observation *per
+  candidate PR*, and the default `per-interval` collapses every observation in
+  a tick onto one key — three mergeable PRs would yield one review, silently.
+  `per-state` keys each task on `slug:pr:head_sha`, which is also what
+  re-reviews a re-pushed PR and leaves an unchanged one alone.
 - `GithubClient` gains a real `merge_pull_request` verb. Its `FakeGithubClient`
   test helper of the same name — which simulated *GitHub* merging a PR, a
   different thing — was renamed `mark_merged`.

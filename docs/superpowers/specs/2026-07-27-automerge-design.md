@@ -10,9 +10,11 @@
 
 ## What it is
 
-A **Process** the operator opts into, composed entirely of primitives that
-already exist. No new orchestration concepts; every existing invariant holds
-unchanged.
+A **Process**, composed entirely of primitives that already exist. No new
+orchestration concepts; every existing invariant holds unchanged. `harness init`
+seeds it on every root — one Process covers every registered repository — and
+what withholds the merge is `dry_run`, not the absence of the file (see *It
+ships withheld*).
 
 ```
 processes/automerge.json
@@ -136,17 +138,23 @@ merely that the summary string reads well.
 
 ## It ships withheld
 
-`harness init` seeds `workflows/automerge.json` and `agents/merge-review.json`
-as dormant data (exactly like `resolver`/`heal`) and seeds **no**
-`processes/automerge.json`. Unlike autoheal — which drains a queue the harness
-fills itself, and so is on by default — automerging is a *posture*, and the
-Process stays the operator's to create.
+`harness init` seeds all three pieces — `workflows/automerge.json`,
+`agents/merge-review.json` and `processes/automerge.json` — never clobbering an
+existing file. The seeded Process needs no per-repo authoring: the check
+iterates `RepositoryRegistry.names()`, so adding a repo to `repos.json` puts it
+under automerge review automatically, and a non-GitHub repo is skipped.
 
-Even then, the seeded binding ships `dry_run: true`: the step reviews and
-records what it *would* have merged, with the confidence, on the board. An
-operator watches this persona decide on their PRs, then flips one field. The
-dry-run period is how trust is earned with evidence rather than assumed at
-configuration time, and it costs one boolean to offer.
+What withholds the merge is the binding's `dry_run: true`: the step reviews and
+records what it *would* have merged, with the confidence, on the board, and
+merges nothing until an operator flips that one field. The dry-run period is how
+trust is earned with evidence rather than assumed at configuration time, and it
+costs one boolean to offer.
+
+This is a revision of the original design, which seeded no Process at all on the
+reasoning that automerging is a posture the operator opts into by authoring a
+file. `dry_run` turned out to be the better gate — it exercises the whole path
+on real PRs and shows the operator what the persona would have done, which an
+unwritten file never did — so the withholding moved there entirely.
 
 ## Deliberately out of scope
 

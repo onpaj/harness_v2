@@ -279,14 +279,14 @@ def _init(args: argparse.Namespace) -> int:
             json.dumps(HEAL_DEFINITION, indent=2, ensure_ascii=False),
             encoding="utf-8",
         )
-    # `automerge`/`merge-review` (ADR-0023): dormant data, shipped
-    # unconditionally exactly like the resolver and heal workflows. No
-    # `processes/automerge.json` is seeded — unlike autoheal, which drains a
-    # queue the harness fills itself, automerging is a posture an operator
-    # opts into deliberately, so the Process stays theirs to create (by hand
-    # or in the dashboard's process editor). Until they do, this workflow
-    # never runs; when they do, it still only records its decisions until
-    # `finishers.merge.dry_run` is flipped to false.
+    # `automerge`/`merge-review` (ADR-0023): shipped unconditionally exactly
+    # like the resolver and heal workflows — and, unlike what the ADR
+    # originally decided, so is `processes/automerge.json` (seeded just below
+    # by `_ensure_automerge_process`, which explains the revision). So this
+    # workflow *runs* on a freshly initialized root: it reviews every clean
+    # harness-authored PR across every registered repo and records what it
+    # would have merged. What withholds the merge itself is
+    # `finishers.merge.dry_run`, seeded `true` until an operator flips it.
     automerge_definition_path = layout.workflows / f"{DEFAULT_AUTOMERGE_WORKFLOW}.json"
     if not automerge_definition_path.exists():
         automerge_definition_path.write_text(
