@@ -1,6 +1,43 @@
 # CHANGELOG
 
 
+## v1.4.1 (2026-07-28)
+
+### Bug Fixes
+
+- **board**: Name the step an outcome badge belongs to
+  ([`c9177ce`](https://github.com/onpaj/harness_v2/commit/c9177ce86bdc640a9808157f859c4f740e2246a8))
+
+A card's outcome badge is a *step's* verdict, but it rendered the bare word — so a task two columns
+  into a workflow, often right next to "processing", read as "this task is done". The board had one
+  word for two different things: a step's outcome and the terminal `done` queue.
+
+The badge now names the step that reported it ("plan · done"), with the bare outcome kept as the
+  fallback when history has nothing to attribute it to. Both history entry shapes carrying an
+  outcome agree on that step — the consumer's delivery entry ran it, the dispatcher's routing entry
+  left it — so the last entry with an outcome answers it either way.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+
+### Documentation
+
+- Correct automerge's shipping story and document it for operators
+  ([`02ae5e7`](https://github.com/onpaj/harness_v2/commit/02ae5e72291bf3ce7fc07d9fbb09fa2ac01b5bcd))
+
+PR #131 made `harness init` seed `processes/automerge.json` and moved the withholding entirely onto
+  the binding's `dry_run`, but three places still described the decision as originally accepted —
+  ADR-0023's "It ships withheld", the automerge design spec, and a `_init` comment sitting directly
+  above the `_ensure_automerge_process` call it claims does not happen.
+
+Also documents automerge in the README, where it had no coverage at all: the four candidate gates,
+  the dry-run → armed flip, the operator-sets-the-bar split, and the branch-protection caveat that
+  decides how much `clean` is really worth. The adjacent autoresolver section claimed a tokenless
+  `github-conflicts` process fails the run; `MissingCredential` has made that a skip-with-warning
+  since.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+
+
 ## v1.4.0 (2026-07-27)
 
 ### Bug Fixes
