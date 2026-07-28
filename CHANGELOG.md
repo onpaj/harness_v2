@@ -1,6 +1,35 @@
 # CHANGELOG
 
 
+## v1.4.2 (2026-07-28)
+
+### Bug Fixes
+
+- **board**: Green card accent only for a task that actually finished
+  ([`40b8aac`](https://github.com/onpaj/harness_v2/commit/40b8aac2b0afe2435d9ff7ea149512b48dcc85ea))
+
+The stripe answers "what is happening to this task", but it painted green on any card whose
+  `last_outcome` was `done` — including one idle two columns into a workflow, where `done` is only
+  the previous step's verdict. Same lie the bare `done` badge told, in colour.
+
+Green is now gated on the card sitting in a terminal column; a step column falls back to the neutral
+  stripe, which is the honest answer (waiting its turn). `request_changes` keeps its accent
+  everywhere — "it came back" is not something a column name says — and `is-working` still outranks
+  both.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+
+### Documentation
+
+- Plan terminal-task retention
+  ([`85313d1`](https://github.com/onpaj/harness_v2/commit/85313d15fef0a01d512d045a2257509f6f859422))
+
+Four TDD tasks: the RetentionReconciler core, its app.py wiring on the existing reconcile loop, the
+  HARNESS_RETENTION_DAYS knob, and the docs.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+
+
 ## v1.4.1 (2026-07-28)
 
 ### Bug Fixes
