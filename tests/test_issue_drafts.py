@@ -101,3 +101,35 @@ def test_the_marker_is_task_scoped_and_title_content_scoped():
     assert first.startswith("tsk_abc:")
     assert first != other_title
     assert first != other_task
+
+
+# The shape that broke self-healing in production: the healer quotes the
+# failure it is reporting, so the draft's own body carries a fenced block.
+# Those backticks live *inside* a JSON string, but a non-greedy regex closing
+# on the first ``` cut the array there and left the body string unterminated.
+ARTIFACT_WITH_FENCED_BODY = (
+    "# Heal report\n\nProse the human reads.\n\n"
+    "```json\n"
+    '[{"title": "Agent step exceeds its timeout", "labels": ["harness:todo"], '
+    '"body": "## Symptom\\n\\nThe task failed with:\\n\\n'
+    "```\\nbehavior raised an exception: claude timed out after 1800.0s\\n```"
+    '\\n\\n## Fix\\n\\nRaise the budget."}]\n'
+    "```\n"
+)
+
+
+def test_a_draft_body_may_contain_a_fenced_code_block():
+    drafts = parse_drafts(ARTIFACT_WITH_FENCED_BODY)
+
+    assert len(drafts) == 1
+    assert drafts[0].title == "Agent step exceeds its timeout"
+    assert "```\nbehavior raised an exception" in drafts[0].body
+    assert drafts[0].body.endswith("Raise the budget.")
+
+
+def test_trailing_prose_after_the_block_is_not_part_of_the_json():
+    """The JSON value ends where JSON says it ends — anything after it in the
+    artifact is the human's text, not a parse error."""
+    drafts = parse_drafts('```json\n[{"title": "ok"}]\n```\n\nThanks for reading.\n')
+
+    assert [d.title for d in drafts] == ["ok"]
