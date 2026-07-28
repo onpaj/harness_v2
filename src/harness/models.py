@@ -12,14 +12,17 @@ FAILED = "failed"
 """Reserved terminal status of a task that ended up in the `failed/` queue.
 Like END it has no outgoing edges — it just additionally isn't known to any
 workflow as one of its steps. Unlike a true terminal, `failed/` has exactly one
-reader: the `failed-tasks` process Check, which drains it into `healed/`
-(invariant 24)."""
+reader: the `failed-tasks` process Check, which claims each healable failure
+and retires it into `done/` (invariant 24). A failure the check *declines* to
+heal keeps this status and stays put — nothing is coming to fix it, so it stays
+where the operator looks (ADR-0024)."""
 
 HEALED = "healed"
-"""Reserved terminal status of a task the `failed-tasks` check has settled
-onto the `healed/` queue. This is the never-consumed terminal that `failed/`
-used to be — the check reads `failed/` and moves a task here once, success or
-failure, so a failure can never be healed twice (invariant 25)."""
+"""Legacy status (ADR-0024), kept only so a task written by an older version
+still loads. The `failed-tasks` check used to settle a claimed failure onto a
+`healed/` queue of its own; it now retires it into `done/` with status `END`,
+and the healer's involvement is recorded in the task's history instead of in a
+status and a board column nobody else reads."""
 
 ARCHIVED = "archived"
 """Reserved terminal status of a task whose PR resolved and was moved out of
