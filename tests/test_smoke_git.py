@@ -230,7 +230,7 @@ async def test_task_lands_as_pull_request_on_real_git(tmp_path):
         delay=0.0,
     )
     stop = asyncio.Event()
-    runner = asyncio.create_task(harness.run(poll_interval=0.01, stop=stop))
+    runner = asyncio.create_task(harness.run(poll_interval=0.01, reconcile_interval=0.01, stop=stop))
     for _ in range(600):
         await asyncio.sleep(0.01)
         if (root / "done" / f"{task_id}.json").exists():
@@ -304,7 +304,7 @@ async def test_task_lands_as_pull_request_on_real_git(tmp_path):
     )
     stop2 = asyncio.Event()
     runner2 = asyncio.create_task(
-        watcher_harness.run(poll_interval=0.01, pr_poll_interval=0.01, stop=stop2)
+        watcher_harness.run(poll_interval=0.01, pr_poll_interval=0.01, reconcile_interval=0.01, stop=stop2)
     )
     for _ in range(600):
         await asyncio.sleep(0.01)
@@ -388,7 +388,7 @@ async def test_review_syncs_with_base_and_requests_changes_on_real_conflict(tmp_
         delay=0.0,
     )
     stop = asyncio.Event()
-    background = asyncio.create_task(harness.run(poll_interval=0.01, stop=stop))
+    background = asyncio.create_task(harness.run(poll_interval=0.01, reconcile_interval=0.01, stop=stop))
 
     worktree = worktrees_root / task_id
     review_artifact = worktree / f".artifacts/{task_id}/review-01.md"

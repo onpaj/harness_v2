@@ -35,7 +35,7 @@ async def test_task_travels_from_submit_to_done(tmp_path, capsys):
         tmp_path, DEFAULT_WORKFLOW, delay=0.0, request_changes_once_at="review"
     )
     stop = asyncio.Event()
-    runner = asyncio.create_task(harness.run(poll_interval=0.01, stop=stop))
+    runner = asyncio.create_task(harness.run(poll_interval=0.01, reconcile_interval=0.01, stop=stop))
     for _ in range(600):
         await asyncio.sleep(0.01)
         if (tmp_path / "done" / f"{task_id}.json").exists():
@@ -83,7 +83,7 @@ async def test_unknown_workflow_lands_in_failed_and_loop_survives(tmp_path):
 
     harness = build(tmp_path, DEFAULT_WORKFLOW, delay=0.0)
     stop = asyncio.Event()
-    runner = asyncio.create_task(harness.run(poll_interval=0.01, stop=stop))
+    runner = asyncio.create_task(harness.run(poll_interval=0.01, reconcile_interval=0.01, stop=stop))
     for _ in range(600):
         await asyncio.sleep(0.01)
         if (tmp_path / "done" / "tsk_ok.json").exists():

@@ -12,6 +12,7 @@ from harness.app import (
 from harness.behaviors.landing import LandingBehavior
 from harness.drivers.fake_forge import FakeForge
 from harness.drivers.memory import (
+    FakeClock,
     FakeIssueChecker,
     FakeMergeChecker,
     MemoryAgentCatalog,
@@ -208,7 +209,7 @@ async def test_resolver_task_flows_through_resolve_and_land_to_done(tmp_path):
     (tmp_path / "tasks" / "tsk_resolver_1.json").write_text(json.dumps(task.to_dict()))
 
     stop = asyncio.Event()
-    runner_task = asyncio.create_task(harness.run(poll_interval=0.01, stop=stop))
+    runner_task = asyncio.create_task(harness.run(poll_interval=0.01, reconcile_interval=0.01, stop=stop))
     for _ in range(400):
         await asyncio.sleep(0.01)
         if (tmp_path / "done" / "tsk_resolver_1.json").exists():
@@ -246,7 +247,7 @@ async def test_run_drives_a_task_all_the_way_to_done(tmp_path):
     (tmp_path / "tasks" / "tsk_1.json").write_text(json.dumps(task.to_dict()))
 
     stop = asyncio.Event()
-    runner = asyncio.create_task(harness.run(poll_interval=0.01, stop=stop))
+    runner = asyncio.create_task(harness.run(poll_interval=0.01, reconcile_interval=0.01, stop=stop))
     for _ in range(400):
         await asyncio.sleep(0.01)
         if (tmp_path / "done" / "tsk_1.json").exists():
@@ -401,7 +402,7 @@ async def test_max_parallel_bounds_concurrent_runs_per_step(tmp_path):
         )
 
     stop = asyncio.Event()
-    runner = asyncio.create_task(harness.run(poll_interval=0.01, stop=stop))
+    runner = asyncio.create_task(harness.run(poll_interval=0.01, reconcile_interval=0.01, stop=stop))
     for _ in range(400):
         await asyncio.sleep(0.01)
         if len(list((tmp_path / "done").glob("tsk_*.json"))) >= 6:
@@ -483,7 +484,7 @@ async def test_pr_watcher_archives_a_resolved_task_end_to_end(tmp_path):
 
     stop = asyncio.Event()
     runner = asyncio.create_task(
-        harness.run(poll_interval=0.01, pr_poll_interval=0.01, stop=stop)
+        harness.run(poll_interval=0.01, pr_poll_interval=0.01, reconcile_interval=0.01, stop=stop)
     )
     for _ in range(400):
         await asyncio.sleep(0.01)
@@ -508,7 +509,19 @@ async def test_pr_watcher_archives_a_resolved_task_end_to_end(tmp_path):
 async def test_pr_watcher_loop_does_not_run_when_interval_is_zero(tmp_path):
     seed(tmp_path)
     forge = FakeForge(tmp_path / "forge")
-    harness = build(tmp_path, "default", events=MemoryEventSink(), forge=forge, delay=0.0)
+    # Pinned to the task's own `created` instant (`FakeClock`'s default) so the
+    # always-on retention sweep — now exercised by this test's non-default
+    # `reconcile_interval` too — sees a freshly-settled task, not a real-world
+    # multi-day-old one, and leaves it alone; only the PR watcher's own
+    # zero-interval gate is under test here.
+    harness = build(
+        tmp_path,
+        "default",
+        events=MemoryEventSink(),
+        forge=forge,
+        delay=0.0,
+        clock=FakeClock(),
+    )
     landed = Task(
         id="tsk_1",
         workflow_template="default",
@@ -527,7 +540,7 @@ async def test_pr_watcher_loop_does_not_run_when_interval_is_zero(tmp_path):
     forge.close_pull_request("harness/tsk_1", merged=True)
 
     stop = asyncio.Event()
-    runner = asyncio.create_task(harness.run(poll_interval=0.01, stop=stop))
+    runner = asyncio.create_task(harness.run(poll_interval=0.01, reconcile_interval=0.01, stop=stop))
     await asyncio.sleep(0.2)
     stop.set()
     await asyncio.wait_for(runner, timeout=RUNNER_TIMEOUT)
@@ -793,7 +806,7 @@ async def test_two_served_workflows_route_tasks_to_their_own_steps_via_shared_qu
     (tmp_path / "tasks" / "tsk_hotfix.json").write_text(json.dumps(hotfix_task.to_dict()))
 
     stop = asyncio.Event()
-    runner = asyncio.create_task(harness.run(poll_interval=0.01, stop=stop))
+    runner = asyncio.create_task(harness.run(poll_interval=0.01, reconcile_interval=0.01, stop=stop))
     for _ in range(400):
         await asyncio.sleep(0.01)
         if (tmp_path / "done" / "tsk_default.json").exists() and (
@@ -893,7 +906,7 @@ async def test_custom_step_bound_to_open_pr_lands_through_the_forge(tmp_path):
     (tmp_path / "tasks" / "tsk_pub.json").write_text(json.dumps(task.to_dict()))
 
     stop = asyncio.Event()
-    runner = asyncio.create_task(harness.run(poll_interval=0.01, stop=stop))
+    runner = asyncio.create_task(harness.run(poll_interval=0.01, reconcile_interval=0.01, stop=stop))
     for _ in range(400):
         await asyncio.sleep(0.01)
         if (tmp_path / "done" / "tsk_pub.json").exists():
