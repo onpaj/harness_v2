@@ -223,6 +223,21 @@ def test_issue_reconciler_imports_only_ports_and_models():
     ), f"issue_reconciler.py imports outside ports/models/ids: {imports}"
 
 
+def test_retention_reconciler_imports_only_ports_and_models():
+    """RetentionReconciler is core (sibling of PrWatcher/MergeReconciler/
+    IssueReconciler): it knows only ports, models and the base `ids` module
+    (for the claim lock id), never a driver."""
+    imports = {
+        module
+        for module in imported_modules(SOURCE / "retention_reconciler.py")
+        if module.startswith("harness")
+    }
+    assert all(
+        module in ("harness.models", "harness.ids") or module.startswith("harness.ports")
+        for module in imports
+    ), f"retention_reconciler.py imports outside ports/models/ids: {imports}"
+
+
 def test_orchestration_does_not_import_issue_import_port():
     """`IssueImport` (the Ahanas board's manual "Add issue" write port,
     invariant #43) is unknown to dispatcher/consumer — touched only by
