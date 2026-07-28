@@ -62,6 +62,7 @@ from harness.ports.control import TaskControl
 from harness.issue_reconciler import IssueReconciler
 from harness.merge_reconciler import MergeReconciler
 from harness.pr_watcher import PrWatcher
+from harness.retention_reconciler import DEFAULT_RETENTION_DAYS, RetentionReconciler
 from harness.source_poller import SourcePoller
 from harness.task_control import TaskControlService
 
@@ -239,6 +240,7 @@ class Harness:
         pr_watcher: PrWatcher | None = None,
         reconciler: MergeReconciler | None = None,
         issue_reconciler: IssueReconciler | None = None,
+        retention_reconciler: RetentionReconciler | None = None,
         healed: TaskQueue | None = None,
         process_checks: dict[str, CheckFactory] | None = None,
         skipped_processes: list[tuple[str, str]] | None = None,
@@ -270,6 +272,7 @@ class Harness:
         self.archived = archived
         self.reconciler = reconciler
         self.issue_reconciler = issue_reconciler
+        self.retention_reconciler = retention_reconciler
         # The effective action registry this run compiles processes with —
         # built-ins plus every wiring-time extra (`extra_checks`, the internal
         # `failed-tasks`). `serve()` hands it to `FilesystemProcessAdmin`, so
@@ -374,6 +377,11 @@ class Harness:
                 if self.issue_reconciler is not None
                 else []
             ),
+            *(
+                [self._retention_loop(reconcile_interval, stop)]
+                if self.retention_reconciler is not None
+                else []
+            ),
         ]
         if pr_poll_interval > 0 and self.pr_watcher is not None:
             loops.append(self._pr_watcher_loop(pr_poll_interval, stop))
@@ -449,6 +457,20 @@ class Harness:
             else:
                 await asyncio.sleep(0)
 
+    async def _retention_loop(
+        self, reconcile_interval: float, stop: asyncio.Event
+    ) -> None:
+        # Shares the reconcilers' cadence. This is the cheapest sweep of the
+        # three — three local `list()` calls over directories holding tens of
+        # files, no remote API — and the slowest-moving: whether a task settled
+        # two days ago does not change between ticks.
+        assert self.retention_reconciler is not None
+        while not stop.is_set():
+            if not self.retention_reconciler.tick():
+                await asyncio.sleep(reconcile_interval)
+            else:
+                await asyncio.sleep(0)
+
 _CREDENTIAL_GATED_CHECKS = {
     "github-issues": "GITHUB_TOKEN",
     "github-conflicts": "GITHUB_TOKEN",
@@ -498,6 +520,7 @@ def build(
     repository_registry: RepositoryRegistry | None = None,
     command_runner: CommandRunner | None = None,
     dropped_workflows: set[str] | None = None,
+    retention_days: int = DEFAULT_RETENTION_DAYS,
 ) -> Harness:
     layout = HarnessLayout(Path(root))
     events = events or StdoutEventSink()
@@ -623,6 +646,18 @@ def build(
             events=events,
             clock=clock,
         )
+
+    # Terminal queues are consumed by nobody, so without this a settled task
+    # stays on the board for the lifetime of the root. Unlike the merge and
+    # issue reconcilers this is *always* built: it needs no external service,
+    # only the local queues and the clock.
+    retention_reconciler = RetentionReconciler(
+        queues=[done, failed, healed_queue],
+        archived=archived,
+        days=retention_days,
+        events=events,
+        clock=clock,
+    )
 
     # `IssueImport` (invariant #43): the Ahanas board's manual "Add issue"
     # write port. Built here, not in cli.py, because it needs both an
@@ -894,6 +929,7 @@ def build(
         pr_watcher=pr_watcher,
         reconciler=reconciler,
         issue_reconciler=issue_reconciler,
+        retention_reconciler=retention_reconciler,
         healed=healed_queue,
         process_checks=checks,
         issue_import=issue_import,
