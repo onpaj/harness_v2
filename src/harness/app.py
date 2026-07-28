@@ -283,6 +283,15 @@ class Harness:
         harness runs degraded rather than not at all. `cli._run` warns per
         entry; see `fs_processes.MissingCredential`."""
 
+    @property
+    def known_steps(self) -> frozenset[str]:
+        """Step names with a live dispatch queue — exactly what `step_queues`
+        is keyed by. Derived from `_step_queues`, not a second stored copy, so
+        it can never drift from what `Dispatcher.tick` actually routes into;
+        `serve()` reads this to feed `FilesystemProcessAdmin`'s target
+        validation the same live answer `Dispatcher.tick` uses."""
+        return frozenset(self._step_queues)
+
     def recover(self) -> int:
         # `done` is included because it is the one write-into queue that also
         # gets claimed out of — by PrWatcher (#44) and/or the MergeReconciler
@@ -822,12 +831,6 @@ def build(
             ),
         ),
     }
-    # `known_targets` must include served *workflow* names too, not just step
-    # names — a `{"workflow": ...}` process target (e.g. the autoheal process
-    # targeting `heal`, or the pre-existing `github-issues`/`github-conflicts`
-    # processes targeting `default`/`resolver`) validates against the workflow
-    # name itself, not its steps.
-    known_targets = set(known_steps) | set(resolved)
     known_repositories = (
         set(repository_registry.names()) if repository_registry is not None else None
     )
@@ -837,7 +840,8 @@ def build(
         checks=checks,
         repository=None,
         worktree_root=str(layout.worktrees),
-        known_targets=known_targets,
+        known_steps=known_steps,
+        known_workflows=set(resolved),
         known_repositories=known_repositories,
         # A Process targeting a workflow `cli._run` already dropped from the
         # served set (an unwirable finisher binding, ADR-0022) is made inert

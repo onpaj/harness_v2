@@ -990,7 +990,8 @@ def _scheduled_sources(
     registry: RepositoryRegistry,
     *,
     clock: Clock,
-    known_targets: set[str] | None,
+    known_steps: set[str] | None,
+    known_workflows: set[str] | None,
 ) -> list[TaskSource]:
     """Scheduled triggers declared under `<root>/triggers/*.json`.
 
@@ -998,8 +999,9 @@ def _scheduled_sources(
     clock gate and reflects nothing outward (a `Trigger`) — appended to the run's
     existing `sources` list; `build()` gains no parameter. A missing/empty
     `triggers/` directory yields `[]`, so the harness runs exactly as before.
-    `known_targets` (served workflow names ∪ known step names) lets the
-    repository reject a trigger that names an unknown target up front."""
+    `known_steps` (the real step-queue namespace) and `known_workflows` (served
+    workflow names) let the repository reject a trigger whose target names
+    neither its own namespace nor has no dispatch queue, up front."""
     from harness.drivers.fs_triggers import FilesystemTriggerRepository
 
     repo = FilesystemTriggerRepository(root / "triggers")
@@ -1008,7 +1010,8 @@ def _scheduled_sources(
         clock=clock,
         repository=None,
         worktree_root=worktree_root,
-        known_targets=known_targets,
+        known_steps=known_steps,
+        known_workflows=known_workflows,
     )
 
 
@@ -2328,19 +2331,28 @@ def _run(args: argparse.Namespace) -> int:
 
     # Scheduled triggers (`triggers/*.json`) are `TaskSource`s that ride the
     # existing `sources` list — no new loop, no `build()` parameter. A trigger's
-    # target must be a served workflow or a known step; `known_targets` (served
-    # workflow names ∪ their steps ∪ any catalog agent) lets the repository
-    # reject a misnamed target up front rather than failing at dispatch time.
-    known_targets: set[str] = set(served_names)
+    # `{"step": ...}` target must have a real dispatch queue (`known_steps` —
+    # their steps ∪ any catalog agent, never a served workflow's own name) and
+    # a `{"workflow": ...}` target must be a served workflow name
+    # (`known_workflows`) — two independent namespaces, so the repository
+    # rejects a target that names the wrong one up front, rather than failing
+    # at dispatch time.
+    known_steps: set[str] = set()
     for name in served_names:
         try:
-            known_targets |= set(wf_repo.get(name).steps())
+            known_steps |= set(wf_repo.get(name).steps())
         except WorkflowNotFound:
             continue
     if catalog is not None:
-        known_targets |= set(catalog.names())
+        known_steps |= set(catalog.names())
+    known_workflows = set(served_names)
     sources = sources + _scheduled_sources(
-        args, root, registry, clock=SystemClock(), known_targets=known_targets
+        args,
+        root,
+        registry,
+        clock=SystemClock(),
+        known_steps=known_steps,
+        known_workflows=known_workflows,
     )
 
     # Same shape for Jira: all three env vars are required, or the
@@ -2505,7 +2517,11 @@ async def serve(
         # the checks this run compiles — a GitHub-backed process is authorable
         # in the dashboard, not only by hand-editing `processes/*.json`.
         process_admin=FilesystemProcessAdmin(
-            harness.layout.processes, checks=harness.process_checks, registry=registry
+            harness.layout.processes,
+            checks=harness.process_checks,
+            registry=registry,
+            known_steps=set(harness.known_steps),
+            known_workflows=set(harness.workflows),
         ),
         updater=updater,
         issue_import=harness.issue_import,

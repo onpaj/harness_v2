@@ -75,7 +75,12 @@ class Dispatcher:
         elif isinstance(decision, MoveTo):
             destination = self._step_queues.get(decision.step)
             if destination is None:
-                self._fail(task, f"step {decision.step!r} has no queue")
+                self._fail(
+                    task,
+                    f"step {decision.step!r} has no queue (if this step, agent, "
+                    "or its process/trigger was added or changed recently, "
+                    "restart the harness service to rebuild its queue set)",
+                )
             else:
                 self._move(task, decision.step, destination)
 
