@@ -8,7 +8,6 @@ from harness.ports.board import (
     COLUMN_TERMINAL,
     DONE_COLUMN,
     FAILED_COLUMN,
-    HEALED_COLUMN,
     LIFECYCLE_DESCRIPTIONS,
     TODO_COLUMN,
     UNKNOWN_WORKFLOW,
@@ -59,7 +58,6 @@ def test_column_order_follows_reachability_and_ignores_back_edges():
         "review",
         DONE_COLUMN,
         FAILED_COLUMN,
-        HEALED_COLUMN,
     )
 
 
@@ -83,7 +81,6 @@ def test_column_order_unions_multiple_workflows_no_duplicates():
         "review",
         DONE_COLUMN,
         FAILED_COLUMN,
-        HEALED_COLUMN,
     )
 
 
@@ -107,7 +104,6 @@ def test_column_order_falls_back_to_declaration_order_for_workflow_less_steps():
         "triage",
         DONE_COLUMN,
         FAILED_COLUMN,
-        HEALED_COLUMN,
     )
 
 
@@ -122,7 +118,6 @@ def test_column_order_folds_in_extra_workflow_steps():
         "land",
         DONE_COLUMN,
         FAILED_COLUMN,
-        HEALED_COLUMN,
     )
 
 
@@ -132,7 +127,6 @@ def test_column_order_with_no_workflow_uses_declaration_order():
         "triage",
         DONE_COLUMN,
         FAILED_COLUMN,
-        HEALED_COLUMN,
     )
 
 
@@ -297,6 +291,28 @@ def test_hydrate_reads_every_source():
     assert tab.column(DONE_COLUMN).tasks[0].id == "tsk_3"
     assert tab.column(FAILED_COLUMN).tasks[0].id == "tsk_4"
     assert tab.column("design").tasks[0].id == "tsk_5"
+
+
+def test_hydrate_shows_a_legacy_healed_task_in_done():
+    """ADR-0024 retired the `healed` queue and column: the healer now settles a
+    claimed failure into `done/` directly. A task an older version left in
+    `healed/` is shown where such a task would land today, rather than dropping
+    off the board (and out of `get()`) on upgrade."""
+    projection = BoardProjection(WORKFLOW.steps(), (WORKFLOW,))
+    healed = MemoryTaskQueue("healed")
+    healed.put(make_task("tsk_old", "healed"))
+
+    projection.hydrate(
+        inbox=MemoryTaskQueue("tasks"),
+        step_queues={},
+        done=MemoryTaskQueue("done"),
+        failed=MemoryTaskQueue("failed"),
+        healed=healed,
+    )
+
+    tab = projection.snapshot().workflow("default")
+    assert [task.id for task in tab.column(DONE_COLUMN).tasks] == ["tsk_old"]
+    assert projection.get("tsk_old") is not None
 
 
 def test_archive_drops_task_from_its_column_but_keeps_it_gettable():
@@ -561,7 +577,7 @@ def test_columns_carry_their_kind():
     assert tab.column(TODO_COLUMN).kind == COLUMN_INBOX
     assert tab.column("plan").kind == COLUMN_STEP
     assert tab.column("review").kind == COLUMN_STEP
-    for name in (DONE_COLUMN, FAILED_COLUMN, HEALED_COLUMN):
+    for name in (DONE_COLUMN, FAILED_COLUMN):
         assert tab.column(name).kind == COLUMN_TERMINAL
 
 

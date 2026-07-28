@@ -5,16 +5,22 @@ shape: it claims work out of an existing queue (`failed/`) via the ordinary
 atomic `claim()` — the same "idempotent, side-effecting claim action" a
 `TaskSource.poll()` may perform (invariant #35) — and turns each claim into one
 `Observation` that the compiled `ScheduledTrigger` fires as a fresh `heal`
-task. `failed/` still drains monotonically: every claimed task settles onto
-`healed/` in the same `evaluate()` call, success or failure, so a failure can
-never be healed twice (invariant 25).
+task.
+
+A claimed failure settles onto **`done/`**, not onto a terminal of its own
+(ADR-0024): once the healer has taken the failure over, the original task's own
+story is finished, and the board should say so in the one column an operator
+already reads as "finished, nothing to do here". That the healer — rather than
+the workflow — ended it is recorded in the task's history, as the `failed-tasks`
+actor moving it from `failed` to `end`. Each failure is still claimed exactly
+once, so it can never be healed twice (invariant 25).
 
 Unlike `GithubIssuesCheck`, this needs no external client — it needs the
-harness's own live `failed`/`healed` queues and event sink, so it is
-registered inside `app.build()` itself (§FR-6), not via a `cli.py` factory.
+harness's own live `failed`/`done` queues and event sink, so it is registered
+inside `app.build()` itself (§FR-6), not via a `cli.py` factory.
 
-Recursion guard: a claimed task is declined — settled straight to `healed/`
-with no `Observation` — in three cases. `data.heal` marks it as itself a
+Recursion guard: a failure is *declined* — never claimed into the heal
+pipeline, no `Observation` — in three cases. `data.heal` marks it as itself a
 `heal` workflow task that failed (`heal-failed`, so a stuck healer can never
 re-enter `failed/` a second time). `data["body"]` carrying the
 `<!-- harness-issue:… -->` marker marks it as a fix attempt for an issue the
@@ -24,6 +30,14 @@ automerge-review task minted from the harness's own pull request, which
 carries neither a body nor `data.heal` (also `heal-declined`). All three
 express one rule: the harness does not heal a failure of work it filed for
 itself (invariant 25).
+
+A declined failure **stays in `failed/`** — that is the whole point of
+declining it: no automated fix is coming, so it must keep reading as a problem
+on the board rather than being retired to a terminal nobody watches. It is
+claimed exactly once, to write one history line saying why the healer is
+leaving it alone, and then written straight back; every later tick recognises
+that line (`_already_declined`) and skips the candidate without claiming it, so
+`failed/` neither churns nor loops.
 """
 
 from __future__ import annotations
@@ -33,9 +47,9 @@ from dataclasses import replace
 from harness.drivers.github_conflicts_check import SOURCE_KIND as MERGEABILITY_SOURCE_KIND
 from harness.drivers.github_issues import MARKER_PREFIX
 from harness.drivers.github_mergeable_check import SOURCE_KIND as PULL_REQUEST_SOURCE_KIND
-from harness.models import FAILED, HEALED, HistoryEntry, Task, append_history
+from harness.models import END, FAILED, HistoryEntry, Task, append_history
 from harness.ids import new_lock_id
-from harness.ports.board import HEALED_COLUMN
+from harness.ports.board import DONE_COLUMN, FAILED_COLUMN
 from harness.ports.clock import Clock
 from harness.ports.events import EventSink
 from harness.ports.queue import TaskQueue
@@ -58,7 +72,11 @@ files, and a silent rename there must not silently disarm the guard here."""
 SPEC = CheckSpec(
     name="failed-tasks",
     label="Failed tasks",
-    description="Drains each failed task into the self-heal workflow. Takes no settings.",
+    description=(
+        "Hands each failed task to the self-heal workflow and retires the "
+        "original into done. A failure it declines to heal stays in failed. "
+        "Takes no settings."
+    ),
 )
 """The action definition for `failed-tasks`. It carries no parameters — but it
 is a *fully declared* action, not an unknown one: wiring bundles this spec with
@@ -71,13 +89,13 @@ class FailedTasksCheck(Check):
         self,
         *,
         failed: TaskQueue,
-        healed: TaskQueue,
+        done: TaskQueue,
         events: EventSink,
         clock: Clock,
         repository: str | None = None,
     ) -> None:
         self._failed = failed
-        self._healed = healed
+        self._done = done
         self._events = events
         self._clock = clock
         self._repository = repository
@@ -85,40 +103,18 @@ class FailedTasksCheck(Check):
     def evaluate(self) -> list[Observation]:
         observations: list[Observation] = []
         for candidate in self._failed.list():
+            reason = _decline_reason(candidate)
+            if reason is not None:
+                # Declined: no heal task, and the failure stays in `failed/`
+                # for the operator. Note it once, then leave it alone forever.
+                self._decline(candidate, reason)
+                continue
             task = self._failed.claim(candidate, new_lock_id())
             if task is None:
                 continue  # lost the race to another evaluate() call — not an error
             self._events.emit(
                 "healing", task_id=task.id, queue=FAILED, task=task.to_dict()
             )
-            if task.data.get("heal") is not None:
-                # This claimed task is itself a `heal`-workflow task that
-                # failed. Settle it, never re-observe it — the recursion guard.
-                self._settle(task, "heal-failed: the heal attempt itself failed")
-                continue
-            if _descends_from_a_harness_filed_issue(task):
-                # A fix task born from an issue the harness itself filed, which
-                # then failed. Healing it again would file a fresh issue and
-                # feed the pipeline its own output — the one-hop limit
-                # (invariant 25).
-                self._settle(
-                    task,
-                    "heal-declined: fix attempt for a harness-filed issue "
-                    "failed (one-hop limit)",
-                )
-                continue
-            if _born_from_a_harness_pull_request(task):
-                # A resolver or automerge-review task minted from the
-                # harness's own open PR, which then failed. These carry
-                # neither a body nor `data.heal`, so the two guards above
-                # miss them — same one-hop limit, closed for the PR-borne
-                # half of the cycle (invariant 25).
-                self._settle(
-                    task,
-                    "heal-declined: fix attempt for harness-filed PR work "
-                    "failed (one-hop limit)",
-                )
-                continue
             self._settle(task, "queued for healing")
             observations.append(self._observation(task))
         return observations
@@ -138,22 +134,103 @@ class FailedTasksCheck(Check):
         return Observation(state_key=task.id, data=data, repository=self._repository)
 
     def _settle(self, task: Task, note: str) -> None:
+        """Retire a claimed failure into `done/`.
+
+        `status=END` and the `done` column are the same terminal an ordinary
+        completion reaches — deliberately, since from here on nobody has to do
+        anything about this task. The `failed → end` move stamped by the
+        `failed-tasks` actor is what distinguishes the two in the task's
+        history, which is where the healer's involvement belongs (ADR-0024).
+        """
         entry = HistoryEntry(
             at=self._clock.now(),
             actor=ACTOR,
             from_step=FAILED,
-            to_step=HEALED,
+            to_step=END,
             summary=note,
         )
-        healed = append_history(replace(task, status=HEALED, lock_id=None), entry)
-        self._failed.transfer(healed, self._healed)
+        healed = append_history(replace(task, status=END, lock_id=None), entry)
+        self._failed.transfer(healed, self._done)
         self._events.emit(
             "healed",
             task_id=task.id,
-            queue=HEALED_COLUMN,
+            queue=DONE_COLUMN,
             summary=note,
             task=healed.to_dict(),
         )
+
+    def _decline(self, candidate: Task, note: str) -> None:
+        """Record — exactly once — that this failure will not be healed.
+
+        The task keeps its `failed` status and its place in `failed/`: nothing
+        is coming to fix it, so it must stay where the operator looks. The
+        history line is both the explanation and the marker that stops the next
+        tick from claiming it again.
+        """
+        if _already_declined(candidate):
+            return
+        task = self._failed.claim(candidate, new_lock_id())
+        if task is None:
+            return  # lost the race — the next tick notes it instead
+        entry = HistoryEntry(
+            at=self._clock.now(),
+            actor=ACTOR,
+            from_step=FAILED,
+            to_step=FAILED,
+            summary=note,
+        )
+        declined = append_history(replace(task, lock_id=None), entry)
+        self._failed.transfer(declined, self._failed)
+        self._events.emit(
+            "heal-declined",
+            task_id=task.id,
+            queue=FAILED_COLUMN,
+            summary=note,
+            task=declined.to_dict(),
+        )
+
+
+def _decline_reason(task: Task) -> str | None:
+    """Why this failure must not enter the heal pipeline, or `None` to heal it.
+
+    Every guard reads only the task's own persisted `data`, so the decision is
+    the same before a claim as after one — which is what lets `evaluate()` skip
+    a declined candidate without touching the queue at all.
+    """
+    if task.data.get("heal") is not None:
+        # Itself a `heal`-workflow task that failed. Healing it would be the
+        # healer healing itself — the recursion guard.
+        return "heal-failed: the heal attempt itself failed — left for the operator"
+    if _descends_from_a_harness_filed_issue(task):
+        # A fix task born from an issue the harness itself filed, which then
+        # failed. Healing it again would file a fresh issue and feed the
+        # pipeline its own output — the one-hop limit (invariant 25).
+        return (
+            "heal-declined: fix attempt for a harness-filed issue failed "
+            "(one-hop limit) — left for the operator"
+        )
+    if _born_from_a_harness_pull_request(task):
+        # A resolver or automerge-review task minted from the harness's own
+        # open PR, which then failed. These carry neither a body nor
+        # `data.heal`, so the two guards above miss them — same one-hop limit,
+        # closed for the PR-borne half of the cycle (invariant 25).
+        return (
+            "heal-declined: fix attempt for harness-filed PR work failed "
+            "(one-hop limit) — left for the operator"
+        )
+    return None
+
+
+def _already_declined(task: Task) -> bool:
+    """True once this check has written its decline note onto the task.
+
+    The note itself is the marker — no extra `data` key — because the note is
+    the only thing this check ever writes onto a task it leaves in `failed/`.
+    A restart (`TaskControl.restart`) keeps the history, so a task that fails
+    again is still recognised: the guards are structural, and the reason it was
+    declined the first time has not changed.
+    """
+    return any(entry.actor == ACTOR for entry in task.history)
 
 
 def _diagnostic_request(task: Task) -> str:

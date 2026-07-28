@@ -4,7 +4,7 @@ A Process is a compile-time aggregate: `FilesystemProcessRepository` reads
 `processes/*.json` and compiles each into a `ScheduledTrigger` — a `TaskSource`.
 Compilation itself now happens *inside* `app.build()` (ADR-0018 relocated it
 there so the `failed-tasks` check can close over the harness's own live
-`failed`/`healed`/`events`) — this mirrors `test_generic_triggers_e2e` but
+`failed`/`done`/`events`) — this mirrors `test_generic_triggers_e2e` but
 starts from the *authoring* surface (files on disk), proving the whole
 compile → poll → dispatch → done path with no disk beyond the queues and no real
 waiting.

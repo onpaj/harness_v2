@@ -17,15 +17,14 @@ TODO_COLUMN = "todo"
 """Column for freshly loaded inbox tasks that have not started yet (status=None)."""
 
 DONE_COLUMN = "done"
-"""Column for tasks that reached END."""
+"""Column for tasks that reached END — whether the workflow ran to completion
+or the self-healer took the failure over (ADR-0024). Which of the two it was is
+in the task's history, not in a column of its own."""
 
 FAILED_COLUMN = "failed"
 """Column for tasks that cannot be routed. With self-healing enabled it drains
-as the healer processes each task into `healed`."""
-
-HEALED_COLUMN = "healed"
-"""Column for tasks the healer has settled — the never-consumed terminal that
-takes over that role from `failed` once a healer is wired."""
+as the healer takes each failure over into `done` — what remains is what the
+healer declined to heal, and is the operator's to deal with."""
 
 UNKNOWN_WORKFLOW = "unknown"
 """Reserved tab for tasks whose workflow_template names no discovered
@@ -52,7 +51,7 @@ COLUMN_STEP = "step"
 """Kind of a column that is a real step of the tab's workflow."""
 
 COLUMN_TERMINAL = "terminal"
-"""Kind of `done`/`failed`/`healed` — where a task ends up, not somewhere it works.
+"""Kind of `done`/`failed` — where a task ends up, not somewhere it works.
 
 The three kinds exist so the board can stop rendering two different vocabularies
 identically: a step column is a place *in* a workflow, an inbox/terminal column is
@@ -61,14 +60,17 @@ the router or dispatcher has ever read a column kind (invariant #8)."""
 
 LIFECYCLE_DESCRIPTIONS = {
     TODO_COLUMN: "Arrived from a source, waiting for the dispatcher to place it.",
-    DONE_COLUMN: "Reached `end` — the workflow ran to completion.",
-    FAILED_COLUMN: (
-        "Could not be routed or delivered. Restartable from the task detail; "
-        "the self-healer drains this queue when a process is configured."
+    DONE_COLUMN: (
+        "Reached `end` — the workflow ran to completion, or the self-healer "
+        "took the failure over. The task's history says which."
     ),
-    HEALED_COLUMN: "Claimed out of `failed` by the self-healer and retired here.",
+    FAILED_COLUMN: (
+        "Could not be routed or delivered. Restartable from the task detail. "
+        "The self-healer drains this queue when a process is configured; what "
+        "stays here is what it declined to heal — that one is yours."
+    ),
 }
-"""What the four non-step columns mean. They are the same on every tab — unlike a
+"""What the three non-step columns mean. They are the same on every tab — unlike a
 step's description, which is the workflow's own (`Workflow.descriptions`)."""
 
 

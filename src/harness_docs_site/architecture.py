@@ -298,13 +298,17 @@ MODEL = ArchitectureModel(
                     name="FailedTasksCheck (failed-tasks)",
                     tagline="Draining the failed queue as a Process action.",
                     description=(
-                        "Claims each task out of failed/, settles it to healed/, "
-                        "and emits one observation carrying the rendered failure "
-                        "report — the single reader of failed/, with a data.heal "
-                        "marker guarding against healing a failed heal."
+                        "Claims each healable task out of failed/, retires it "
+                        "into done/, and emits one observation carrying the "
+                        "rendered failure report — the single reader of failed/. "
+                        "A data.heal marker guards against healing a failed "
+                        "heal: that one is declined and left in failed/."
                     ),
                     sources=("src/harness/drivers/failed_tasks_check.py",),
-                    adrs=("0018-healing-as-a-process",),
+                    adrs=(
+                        "0018-healing-as-a-process",
+                        "0024-a-healed-failure-lands-in-done",
+                    ),
                 ),
             ),
         ),
@@ -317,7 +321,7 @@ MODEL = ArchitectureModel(
             description=(
                 "Every place a task can rest is an instance of the same port: "
                 "the inbox, each workflow step, and the terminal queues (done, "
-                "failed, healed, archived) that nobody consumes. claim() is "
+                "failed, archived) that nobody consumes. claim() is "
                 "atomic, so two workers can never take the same task."
             ),
             adrs=("0003-atomic-queue-claim-by-rename",),
