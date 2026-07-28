@@ -27,7 +27,20 @@
     {% endif %}
     <div class="card__meta">
       {% if task.lock_id %}<span class="badge working">processing</span>{% endif %}
-      {% if task.last_outcome %}<span class="badge {{ task.last_outcome }}">{{ task.last_outcome }}</span>{% endif %}
+      {#
+        The outcome badge is a *step's* verdict, never the task's — a bare
+        "done" here read as "the task is finished" while the task was in fact
+        two columns from the end (and often mid-flight, next to "processing").
+        Naming the step it came from is the whole point; the bare outcome is
+        only the fallback for a task with no history to attribute it to.
+      #}
+      {% if task.last_outcome %}
+      {% set reported_by = task | outcome_step %}
+      <span class="badge {{ task.last_outcome }}"
+            {% if reported_by %}title="step '{{ reported_by }}' reported {{ task.last_outcome }} — not the whole task"{% endif %}>
+        {%- if reported_by %}<span class="badge__step">{{ reported_by }}</span>{% endif -%}
+        {{ task.last_outcome }}</span>
+      {% endif %}
       {% if task.history %}<time datetime="{{ task.history[-1].at }}" class="card__time" title="{{ task.history[-1].at }} UTC">{{ task.history[-1].at | shorttime }}</time>{% endif %}
     </div>
   </div>

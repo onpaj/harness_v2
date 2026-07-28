@@ -247,6 +247,10 @@ h3 {
   font-size: 12px; font-weight: 600; border-radius: var(--radius-pill); padding: 3px 10px;
 }
 .badge::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+/* The step an outcome belongs to, dimmed inside its own badge: "plan · done"
+ * reads as one label whose loud half is still the verdict. */
+.badge__step { font-weight: 500; opacity: 0.75; }
+.badge__step::after { content: "\00b7"; margin-left: 4px; opacity: 0.6; }
 .badge.done { background: var(--done-bg); color: var(--done-fg); }
 .badge.request_changes { background: var(--changes-bg); color: var(--changes-fg); }
 .badge.working { background: var(--working-bg); color: var(--working-fg); }

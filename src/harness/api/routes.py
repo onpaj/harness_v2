@@ -20,7 +20,7 @@ from fastapi.responses import (
 )
 from fastapi.templating import Jinja2Templates
 
-from harness.models import END
+from harness.models import END, Task
 from harness.ports.agent import AgentNotFound, AgentSpec
 from harness.ports.agent_admin import AgentAdmin, AgentFields, AgentValidationError
 from harness.ports.artifacts import ArtifactView
@@ -86,6 +86,29 @@ def _shorttime(value: str | None) -> str:
 
 
 TEMPLATES.env.filters["shorttime"] = _shorttime
+
+
+def _outcome_step(task: Task) -> str:
+    """The step whose verdict `task.last_outcome` is — "" when unknowable.
+
+    A bare `done` badge on a card two columns into a workflow reads as "this
+    task is done" when all it ever meant is "the step it just left reported
+    done". The board had one word for two different things (a step's verdict
+    and the terminal `done` queue), so the badge names the step it belongs to.
+
+    Both entry shapes that carry an outcome agree on which step that is: the
+    consumer's delivery entry (`from_step` = the step it ran) and the
+    dispatcher's routing entry (`from_step` = the step being left, with the
+    outcome copied forward). So the last entry carrying an outcome is the
+    answer whichever of the two it is.
+    """
+    for entry in reversed(task.history):
+        if entry.outcome:
+            return entry.from_step or ""
+    return ""
+
+
+TEMPLATES.env.filters["outcome_step"] = _outcome_step
 
 
 def _split_refs(text: str) -> list[str]:

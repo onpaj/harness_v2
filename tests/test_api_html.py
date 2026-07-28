@@ -2,6 +2,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from harness.api.app import create_app
+from harness.api.routes import _outcome_step
 from harness.drivers.memory import FakeClock
 from harness.models import HistoryEntry, Task
 from harness.ports.board import (
@@ -54,6 +55,44 @@ TITLED = Task(
 )
 
 
+# The shape that made a card read as "this task is finished": a step's `done`
+# verdict sitting next to "processing", two columns from the end.
+MIDFLIGHT = Task(
+    id="tsk_5",
+    workflow_template="default",
+    created="2026-07-19T09:59:00Z",
+    status="development",
+    last_outcome="done",
+    lock_id="lck_5",
+    history=(
+        HistoryEntry(
+            at="2026-07-19T09:59:10Z",
+            actor="worker",
+            from_step="plan",
+            to_step=None,
+            outcome="done",
+        ),
+        HistoryEntry(
+            at="2026-07-19T09:59:11Z",
+            actor="dispatcher",
+            from_step="plan",
+            to_step="development",
+            outcome="done",
+        ),
+    ),
+)
+
+# An outcome with no history to attribute it to — the badge falls back to the
+# bare word rather than inventing a step.
+UNATTRIBUTED = Task(
+    id="tsk_6",
+    workflow_template="default",
+    created="2026-07-19T10:00:06Z",
+    status="done",
+    last_outcome="done",
+)
+
+
 WORKFLOW_LESS = Task(
     id="tsk_4",
     workflow_template=None,
@@ -89,8 +128,10 @@ def client() -> TestClient:
                 name="default",
                 columns=(
                     BoardColumn(name="todo", tasks=()),
-                    BoardColumn(name="development", tasks=(WORKING, WAITING, TITLED)),
-                    BoardColumn(name="done", tasks=()),
+                    BoardColumn(
+                        name="development", tasks=(MIDFLIGHT, WORKING, WAITING, TITLED)
+                    ),
+                    BoardColumn(name="done", tasks=(UNATTRIBUTED,)),
                     BoardColumn(name="failed", tasks=()),
                 ),
             ),
@@ -185,6 +226,50 @@ def test_card_shows_last_outcome(client):
     body = client.get("/fragment/board").text
 
     assert "request_changes" in body
+
+
+def test_outcome_badge_names_the_step_that_reported_it(client):
+    """A `done` badge is a *step's* verdict, not the task's — a card mid-flow
+    showing a bare "done" next to "processing" read as a finished task."""
+    body = client.get("/fragment/board").text
+
+    card = body[body.index("tsk_5") : body.index("tsk_1")]
+    assert '<span class="badge__step">plan</span>' in card
+    assert "step 'plan' reported done" in card
+
+
+def test_outcome_badge_falls_back_to_bare_outcome_without_history(client):
+    """Nothing to attribute the outcome to — the badge stays a bare word rather
+    than inventing a step."""
+    body = client.get("/fragment/board").text
+
+    card = body[body.index("tsk_6") :]
+    assert "badge__step" not in card
+    assert "badge done" in card
+
+
+def test_outcome_step_reads_the_consumer_delivery_entry():
+    """The dispatcher's routing entry usually lands last, but a task claimed and
+    delivered with no dispatch yet has only the consumer's own entry (`to_step`
+    unset) — `from_step` names the reporting step in both shapes."""
+    delivered = Task(
+        id="tsk_7",
+        created="2026-07-19T10:00:07Z",
+        status="development",
+        last_outcome="done",
+        history=(
+            HistoryEntry(
+                at="2026-07-19T10:00:08Z",
+                actor="worker",
+                from_step="design",
+                to_step=None,
+                outcome="done",
+            ),
+        ),
+    )
+
+    assert _outcome_step(delivered) == "design"
+    assert _outcome_step(WAITING) == ""
 
 
 def test_card_shows_time_in_state_only_when_history_exists(client):
