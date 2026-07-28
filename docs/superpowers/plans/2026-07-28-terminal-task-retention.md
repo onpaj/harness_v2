@@ -18,7 +18,9 @@
 - Every module under `src/harness/` must have its bare stem named somewhere in `CLAUDE.md`, or `tests/test_claude_md_module_map.py::test_every_source_module_is_named_in_claude_md` fails.
 - Every environment variable `src/harness` reads as configuration must be listed in `tests/conftest.py::_HARNESS_ENVIRONMENT`, or the suite stops being hermetic.
 - Default retention window: **2 days**. Env var: `HARNESS_RETENTION_DAYS`.
-- Work on branch `spec/terminal-task-retention` (already created, spec already committed there). Four files were already dirty in the tree from other work — `src/harness/api/routes.py`, `src/harness/api/static/app.css`, `src/harness/api/templates/_columns.html`, `tests/test_api_html.py`. **Never `git add` those**; every commit below names its files explicitly.
+- Work in the isolated worktree `/Users/rem/harness_v2/.claude/worktrees/terminal-task-retention`, on branch `plan/terminal-task-retention`, which already carries both the spec and this plan. Do **not** work in `/Users/rem/harness_v2` itself — the running harness checks that tree out to `origin/main` without warning, which will destroy uncommitted work.
+- The worktree has its own `.venv` (`uv venv --python 3.11 && uv pip install -e ".[dev]"`, already done). Baseline before any change: **1665 passed, 1 skipped**.
+- `git status --short` starts empty and should only ever show the files the current task is editing. Every commit below names its files explicitly — never `git add -A`.
 
 ---
 
