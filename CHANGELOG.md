@@ -1,6 +1,38 @@
 # CHANGELOG
 
 
+## v1.5.0 (2026-07-28)
+
+### Features
+
+- Retire a healed failure into done, leave a declined one in failed
+  ([#140](https://github.com/onpaj/harness_v2/pull/140),
+  [`568be73`](https://github.com/onpaj/harness_v2/commit/568be7325b2ef9890ca357642738c6369bb21260))
+
+The `failed-tasks` check settled every claim onto a `healed/` terminal of its own — both the
+  failures it took over and the ones its guards declined. That column answered no question an
+  operator has: "healed" reads as success, but it also held the one case where the automation gave
+  up, which is why the docs had to spell out that `heal-declined` in `healed/` means "it's yours
+  now".
+
+Split the two along the columns that already mean what they mean. A claimed failure is retired into
+  `done/` with `status = END` — nobody has to do anything about it any more — and the healer's
+  involvement is recorded in the task's history as the `failed-tasks` actor moving it `failed →
+  end`. A declined failure stays in `failed/`: it is claimed exactly once, to append one history
+  line saying why nothing is coming to fix it, and that line is also the marker that makes every
+  later tick skip it without claiming. So `failed/` no longer drains to empty, but what remains is
+  bounded and inert — no loop, no repeated work, no failure healed twice.
+
+The `healed` status, queue and column are retired. `healed/` is still built and still hydrated, into
+  the `done` column, so tasks an older version left there stay on the board and gettable by id.
+
+See ADR-0024.
+
+Claude-Session: https://claude.ai/code/session_01WUQgssgPZzvk5ZZ6Gim9qR
+
+Co-authored-by: Claude <noreply@anthropic.com>
+
+
 ## v1.4.2 (2026-07-28)
 
 ### Bug Fixes
