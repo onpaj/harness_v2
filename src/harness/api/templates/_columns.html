@@ -30,6 +30,8 @@
      else 'is-changes' if task.last_outcome == 'request_changes'
      else '' %}
   <div class="card{% if accent %} {{ accent }}{% endif %}"
+       data-repository="{{ task.repository | basename }}"
+       data-search="{{ ((task.data.title or task.id) ~ ' ' ~ task.id ~ ' ' ~ (task.repository | basename) ~ ' ' ~ (task.worktree | basename) ~ ' ' ~ (task.last_outcome or '')) | lower }}"
        hx-get="/fragment/task/{{ task.id }}"
        hx-target="#detail"
        hx-swap="innerHTML">

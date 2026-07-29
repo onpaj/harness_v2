@@ -167,6 +167,18 @@ def test_snapshot_has_every_column_even_when_empty():
     assert all(column.tasks == () for column in tab.columns)
 
 
+def test_snapshot_repository_names_defaults_empty():
+    projection = BoardProjection(WORKFLOW.steps(), (WORKFLOW,))
+
+    assert projection.snapshot().repository_names == ()
+
+
+def test_snapshot_repository_names_is_sorted():
+    projection = BoardProjection(WORKFLOW.steps(), (WORKFLOW,), repository_names=["b", "a"])
+
+    assert projection.snapshot().repository_names == ("a", "b")
+
+
 def test_apply_places_task_in_column():
     projection = BoardProjection(WORKFLOW.steps(), (WORKFLOW,))
 

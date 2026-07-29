@@ -127,6 +127,15 @@ def test_default_tab_prefers_development_then_alphabetical_then_none():
     assert Board(revision=0, workflows=()).default_tab() is None
 
 
+def test_board_repository_names_default_and_to_dict():
+    board = Board(revision=0, workflows=())
+    assert board.repository_names == ()
+    assert board.to_dict()["repository_names"] == []
+
+    board = Board(revision=0, workflows=(), repository_names=("b", "a"))
+    assert board.to_dict()["repository_names"] == ["b", "a"]
+
+
 def test_board_serializes_tasks_as_camelcase():
     board = Board(
         revision=7,

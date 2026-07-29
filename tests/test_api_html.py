@@ -177,6 +177,7 @@ def client() -> TestClient:
                 ),
             ),
         ),
+        repository_names=("app-backend", "other-repo"),
     )
     # BROKEN is retrievable via get() (for the detail fragment) without cluttering
     # the rendered columns, so the board-rendering tests stay undisturbed.
@@ -284,6 +285,26 @@ def test_card_shows_last_outcome(client):
     body = client.get("/fragment/board").text
 
     assert "request_changes" in body
+
+
+def test_index_renders_filter_bar_with_repository_options(client):
+    body = client.get("/").text
+
+    assert 'id="filter-repo"' in body
+    assert 'id="filter-text"' in body
+    assert "All repositories" in body
+    assert '<option value="app-backend">app-backend</option>' in body
+    assert '<option value="other-repo">other-repo</option>' in body
+
+
+def test_card_carries_data_repository_and_data_search_attributes(client):
+    body = client.get("/fragment/board").text
+
+    assert 'data-repository="app-backend"' in body
+    # WAITING has no repository — the attribute is present but empty, not
+    # omitted, so the client-side script never has to null-check it.
+    assert 'data-repository=""' in body
+    assert 'data-search="fix the login bug tsk_3' in body
 
 
 def test_outcome_badge_names_the_step_that_reported_it(client):
