@@ -1,5 +1,6 @@
 """`build()` always wires a RetentionReconciler over the terminal queues."""
 
+import asyncio
 import json
 
 from harness.app import HarnessLayout, build
@@ -138,3 +139,37 @@ def test_the_sweep_takes_the_task_off_the_board_but_leaves_it_gettable(tmp_path)
 
     assert "tsk_old" not in on_board()
     assert harness.projection.get("tsk_old") is not None
+
+
+async def test_run_hosts_the_retention_loop_and_archives_an_old_settled_task(tmp_path):
+    """The wiring's headline deliverable: `run()` itself gathers the retention
+    loop, so an old settled task is archived by the running harness — not only
+    by a `tick()` called by hand, as every test above does."""
+    seed(tmp_path)
+    harness = build(
+        tmp_path,
+        "default",
+        events=MemoryEventSink(),
+        clock=FakeClock(NOW),
+        retention_days=2,
+    )
+    harness._done.put(_settled("tsk_old", at="2026-07-20T12:00:00Z", status="done"))
+
+    stop = asyncio.Event()
+    runner = asyncio.create_task(
+        harness.run(poll_interval=0.01, reconcile_interval=0.01, stop=stop)
+    )
+    for _ in range(400):
+        await asyncio.sleep(0.01)
+        if (tmp_path / "archived" / "tsk_old.json").exists():
+            break
+    stop.set()
+    await asyncio.wait_for(runner, timeout=5.0)
+
+    assert (tmp_path / "archived" / "tsk_old.json").exists()
+    assert not (tmp_path / "done" / "tsk_old.json").exists()
+    archived = Task.from_dict(
+        json.loads((tmp_path / "archived" / "tsk_old.json").read_text())
+    )
+    assert archived.status == ARCHIVED
+    assert archived.history[-1].actor == "retention"
