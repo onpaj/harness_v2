@@ -97,6 +97,10 @@ class BoardTab:
 class Board:
     revision: int
     workflows: tuple[BoardTab, ...]
+    repository_names: tuple[str, ...] = ()
+    """Sorted names of every repository the harness has registered — for
+    populating the board's repository filter `<select>`. Pure view data: never
+    consulted by anything that routes a task (invariant #8)."""
 
     def workflow(self, name: str) -> BoardTab | None:
         for tab in self.workflows:
@@ -117,6 +121,7 @@ class Board:
         return {
             "revision": self.revision,
             "workflows": [tab.to_dict() for tab in self.workflows],
+            "repository_names": list(self.repository_names),
         }
 
 

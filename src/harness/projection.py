@@ -85,6 +85,7 @@ class BoardProjection(BoardView):
         self,
         steps: Iterable[str],
         workflows: Sequence[Workflow] = (),
+        repository_names: Sequence[str] = (),
     ) -> None:
         # One tab per served workflow, each carrying that workflow's own column
         # order (including the unconditional `healed` terminal column).
@@ -98,6 +99,7 @@ class BoardProjection(BoardView):
         # become real columns here. TODO_COLUMN must stay or such a task is
         # silently dropped from the board until the dispatcher fails it.
         self._orders[UNKNOWN_WORKFLOW] = column_order(steps)
+        self._repository_names: tuple[str, ...] = tuple(sorted(repository_names))
         self._tasks: dict[str, Task] = {}
         self._locations: dict[str, tuple[str, str]] = {}
         self._revision = 0
@@ -182,7 +184,11 @@ class BoardProjection(BoardView):
             )
             tabs.append(BoardTab(name=tab_name, columns=columns))
         tabs.sort(key=lambda tab: tab.name)
-        return Board(revision=self._revision, workflows=tuple(tabs))
+        return Board(
+            revision=self._revision,
+            workflows=tuple(tabs),
+            repository_names=self._repository_names,
+        )
 
     def get(self, task_id: str) -> Task | None:
         return self._tasks.get(task_id)

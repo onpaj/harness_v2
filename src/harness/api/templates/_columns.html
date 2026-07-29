@@ -19,6 +19,8 @@
         <div class="column__list">
         {% for task in column.tasks %}
         <div class="card{% if task.status == 'failed' %} is-failed{% elif task.lock_id %} is-working{% elif task.last_outcome == 'done' %} is-done{% elif task.last_outcome == 'request_changes' %} is-changes{% endif %}"
+             data-repository="{{ task.repository | basename }}"
+             data-search="{{ ((task.data.title or task.id) ~ ' ' ~ task.id ~ ' ' ~ (task.repository | basename) ~ ' ' ~ (task.worktree | basename) ~ ' ' ~ (task.last_outcome or '')) | lower }}"
              hx-get="/fragment/task/{{ task.id }}"
              hx-target="#detail"
              hx-swap="innerHTML">

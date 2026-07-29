@@ -428,6 +428,7 @@ def build(
     projection = BoardProjection(
         steps=steps,
         workflows=list(discovered.values()),
+        repository_names=repository_registry.names() if repository_registry is not None else (),
     )
     stage_output = StageOutputProjection()
     # The reflector comes after ProjectionSink: the outward projection must not

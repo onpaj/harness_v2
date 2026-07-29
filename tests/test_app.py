@@ -1157,6 +1157,29 @@ def test_build_repository_registry_omitted_is_lenient(tmp_path):
     assert len(harness.pollers) == 1
 
 
+def test_build_threads_repository_registry_names_into_the_board(tmp_path):
+    """The board's filter-bar repository options come from the registry, sorted
+    — not from an ad-hoc scan of whatever tasks happen to be on the board."""
+    from pathlib import Path
+
+    seed_definition(tmp_path, DEFINITION)
+    registry = MemoryRepositoryRegistry(
+        {"harness_v2": Path("/repos/harness_v2"), "another": Path("/repos/another")}
+    )
+
+    harness = build(tmp_path, "default", events=MemoryEventSink(), repository_registry=registry)
+
+    assert harness.projection.snapshot().repository_names == ("another", "harness_v2")
+
+
+def test_build_without_repository_registry_leaves_board_repository_names_empty(tmp_path):
+    seed_definition(tmp_path, DEFINITION)
+
+    harness = build(tmp_path, "default", events=MemoryEventSink())
+
+    assert harness.projection.snapshot().repository_names == ()
+
+
 def test_finisher_factory_receives_step_config_and_a_lazy_inner_thunk(tmp_path):
     """The factory shape (step, config, inner) is what lets a finisher *wrap*
     the step's own agent behavior instead of only replacing it (ADR-0018).
