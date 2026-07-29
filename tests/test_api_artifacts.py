@@ -81,6 +81,33 @@ def test_fragment_task_lists_artifacts_with_links(store):
     assert "/api/tasks/tsk_1/artifacts/plan/0/plan.md" in body
 
 
+def test_fragment_task_has_artifacts_tab_with_count_and_table_in_its_own_panel(store):
+    view = FakeBoardView(Board(revision=1, workflows=(BoardTab(name="default", columns=()),)), {"tsk_1": make_task()})
+    client = TestClient(create_app(view=view, artifacts=store, clock=FakeClock()))
+
+    body = client.get("/fragment/task/tsk_1").text
+
+    assert '<button class="tab" data-tab="artifacts">Artifacts <span class="tab__count">2</span></button>' in body
+    assert '<section class="tab-panel" data-panel="artifacts">' in body
+
+    info_panel = body.split('data-panel="info"')[1].split('data-panel="history"')[0]
+    artifacts_panel = body.split('data-panel="artifacts"')[1]
+    assert "plan.md" not in info_panel
+    assert "<h3>artifacts</h3>" not in body
+    assert "plan.md" in artifacts_panel
+
+
+def test_fragment_task_shows_no_artifacts_hint_and_no_badge_when_empty():
+    view = FakeBoardView(Board(revision=1, workflows=(BoardTab(name="default", columns=()),)), {"tsk_1": make_task()})
+    client = TestClient(create_app(view=view, clock=FakeClock()))
+
+    body = client.get("/fragment/task/tsk_1").text
+
+    assert '<button class="tab" data-tab="artifacts">Artifacts</button>' in body
+    artifacts_panel = body.split('data-panel="artifacts"')[1]
+    assert "No artifacts yet." in artifacts_panel
+
+
 def test_create_app_works_without_artifacts():
     view = FakeBoardView(Board(revision=1, workflows=(BoardTab(name="default", columns=()),)), {"tsk_1": make_task()})
     client = TestClient(create_app(view=view, clock=FakeClock()))
