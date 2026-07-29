@@ -263,6 +263,23 @@ def test_card_shows_repo_and_worktree_basename_not_path(client):
     assert "/Users/x/" not in body
 
 
+def test_card_renders_repository_as_a_badge_with_a_derived_hue(client):
+    body = client.get("/fragment/board").text
+
+    assert '<span class="badge repo-badge" style="--repo-hue: 192">my-repo</span>' in body
+
+
+def test_card_with_no_repository_renders_no_badge(client):
+    body = client.get("/fragment/board").text
+
+    # tsk_2 (WAITING) has neither repository nor worktree; it's the card
+    # rendered between tsk_1's and tsk_3's in the "development" column.
+    after_tsk2 = body.split('hx-get="/fragment/task/tsk_2"', 1)[1]
+    tsk2_card = after_tsk2.split('hx-get="/fragment/task/tsk_3"', 1)[0]
+    assert "repo-badge" not in tsk2_card
+    assert "card__repo" not in tsk2_card
+
+
 def test_card_shows_last_outcome(client):
     body = client.get("/fragment/board").text
 
@@ -371,6 +388,19 @@ def test_fragment_task_shows_metadata_and_history(client):
     assert "development" in body
     assert "2026-07-19T10:00:05Z" in body
     assert "dispatcher" in body
+
+
+def test_fragment_task_shows_repository_as_a_badge_with_same_hue_as_the_card(client):
+    body = client.get("/fragment/task/tsk_1").text
+
+    assert '<span class="badge repo-badge" style="--repo-hue: 57">app-backend</span>' in body
+
+
+def test_fragment_task_with_no_repository_shows_a_dash(client):
+    body = client.get("/fragment/task/tsk_4").text
+
+    assert "repo-badge" not in body
+    assert '<span class="v">—</span>' in body
 
 
 def test_fragment_task_times_are_time_elements_for_client_side_localization(client):
