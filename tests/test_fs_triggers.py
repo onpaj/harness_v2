@@ -188,7 +188,7 @@ def test_missing_kind_raises_naming_the_file(tmp_path: Path) -> None:
     assert "no-kind" in str(excinfo.value)
 
 
-def test_target_outside_known_targets_raises_naming_the_file(tmp_path: Path) -> None:
+def test_target_outside_known_workflows_raises_naming_the_file(tmp_path: Path) -> None:
     _write(
         tmp_path,
         "unknown-wf",
@@ -201,8 +201,77 @@ def test_target_outside_known_targets_raises_naming_the_file(tmp_path: Path) -> 
     )
 
     with pytest.raises(TriggerValidationError) as excinfo:
-        _build(tmp_path, known_targets={"wf"})
+        _build(tmp_path, known_workflows={"wf"})
     assert "unknown-wf" in str(excinfo.value)
+
+
+def test_step_target_naming_a_served_workflow_not_a_step_is_rejected(
+    tmp_path: Path,
+) -> None:
+    """A `{"step": "resolver"}` target where "resolver" is a served workflow's
+    *name*, not a queued step, must be rejected — it would otherwise validate
+    against the old merged set and only fail later at dispatch."""
+    _write(
+        tmp_path,
+        "step-is-really-a-workflow",
+        {
+            "kind": "scheduled",
+            "interval": "1h",
+            "check": "always",
+            "target": {"step": "resolver"},
+        },
+    )
+
+    with pytest.raises(TriggerValidationError) as excinfo:
+        _build(
+            tmp_path,
+            known_steps={"plan", "review"},
+            known_workflows={"resolver"},
+        )
+    assert "step-is-really-a-workflow" in str(excinfo.value)
+
+
+def test_workflow_target_naming_a_step_not_a_served_workflow_is_rejected(
+    tmp_path: Path,
+) -> None:
+    """Symmetric to the above: a `{"workflow": "plan"}` target where "plan" is
+    a step/agent name but not a served workflow must be rejected too."""
+    _write(
+        tmp_path,
+        "workflow-is-really-a-step",
+        {
+            "kind": "scheduled",
+            "interval": "1h",
+            "check": "always",
+            "target": {"workflow": "plan"},
+        },
+    )
+
+    with pytest.raises(TriggerValidationError) as excinfo:
+        _build(
+            tmp_path,
+            known_steps={"plan", "review"},
+            known_workflows={"resolver"},
+        )
+    assert "workflow-is-really-a-step" in str(excinfo.value)
+
+
+def test_step_target_within_known_steps_is_accepted(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "plan-step",
+        {
+            "kind": "scheduled",
+            "interval": "1h",
+            "check": "always",
+            "target": {"step": "plan"},
+        },
+    )
+
+    (trigger,) = _build(
+        tmp_path, known_steps={"plan", "review"}, known_workflows={"resolver"}
+    )
+    assert trigger._step == "plan"
 
 
 # --- cron cadence -------------------------------------------------------------

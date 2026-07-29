@@ -439,6 +439,13 @@ def test_compose_prompt_unchanged_when_body_absent():
         "before you start.\n"
         "Write your output for this step to the file .artifacts/tsk_1/development-01.md.\n"
         "\n"
+        "This is a single non-interactive turn: there is no follow-up turn, and "
+        "nothing you start now will be resumed or checked later. If your verdict "
+        "depends on a command's result — a build, a test run, a formatter, "
+        "anything — run it to completion in this turn before you answer. Do not "
+        "launch it in the background and end the turn expecting to be notified "
+        "when it finishes; that will not happen.\n"
+        "\n"
         "Finish by choosing exactly one outcome:\n"
         '  - "done"\n'
         "\n"
@@ -449,6 +456,23 @@ def test_compose_prompt_unchanged_when_body_absent():
         "```json\n"
         '{"outcome": "<one of: done>", "summary": "<short summary>"}\n'
         "```"
+    )
+
+
+def test_compose_prompt_states_the_single_shot_contract():
+    prompt = compose_prompt(
+        make_task(status="development"),
+        step="development",
+        artifact_relpath=".artifacts/tsk_1/development-01.md",
+        outcomes=(DONE,),
+        hints={},
+    )
+
+    assert "single non-interactive turn" in prompt
+    assert "Do not launch it in the background" in prompt
+    # scene-setting, not an afterthought: appears before the outcome list
+    assert prompt.index("single non-interactive turn") < prompt.index(
+        "Finish by choosing exactly one outcome"
     )
 
 

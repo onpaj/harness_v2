@@ -47,15 +47,39 @@ enables self-healing; its `action.params.repository` configures it.
   missing, malformed, or `repository`-less file returns `None` — "nothing to
   wire" — rather than raising: the process still has to compile in `build()`
   moments later, and that is where a malformed one earns its error message.
+
+  > **Superseded 2026-07-26 (ADR-0022).** `cli._autoheal_repo` does not exist
+  > in the shipped harness — `action.params.repository` is never read at
+  > startup as a slug at all. `OpenIssueBehavior` resolves the repo
+  > per-task, at consume time, from `task.repository` (which the field is
+  > stamped onto) through `RepositoryRegistry` and the clone's own `origin`,
+  > the same way every other GitHub-touching driver does. See ADR-0022's
+  > Context for why: this bullet's "the slug" presumes `action.params.
+  > repository` *is* a GitHub slug, an assumption ADR-0022 replaces.
 - `--heal-repo <owner/repo>` becomes a **bootstrap**: it writes the file
   (still only if absent — a hand-edited process is never clobbered) and
   enables healing for that run. Every run afterwards needs no flag.
+
+  > **Superseded 2026-07-26 (ADR-0022).** `--heal-repo` is removed outright,
+  > not kept as a bootstrap: `harness init` seeds `processes/autoheal.json`
+  > unconditionally (with an empty `action.params.repository`), so nothing
+  > is left for a flag to bootstrap. See ADR-0022.
 - `HARNESS_HEAL_REPO` is removed. The service needs neither a flag nor a
   variable; it finds the process file in the root it was already pointed at.
 - The `--agent claude` requirement splits by how the misconfiguration was
   reached. Via the flag it stays a hard error (exit 2) — the operator is at a
   prompt to read it. Via the process file it is a warning, because an
   unattended service must not crash-loop on config it cannot be told to fix.
+
+  > **Superseded 2026-07-26 (ADR-0022).** There is no flag path any more, so
+  > this split has nothing left to split on — `harness run` never accepted
+  > `--heal-repo`/`--agent claude` as a paired requirement in the shipped
+  > code. The underlying principle — an unattended service warns rather than
+  > crash-loops on config it cannot be told to fix — survives, restated over
+  > this ADR's own two `action.params.repository` cases: a *present but
+  > wrong* value still fails loud at process-compile time
+  > (`ProcessValidationError`, unchanged from this ADR's Decision above), and
+  > an *absent* one — silent before ADR-0022 — now warns at startup instead.
 
 ## Consequences
 
