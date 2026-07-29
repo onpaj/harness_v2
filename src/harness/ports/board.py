@@ -17,20 +17,61 @@ TODO_COLUMN = "todo"
 """Column for freshly loaded inbox tasks that have not started yet (status=None)."""
 
 DONE_COLUMN = "done"
-"""Column for tasks that reached END."""
+"""Column for tasks that reached END — whether the workflow ran to completion
+or the self-healer took the failure over (ADR-0024). Which of the two it was is
+in the task's history, not in a column of its own."""
 
 FAILED_COLUMN = "failed"
 """Column for tasks that cannot be routed. With self-healing enabled it drains
-as the healer processes each task into `healed`."""
-
-HEALED_COLUMN = "healed"
-"""Column for tasks the healer has settled — the never-consumed terminal that
-takes over that role from `failed` once a healer is wired."""
+as the healer takes each failure over into `done` — what remains is what the
+healer declined to heal, and is the operator's to deal with."""
 
 UNKNOWN_WORKFLOW = "unknown"
 """Reserved tab for tasks whose workflow_template names no discovered
 definition. Never a real workflow's name (workflow names come from filenames,
 and "unknown" collides with nothing in practice)."""
+
+UNKNOWN_WORKFLOW_LABEL = "No workflow"
+"""What the UI calls the `unknown` tab. The internal name stays `unknown` (it is
+the tab's key, in `Board.workflow()` and in the DOM), but "unknown" names the
+harness's failure to classify rather than the thing an operator is looking at —
+these are tasks that run *outside* any workflow definition."""
+
+UNKNOWN_WORKFLOW_NOTE = (
+    "Tasks that belong to no workflow file: a Process targeting a bare step, "
+    "or a task whose workflow was renamed or removed. They still run — the "
+    "dispatcher just has no graph to route them along after the current step."
+)
+"""One-line explanation rendered above the `unknown` tab's columns."""
+
+COLUMN_INBOX = "inbox"
+"""Kind of the `todo` column — arrived, not yet dispatched into a workflow."""
+
+COLUMN_STEP = "step"
+"""Kind of a column that is a real step of the tab's workflow."""
+
+COLUMN_TERMINAL = "terminal"
+"""Kind of `done`/`failed` — where a task ends up, not somewhere it works.
+
+The three kinds exist so the board can stop rendering two different vocabularies
+identically: a step column is a place *in* a workflow, an inbox/terminal column is
+a state of the task *relative to* any workflow. Purely a view concern — nothing in
+the router or dispatcher has ever read a column kind (invariant #8)."""
+
+LIFECYCLE_DESCRIPTIONS = {
+    TODO_COLUMN: "Arrived from a source, waiting for the dispatcher to place it.",
+    DONE_COLUMN: (
+        "Reached `end` — the workflow ran to completion, or the self-healer "
+        "took the failure over. The task's history says which."
+    ),
+    FAILED_COLUMN: (
+        "Could not be routed or delivered. Restartable from the task detail. "
+        "The self-healer drains this queue when a process is configured; what "
+        "stays here is what it declined to heal — that one is yours."
+    ),
+}
+"""What the three non-step columns mean. They are the same on every tab — unlike a
+step's description, which is the workflow's own (`Workflow.descriptions`)."""
 
 
 @dataclass(frozen=True)
@@ -73,9 +114,16 @@ class AgentActivity:
 class BoardColumn:
     name: str
     tasks: tuple[Task, ...]
+    kind: str = COLUMN_STEP
+    description: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {"name": self.name, "tasks": [task.to_dict() for task in self.tasks]}
+        return {
+            "name": self.name,
+            "kind": self.kind,
+            "description": self.description,
+            "tasks": [task.to_dict() for task in self.tasks],
+        }
 
 
 @dataclass(frozen=True)
@@ -88,6 +136,33 @@ class BoardTab:
             if column.name == name:
                 return column
         return None
+
+    @property
+    def is_unknown(self) -> bool:
+        return self.name == UNKNOWN_WORKFLOW
+
+    @property
+    def label(self) -> str:
+        """What to call this tab in the UI."""
+        return UNKNOWN_WORKFLOW_LABEL if self.is_unknown else self.name
+
+    @property
+    def task_count(self) -> int:
+        return sum(len(column.tasks) for column in self.columns)
+
+    def visible_columns(self) -> tuple[BoardColumn, ...]:
+        """The columns worth rendering.
+
+        A workflow tab renders all of them — an empty step column is meaningful
+        (it is part of the graph, just idle). The `unknown` tab is a catch-all
+        whose column set is the union of *every* step in the harness, so its
+        empty columns say nothing about anything; only the occupied ones are
+        rendered. Filtering here rather than in the projection keeps the port's
+        snapshot complete for the callers that read the full step set out of it
+        (`routes._target_option_groups`, `routes._new_step_warnings`)."""
+        if not self.is_unknown:
+            return self.columns
+        return tuple(column for column in self.columns if column.tasks)
 
     def to_dict(self) -> dict[str, Any]:
         return {"name": self.name, "columns": [column.to_dict() for column in self.columns]}

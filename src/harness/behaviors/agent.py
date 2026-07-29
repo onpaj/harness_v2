@@ -186,6 +186,13 @@ def compose_prompt(
             f"before you start.",
             f"Write your output for this step to the file {artifact_relpath}.",
             "",
+            "This is a single non-interactive turn: there is no follow-up turn, and "
+            "nothing you start now will be resumed or checked later. If your verdict "
+            "depends on a command's result — a build, a test run, a formatter, "
+            "anything — run it to completion in this turn before you answer. Do not "
+            "launch it in the background and end the turn expecting to be notified "
+            "when it finishes; that will not happen.",
+            "",
             "Finish by choosing exactly one outcome:",
         ]
     )

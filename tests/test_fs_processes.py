@@ -459,7 +459,7 @@ def test_both_targets_raises_naming_the_file(tmp_path: Path) -> None:
     assert "both-targets" in str(excinfo.value)
 
 
-def test_target_outside_known_targets_raises_naming_the_file(tmp_path: Path) -> None:
+def test_target_outside_known_workflows_raises_naming_the_file(tmp_path: Path) -> None:
     _write(
         tmp_path,
         "unknown-wf",
@@ -471,8 +471,77 @@ def test_target_outside_known_targets_raises_naming_the_file(tmp_path: Path) -> 
     )
 
     with pytest.raises(ProcessValidationError) as excinfo:
-        _build(tmp_path, known_targets={"wf"})
+        _build(tmp_path, known_workflows={"wf"})
     assert "unknown-wf" in str(excinfo.value)
+
+
+def test_step_target_naming_a_served_workflow_not_a_step_is_rejected(
+    tmp_path: Path,
+) -> None:
+    """A `{"step": "resolver"}` target where "resolver" is a served workflow's
+    *name*, not a queued step, must be rejected — it would otherwise validate
+    against the old merged set and only fail later at dispatch (`step
+    'resolver' has no queue`)."""
+    _write(
+        tmp_path,
+        "step-is-really-a-workflow",
+        {
+            "trigger": {"interval": "1h"},
+            "action": {"check": "always"},
+            "target": {"step": "resolver"},
+        },
+    )
+
+    with pytest.raises(ProcessValidationError) as excinfo:
+        _build(
+            tmp_path,
+            known_steps={"plan", "review"},
+            known_workflows={"resolver"},
+        )
+    assert "step-is-really-a-workflow" in str(excinfo.value)
+    assert excinfo.value.field == "target"
+
+
+def test_workflow_target_naming_a_step_not_a_served_workflow_is_rejected(
+    tmp_path: Path,
+) -> None:
+    """Symmetric to the above: a `{"workflow": "plan"}` target where "plan" is
+    a step/agent name but not a served workflow must be rejected too."""
+    _write(
+        tmp_path,
+        "workflow-is-really-a-step",
+        {
+            "trigger": {"interval": "1h"},
+            "action": {"check": "always"},
+            "target": {"workflow": "plan"},
+        },
+    )
+
+    with pytest.raises(ProcessValidationError) as excinfo:
+        _build(
+            tmp_path,
+            known_steps={"plan", "review"},
+            known_workflows={"resolver"},
+        )
+    assert "workflow-is-really-a-step" in str(excinfo.value)
+    assert excinfo.value.field == "target"
+
+
+def test_step_target_within_known_steps_is_accepted(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "plan-step",
+        {
+            "trigger": {"interval": "1h"},
+            "action": {"check": "always"},
+            "target": {"step": "plan"},
+        },
+    )
+
+    (trigger,) = _build(
+        tmp_path, known_steps={"plan", "review"}, known_workflows={"resolver"}
+    )
+    assert trigger._step == "plan"
 
 
 def test_unknown_dedup_raises_naming_the_file(tmp_path: Path) -> None:
@@ -806,3 +875,91 @@ def test_observation_repository_wins_over_the_process_default(tmp_path: Path) ->
     (task,) = trigger.poll()
 
     assert task.repository == "obs-repo"
+
+
+# --- action.params.repository (failed-tasks) --------------------------------
+#
+# A `failed-tasks` process's `action.params.repository` is now the primary
+# surface an operator points self-healing at a repo through (it replaced the
+# old `--heal-repo` startup flag). It is validated against the repository
+# registry the same way the top-level `repository` key is. A real
+# `failed-tasks` check needs the live harness queues `app.build()` assembles
+# (it isn't in `BUILTIN_CHECKS`), so — same trick as the github-issues
+# collision tests above — a trivial stand-in factory is registered under the
+# "failed-tasks" name; these tests only exercise the compile-time validation.
+
+_FAILED_TASKS_CHECKS = {**BUILTIN_CHECKS, "failed-tasks": lambda params: AlwaysCheck()}
+
+
+def _build_with_failed_tasks(root: Path, **kwargs) -> list[ScheduledTrigger]:
+    return FilesystemProcessRepository(root).build(
+        clock=SystemClock(), checks=_FAILED_TASKS_CHECKS, **kwargs
+    )
+
+
+def test_failed_tasks_unknown_params_repository_fails_the_build(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "autoheal",
+        {
+            "trigger": {"interval": "30s"},
+            "action": {"check": "failed-tasks", "params": {"repository": "ghost"}},
+            "target": {"workflow": "heal"},
+        },
+    )
+
+    with pytest.raises(ProcessValidationError) as excinfo:
+        _build_with_failed_tasks(tmp_path, known_repositories={"harness_v2"})
+    assert "autoheal" in str(excinfo.value)
+    assert "ghost" in str(excinfo.value)
+    assert excinfo.value.field == "params"
+
+
+def test_failed_tasks_registered_params_repository_compiles(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "autoheal",
+        {
+            "trigger": {"interval": "30s"},
+            "action": {"check": "failed-tasks", "params": {"repository": "harness_v2"}},
+            "target": {"workflow": "heal"},
+        },
+    )
+
+    triggers = _build_with_failed_tasks(tmp_path, known_repositories={"harness_v2"})
+
+    assert len(triggers) == 1
+
+
+def test_failed_tasks_no_params_repository_compiles(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "autoheal",
+        {
+            "trigger": {"interval": "30s"},
+            "action": {"check": "failed-tasks", "params": {}},
+            "target": {"workflow": "heal"},
+        },
+    )
+
+    triggers = _build_with_failed_tasks(tmp_path, known_repositories={"harness_v2"})
+
+    assert len(triggers) == 1
+
+
+def test_failed_tasks_params_repository_accepted_when_known_repositories_is_none(
+    tmp_path: Path,
+) -> None:
+    _write(
+        tmp_path,
+        "autoheal",
+        {
+            "trigger": {"interval": "30s"},
+            "action": {"check": "failed-tasks", "params": {"repository": "whatever"}},
+            "target": {"workflow": "heal"},
+        },
+    )
+
+    triggers = _build_with_failed_tasks(tmp_path)
+
+    assert len(triggers) == 1
