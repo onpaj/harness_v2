@@ -2612,7 +2612,7 @@ def main(argv: list[str] | None = None) -> int:
         "archiving them once merged; deliberately long to respect GitHub "
         "rate limits",
     )
-    run.add_argument("--agent-timeout", type=float, default=1800.0, dest="agent_timeout")
+    run.add_argument("--agent-timeout", type=float, default=5400.0, dest="agent_timeout")
     run.add_argument("--request-changes-at", default=None, dest="request_changes_at")
     run.add_argument(
         "--github-label",

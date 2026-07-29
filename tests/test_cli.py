@@ -753,7 +753,7 @@ def test_run_wires_the_registry_into_build_and_serve(monkeypatch, tmp_path):
     assert captured["serve_registry"] is captured["repository_registry"]
 
 
-def test_run_defaults_agent_timeout_to_1800(monkeypatch, tmp_path):
+def test_run_defaults_agent_timeout_to_5400(monkeypatch, tmp_path):
     main(["init", "--root", str(tmp_path)])
     captured = {}
 
@@ -768,7 +768,7 @@ def test_run_defaults_agent_timeout_to_1800(monkeypatch, tmp_path):
     monkeypatch.setattr("harness.cli.serve", fake_serve)
 
     assert main(["run", "--root", str(tmp_path)]) == 0
-    assert captured["agent_timeout"] == 1800.0
+    assert captured["agent_timeout"] == 5400.0
 
 
 def test_run_accepts_explicit_agent_timeout(monkeypatch, tmp_path):
