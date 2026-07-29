@@ -348,6 +348,12 @@ dialog#add-issue[open] { display: flex; }
   color: var(--text-2); background: var(--surface-2); border-radius: var(--radius-pill);
 }
 .tabs .tab.active { color: var(--on-accent); background: var(--accent); }
+.tab__count {
+  font-size: 11px; font-weight: 700;
+  background: var(--surface); color: var(--text-3);
+  border-radius: var(--radius-pill); padding: 1px 7px; margin-left: 2px;
+}
+.tabs .tab.active .tab__count { background: var(--on-accent); color: var(--accent); }
 
 .tab-panels {
   flex: 1; min-height: 0; overflow: auto; padding: 16px;
