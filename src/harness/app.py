@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -403,46 +403,61 @@ class Harness:
             default=1,
         )
 
-    async def _dispatcher_loop(self, poll_interval: float, stop: asyncio.Event) -> None:
+    async def _tick_loop(
+        self,
+        tick: Callable[[], bool | Awaitable[bool]],
+        interval: float,
+        stop: asyncio.Event,
+    ) -> None:
+        """The one shape every loop in `run()` has: tick, then wait.
+
+        Two properties, both load-bearing. **A productive tick is followed by no
+        delay at all** (`sleep(0)`, a bare yield to the event loop) — a queue with
+        work in it drains at full speed, and only an idle tick pays the interval.
+        And **the idle wait is on `stop`, not on the clock**: a blind
+        `sleep(interval)` cannot be woken, so `stop.set()` followed by
+        `asyncio.gather(...)` over these loops would block until the *longest*
+        interval elapsed — up to `reconcile_interval` (300s by default), which is
+        well past the SIGKILL deadline launchd gives `cli.serve()`'s shutdown
+        path. Waiting on the event instead makes shutdown prompt for every loop,
+        while the timeout keeps the cadence when nothing is stopping.
+
+        `tick` may be sync (every loop but one) or async (`Consumer.tick`); both
+        are accepted so the seven loops stay one shape rather than two.
+        """
         while not stop.is_set():
-            if not self.dispatcher.tick():
-                await asyncio.sleep(poll_interval)
-            else:
+            progressed = tick()
+            if isinstance(progressed, Awaitable):
+                progressed = await progressed
+            if progressed:
                 await asyncio.sleep(0)
+                continue
+            try:
+                await asyncio.wait_for(stop.wait(), timeout=interval)
+            except asyncio.TimeoutError:
+                pass
+
+    async def _dispatcher_loop(self, poll_interval: float, stop: asyncio.Event) -> None:
+        await self._tick_loop(self.dispatcher.tick, poll_interval, stop)
 
     async def _consumer_loop(
         self, consumer: Consumer, poll_interval: float, stop: asyncio.Event
     ) -> None:
-        while not stop.is_set():
-            if not await consumer.tick():
-                await asyncio.sleep(poll_interval)
-            else:
-                await asyncio.sleep(0)
+        await self._tick_loop(consumer.tick, poll_interval, stop)
 
     async def _source_loop(
         self, poller: SourcePoller, source_interval: float, stop: asyncio.Event
     ) -> None:
-        while not stop.is_set():
-            if not poller.tick():
-                await asyncio.sleep(source_interval)
-            else:
-                await asyncio.sleep(0)
+        await self._tick_loop(poller.tick, source_interval, stop)
 
     async def _pr_watcher_loop(self, interval: float, stop: asyncio.Event) -> None:
-        while not stop.is_set():
-            if not self.pr_watcher.tick():
-                await asyncio.sleep(interval)
-            else:
-                await asyncio.sleep(0)
+        assert self.pr_watcher is not None
+        await self._tick_loop(self.pr_watcher.tick, interval, stop)
 
     async def _reconcile_loop(
         self, reconciler: MergeReconciler, reconcile_interval: float, stop: asyncio.Event
     ) -> None:
-        while not stop.is_set():
-            if not reconciler.tick():
-                await asyncio.sleep(reconcile_interval)
-            else:
-                await asyncio.sleep(0)
+        await self._tick_loop(reconciler.tick, reconcile_interval, stop)
 
     async def _issue_reconcile_loop(
         self, reconcile_interval: float, stop: asyncio.Event
@@ -451,11 +466,7 @@ class Harness:
         # is the same kind of slow GitHub housekeeping sweep as checking a done
         # task's PR — not a latency-sensitive "pick up new work" path.
         assert self.issue_reconciler is not None
-        while not stop.is_set():
-            if not self.issue_reconciler.tick():
-                await asyncio.sleep(reconcile_interval)
-            else:
-                await asyncio.sleep(0)
+        await self._tick_loop(self.issue_reconciler.tick, reconcile_interval, stop)
 
     async def _retention_loop(
         self, reconcile_interval: float, stop: asyncio.Event
@@ -465,11 +476,7 @@ class Harness:
         # files, no remote API — and the slowest-moving: whether a task settled
         # two days ago does not change between ticks.
         assert self.retention_reconciler is not None
-        while not stop.is_set():
-            if not self.retention_reconciler.tick():
-                await asyncio.sleep(reconcile_interval)
-            else:
-                await asyncio.sleep(0)
+        await self._tick_loop(self.retention_reconciler.tick, reconcile_interval, stop)
 
 _CREDENTIAL_GATED_CHECKS = {
     "github-issues": "GITHUB_TOKEN",
