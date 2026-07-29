@@ -25,7 +25,7 @@
           <div class="card__title">{{ task.data.title or task.id }}</div>
           {% if task.repository or task.worktree %}
           <div class="card__repo">
-            {{ task.repository | basename }}{% if task.repository and task.worktree %} · {% endif %}{{ task.worktree | basename }}
+            {% if task.repository %}<span class="badge repo-badge" style="--repo-hue: {{ task.repository | repo_hue }}">{{ task.repository | basename }}</span>{% endif %}{% if task.repository and task.worktree %} · {% endif %}{% if task.worktree %}<span class="card__worktree">{{ task.worktree | basename }}</span>{% endif %}
           </div>
           {% endif %}
           <div class="card__meta">

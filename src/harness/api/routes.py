@@ -5,6 +5,7 @@ from __future__ import annotations
 import html
 import json
 import re
+import zlib
 from collections.abc import AsyncIterator
 from datetime import datetime
 from pathlib import Path
@@ -60,6 +61,24 @@ def _basename(value: str | None) -> str:
 
 
 TEMPLATES.env.filters["basename"] = _basename
+
+
+def _repo_hue(value: str | None) -> str:
+    """Deterministic hue in [0, 360) for a repository name, as a plain
+    decimal string ready for a CSS custom property. `zlib.crc32`, not the
+    builtin `hash()` — the latter is salted per-process for strings, which
+    would flip every badge's color on each server restart.
+
+    Falsy input passes through as "" (not "0") so a template checking
+    `{% if task.repository %}` never emits a badge span with an empty-but-
+    present --repo-hue for a repository-less task.
+    """
+    if not value:
+        return ""
+    return str(zlib.crc32(value.encode("utf-8")) % 360)
+
+
+TEMPLATES.env.filters["repo_hue"] = _repo_hue
 
 
 def _shorttime(value: str | None) -> str:

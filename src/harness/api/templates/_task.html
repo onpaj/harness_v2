@@ -25,7 +25,7 @@
     <section class="tab-panel active" data-panel="info">
       <ul class="kv">
         <li><span class="k">id</span><span class="v">{{ task.id }}</span></li>
-        <li><span class="k">repository</span><span class="v">{{ task.repository or "—" }}</span></li>
+        <li><span class="k">repository</span><span class="v">{% if task.repository %}<span class="badge repo-badge" style="--repo-hue: {{ task.repository | repo_hue }}">{{ task.repository | basename }}</span>{% else %}—{% endif %}</span></li>
         <li><span class="k">worktree</span><span class="v">{{ task.worktree or "—" }}</span></li>
         <li><span class="k">workflow</span><span class="v">{{ task.workflow_template or "—" }}</span></li>
         <li><span class="k">step</span><span class="v">{{ task.step or "—" }}</span></li>
