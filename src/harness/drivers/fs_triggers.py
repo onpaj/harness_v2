@@ -36,7 +36,8 @@ class FilesystemTriggerRepository:
         checks: dict[str, CheckFactory] = BUILTIN_CHECKS,
         repository: str | None = None,
         worktree_root: str | None = None,
-        known_targets: set[str] | None = None,
+        known_steps: set[str] | None = None,
+        known_workflows: set[str] | None = None,
     ) -> list[ScheduledTrigger]:
         if not self._root.exists():
             return []
@@ -50,7 +51,8 @@ class FilesystemTriggerRepository:
                     checks=checks,
                     repository=repository,
                     worktree_root=worktree_root,
-                    known_targets=known_targets,
+                    known_steps=known_steps,
+                    known_workflows=known_workflows,
                 )
             )
         return triggers
@@ -63,7 +65,8 @@ class FilesystemTriggerRepository:
         checks: dict[str, CheckFactory],
         repository: str | None,
         worktree_root: str | None,
-        known_targets: set[str] | None,
+        known_steps: set[str] | None,
+        known_workflows: set[str] | None,
     ) -> ScheduledTrigger:
         try:
             raw = json.loads(path.read_text(encoding="utf-8"))
@@ -113,7 +116,9 @@ class FilesystemTriggerRepository:
                 f"trigger {path.name} names an unknown check {check_name!r}"
             )
 
-        workflow, step = self._parse_target(path, raw.get("target"), known_targets)
+        workflow, step = self._parse_target(
+            path, raw.get("target"), known_steps, known_workflows
+        )
 
         dedup = raw.get("dedup", "per-interval")
         if dedup not in ("per-interval", "per-state"):
@@ -140,7 +145,8 @@ class FilesystemTriggerRepository:
         self,
         path: Path,
         target: object,
-        known_targets: set[str] | None,
+        known_steps: set[str] | None,
+        known_workflows: set[str] | None,
     ) -> tuple[str | None, str | None]:
         if not isinstance(target, dict) or set(target) not in ({"workflow"}, {"step"}):
             raise TriggerValidationError(
@@ -150,10 +156,16 @@ class FilesystemTriggerRepository:
 
         workflow = target.get("workflow")
         step = target.get("step")
-        value = workflow if workflow is not None else step
-        if known_targets is not None and value not in known_targets:
-            raise TriggerValidationError(
-                f"trigger {path.name} targets {value!r}, which is not a known "
-                f"workflow or step"
-            )
+        if workflow is not None:
+            if known_workflows is not None and workflow not in known_workflows:
+                raise TriggerValidationError(
+                    f"trigger {path.name} targets workflow {workflow!r}, "
+                    f"which is not a served workflow"
+                )
+        else:
+            if known_steps is not None and step not in known_steps:
+                raise TriggerValidationError(
+                    f"trigger {path.name} targets step {step!r}, which has "
+                    f"no dispatch queue"
+                )
         return workflow, step

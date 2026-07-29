@@ -21,7 +21,7 @@ from fastapi.responses import (
 )
 from fastapi.templating import Jinja2Templates
 
-from harness.models import END
+from harness.models import END, Task
 from harness.ports.agent import AgentNotFound, AgentSpec
 from harness.ports.agent_admin import AgentAdmin, AgentFields, AgentValidationError
 from harness.ports.artifacts import ArtifactView
@@ -29,6 +29,7 @@ from harness.ports.board import (
     DONE_COLUMN,
     FAILED_COLUMN,
     TODO_COLUMN,
+    UNKNOWN_WORKFLOW_NOTE,
     AgentActivity,
     BoardView,
 )
@@ -47,6 +48,11 @@ from harness.ports.workflow_admin import WorkflowAdmin, WorkflowValidationError
 from harness.ports.workflows import WorkflowNotFound
 
 TEMPLATES = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
+
+# A global, not a per-render context entry: `_columns.html` is rendered both
+# inside board.html and standalone as the /fragment/board swap target, and the
+# note is a fixed string either way.
+TEMPLATES.env.globals["unknown_workflow_note"] = UNKNOWN_WORKFLOW_NOTE
 
 
 def _basename(value: str | None) -> str:
@@ -99,6 +105,29 @@ def _shorttime(value: str | None) -> str:
 
 
 TEMPLATES.env.filters["shorttime"] = _shorttime
+
+
+def _outcome_step(task: Task) -> str:
+    """The step whose verdict `task.last_outcome` is — "" when unknowable.
+
+    A bare `done` badge on a card two columns into a workflow reads as "this
+    task is done" when all it ever meant is "the step it just left reported
+    done". The board had one word for two different things (a step's verdict
+    and the terminal `done` queue), so the badge names the step it belongs to.
+
+    Both entry shapes that carry an outcome agree on which step that is: the
+    consumer's delivery entry (`from_step` = the step it ran) and the
+    dispatcher's routing entry (`from_step` = the step being left, with the
+    outcome copied forward). So the last entry carrying an outcome is the
+    answer whichever of the two it is.
+    """
+    for entry in reversed(task.history):
+        if entry.outcome:
+            return entry.from_step or ""
+    return ""
+
+
+TEMPLATES.env.filters["outcome_step"] = _outcome_step
 
 
 def _split_refs(text: str) -> list[str]:

@@ -161,6 +161,31 @@ h3 {
 
 .board { display: flex; flex-direction: column; gap: 16px; }
 
+/* Column groups: `Waiting` (inbox) / the workflow's own steps / `Finished`
+ * (terminals). Three visually separated zones so a step column is never read as
+ * a lifecycle queue, or the other way round. */
+.board-group { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.board-group__label {
+  font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .08em;
+  color: var(--text-3); padding: 0 4px;
+}
+.board-group--steps > .board-group__label { color: var(--text-2); }
+.board-group__columns { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+.board-group--steps { flex: 1 1 auto; }
+
+/* The edge between two consecutive steps. Points down in the phone's stacked
+ * layout, right in the desktop row — one glyph, rotated. */
+.board-flow {
+  align-self: center; color: var(--text-3); font-size: 15px; line-height: 1;
+  transform: rotate(90deg);
+}
+
+.board-note {
+  color: var(--text-2); font-size: 13px; line-height: 1.45;
+  background: var(--surface-2); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 10px 12px; margin: 0 2px 14px;
+}
+
 .column { background: transparent; }
 .column__head {
   position: sticky; top: calc(var(--safe-top) + 48px); z-index: 10;
@@ -177,8 +202,17 @@ h3 {
   background: var(--surface-2); border: 1px solid var(--border);
   border-radius: var(--radius-pill); padding: 1px 9px; min-width: 22px; text-align: center;
 }
+.column__desc {
+  color: var(--text-3); font-size: 12px; line-height: 1.4;
+  padding: 0 6px; margin: -4px 0 8px;
+}
 .column__list { display: flex; flex-direction: column; gap: 10px; }
 .column--empty .column__head { opacity: .55; }
+/* Lifecycle columns are the harness's, not the workflow's — muted so the eye
+ * lands on the steps first. */
+.column--inbox .column__head h2, .column--terminal .column__head h2 {
+  text-transform: none; letter-spacing: 0; font-size: 13px;
+}
 .column__empty {
   color: var(--text-3); font-size: 13px; padding: 2px 6px 4px; font-style: normal;
 }
@@ -217,6 +251,10 @@ h3 {
   font-size: 12px; font-weight: 600; border-radius: var(--radius-pill); padding: 3px 10px;
 }
 .badge::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+/* The step an outcome belongs to, dimmed inside its own badge: "plan · done"
+ * reads as one label whose loud half is still the verdict. */
+.badge__step { font-weight: 500; opacity: 0.75; }
+.badge__step::after { content: "\00b7"; margin-left: 4px; opacity: 0.6; }
 .badge.done { background: var(--done-bg); color: var(--done-fg); }
 .badge.request_changes { background: var(--changes-bg); color: var(--changes-fg); }
 .badge.working { background: var(--working-bg); color: var(--working-fg); }
@@ -252,6 +290,12 @@ h3 {
   color: var(--text-2); background: transparent; border-radius: var(--radius-pill);
 }
 .tab-strip .tab.active { color: var(--on-accent); background: var(--accent); }
+.tab__count {
+  display: inline-block; margin-left: 7px; font-size: 12px; font-weight: 700;
+  background: var(--surface); border-radius: var(--radius-pill); padding: 1px 8px;
+  color: var(--text-3);
+}
+.tab-strip .tab.active .tab__count { background: rgba(255, 255, 255, .22); color: inherit; }
 .workflow-panel { min-width: 0; }
 
 /* --- Task detail (full-screen sheet on phone, dialog on desktop) ---------- */
@@ -384,16 +428,31 @@ td.wrap, th.wrap { white-space: normal; }
   .tabbar { display: none; }
   .appbar__links { display: flex; }
 
+  /* The board scrolls horizontally as one strip; each group sizes to its own
+   * columns (`min-width: auto` — the mobile `min-width: 0` would let a group
+   * shrink below its content and the columns would overlap). */
   .board {
-    flex-direction: row; align-items: flex-start; gap: 14px;
+    flex-direction: row; align-items: stretch; gap: 18px;
     overflow-x: auto; -webkit-overflow-scrolling: touch;
   }
+  .board-group { flex: 0 0 auto; min-width: auto; }
+  .board-group__columns {
+    flex-direction: row; align-items: flex-start; gap: 14px; min-width: auto;
+  }
+  /* A vertical rule between the three zones — the same separation the group
+   * labels carry, for the eye that scans the columns and not the labels. */
+  .board-group + .board-group { border-left: 1px solid var(--border); padding-left: 18px; }
+  .board-flow { transform: none; align-self: flex-start; padding-top: 14px; }
+
   .column {
-    flex: 1 1 0; min-width: 260px; max-width: 360px;
+    flex: 0 0 auto; width: 280px;
     background: var(--surface-2); border: 1px solid var(--border);
     border-radius: var(--radius); padding: 10px;
   }
+  /* Lifecycle columns are narrower: they are terminals, not workstations. */
+  .board-group--inbox .column, .board-group--terminal .column { width: 220px; }
   .column__head { position: static; top: auto; background: none; margin-bottom: 10px; padding: 4px 6px; }
+  .column__desc { margin: -6px 0 10px; }
   .column--empty { opacity: .7; }
 
   dialog#detail, dialog#add-issue {

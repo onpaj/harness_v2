@@ -1,46 +1,123 @@
+{#
+  The board is grouped by column *kind*, not by position: `inbox` (arrived, not
+  dispatched), `step` (a place in this tab's workflow) and `terminal` (where a
+  task ended up). Rendering all three identically was the whole reason a column
+  row read as one undifferentiated vocabulary. The kind strings mirror
+  ports/board.py's COLUMN_INBOX/COLUMN_STEP/COLUMN_TERMINAL.
+#}
+{% macro board_column(col) %}
+<div class="column column--{{ col.kind }} {% if not col.tasks %}column--empty{% endif %}">
+  <div class="column__head">
+    <h2>{{ col.name }}</h2>
+    <span class="column__count">{{ col.tasks|length }}</span>
+  </div>
+  {% if col.description %}<p class="column__desc">{{ col.description }}</p>{% endif %}
+  {% if col.tasks %}
+  <div class="column__list">
+  {% for task in col.tasks %}
+  {#
+    The accent stripe answers "what is happening to this task", so green has to
+    mean the *task* is finished. In a step column a `done` outcome is only the
+    previous step's verdict, and a green card there told the same lie the bare
+    `done` badge did — a task mid-workflow reading as complete. Neutral is the
+    honest answer there: it is sitting in a step column, waiting its turn.
+    `request_changes` keeps its stripe in every column — "it came back" is as
+    true mid-workflow as anywhere, and no column name says it.
+  #}
+  {% set accent = 'is-failed' if task.status == 'failed'
+     else 'is-working' if task.lock_id
+     else 'is-done' if task.last_outcome == 'done' and col.kind == 'terminal'
+     else 'is-changes' if task.last_outcome == 'request_changes'
+     else '' %}
+  <div class="card{% if accent %} {{ accent }}{% endif %}"
+       hx-get="/fragment/task/{{ task.id }}"
+       hx-target="#detail"
+       hx-swap="innerHTML">
+    <div class="card__title">{{ task.data.title or task.id }}</div>
+    {% if task.repository or task.worktree %}
+    <div class="card__repo">
+      {% if task.repository %}<span class="badge repo-badge" style="--repo-hue: {{ task.repository | repo_hue }}">{{ task.repository | basename }}</span>{% endif %}{% if task.repository and task.worktree %} · {% endif %}{% if task.worktree %}<span class="card__worktree">{{ task.worktree | basename }}</span>{% endif %}
+    </div>
+    {% endif %}
+    <div class="card__meta">
+      {% if task.lock_id %}<span class="badge working">processing</span>{% endif %}
+      {#
+        The outcome badge is a *step's* verdict, never the task's — a bare
+        "done" here read as "the task is finished" while the task was in fact
+        two columns from the end (and often mid-flight, next to "processing").
+        Naming the step it came from is the whole point; the bare outcome is
+        only the fallback for a task with no history to attribute it to.
+      #}
+      {% if task.last_outcome %}
+      {% set reported_by = task | outcome_step %}
+      <span class="badge {{ task.last_outcome }}"
+            {% if reported_by %}title="step '{{ reported_by }}' reported {{ task.last_outcome }} — not the whole task"{% endif %}>
+        {%- if reported_by %}<span class="badge__step">{{ reported_by }}</span>{% endif -%}
+        {{ task.last_outcome }}</span>
+      {% endif %}
+      {% if task.history %}<time datetime="{{ task.history[-1].at }}" class="card__time" title="{{ task.history[-1].at }} UTC">{{ task.history[-1].at | shorttime }}</time>{% endif %}
+    </div>
+  </div>
+  {% endfor %}
+  </div>
+  {% else %}
+  <div class="column__empty">No tasks</div>
+  {% endif %}
+</div>
+{% endmacro %}
+
 <div class="board-wrap">
   {% if board.workflows|length > 1 %}
-  <div class="tab-strip">
+  <div class="tab-strip" role="tablist" aria-label="Workflow">
     {% for tab in board.workflows %}
-    <button class="tab" data-workflow="{{ tab.name }}">{{ tab.name }}</button>
+    <button class="tab" role="tab" data-workflow="{{ tab.name }}">
+      {{ tab.label }}<span class="tab__count">{{ tab.task_count }}</span>
+    </button>
     {% endfor %}
   </div>
   {% endif %}
   {% for tab in board.workflows %}
+  {% set visible = tab.visible_columns() %}
+  {% set inbox_columns = visible | selectattr('kind', 'equalto', 'inbox') | list %}
+  {% set step_columns = visible | selectattr('kind', 'equalto', 'step') | list %}
+  {% set terminal_columns = visible | selectattr('kind', 'equalto', 'terminal') | list %}
   <div class="workflow-panel" data-workflow="{{ tab.name }}">
+    {% if tab.is_unknown %}
+    <p class="board-note">{{ unknown_workflow_note }}</p>
+    {% endif %}
     <div class="board">
-      {% for column in tab.columns %}
-      <div class="column {% if not column.tasks %}column--empty{% endif %}">
-        <div class="column__head">
-          <h2>{{ column.name }}</h2>
-          <span class="column__count">{{ column.tasks|length }}</span>
+      {% if inbox_columns %}
+      <section class="board-group board-group--inbox">
+        <h3 class="board-group__label">Waiting</h3>
+        <div class="board-group__columns">
+          {% for col in inbox_columns %}{{ board_column(col) }}{% endfor %}
         </div>
-        {% if column.tasks %}
-        <div class="column__list">
-        {% for task in column.tasks %}
-        <div class="card{% if task.status == 'failed' %} is-failed{% elif task.lock_id %} is-working{% elif task.last_outcome == 'done' %} is-done{% elif task.last_outcome == 'request_changes' %} is-changes{% endif %}"
-             hx-get="/fragment/task/{{ task.id }}"
-             hx-target="#detail"
-             hx-swap="innerHTML">
-          <div class="card__title">{{ task.data.title or task.id }}</div>
-          {% if task.repository or task.worktree %}
-          <div class="card__repo">
-            {% if task.repository %}<span class="badge repo-badge" style="--repo-hue: {{ task.repository | repo_hue }}">{{ task.repository | basename }}</span>{% endif %}{% if task.repository and task.worktree %} · {% endif %}{% if task.worktree %}<span class="card__worktree">{{ task.worktree | basename }}</span>{% endif %}
-          </div>
+      </section>
+      {% endif %}
+      {% if step_columns %}
+      <section class="board-group board-group--steps">
+        <h3 class="board-group__label">
+          {% if tab.is_unknown %}Steps{% else %}{{ tab.name }} workflow{% endif %}
+        </h3>
+        <div class="board-group__columns">
+          {% for col in step_columns %}
+          {% if not loop.first and not tab.is_unknown %}
+          {# The unknown tab's columns are an unordered catch-all — no flow to draw. #}
+          <div class="board-flow" aria-hidden="true">→</div>
           {% endif %}
-          <div class="card__meta">
-            {% if task.lock_id %}<span class="badge working">processing</span>{% endif %}
-            {% if task.last_outcome %}<span class="badge {{ task.last_outcome }}">{{ task.last_outcome }}</span>{% endif %}
-            {% if task.history %}<time datetime="{{ task.history[-1].at }}" class="card__time" title="{{ task.history[-1].at }} UTC">{{ task.history[-1].at | shorttime }}</time>{% endif %}
-          </div>
+          {{ board_column(col) }}
+          {% endfor %}
         </div>
-        {% endfor %}
+      </section>
+      {% endif %}
+      {% if terminal_columns %}
+      <section class="board-group board-group--terminal">
+        <h3 class="board-group__label">Finished</h3>
+        <div class="board-group__columns">
+          {% for col in terminal_columns %}{{ board_column(col) }}{% endfor %}
         </div>
-        {% else %}
-        <div class="column__empty">No tasks</div>
-        {% endif %}
-      </div>
-      {% endfor %}
+      </section>
+      {% endif %}
     </div>
   </div>
   {% endfor %}

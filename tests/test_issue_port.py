@@ -12,11 +12,16 @@ def test_issue_tracker_is_abstract():
 
 def test_a_trivial_subclass_satisfies_the_signature():
     class Stub(IssueTracker):
-        def open_issue(self, repo, *, title, body, labels, marker):
+        def open_issue(self, repo, *, title, body, labels, marker, scope_label):
             return IssueRef(number=1, url=f"https://x/{repo}/1")
 
     ref = Stub().open_issue(
-        "o/r", title="T", body="B", labels=("harness:self-heal",), marker="tsk_1"
+        "o/r",
+        title="T",
+        body="B",
+        labels=("harness:self-heal",),
+        marker="tsk_1",
+        scope_label="harness:self-heal",
     )
     assert ref == IssueRef(number=1, url="https://x/o/r/1")
 

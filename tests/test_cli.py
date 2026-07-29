@@ -8,12 +8,14 @@ from pathlib import Path
 import pytest
 
 from harness.app import HarnessLayout
+from harness.behaviors.merge_pr import MergePrBehavior
 from harness.cli import (
     AGENT_PERSONAS,
     AUTOHEAL_PROCESS_DEFINITION,
     DEFAULT_DEFINITION,
     DEFAULT_HEAL_WORKFLOW,
     DEFAULT_WORKFLOW,
+    HEAL_DEFINITION,
     _REVIEW_PERSONA,
     _agent_definition_template,
     _declared_sink_kinds,
@@ -22,6 +24,7 @@ from harness.cli import (
     _issue_import_factory,
     _process_check_factories,
     _slack_sinks,
+    _warn_missing_autoheal_repository,
     main,
     serve,
 )
@@ -44,28 +47,6 @@ SERVE_TEST_WORKFLOW = Workflow(
     ),
 )
 
-
-def _write_autoheal(root: Path, repository: str | None) -> Path:
-    """Write `processes/autoheal.json` the way a `--heal-repo` bootstrap would.
-
-    Self-healing is enabled by this file's existence and configured by its
-    `action.params.repository` — `repository=None` writes the param-less form,
-    which names no repo to file against.
-    """
-    path = Path(root) / "processes" / "autoheal.json"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    params = {} if repository is None else {"repository": repository}
-    path.write_text(
-        json.dumps(
-            {
-                **AUTOHEAL_PROCESS_DEFINITION,
-                "action": {"check": "failed-tasks", "params": params},
-            },
-            indent=2,
-        ),
-        encoding="utf-8",
-    )
-    return path
 
 
 def test_init_creates_layout_and_default_workflow(tmp_path):
@@ -99,7 +80,13 @@ def test_init_writes_heal_workflow_and_agent(tmp_path):
     )
     assert heal_to_dedup["to"] == "dedup"
     assert heal_to_dedup["hint"]
-    assert workflow["finishers"] == {"file-issue": "open-issue"}
+    assert workflow["finishers"] == {
+        "file-issue": {
+            "kind": "open-issue",
+            "from_step": "heal",
+            "label": "harness:self-heal",
+        }
+    }
 
     # `heal`'s custom outcomes (file/skip) mean the fallback written into
     # agents/heal.json is clamped to a loadable subset — not the workflow's
@@ -129,9 +116,10 @@ def test_init_writes_heal_workflow_and_agent(tmp_path):
     assert not (tmp_path / "agents" / "file-issue.json").exists()
     assert not (tmp_path / "agents" / "land.json").exists()
 
-    # a bare `harness init` has no repo to file issues against — the process
-    # that actually drives healing stays gated behind `--heal-repo`.
-    assert not (tmp_path / "processes" / "autoheal.json").exists()
+    # `harness init` also seeds `processes/autoheal.json` unconditionally, with
+    # an empty `action.params.repository` — see
+    # `test_init_seeds_the_autoheal_process` for its full shape.
+    assert (tmp_path / "processes" / "autoheal.json").is_file()
 
 
 def test_heal_workflow_transitions_and_descriptions(tmp_path):
@@ -155,22 +143,63 @@ def test_heal_workflow_transitions_and_descriptions(tmp_path):
     assert workflow.description_for("heal")
 
 
-def test_ensure_autoheal_process_writes_repository_param(tmp_path):
-    from harness.app import HarnessLayout
-    from harness.cli import _ensure_autoheal_process
-
-    assert main(["init", "--root", str(tmp_path)]) == 0
-    layout = HarnessLayout(tmp_path)
-
-    _ensure_autoheal_process(layout, "onpaj/harness_v2")
-
-    process = json.loads((tmp_path / "processes" / "autoheal.json").read_text())
-    assert process["action"]["params"]["repository"] == "onpaj/harness_v2"
+def test_heal_definitions_file_issue_binding_withholds_allowed_labels():
+    """Pins a deliberate omission: the shipped `heal` persona now tells the
+    model to emit `labels: ["harness:todo"]`, but `HEAL_DEFINITION`'s
+    `file-issue` binding carries no `allowed_labels`, so that label is
+    dropped rather than applied — every `harness init` deployment gets
+    unattended fix-attempt healing only once an operator opts in by editing
+    the binding themselves. See the binding's own comment."""
+    assert "allowed_labels" not in HEAL_DEFINITION["finishers"]["file-issue"]
 
 
-def test_run_heal_repo_wires_open_issue_finisher_and_tracker(monkeypatch, tmp_path):
+def test_init_seeds_the_autoheal_process(tmp_path):
+    main(["init", "--root", str(tmp_path)])
+
+    definition = json.loads((tmp_path / "processes" / "autoheal.json").read_text())
+
+    assert definition["action"]["check"] == "failed-tasks"
+    assert definition["target"] == {"workflow": "heal"}
+    assert definition["action"]["params"] == {}
+
+
+def test_init_never_clobbers_an_existing_autoheal_process(tmp_path):
+    (tmp_path / "processes").mkdir(parents=True)
+    (tmp_path / "processes" / "autoheal.json").write_text('{"mine": true}')
+
+    main(["init", "--root", str(tmp_path)])
+
+    assert json.loads((tmp_path / "processes" / "autoheal.json").read_text()) == {"mine": True}
+
+
+def test_the_heal_repo_flag_is_gone(tmp_path, capsys):
+    main(["init", "--root", str(tmp_path)])
+    capsys.readouterr()
+
+    # Checks argparse's own rejection (exit code 2 + "unrecognized
+    # arguments"), never merely "some SystemExit happened" — that weaker
+    # shape would also pass if the flag were still accepted and a real
+    # serve() started and then died for an unrelated reason (e.g. the board
+    # port already being held by another process), which is exactly what
+    # the pre-fix version of the equivalent test for `--workflow`/
+    # `--all-workflows`/`--resolver-workflow` did before those flags were
+    # removed (see test_the_workflow_selection_flags_are_gone).
+    with pytest.raises(SystemExit) as exc:
+        main(["run", "--root", str(tmp_path), "--heal-repo", "onpaj/harness_v2"])
+    assert exc.value.code == 2
+    assert "unrecognized arguments" in capsys.readouterr().err
+
+
+HEAL_FINISHER_CONFIG = {"from_step": "heal", "label": "harness:self-heal"}
+"""The config `HEAL_DEFINITION`'s `file-issue` binding carries — the tests
+below call the captured factory directly, the way `behavior_for` would, so
+they must pass the same config a real build reads off the workflow file."""
+
+
+def test_run_wires_open_issue_finisher_and_tracker(monkeypatch, tmp_path):
     from harness.behaviors.open_issue import OpenIssueBehavior
     from harness.drivers.memory import MemoryIssueTracker
+    from harness.ports.issues import IssueError
 
     main(["init", "--root", str(tmp_path)])
     captured = {}
@@ -187,46 +216,44 @@ def test_run_heal_repo_wires_open_issue_finisher_and_tracker(monkeypatch, tmp_pa
     monkeypatch.setattr("harness.cli.serve", fake_serve)
     monkeypatch.delenv("GITHUB_TOKEN", raising=False)
 
-    assert main(["run", "--root", str(tmp_path), "--heal-repo", "onpaj/harness_v2"]) == 0
-    assert DEFAULT_HEAL_WORKFLOW in captured["served_names"]
+    assert main(["run", "--root", str(tmp_path)]) == 0
     # the finisher registry holds factories (invariant #41), so call it to get
-    # the behavior — open-issue ignores step/config/inner and replaces the step.
-    behavior = captured["finishers"]["open-issue"]("file-issue", {}, lambda: None)
+    # the behavior — open-issue reads label/from_step off the binding's config;
+    # with from_step set it replaces the step and never calls the thunk.
+    behavior = captured["finishers"]["open-issue"](
+        "file-issue", HEAL_FINISHER_CONFIG, lambda: None
+    )
     assert isinstance(behavior, OpenIssueBehavior)
     # offline (no token) → the in-memory tracker, so the loop still runs
     assert isinstance(behavior._tracker, MemoryIssueTracker)
-    assert behavior._repo == "onpaj/harness_v2"
-
-    # the thin generator also wrote the autoheal process — targeting the
-    # *workflow*, not the bare step (a workflow-less target finishes after one
-    # hop and never reaches file-issue/open-issue, ADR-0018).
-    process = json.loads((tmp_path / "processes" / "autoheal.json").read_text())
-    assert process["target"] == {"workflow": "heal"}
-    assert process["action"]["check"] == "failed-tasks"
+    # `slug_for` is the generic, registry-backed resolver (`_slug_resolver`),
+    # not a closure hardcoded to a single repo — an unregistered name raises,
+    # exactly like it would for any other GitHub-touching driver.
+    with pytest.raises(IssueError):
+        behavior._slug_for("some-unregistered-repo-name")
 
 
-def test_run_heal_via_the_process_file_wires_everything_without_a_flag(
-    monkeypatch, tmp_path
-):
-    """The flag-free path: `processes/autoheal.json` alone enables healing —
-    serves `heal` and registers the `open-issue` finisher on the repo named in
-    the process's own `action.params.repository`. No flag, no environment
-    variable: this is what lets the launchd service self-heal, whose wrapper
-    execs a fixed `harness run --root ... --api-port ...` (ADR-0018).
-
-    Enablement by a file in `processes/` is how every *other* automation in the
-    harness works; autoheal was the sole exception until this."""
-    from harness.behaviors.open_issue import OpenIssueBehavior
-
+def test_a_binding_without_a_label_is_dropped_from_the_served_set(monkeypatch, tmp_path, capsys):
+    """ADR-0022: a served workflow whose finisher binding can't be wired
+    (here, `open-issue` without the `label` its factory requires) no longer
+    fails the whole run — `_validate_served_workflows` catches it in
+    `cli._run`, before `build()` ever sees it, and drops just that workflow
+    with a warning naming the file, the step and the reason. `review` is
+    served automatically because its definition is on disk (the served set
+    is every workflow file under `workflows/`), so this reproduces without
+    any extra wiring; `development`/`resolver`/`heal` stay served."""
     main(["init", "--root", str(tmp_path)])
-    # Written by a prior `--heal-repo` bootstrap, or by hand. Either way it is
-    # the only configuration this run gets.
-    _write_autoheal(tmp_path, "onpaj/harness_v2")
+    path = tmp_path / "workflows" / "review.json"
+    path.write_text(json.dumps({
+        "name": "review",
+        "start": "review",
+        "transitions": [{"from": "review", "on": "done", "to": "end"}],
+        "finishers": {"review": {"kind": "open-issue"}},
+    }))
     captured = {}
 
     def fake_build(*args, **kwargs):
         captured["served_names"] = args[1]
-        captured["finishers"] = kwargs.get("finishers")
         return object()
 
     async def fake_serve(harness, port, poll_interval, source_interval=30.0, pr_poll_interval=0.0, reconcile_interval=300.0, registry=None):
@@ -234,131 +261,290 @@ def test_run_heal_via_the_process_file_wires_everything_without_a_flag(
 
     monkeypatch.setattr("harness.cli.build", fake_build)
     monkeypatch.setattr("harness.cli.serve", fake_serve)
+    capsys.readouterr()
 
-    # No --heal-repo anywhere on the command line, and no env var.
     assert main(["run", "--root", str(tmp_path)]) == 0
-    assert DEFAULT_HEAL_WORKFLOW in captured["served_names"]
-    behavior = captured["finishers"]["open-issue"]("file-issue", {}, lambda: None)
-    assert isinstance(behavior, OpenIssueBehavior)
-    # The repo the finisher files against is the process's own param — the same
-    # value `FailedTasksCheck` stamps as `task.repository`, so they can't drift.
-    assert behavior._repo == "onpaj/harness_v2"
+    err = capsys.readouterr().err
+    assert err.startswith("warning:")
+    assert "review" in err
+    assert str(path) in err
+    # Specifically the missing-`label` check, not merely "unknown kind" —
+    # `open-issue` must already be a known finisher kind here.
+    assert "label" in err
+    assert "review" not in captured["served_names"]
+    assert set(captured["served_names"]) == {DEFAULT_WORKFLOW, DEFAULT_HEAL_WORKFLOW, "resolver", "automerge"}
 
 
-def test_run_heal_repo_flag_bootstraps_the_process_file_for_later_runs(
-    monkeypatch, tmp_path
-):
-    """`--heal-repo` writes the file; the *next* run needs no flag.
-
-    The two halves of the new contract in one test: the flag is a bootstrap
-    that persists its argument, and persistence is what makes the flag
-    unnecessary from then on."""
+def _make_stale_heal_root(tmp_path) -> Path:
+    """`harness init`, then corrupt the seeded `workflows/heal.json` into the
+    pre-generic string form `"file-issue": "open-issue"` — the exact
+    reference-install shape (`FinisherBinding(kind="open-issue")`, an empty
+    config) that fails the `open-issue` factory's own `label` check. Returns
+    the workflow file's path."""
     main(["init", "--root", str(tmp_path)])
-    captured = {}
+    heal_path = tmp_path / "workflows" / "heal.json"
+    definition = json.loads(heal_path.read_text())
+    definition["finishers"] = {"file-issue": "open-issue"}
+    heal_path.write_text(json.dumps(definition))
+    return heal_path
 
-    def fake_build(*args, **kwargs):
-        captured["served_names"] = args[1]
-        return object()
 
-    async def fake_serve(harness, port, poll_interval, source_interval=30.0, pr_poll_interval=0.0, reconcile_interval=300.0, registry=None):
-        pass
-
-    monkeypatch.setattr("harness.cli.build", fake_build)
-    monkeypatch.setattr("harness.cli.serve", fake_serve)
-
-    # First run: the flag bootstraps the file.
-    assert main(["run", "--root", str(tmp_path), "--heal-repo", "onpaj/harness_v2"]) == 0
-    autoheal = tmp_path / "processes" / "autoheal.json"
-    assert autoheal.is_file()
-    assert json.loads(autoheal.read_text())["action"]["params"]["repository"] == (
-        "onpaj/harness_v2"
+def _autoheal_still_inert(harness) -> bool:
+    """Whether the compiled `autoheal.json` process is nowhere among
+    `harness.pollers` — used below to confirm the dropped `heal` workflow's
+    dependent Process was skipped rather than compiled (which would either
+    crash the build or, worse, silently resolve by accident through the
+    `heal` *agent* catalog entry sharing the workflow's name)."""
+    return not any(
+        getattr(poller, "_source", None) is not None
+        and getattr(poller._source, "kind", None) == "scheduled:autoheal"
+        for poller in harness.pollers
     )
 
-    # Second run: no flag, and healing is still on — read back out of the file.
-    captured.clear()
-    assert main(["run", "--root", str(tmp_path)]) == 0
-    assert DEFAULT_HEAL_WORKFLOW in captured["served_names"]
 
-
-def test_run_ignores_an_autoheal_process_with_no_repository_param(
-    monkeypatch, tmp_path
+@pytest.mark.parametrize("agent", ["claude", "dummy"])
+def test_the_stale_pre_generic_heal_workflow_is_dropped_not_fatal(
+    monkeypatch, tmp_path, capsys, agent
 ):
-    """A repository-less autoheal file names no repo, so there is nothing to
-    file issues against and nothing to wire.
+    """The exact reference-install failure: `workflows/heal.json` still
+    carrying the pre-generic string form `"file-issue": "open-issue"` fails
+    the `open-issue` factory's own `label` check exactly like
+    `test_a_binding_without_a_label_is_dropped_from_the_served_set` above,
+    just via the shipped `heal` workflow rather than a hand-authored one.
+    Before ADR-0022 this exited 2 (`error: step 'file-issue' binds the
+    'open-issue' finisher without a 'label'`) and, under the launchd
+    service's `KeepAlive=true`, crash-looped. Now it's a warning and `heal`
+    is simply not served — everything else still runs.
 
-    `_autoheal_repo` returns None rather than guessing; `heal` stays unserved
-    and the `open-issue` kind unregistered. The operator still finds out —
-    `build()` rejects a process targeting an unserved workflow — but that is
-    the existing build-time error, not a new silent half-configured mode."""
-    main(["init", "--root", str(tmp_path)])
-    _write_autoheal(tmp_path, None)
+    `build()` is deliberately NOT mocked here (unlike the earlier revision of
+    this test): mocking it out proved nothing about the composite path — it
+    stayed green even when `build()` itself rejected `processes/autoheal.json`
+    outright, because `autoheal.json` targets `{"workflow": "heal"}` and
+    `heal` also happens to be an agent name in the default catalog
+    (`agents/heal.json`), a coincidence nothing pins. Only `serve` is
+    monkeypatched, as a belt-and-suspenders guard against starting a real
+    server / binding a port — `build()` runs for real and must not raise for
+    either `--agent claude` or `--agent dummy` (no catalog at all), which is
+    exactly the distinction the reviewer's bug depended on."""
+    heal_path = _make_stale_heal_root(tmp_path)
     captured = {}
 
-    def fake_build(*args, **kwargs):
-        captured["served_names"] = args[1]
-        captured["finishers"] = kwargs.get("finishers")
-        return object()
-
     async def fake_serve(harness, port, poll_interval, source_interval=30.0, pr_poll_interval=0.0, reconcile_interval=300.0, registry=None):
-        pass
+        captured["harness"] = harness
 
-    monkeypatch.setattr("harness.cli.build", fake_build)
     monkeypatch.setattr("harness.cli.serve", fake_serve)
+    capsys.readouterr()
 
-    assert main(["run", "--root", str(tmp_path)]) == 0
-    assert DEFAULT_HEAL_WORKFLOW not in captured["served_names"]
-    assert captured["finishers"] is None
+    exit_code = main(["run", "--root", str(tmp_path), "--agent", agent])
+    err = capsys.readouterr().err
 
-
-def test_run_tolerates_a_broken_autoheal_process_file(monkeypatch, tmp_path):
-    """Broken JSON in `autoheal.json` must not crash `_run` before `build()`.
-
-    `build()` is where a malformed process earns its error message, with the
-    file name and the parse failure in it. `_autoheal_repo` reading it first
-    must not pre-empt that with a traceback."""
-    main(["init", "--root", str(tmp_path)])
-    (tmp_path / "processes").mkdir(parents=True, exist_ok=True)
-    (tmp_path / "processes" / "autoheal.json").write_text("{not json", encoding="utf-8")
-
-    def fake_build(*args, **kwargs):
-        return object()
-
-    async def fake_serve(harness, port, poll_interval, source_interval=30.0, pr_poll_interval=0.0, reconcile_interval=300.0, registry=None):
-        pass
-
-    monkeypatch.setattr("harness.cli.build", fake_build)
-    monkeypatch.setattr("harness.cli.serve", fake_serve)
-
-    assert main(["run", "--root", str(tmp_path)]) == 0
+    assert exit_code == 0  # was 2 before ADR-0022
+    assert "warning:" in err
+    assert DEFAULT_HEAL_WORKFLOW in err
+    assert str(heal_path) in err
+    assert "label" in err
+    harness = captured["harness"]
+    assert DEFAULT_HEAL_WORKFLOW not in harness.workflows
+    assert set(harness.workflows) == {DEFAULT_WORKFLOW, "resolver", "automerge"}
+    # The seeded autoheal Process targets the now-dropped `heal` workflow, so
+    # it must be skipped rather than crashing `build()` with "not a known
+    # workflow or step" — the same warning above names it.
+    assert "autoheal.json" in err
+    assert _autoheal_still_inert(harness)
+    # Fix 2: with the process inert, `_warn_missing_autoheal_repository`'s
+    # own warning ("will run heal/dedup on every failure but file nothing")
+    # would directly contradict the drop warning above, which already says
+    # the process is disabled. It must not appear alongside it.
+    assert "will run heal/dedup" not in err
 
 
-def test_run_config_driven_heal_without_claude_warns_instead_of_failing(
+def test_the_stale_pre_generic_heal_workflow_is_dropped_not_fatal_with_no_heal_agent(
     monkeypatch, tmp_path, capsys
 ):
-    """A flag is a prompt the operator is standing at; a file is not.
-
-    `--heal-repo --agent dummy` hard-errors (exit 2) — the operator is there to
-    read it. The same misconfiguration reached through the process file only
-    warns, because the launchd service would otherwise crash-loop on it."""
-    main(["init", "--root", str(tmp_path)])
-    _write_autoheal(tmp_path, "onpaj/harness_v2")
-
-    def fake_build(*args, **kwargs):
-        return object()
+    """The reviewer's third reproduction: with `agents/heal.json` removed
+    entirely, `--agent claude` no longer has an accidental `heal` *agent*
+    name to fall back on for `_parse_target`'s membership test — before
+    Fix 2 this exited 2 (`process autoheal.json targets 'heal', which is not
+    a known workflow or step`) even though the workflow drop above is
+    working exactly as intended. It must exit 0 the same as the parametrized
+    cases above."""
+    _make_stale_heal_root(tmp_path)
+    (tmp_path / "agents" / "heal.json").unlink()
+    captured = {}
 
     async def fake_serve(harness, port, poll_interval, source_interval=30.0, pr_poll_interval=0.0, reconcile_interval=300.0, registry=None):
-        pass
+        captured["harness"] = harness
 
-    monkeypatch.setattr("harness.cli.build", fake_build)
     monkeypatch.setattr("harness.cli.serve", fake_serve)
+    capsys.readouterr()
 
-    assert main(["run", "--root", str(tmp_path), "--agent", "dummy"]) == 0
-    warning = capsys.readouterr().err
-    assert "autoheal.json" in warning
-    assert "--agent is not claude" in warning
+    exit_code = main(["run", "--root", str(tmp_path), "--agent", "claude"])
+
+    assert exit_code == 0
+    harness = captured["harness"]
+    assert DEFAULT_HEAL_WORKFLOW not in harness.workflows
+    assert _autoheal_still_inert(harness)
 
 
-def test_run_heal_repo_uses_github_tracker_with_a_token(monkeypatch, tmp_path):
+def test_unknown_finisher_kind_still_fails_the_whole_run(monkeypatch, tmp_path, capsys):
+    """The other side of ADR-0022's warn/fail split: an unknown finisher
+    kind is a value that is *set and wrong* (a typo, or a binding naming a
+    kind nothing ever registered) — not a missing one — so it must still
+    fail the whole run exactly as before Fix 1 restored this. Reproduces the
+    reviewer's exact finding: a workflow binding `{"kind":
+    "call-a-webhook"}` used to exit 0 with the workflow silently dropped."""
+    main(["init", "--root", str(tmp_path)])
+    path = tmp_path / "workflows" / "review.json"
+    path.write_text(json.dumps({
+        "name": "review",
+        "start": "review",
+        "transitions": [{"from": "review", "on": "done", "to": "end"}],
+        "finishers": {"review": {"kind": "call-a-webhook"}},
+    }))
+
+    async def fake_serve(harness, port, poll_interval, source_interval=30.0, pr_poll_interval=0.0, reconcile_interval=300.0, registry=None):
+        raise AssertionError("serve() must not be reached")
+
+    monkeypatch.setattr("harness.cli.serve", fake_serve)
+    capsys.readouterr()
+
+    assert main(["run", "--root", str(tmp_path)]) == 2
+    err = capsys.readouterr().err
+    assert err.startswith("error:")
+    assert "call-a-webhook" in err
+    # The one hint that tells an operator a kind is token-gated rather than
+    # misspelled — `build()`'s own diagnostic, restored here too.
+    assert "known: merge-pr, open-issue, open-pr, verify" in err
+
+
+@pytest.mark.parametrize(
+    "finishers",
+    [
+        # Winning order: the unknown kind is iterated first.
+        {"broadcast": {"kind": "call-a-webhook"}, "review": {"kind": "open-issue"}},
+        # Losing order — the regression this test pins: the config-shaped
+        # failure (open-issue, no label) is bound to a step iterated before
+        # the unknown-kind step. Before Fix 1, `validate_workflow_finishers`
+        # did the unknown-kind lookup and the factory call in a single loop
+        # over `workflow.finishers`, so whichever binding a dict iterated
+        # first decided the outcome: here the config-shaped `ValueError`
+        # would escape first, the workflow would be silently dropped with a
+        # warning (exit 0), and the unknown kind would never be seen.
+        {"review": {"kind": "open-issue"}, "broadcast": {"kind": "call-a-webhook"}},
+    ],
+    ids=["unknown-kind-first", "unknown-kind-second"],
+)
+def test_unknown_finisher_kind_fails_the_whole_run_regardless_of_binding_order(
+    monkeypatch, tmp_path, capsys, finishers
+):
+    """Fix 1's blocker, reproduced directly through `harness run`: one
+    workflow, two bindings — one names an unknown finisher kind
+    (`call-a-webhook`), the other a known kind whose factory rejects its own
+    config (`open-issue` with no `label`) — must exit 2 in *both* JSON key
+    orders. `build()` never had this bug (invariant #41's step_bindings loop
+    is already a complete unknown-kind pass before any factory runs);
+    `validate_workflow_finishers` had collapsed the two into one loop,
+    making "an unknown kind is fatal" depend on JSON key order. A test in
+    the winning order alone would not have caught that regression."""
+    main(["init", "--root", str(tmp_path)])
+    path = tmp_path / "workflows" / "review.json"
+    path.write_text(json.dumps({
+        "name": "review",
+        "start": "review",
+        "transitions": [
+            {"from": "review", "on": "done", "to": "broadcast"},
+            {"from": "broadcast", "on": "done", "to": "end"},
+        ],
+        "finishers": finishers,
+    }))
+
+    async def fake_serve(harness, port, poll_interval, source_interval=30.0, pr_poll_interval=0.0, reconcile_interval=300.0, registry=None):
+        raise AssertionError("serve() must not be reached")
+
+    monkeypatch.setattr("harness.cli.serve", fake_serve)
+    capsys.readouterr()
+
+    assert main(["run", "--root", str(tmp_path)]) == 2
+    err = capsys.readouterr().err
+    assert err.startswith("error:")
+    assert "call-a-webhook" in err
+
+
+def test_label_issue_binding_without_a_token_still_fails_the_whole_run(
+    monkeypatch, tmp_path, capsys
+):
+    """`label-issue` is only registered as a finisher kind when `GITHUB_TOKEN`
+    is set (invariant #41) — so a workflow binding it during a credential
+    outage must still fail the whole run with the "unknown finisher kind"
+    diagnostic (naming `label-issue` as unknown, not just missing config),
+    exactly as it did before Fix 1. This is what Fix 1 restores "by
+    construction" per the review, confirmed here directly."""
+    main(["init", "--root", str(tmp_path)])
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    path = tmp_path / "workflows" / "review.json"
+    path.write_text(json.dumps({
+        "name": "review",
+        "start": "review",
+        "transitions": [{"from": "review", "on": "done", "to": "end"}],
+        "finishers": {"review": {"kind": "label-issue"}},
+    }))
+
+    async def fake_serve(harness, port, poll_interval, source_interval=30.0, pr_poll_interval=0.0, reconcile_interval=300.0, registry=None):
+        raise AssertionError("serve() must not be reached")
+
+    monkeypatch.setattr("harness.cli.serve", fake_serve)
+    capsys.readouterr()
+
+    assert main(["run", "--root", str(tmp_path)]) == 2
+    err = capsys.readouterr().err
+    assert err.startswith("error:")
+    assert "label-issue" in err
+    assert "known: merge-pr, open-issue, open-pr, verify" in err
+
+
+def test_run_reports_an_unregistered_process_repository_cleanly(monkeypatch, tmp_path, capsys):
+    """`ProcessValidationError` (raised by `build()` compiling
+    `processes/*.json`, invariant #39) must land in the same `error: ...` /
+    exit-2 path as `WorkflowNotFound`/`ValueError`, not escape `main()` as a
+    raw traceback — under launchd a traceback means a crash-loop. The seeded
+    `processes/autoheal.json` ships with an empty `action.params.repository`
+    (valid, the seeded default); pointing it at a name absent from the empty
+    seeded `repos.json` reproduces the failure a typo in that one
+    operator-facing field would cause.
+
+    `build()` raises before `serve()` is ever reached — the only test in this
+    file where a real, unmonkeypatched `build()` raises inside `main()` this
+    way. (The other shape that used to raise inside `build()` — a served
+    workflow's own finisher binding rejecting its config — no longer does:
+    ADR-0022's pre-filter `_validate_served_workflows` catches it earlier and
+    warns-and-drops instead of failing the whole run, so
+    `test_a_binding_without_a_label_is_dropped_from_the_served_set` mocks
+    `build()` itself rather than reaching a real one.) So `serve` is
+    monkeypatched only as a belt-and-suspenders guard against starting a real
+    server / binding a port, matching the pattern the neighbouring `run`
+    tests in this file use. If `main()` were to let the exception escape
+    instead of handling it, this test would fail with that traceback rather
+    than reaching the assertions below.
+    """
+    main(["init", "--root", str(tmp_path)])
+    autoheal_path = tmp_path / "processes" / "autoheal.json"
+    definition = json.loads(autoheal_path.read_text())
+    definition["action"]["params"]["repository"] = "harness_v2"
+    autoheal_path.write_text(json.dumps(definition))
+
+    async def fake_serve(harness, port, poll_interval, source_interval=30.0, pr_poll_interval=0.0, reconcile_interval=300.0, registry=None):
+        raise AssertionError("serve() must not be reached")
+
+    monkeypatch.setattr("harness.cli.serve", fake_serve)
+    capsys.readouterr()
+
+    assert main(["run", "--root", str(tmp_path)]) == 2
+    err = capsys.readouterr().err
+    assert err.startswith("error:")
+    assert "harness_v2" in err
+
+
+def test_run_registers_open_issue_with_github_tracker_when_a_token_is_set(monkeypatch, tmp_path):
     from harness.drivers.github_issues import GithubIssueTracker
 
     main(["init", "--root", str(tmp_path)])
@@ -375,86 +561,11 @@ def test_run_heal_repo_uses_github_tracker_with_a_token(monkeypatch, tmp_path):
     monkeypatch.setattr("harness.cli.serve", fake_serve)
     monkeypatch.setenv("GITHUB_TOKEN", "tok")
 
-    assert main(["run", "--root", str(tmp_path), "--heal-repo", "onpaj/harness_v2"]) == 0
-    built = captured["finishers"]["open-issue"]("file-issue", {}, lambda: None)
-    assert isinstance(built._tracker, GithubIssueTracker)
-
-
-def test_run_heal_repo_does_not_clobber_a_hand_edited_autoheal_process(monkeypatch, tmp_path):
-    main(["init", "--root", str(tmp_path)])
-    (tmp_path / "processes").mkdir(exist_ok=True)
-    custom = {
-        "trigger": {"interval": "5m"},
-        "action": {"check": "failed-tasks", "params": {}},
-        "target": {"workflow": "heal"},
-        "dedup": "per-state",
-        "sink": {"kind": "none"},
-    }
-    (tmp_path / "processes" / "autoheal.json").write_text(json.dumps(custom))
-
-    monkeypatch.setattr("harness.cli.build", lambda *a, **k: object())
-
-    async def fake_serve(harness, port, poll_interval, source_interval=30.0, pr_poll_interval=0.0, reconcile_interval=300.0, registry=None):
-        pass
-
-    monkeypatch.setattr("harness.cli.serve", fake_serve)
-    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
-
-    assert main(["run", "--root", str(tmp_path), "--heal-repo", "onpaj/harness_v2"]) == 0
-
-    on_disk = json.loads((tmp_path / "processes" / "autoheal.json").read_text())
-    assert on_disk["trigger"]["interval"] == "5m"
-
-
-def test_run_heal_repo_warns_when_the_slug_is_not_registered(monkeypatch, tmp_path, capsys):
-    """`task.repository` is stamped with `heal_repo` on every heal task
-    (invariant #25), and `GitWorkspace.attach` resolves it through the same
-    `RepositoryRegistry` wired here — an unregistered slug raises
-    `RepositoryNotFound` at attach time, the heal task fails to attach a
-    worktree, and the recursion guard silently retires it to `healed/` with
-    no issue filed. `init` writes an empty `repos.json`, so `onpaj/harness_v2`
-    is unregistered here — the operator should be warned up front rather than
-    discover this via silent inaction."""
-    main(["init", "--root", str(tmp_path)])
-
-    monkeypatch.setattr("harness.cli.build", lambda *a, **k: object())
-
-    async def fake_serve(harness, port, poll_interval, source_interval=30.0, pr_poll_interval=0.0, reconcile_interval=300.0, registry=None):
-        pass
-
-    monkeypatch.setattr("harness.cli.serve", fake_serve)
-    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
-
-    assert main(["run", "--root", str(tmp_path), "--heal-repo", "onpaj/harness_v2"]) == 0
-
-    err = capsys.readouterr().err
-    assert "warning:" in err
-    assert "onpaj/harness_v2" in err
-    assert "repos.json" in err or str(tmp_path / "repos.json") in err
-
-
-def test_run_heal_repo_registered_emits_no_repo_warning(monkeypatch, tmp_path, capsys):
-    """The positive case: once `onpaj/harness_v2` is registered in
-    `repos.json`, the new fail-fast check finds it resolvable and stays
-    silent — a correctly configured operator sees no spurious warning."""
-    main(["init", "--root", str(tmp_path)])
-    (tmp_path / "repos.json").write_text(
-        json.dumps({"onpaj/harness_v2": str(tmp_path / "harness_v2")})
+    assert main(["run", "--root", str(tmp_path)]) == 0
+    built = captured["finishers"]["open-issue"](
+        "file-issue", HEAL_FINISHER_CONFIG, lambda: None
     )
-
-    monkeypatch.setattr("harness.cli.build", lambda *a, **k: object())
-
-    async def fake_serve(harness, port, poll_interval, source_interval=30.0, pr_poll_interval=0.0, reconcile_interval=300.0, registry=None):
-        pass
-
-    monkeypatch.setattr("harness.cli.serve", fake_serve)
-    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
-
-    assert main(["run", "--root", str(tmp_path), "--heal-repo", "onpaj/harness_v2"]) == 0
-
-    err = capsys.readouterr().err
-    assert "not registered" not in err
-    assert "onpaj/harness_v2" not in err
+    assert isinstance(built._tracker, GithubIssueTracker)
 
 
 def test_run_registers_label_issue_finisher_only_with_a_token(monkeypatch, tmp_path):
@@ -474,11 +585,11 @@ def test_run_registers_label_issue_finisher_only_with_a_token(monkeypatch, tmp_p
     monkeypatch.delenv("HARNESS_HEAL_REPO", raising=False)
 
     assert main(["run", "--root", str(tmp_path)]) == 0
-    assert captured["finishers"] is None
+    assert set(captured["finishers"]) == {"open-issue", "merge-pr"}
 
     monkeypatch.setenv("GITHUB_TOKEN", "tok")
     assert main(["run", "--root", str(tmp_path)]) == 0
-    assert set(captured["finishers"]) == {"label-issue"}
+    assert set(captured["finishers"]) == {"open-issue", "merge-pr", "label-issue"}
 
 
 def test_run_passes_issue_import_factory_to_build_only_with_a_token(monkeypatch, tmp_path):
@@ -542,6 +653,8 @@ async def test_serve_passes_the_harness_issue_import_into_create_app(monkeypatch
             self.stage_output = StageOutputProjection()
             self.control = FakeTaskControl()
             self.process_checks = None
+            self.known_steps = frozenset()
+            self.workflows = {}
             self.issue_import = sentinel
 
         async def run(
@@ -588,7 +701,11 @@ def test_run_label_issue_finisher_wraps_inner_and_applies_the_mapped_label(
     assert isinstance(built, LabelIssueBehavior)
 
 
-def test_run_without_heal_repo_wires_no_open_issue_finisher(monkeypatch, tmp_path):
+def test_run_wires_open_issue_and_still_serves_heal(monkeypatch, tmp_path):
+    """`open-issue` is registered unconditionally (it needs no heal-specific
+    configuration), and the seeded `heal` workflow is served too — every
+    `harness init` root has `workflows/heal.json` on disk, and the served set
+    is exactly what `workflows/` holds."""
     main(["init", "--root", str(tmp_path)])
     captured = {}
 
@@ -603,11 +720,10 @@ def test_run_without_heal_repo_wires_no_open_issue_finisher(monkeypatch, tmp_pat
     monkeypatch.setattr("harness.cli.build", fake_build)
     monkeypatch.setattr("harness.cli.serve", fake_serve)
     monkeypatch.delenv("GITHUB_TOKEN", raising=False)
-    monkeypatch.delenv("HARNESS_HEAL_REPO", raising=False)
 
     assert main(["run", "--root", str(tmp_path)]) == 0
-    assert captured["finishers"] is None
-    assert DEFAULT_HEAL_WORKFLOW not in captured["served_names"]
+    assert set(captured["finishers"]) == {"open-issue", "merge-pr"}
+    assert DEFAULT_HEAL_WORKFLOW in captured["served_names"]
 
 
 def test_run_wires_the_registry_into_build_and_serve(monkeypatch, tmp_path):
@@ -635,20 +751,6 @@ def test_run_wires_the_registry_into_build_and_serve(monkeypatch, tmp_path):
 
     assert isinstance(captured["repository_registry"], FilesystemRepositoryRegistry)
     assert captured["serve_registry"] is captured["repository_registry"]
-
-
-def test_run_heal_repo_needs_claude_agent(monkeypatch, tmp_path):
-    main(["init", "--root", str(tmp_path)])
-
-    def fake_build(*args, **kwargs):  # must not be reached
-        raise AssertionError("build should not run when --heal-repo rejects the args")
-
-    monkeypatch.setattr("harness.cli.build", fake_build)
-
-    code = main(
-        ["run", "--root", str(tmp_path), "--heal-repo", "o/r", "--agent", "dummy"]
-    )
-    assert code == 2
 
 
 def test_run_defaults_agent_timeout_to_1800(monkeypatch, tmp_path):
@@ -1071,30 +1173,17 @@ def test_init_no_workflow_writes_no_default_workflow(tmp_path, capsys):
 
 
 def test_init_creates_processes_directory(tmp_path):
-    """`harness init` writes an empty processes/ next to agents/ and triggers/;
-    building over it yields no sources, so the harness runs exactly as today."""
-    from harness.drivers.fs_processes import FilesystemProcessRepository
-    from harness.drivers.system_clock import SystemClock
-
+    """`harness init` writes processes/ next to agents/ and triggers/ — no
+    longer empty (it seeds `autoheal.json`, see
+    `test_init_seeds_the_autoheal_process`), but nothing else: an operator
+    who wants a second process still adds its own file."""
     assert main(["init", "--root", str(tmp_path)]) == 0
 
     assert (tmp_path / "processes").is_dir()
-    built = FilesystemProcessRepository(tmp_path / "processes").build(
-        clock=SystemClock()
-    )
-    assert built == []
-
-
-def test_run_with_unknown_workflow_fails_cleanly(tmp_path, capsys):
-    """The third documented error path: unknown workflow (via `run`)."""
-    main(["init", "--root", str(tmp_path)])
-    capsys.readouterr()
-
-    assert main(["run", "--root", str(tmp_path), "--workflow", "nonexistent"]) == 2
-
-    out, err = capsys.readouterr()
-    assert out == ""
-    assert "nonexistent" in err
+    assert sorted(p.name for p in (tmp_path / "processes").glob("*.json")) == [
+        "autoheal.json",
+        "automerge.json",
+    ]
 
 
 HOTFIX_DEFINITION = {
@@ -1104,119 +1193,78 @@ HOTFIX_DEFINITION = {
 }
 
 
-def test_run_serves_multiple_workflows_with_repeated_flag(monkeypatch, tmp_path):
+def test_run_serves_every_workflow_definition_on_disk(monkeypatch, tmp_path):
+    """No flag: the served set is exactly what `workflows/` holds."""
     main(["init", "--root", str(tmp_path)])
     (tmp_path / "workflows" / "hotfix.json").write_text(json.dumps(HOTFIX_DEFINITION))
     captured = {}
 
-    async def fake_serve(harness, port, poll_interval, source_interval=30.0, pr_poll_interval=0.0, reconcile_interval=300.0, registry=None):
-        captured["harness"] = harness
-
-    monkeypatch.setattr("harness.cli.serve", fake_serve)
-    monkeypatch.delenv("HARNESS_HEAL_REPO", raising=False)
-
-    assert main(
-        [
-            "run",
-            "--root",
-            str(tmp_path),
-            "--workflow",
-            "development",
-            "--workflow",
-            "hotfix",
-        ]
-    ) == 0
-    # The scaffolded resolver workflow is served whenever its file exists.
-    assert set(captured["harness"].workflows) == {"development", "hotfix", "resolver"}
-
-
-def test_run_with_no_workflow_flag_serves_default_and_resolver(monkeypatch, tmp_path):
-    main(["init", "--root", str(tmp_path)])
-    (tmp_path / "workflows" / "hotfix.json").write_text(json.dumps(HOTFIX_DEFINITION))
-    captured = {}
-
-    async def fake_serve(harness, port, poll_interval, source_interval=30.0, pr_poll_interval=0.0, reconcile_interval=300.0, registry=None):
+    async def fake_serve(harness, port, poll_interval, source_interval=30.0,
+                         pr_poll_interval=0.0, reconcile_interval=300.0, registry=None):
         captured["harness"] = harness
 
     monkeypatch.setattr("harness.cli.serve", fake_serve)
     monkeypatch.delenv("HARNESS_HEAL_REPO", raising=False)
 
     assert main(["run", "--root", str(tmp_path)]) == 0
-    # `hotfix` isn't served (not selected), but the scaffolded `resolver` is —
-    # its definition exists, so it rides alongside the default (decoupled from
-    # the mergeability watcher flag).
-    assert set(captured["harness"].workflows) == {"development", "resolver"}
+    assert set(captured["harness"].workflows) == {
+        "development", "hotfix", "resolver", "heal", "automerge"
+    }
 
 
-def test_run_all_workflows_serves_every_definition_found(monkeypatch, tmp_path):
-    main(["init", "--root", str(tmp_path)])
-    (tmp_path / "workflows" / "hotfix.json").write_text(json.dumps(HOTFIX_DEFINITION))
+def test_run_with_no_workflow_definitions_is_workflow_less_not_an_error(monkeypatch, tmp_path):
+    """FR-6: an empty workflows/ runs the catalog agents directly."""
+    (tmp_path / "workflows").mkdir(parents=True)
+    (tmp_path / "agents").mkdir(parents=True)
     captured = {}
 
-    async def fake_serve(harness, port, poll_interval, source_interval=30.0, pr_poll_interval=0.0, reconcile_interval=300.0, registry=None):
+    async def fake_serve(harness, port, poll_interval, source_interval=30.0,
+                         pr_poll_interval=0.0, reconcile_interval=300.0, registry=None):
         captured["harness"] = harness
 
     monkeypatch.setattr("harness.cli.serve", fake_serve)
 
-    # `init` also scaffolds the resolver and heal workflows; `heal`'s
-    # `file-issue` step needs the "open-issue" finisher kind, which only
-    # `--heal-repo` wires in — so serving it here needs the flag too.
-    assert main(
-        ["run", "--root", str(tmp_path), "--all-workflows", "--heal-repo", "onpaj/harness_v2"]
-    ) == 0
-    assert set(captured["harness"].workflows) == {"development", "hotfix", "resolver", "heal"}
+    assert main(["run", "--root", str(tmp_path)]) == 0
+    assert tuple(captured["harness"].workflows) == ()
 
 
-def test_run_all_workflows_without_heal_repo_fails_fast_on_the_heal_workflow(
-    tmp_path, capsys, monkeypatch
-):
-    """Serving the dormant `heal` workflow without `--heal-repo` means nothing
-    registers its `file-issue` step's "open-issue" finisher kind — `build()`
-    refuses at startup (fail-fast configuration), not mid-run."""
-    monkeypatch.delenv("HARNESS_HEAL_REPO", raising=False)
+def test_the_workflow_selection_flags_are_gone(tmp_path, capsys):
     main(["init", "--root", str(tmp_path)])
     capsys.readouterr()
 
-    assert main(["run", "--root", str(tmp_path), "--all-workflows"]) == 2
+    # Each assertion checks argparse's own rejection (exit code 2 +
+    # "unrecognized arguments"), never merely "some SystemExit happened" —
+    # that weaker shape would also pass if the flag were still accepted and
+    # a real serve() started and then died for an unrelated reason (e.g. the
+    # board port already being held by another process), which is exactly
+    # what the pre-fix version of this test did.
+    with pytest.raises(SystemExit) as exc:
+        main(["run", "--root", str(tmp_path), "--workflow", "development"])
+    assert exc.value.code == 2
+    assert "unrecognized arguments" in capsys.readouterr().err
 
-    assert "open-issue" in capsys.readouterr().err
+    with pytest.raises(SystemExit) as exc:
+        main(["run", "--root", str(tmp_path), "--all-workflows"])
+    assert exc.value.code == 2
+    assert "unrecognized arguments" in capsys.readouterr().err
 
-
-def test_run_rejects_workflow_and_all_workflows_together(tmp_path, capsys):
-    main(["init", "--root", str(tmp_path)])
-    capsys.readouterr()
-
-    assert main(
-        ["run", "--root", str(tmp_path), "--workflow", "default", "--all-workflows"]
-    ) == 2
-
-    out, err = capsys.readouterr()
-    assert out == ""
-    assert "mutually exclusive" in err
-
-
-def test_run_all_workflows_with_no_definitions_is_a_startup_error(tmp_path, capsys):
-    (tmp_path / "workflows").mkdir(parents=True)
-
-    assert main(["run", "--root", str(tmp_path), "--all-workflows"]) == 2
-
-    out, err = capsys.readouterr()
-    assert out == ""
-    assert "no workflow definitions found" in err
+    with pytest.raises(SystemExit) as exc:
+        main(["run", "--root", str(tmp_path), "--resolver-workflow", "resolver"])
+    assert exc.value.code == 2
+    assert "unrecognized arguments" in capsys.readouterr().err
 
 
 def test_run_rejects_github_workflow_not_in_served_set(tmp_path, capsys):
     main(["init", "--root", str(tmp_path)])
-    (tmp_path / "workflows" / "hotfix.json").write_text(json.dumps(HOTFIX_DEFINITION))
     capsys.readouterr()
 
+    # `hotfix.json` is never written, so `hotfix` is not on disk and
+    # therefore not served.
     assert main(
         [
             "run",
             "--root",
             str(tmp_path),
-            "--workflow",
-            "default",
             "--github-workflow",
             "hotfix",
         ]
@@ -1228,18 +1276,28 @@ def test_run_rejects_github_workflow_not_in_served_set(tmp_path, capsys):
     assert "not served" in err
 
 
-def test_run_single_custom_workflow_ignores_github_workflow_default(
+def test_run_without_a_default_workflow_ignores_github_workflow_default(
     monkeypatch, tmp_path, capsys
 ):
     """Regression: `--github-workflow` used to default to `DEFAULT_WORKFLOW`
-    ("default") and get checked against the served set unconditionally, so
-    `run --workflow hotfix` with no GitHub flags at all (and no GITHUB_TOKEN)
-    used to fail startup even though no GithubTaskSource is ever built in that
-    case. FR-6 requires single-workflow runs to behave exactly as before."""
+    ("development") and get checked against the served set unconditionally,
+    so a root whose served set excludes "development" (no `development.json`
+    on disk) used to fail startup even with no GitHub flags at all, even
+    though no GithubTaskSource is ever built in that case. FR-6 requires this
+    to succeed regardless of what the served set actually is."""
     monkeypatch.delenv("GITHUB_TOKEN", raising=False)
     monkeypatch.delenv("HARNESS_HEAL_REPO", raising=False)
     main(["init", "--root", str(tmp_path)])
+    (tmp_path / "workflows" / f"{DEFAULT_WORKFLOW}.json").unlink()
     (tmp_path / "workflows" / "hotfix.json").write_text(json.dumps(HOTFIX_DEFINITION))
+    # Unrelated to this test's own regression: the two seeded processes would
+    # otherwise print their own startup warnings here and break the
+    # `err == ""` assertion below, which exists to check for the
+    # *github-workflow* regression specifically — `autoheal.json` because it
+    # is repository-less (ADR-0022), `automerge.json` because this run has no
+    # GITHUB_TOKEN for its `github-mergeable` action (ADR-0023).
+    (tmp_path / "processes" / "autoheal.json").unlink()
+    (tmp_path / "processes" / "automerge.json").unlink()
     captured = {}
 
     async def fake_serve(harness, port, poll_interval, source_interval=30.0, pr_poll_interval=0.0, reconcile_interval=300.0, registry=None):
@@ -1248,13 +1306,13 @@ def test_run_single_custom_workflow_ignores_github_workflow_default(
     monkeypatch.setattr("harness.cli.serve", fake_serve)
     capsys.readouterr()
 
-    assert main(["run", "--root", str(tmp_path), "--workflow", "hotfix"]) == 0
+    assert main(["run", "--root", str(tmp_path)]) == 0
 
     out, err = capsys.readouterr()
     assert err == ""
-    # `hotfix` is the selected workflow; the scaffolded `resolver` rides along
-    # because its definition exists.
-    assert set(captured["harness"].workflows) == {"hotfix", "resolver"}
+    # `development` isn't on disk, so it isn't served; `hotfix`, `resolver`
+    # and `heal` are, because their files are.
+    assert set(captured["harness"].workflows) == {"hotfix", "resolver", "heal", "automerge"}
 
 
 def test_init_rejects_workflow_name_with_path_separator(tmp_path, capsys):
@@ -1577,7 +1635,7 @@ def _process_args(**overrides):
     return argparse.Namespace(**base)
 
 
-def _compile_processes(tmp_path, *, checks, known_targets, clock):
+def _compile_processes(tmp_path, *, checks, known_workflows, clock, known_steps=None):
     """Test helper standing in for what `app.build()` now does internally
     (ADR-0018/architecture-02 §2.1): `_process_check_factories` only supplies
     the externally-dependent check factories, compilation itself happens
@@ -1586,13 +1644,34 @@ def _compile_processes(tmp_path, *, checks, known_targets, clock):
     from harness.drivers.checks import BUILTIN_CHECKS
     from harness.drivers.fs_processes import FilesystemProcessRepository
 
-    return FilesystemProcessRepository(tmp_path / "processes").build(
+    repo = FilesystemProcessRepository(tmp_path / "processes")
+    return repo.build(
         clock=clock,
         checks={**BUILTIN_CHECKS, **checks},
         repository=None,
         worktree_root=str(tmp_path / "worktrees"),
-        known_targets=known_targets,
+        known_steps=known_steps,
+        known_workflows=known_workflows,
     )
+
+
+def _compile_processes_with_repo(tmp_path, *, checks, known_workflows, clock, known_steps=None):
+    """As `_compile_processes`, but also returns the repository, so a test can
+    inspect `skipped` — the credential-less processes that were warned about
+    and left out rather than failing the build (`MissingCredential`)."""
+    from harness.drivers.checks import BUILTIN_CHECKS
+    from harness.drivers.fs_processes import FilesystemProcessRepository
+
+    repo = FilesystemProcessRepository(tmp_path / "processes")
+    triggers = repo.build(
+        clock=clock,
+        checks={**BUILTIN_CHECKS, **checks},
+        repository=None,
+        worktree_root=str(tmp_path / "worktrees"),
+        known_steps=known_steps,
+        known_workflows=known_workflows,
+    )
+    return triggers, repo
 
 
 def test_process_check_factories_builds_a_github_issues_process(tmp_path):
@@ -1611,7 +1690,7 @@ def test_process_check_factories_builds_a_github_issues_process(tmp_path):
     sources = _compile_processes(
         tmp_path,
         checks=checks,
-        known_targets={"default"},
+        known_workflows={"default"},
         clock=FakeClock("2026-07-22T10:00:00Z"),
     )
 
@@ -1619,8 +1698,14 @@ def test_process_check_factories_builds_a_github_issues_process(tmp_path):
     assert sources[0].kind == "scheduled:harness-todo"
 
 
-def test_process_check_factories_github_issues_fails_fast_without_a_client(tmp_path, monkeypatch):
-    from harness.drivers.fs_processes import ProcessValidationError
+def test_a_github_issues_process_is_skipped_not_fatal_without_a_credential(
+    tmp_path, monkeypatch
+):
+    """A missing credential is on the *absent* side of the operator's rule, so
+    it warns and skips rather than failing the whole run — otherwise one
+    `github-issues` process file would make every credential-less run exit 2
+    and break the harness's "no token is not fatal" promise. A set-and-wrong
+    value (an unknown check, a bad param) is still fatal."""
     from harness.drivers.memory import FakeClock
 
     monkeypatch.delenv("GITHUB_TOKEN", raising=False)
@@ -1633,14 +1718,16 @@ def test_process_check_factories_github_issues_fails_fast_without_a_client(tmp_p
     registry = MemoryRepositoryRegistry({"heblo": Path("/repos/heblo")})
     checks = _process_check_factories(_process_args(), registry, client=None)
 
-    with pytest.raises(ProcessValidationError) as exc:
-        _compile_processes(
-            tmp_path,
-            checks=checks,
-            known_targets={"default"},
-            clock=FakeClock("2026-07-22T10:00:00Z"),
-        )
-    assert "GITHUB_TOKEN" in str(exc.value)
+    triggers, repo = _compile_processes_with_repo(
+        tmp_path,
+        checks=checks,
+        known_workflows={"default"},
+        clock=FakeClock("2026-07-22T10:00:00Z"),
+    )
+
+    assert triggers == []
+    assert [name for name, _ in repo.skipped] == ["harness-todo.json"]
+    assert "GITHUB_TOKEN" in repo.skipped[0][1]
 
 
 def test_process_check_factories_builds_a_resolve_conflicts_process(tmp_path):
@@ -1659,7 +1746,7 @@ def test_process_check_factories_builds_a_resolve_conflicts_process(tmp_path):
     sources = _compile_processes(
         tmp_path,
         checks=checks,
-        known_targets={"resolver"},
+        known_workflows={"resolver"},
         clock=FakeClock("2026-07-23T10:00:00Z"),
     )
 
@@ -1667,8 +1754,14 @@ def test_process_check_factories_builds_a_resolve_conflicts_process(tmp_path):
     assert sources[0].kind == "scheduled:resolve-conflicts"
 
 
-def test_process_check_factories_github_conflicts_fails_fast_without_a_client(tmp_path, monkeypatch):
-    from harness.drivers.fs_processes import ProcessValidationError
+def test_a_github_conflicts_process_is_skipped_not_fatal_without_a_credential(
+    tmp_path, monkeypatch
+):
+    """A missing credential is on the *absent* side of the operator's rule, so
+    it warns and skips rather than failing the whole run — otherwise one
+    `github-conflicts` process file would make every credential-less run exit 2
+    and break the harness's "no token is not fatal" promise. A set-and-wrong
+    value (an unknown check, a bad param) is still fatal."""
     from harness.drivers.memory import FakeClock
 
     monkeypatch.delenv("GITHUB_TOKEN", raising=False)
@@ -1678,17 +1771,19 @@ def test_process_check_factories_github_conflicts_fails_fast_without_a_client(tm
         ' "action": {"check": "github-conflicts"},'
         ' "target": {"workflow": "resolver"}}'
     )
-    registry = MemoryRepositoryRegistry({"harness_v2": Path("/repos/harness_v2")})
+    registry = MemoryRepositoryRegistry({"heblo": Path("/repos/heblo")})
     checks = _process_check_factories(_process_args(), registry, client=None)
 
-    with pytest.raises(ProcessValidationError) as exc:
-        _compile_processes(
-            tmp_path,
-            checks=checks,
-            known_targets={"resolver"},
-            clock=FakeClock("2026-07-23T10:00:00Z"),
-        )
-    assert "GITHUB_TOKEN" in str(exc.value)
+    triggers, repo = _compile_processes_with_repo(
+        tmp_path,
+        checks=checks,
+        known_workflows={"resolver"},
+        clock=FakeClock("2026-07-23T10:00:00Z"),
+    )
+
+    assert triggers == []
+    assert [name for name, _ in repo.skipped] == ["resolve-conflicts.json"]
+    assert "GITHUB_TOKEN" in repo.skipped[0][1]
 
 
 def test_process_check_factories_stays_dependency_free_for_builtin_checks(tmp_path):
@@ -1697,7 +1792,7 @@ def test_process_check_factories_stays_dependency_free_for_builtin_checks(tmp_pa
     registry = MemoryRepositoryRegistry({})
     checks = _process_check_factories(_process_args(), registry, client=None)
 
-    assert set(checks) == {"github-issues", "github-conflicts", "jira-issues"}
+    assert set(checks) == {"github-issues", "github-conflicts", "github-mergeable", "jira-issues"}
 
 
 def test_process_check_factories_builds_a_jira_issues_process(tmp_path):
@@ -1718,7 +1813,7 @@ def test_process_check_factories_builds_a_jira_issues_process(tmp_path):
     sources = _compile_processes(
         tmp_path,
         checks=checks,
-        known_targets={"default"},
+        known_workflows={"default"},
         clock=FakeClock("2026-07-24T10:00:00Z"),
     )
 
@@ -1726,8 +1821,14 @@ def test_process_check_factories_builds_a_jira_issues_process(tmp_path):
     assert sources[0].kind == "scheduled:jira-todo"
 
 
-def test_process_check_factories_jira_issues_fails_fast_without_a_client(tmp_path, monkeypatch):
-    from harness.drivers.fs_processes import ProcessValidationError
+def test_a_jira_issues_process_is_skipped_not_fatal_without_a_credential(
+    tmp_path, monkeypatch
+):
+    """A missing credential is on the *absent* side of the operator's rule, so
+    it warns and skips rather than failing the whole run — otherwise one
+    `jira-issues` process file would make every credential-less run exit 2
+    and break the harness's "no token is not fatal" promise. A set-and-wrong
+    value (an unknown check, a bad param) is still fatal."""
     from harness.drivers.memory import FakeClock
 
     monkeypatch.delenv("JIRA_BASE_URL", raising=False)
@@ -1740,18 +1841,19 @@ def test_process_check_factories_jira_issues_fails_fast_without_a_client(tmp_pat
         '            "params": {"project": "PROJ", "repository": "my-service"}},'
         ' "target": {"workflow": "default"}}'
     )
-    registry = MemoryRepositoryRegistry({"my-service": Path("/repos/my-service")})
+    registry = MemoryRepositoryRegistry({"heblo": Path("/repos/heblo")})
     checks = _process_check_factories(_process_args(), registry, jira_client=None)
 
-    with pytest.raises(ProcessValidationError) as exc:
-        _compile_processes(
-            tmp_path,
-            checks=checks,
-            known_targets={"default"},
-            clock=FakeClock("2026-07-24T10:00:00Z"),
-        )
-    assert "JIRA_BASE_URL" in str(exc.value)
-    assert exc.value.field == "check"
+    triggers, repo = _compile_processes_with_repo(
+        tmp_path,
+        checks=checks,
+        known_workflows={"default"},
+        clock=FakeClock("2026-07-24T10:00:00Z"),
+    )
+
+    assert triggers == []
+    assert [name for name, _ in repo.skipped] == ["jira-todo.json"]
+    assert "JIRA_BASE_URL" in repo.skipped[0][1]
 
 
 def test_process_check_factories_jira_issues_requires_a_known_repository(tmp_path):
@@ -1772,7 +1874,7 @@ def test_process_check_factories_jira_issues_requires_a_known_repository(tmp_pat
         _compile_processes(
             tmp_path,
             checks=checks,
-            known_targets={"default"},
+            known_workflows={"default"},
             clock=FakeClock("2026-07-24T10:00:00Z"),
         )
     assert exc.value.field == "params"
@@ -1795,7 +1897,7 @@ def test_process_check_factories_jira_issues_requires_jql_or_project(tmp_path):
         _compile_processes(
             tmp_path,
             checks=checks,
-            known_targets={"default"},
+            known_workflows={"default"},
             clock=FakeClock("2026-07-24T10:00:00Z"),
         )
     assert exc.value.field == "params"
@@ -1861,6 +1963,124 @@ def test_slack_sinks_silent_when_no_process_declares_slack(
     assert capsys.readouterr().err == ""
 
 
+def test_warn_missing_autoheal_repository_silent_when_its_target_workflow_was_dropped(
+    capsys, tmp_path
+):
+    """Fix 2: `_validate_served_workflows` already prints a warning saying a
+    dropped workflow's dependent process(es) are disabled — e.g. "also
+    disables process(es) autoheal.json, which target it". Under that drop,
+    `FilesystemProcessRepository.build()`'s own `_targets_a_dropped_workflow`
+    check makes the process inert, so it will not run heal/dedup on any
+    failure at all. This warning must not then claim, contradictorily, that
+    it "will run heal/dedup on every failure but file nothing" — so a
+    `dropped_workflows` naming the process's own target workflow silences
+    it, regardless of whether `action.params.repository` is set."""
+    main(["init", "--root", str(tmp_path)])
+    capsys.readouterr()
+
+    _warn_missing_autoheal_repository(tmp_path / "processes", {DEFAULT_HEAL_WORKFLOW})
+
+    assert capsys.readouterr().err == ""
+
+
+def test_warn_missing_autoheal_repository_still_warns_when_a_different_workflow_was_dropped(
+    capsys, tmp_path
+):
+    """The dropped-workflow suppression (Fix 2) is scoped to the process's
+    *own* target — a `dropped_workflows` set that names some unrelated
+    workflow must not silence the warning for a `failed-tasks` process whose
+    own target workflow is unaffected and still served."""
+    main(["init", "--root", str(tmp_path)])
+    capsys.readouterr()
+
+    _warn_missing_autoheal_repository(tmp_path / "processes", {"some-other-workflow"})
+
+    err = capsys.readouterr().err
+    assert err.startswith("warning:")
+    assert "autoheal.json" in err
+
+
+def test_warn_missing_autoheal_repository_warns_for_the_seeded_empty_default(
+    capsys, tmp_path
+):
+    """`harness init` seeds `processes/autoheal.json` with `action.params ==
+    {}` (invariant #25) — valid, and must stay valid, but self-healing then
+    runs on every failure and files nothing. This is the warning ADR-0022
+    adds for that case."""
+    main(["init", "--root", str(tmp_path)])
+    capsys.readouterr()
+
+    _warn_missing_autoheal_repository(tmp_path / "processes")
+
+    err = capsys.readouterr().err
+    assert err.startswith("warning:")
+    assert "autoheal.json" in err
+    assert "action.params.repository" in err
+
+
+def test_warn_missing_autoheal_repository_silent_once_a_repository_is_set(
+    capsys, tmp_path
+):
+    main(["init", "--root", str(tmp_path)])
+    autoheal_path = tmp_path / "processes" / "autoheal.json"
+    definition = json.loads(autoheal_path.read_text())
+    definition["action"]["params"]["repository"] = "harness_v2"
+    autoheal_path.write_text(json.dumps(definition))
+    capsys.readouterr()
+
+    _warn_missing_autoheal_repository(tmp_path / "processes")
+
+    assert capsys.readouterr().err == ""
+
+
+def test_warn_missing_autoheal_repository_ignores_non_failed_tasks_processes(
+    capsys, tmp_path
+):
+    """A process with no `action.params.repository` that isn't `failed-tasks`
+    is none of this warning's business — e.g. `github-issues` has no
+    `repository` param at all."""
+    (tmp_path / "processes").mkdir()
+    (tmp_path / "processes" / "triage.json").write_text(json.dumps({
+        "trigger": {"interval": "1h"},
+        "action": {"check": "github-issues", "params": {}},
+        "target": {"workflow": "default"},
+    }))
+    capsys.readouterr()
+
+    _warn_missing_autoheal_repository(tmp_path / "processes")
+
+    assert capsys.readouterr().err == ""
+
+
+def test_warn_missing_autoheal_repository_empty_for_a_missing_processes_dir(
+    capsys, tmp_path
+):
+    _warn_missing_autoheal_repository(tmp_path / "processes")
+
+    assert capsys.readouterr().err == ""
+
+
+def test_run_warns_on_the_seeded_repository_less_autoheal_process(
+    monkeypatch, tmp_path, capsys
+):
+    """End to end through `main(["run", ...])`: the seeded root's
+    `processes/autoheal.json` (`action.params == {}`) triggers the startup
+    warning, and the run still proceeds (exit 0) — never fatal."""
+    main(["init", "--root", str(tmp_path)])
+
+    async def fake_serve(harness, port, poll_interval, source_interval=30.0, pr_poll_interval=0.0, reconcile_interval=300.0, registry=None):
+        pass
+
+    monkeypatch.setattr("harness.cli.serve", fake_serve)
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    capsys.readouterr()
+
+    assert main(["run", "--root", str(tmp_path)]) == 0
+    err = capsys.readouterr().err
+    assert "warning:" in err
+    assert "autoheal.json" in err
+
+
 def test_run_has_a_no_github_source_flag_defaulting_off():
     parser = _build_run_parser_namespace()
     assert parser.no_github_source is False
@@ -1890,13 +2110,10 @@ def _parse_run(argv):
     return captured["args"]
 
 
-def test_run_resolves_default_workflow_when_omitted(tmp_path, monkeypatch):
-    """Plain `harness run` (no --workflow) against an ordinarily-initialized
-    harness serves `development` — the same effective default as before
-    --workflow's argparse default became None to support --no-workflow
-    harnesses. The scaffolded `resolver` workflow is appended because its
-    definition exists."""
-    monkeypatch.delenv("HARNESS_HEAL_REPO", raising=False)
+def test_run_serves_every_scaffolded_workflow_for_an_ordinary_init(tmp_path, monkeypatch):
+    """Plain `harness run` against an ordinarily-initialized harness serves
+    every workflow `init` scaffolded: `development`, `heal` and `resolver` —
+    the served set is exactly what `workflows/` holds."""
     main(["init", "--root", str(tmp_path)])
     seen = {}
 
@@ -1909,12 +2126,56 @@ def test_run_resolves_default_workflow_when_omitted(tmp_path, monkeypatch):
     with pytest.raises(SystemExit):
         main(["run", "--root", str(tmp_path), "--api-port", "0"])
 
-    assert list(seen["served"]) == ["development", "resolver"]
+    assert list(seen["served"]) == ["automerge", "development", "heal", "resolver"]
+
+
+def test_run_over_a_fresh_init_builds_successfully_with_a_real_build(monkeypatch, tmp_path):
+    """`harness init` writes `HEAL_DEFINITION`/`AUTOHEAL_PROCESS_DEFINITION`
+    (`src/harness/cli.py`) into every new root, but no test previously ran a
+    real, unmonkeypatched `build()` over a freshly-initialized root purely to
+    pin that those seeded constants compile together successfully: every
+    neighbouring `run` test that reaches a successful exit in this file
+    monkeypatches `build` itself (e.g.
+    `test_run_serves_every_scaffolded_workflow_for_an_ordinary_init` above),
+    and the only other test in this file with a real `build()` over a
+    comparable setup (`test_run_reports_an_unregistered_process_repository_cleanly`)
+    asserts exit *2*. (A served workflow's own finisher binding rejecting its
+    config used to be a second such case, but since ADR-0022 that shape is
+    caught earlier by the `_validate_served_workflows` pre-filter and
+    warns-and-drops rather than reaching a real `build()` raise — see
+    `test_a_binding_without_a_label_is_dropped_from_the_served_set`, which
+    mocks `build()` itself.) This duplication already drifted once — commit `97bc9ef` had to
+    fix `HEAL_DEFINITION` in `cli.py` *and* its old hand-copied mirror in
+    `tests/test_self_heal_e2e.py` — so a test that would fail the moment the
+    seeded workflow/agents/process stop compiling together is worth the extra
+    coverage on top of `test_run_serves_resolver_workflow_when_its_file_exists`
+    below, which reaches the same real-`build()`-success shape incidentally
+    while proving something else (that the resolver workflow gets served).
+
+    Only `harness.cli.serve` is monkeypatched, so no port is bound and no
+    network touched — `build()` itself runs for real."""
+    main(["init", "--root", str(tmp_path)])
+    captured = {}
+
+    async def fake_serve(harness, port, poll_interval, source_interval=30.0, pr_poll_interval=0.0, reconcile_interval=300.0, registry=None):
+        captured["harness"] = harness
+
+    monkeypatch.setattr("harness.cli.serve", fake_serve)
+
+    assert main(["run", "--root", str(tmp_path)]) == 0
+
+    # `HEAL_DEFINITION` compiled: `heal` (and every other scaffolded workflow)
+    # is being served.
+    assert set(captured["harness"].workflows) == {"development", "heal", "resolver", "automerge"}
+    # `AUTOHEAL_PROCESS_DEFINITION` compiled: the seeded `processes/autoheal.json`
+    # became one live poller alongside the scaffolded `triggers/` (empty by
+    # default, so this is exactly the autoheal process).
+    assert len(captured["harness"].pollers) == 1
 
 
 def test_run_with_no_workflow_harness_defaults_to_none(tmp_path, monkeypatch):
-    """A --no-workflow harness has no workflows/default.json, so an omitted
-    --workflow flag must resolve to an empty served set (workflow-less), not
+    """A --no-workflow harness has no `workflows/` directory at all, so
+    `harness run` must resolve to an empty served set (workflow-less), not
     raise WorkflowNotFound."""
     monkeypatch.delenv("HARNESS_HEAL_REPO", raising=False)
     main(["init", "--root", str(tmp_path), "--no-workflow"])
@@ -2068,6 +2329,8 @@ async def test_serve_returns_when_uvicorn_stops_before_the_loop(monkeypatch, tmp
             self.stage_output = StageOutputProjection()
             self.control = FakeTaskControl()
             self.process_checks = None
+            self.known_steps = frozenset()
+            self.workflows = {}
             self.issue_import = NullIssueImport()
             self.stop_seen: asyncio.Event | None = None
 
@@ -2139,6 +2402,8 @@ async def test_serve_wires_the_filesystem_process_admin(monkeypatch, tmp_path):
                 **BUILTIN_CHECKS,
                 "github-issues": lambda params: AlwaysCheck(),
             }
+            self.known_steps = frozenset()
+            self.workflows = {}
             self.issue_import = NullIssueImport()
 
         async def run(
@@ -2191,6 +2456,8 @@ async def test_serve_wires_the_registry_into_the_filesystem_process_admin(
             self.stage_output = StageOutputProjection()
             self.control = FakeTaskControl()
             self.process_checks = None
+            self.known_steps = frozenset()
+            self.workflows = {}
             self.issue_import = NullIssueImport()
 
         async def run(
@@ -2207,6 +2474,71 @@ async def test_serve_wires_the_registry_into_the_filesystem_process_admin(
     admin = captured["process_admin"]
     assert isinstance(admin, FilesystemProcessAdmin)
     assert admin.repository_names() == ("harness_v2",)
+
+
+async def test_serve_wires_known_steps_and_workflows_into_the_process_admin(
+    monkeypatch, tmp_path
+):
+    """FR-4: `serve()` reaches `FilesystemProcessAdmin` with the harness's own
+    live `known_steps`/`workflows` — so a dashboard-authored process naming an
+    unreachable target is rejected at save time, closing the gap where
+    `write()` used to skip target validation entirely."""
+    from harness.drivers.fs_processes import FilesystemProcessAdmin
+    from harness.ports.process_admin import ProcessAdminValidationError, ProcessFields
+
+    captured = {}
+    real_create_app = __import__("harness.api.app", fromlist=["create_app"]).create_app
+
+    def capturing_create_app(**kwargs):
+        captured.update(kwargs)
+        return real_create_app(**kwargs)
+
+    class FakeUvicornServer:
+        def __init__(self, config):
+            pass
+
+        async def serve(self):
+            return
+
+    monkeypatch.setattr("harness.cli.create_app", capturing_create_app)
+    monkeypatch.setattr("harness.cli.uvicorn.Server", FakeUvicornServer)
+
+    class FakeHarness:
+        def __init__(self):
+            self.layout = HarnessLayout(tmp_path)
+            self.projection = BoardProjection(
+                SERVE_TEST_WORKFLOW.steps(), (SERVE_TEST_WORKFLOW,)
+            )
+            self.artifacts = MemoryArtifactStore()
+            self.stage_output = StageOutputProjection()
+            self.control = FakeTaskControl()
+            self.process_checks = None
+            self.known_steps = frozenset({"plan", "review"})
+            self.workflows = {"resolver": SERVE_TEST_WORKFLOW}
+            self.issue_import = NullIssueImport()
+
+        async def run(
+            self, poll_interval, source_interval=30.0, pr_poll_interval=0.0, reconcile_interval=300.0, stop=None
+        ):
+            while not stop.is_set():
+                await asyncio.sleep(0.01)
+
+    await asyncio.wait_for(serve(FakeHarness(), 8000, 0.01), timeout=2.0)
+
+    admin = captured["process_admin"]
+    assert isinstance(admin, FilesystemProcessAdmin)
+
+    with pytest.raises(ProcessAdminValidationError) as excinfo:
+        admin.write(
+            "bad",
+            ProcessFields(
+                interval="1h",
+                check="always",
+                target_kind="step",
+                target="resolver",
+            ),
+        )
+    assert "target" in excinfo.value.errors
 
 
 # --- harness service -------------------------------------------------------
@@ -2917,6 +3249,69 @@ def test_build_issue_checker_with_a_token_wires_the_http_client(monkeypatch):
     assert isinstance(checker._client, HttpGithubClient)
 
 
+# --- slug resolver ------------------------------------------------------
+
+
+def test_slug_resolver_resolves_a_registered_repo_with_a_github_origin(monkeypatch):
+    """The happy path: a registered name resolves to a clone whose origin
+    `github_slug` can read — the slug it returns is what `open-issue` files
+    the issue onto."""
+    from harness.cli import _slug_resolver
+
+    registry = MemoryRepositoryRegistry({"heblo": Path("/repos/heblo")})
+    monkeypatch.setattr(
+        "harness.cli.github_slug",
+        lambda path: "onpaj/Anela.Heblo" if path == Path("/repos/heblo") else None,
+    )
+
+    slug_for = _slug_resolver(registry)
+
+    assert slug_for("heblo") == "onpaj/Anela.Heblo"
+
+
+def test_slug_resolver_raises_issue_error_for_a_missing_name(monkeypatch):
+    """`None`/empty — no repository was stamped on the task — is a distinct
+    failure from an unregistered name, but both must be `IssueError`."""
+    from harness.cli import _slug_resolver
+    from harness.ports.issues import IssueError
+
+    registry = MemoryRepositoryRegistry({})
+    slug_for = _slug_resolver(registry)
+
+    with pytest.raises(IssueError, match="no repository"):
+        slug_for(None)
+    with pytest.raises(IssueError, match="no repository"):
+        slug_for("")
+
+
+def test_slug_resolver_raises_issue_error_for_an_unregistered_name(monkeypatch):
+    """`RepositoryNotFound` from the registry is translated into `IssueError`,
+    not left to propagate as-is or swallowed."""
+    from harness.cli import _slug_resolver
+    from harness.ports.issues import IssueError
+
+    registry = MemoryRepositoryRegistry({"heblo": Path("/repos/heblo")})
+    slug_for = _slug_resolver(registry)
+
+    with pytest.raises(IssueError, match="some-unregistered-repo-name"):
+        slug_for("some-unregistered-repo-name")
+
+
+def test_slug_resolver_raises_issue_error_for_a_non_github_origin(monkeypatch):
+    """A registered clone that resolves fine but whose origin isn't GitHub
+    (or has none) must also fail as `IssueError`, naming the repo and path."""
+    from harness.cli import _slug_resolver
+    from harness.ports.issues import IssueError
+
+    registry = MemoryRepositoryRegistry({"local": Path("/repos/local")})
+    monkeypatch.setattr("harness.cli.github_slug", lambda path: None)
+
+    slug_for = _slug_resolver(registry)
+
+    with pytest.raises(IssueError, match="local"):
+        slug_for("local")
+
+
 def test_run_agent_defaults_to_claude_and_accepts_dummy(tmp_path, monkeypatch):
     """`--agent dummy` runs the real pipeline (worktree, push, forge) with a stub
     step behavior — the only way to exercise landing where claude is unusable."""
@@ -3150,3 +3545,181 @@ def test_autoupdate_plist_runs_the_idle_gated_update():
     ]
     assert d["StartCalendarInterval"] == [{"Hour": 2, "Minute": 0}, {"Hour": 14, "Minute": 0}]
     assert "KeepAlive" not in d  # a periodic one-shot, not a daemon
+
+
+# --- automerge (ADR-0023) --------------------------------------------------
+
+
+def test_init_seeds_the_automerge_workflow_and_its_persona(tmp_path):
+    """Dormant data, exactly like `resolver`/`heal`: the workflow and the
+    reviewer persona ship on every root, and the `merge` step gets no persona
+    because it is finisher-driven."""
+    main(["init", "--root", str(tmp_path)])
+
+    definition = json.loads(
+        (tmp_path / "workflows" / "automerge.json").read_text()
+    )
+    assert definition["start"] == "merge-review"
+    assert definition["finishers"]["merge"]["kind"] == "merge-pr"
+    assert (tmp_path / "agents" / "merge-review.json").exists()
+    assert not (tmp_path / "agents" / "merge.json").exists()
+
+
+def test_init_seeds_a_working_automerge_process(tmp_path):
+    """The Process ships so automerge *runs* on every repo out of the box; what
+    withholds the merge is `dry_run` in the workflow binding, not the absence
+    of this file (see `_ensure_automerge_process`).
+
+    `dedup` must be `per-state`: `github-mergeable` emits one observation per
+    candidate PR, and the default `per-interval` would collapse them onto one
+    key and silently drop all but the first."""
+    main(["init", "--root", str(tmp_path)])
+
+    process = json.loads((tmp_path / "processes" / "automerge.json").read_text())
+    assert process["action"]["check"] == "github-mergeable"
+    assert process["target"] == {"workflow": "automerge"}
+    assert process["dedup"] == "per-state"
+    # No per-repo params: the check iterates the whole repo registry.
+    assert set(process["action"]["params"]) <= {"head_prefix"}
+
+
+def test_a_seeded_automerge_process_never_clobbers_a_hand_edited_one(tmp_path):
+    main(["init", "--root", str(tmp_path)])
+    path = tmp_path / "processes" / "automerge.json"
+    path.write_text('{"mine": true}')
+
+    main(["init", "--root", str(tmp_path)])
+
+    assert json.loads(path.read_text()) == {"mine": True}
+
+
+def test_the_seeded_automerge_binding_ships_in_dry_run(tmp_path):
+    """Configuring the Process is not the same as trusting it: even once an
+    operator wires the Process, nothing merges until they flip this."""
+    main(["init", "--root", str(tmp_path)])
+
+    definition = json.loads((tmp_path / "workflows" / "automerge.json").read_text())
+    binding = definition["finishers"]["merge"]
+    assert binding["dry_run"] is True
+    assert binding["min_confidence"] == 0.8
+    assert binding["method"] == "squash"
+
+
+@pytest.mark.parametrize(
+    ("config", "message"),
+    [
+        ({"method": "cherry-pick"}, "unknown merge method"),
+        ({"min_confidence": "high"}, "non-numeric 'min_confidence'"),
+        ({"min_confidence": 1.5}, "outside 0.0"),
+        ({"dry_run": "yes"}, "non-boolean 'dry_run'"),
+    ],
+)
+def test_a_bad_merge_pr_binding_is_rejected_at_wiring_time(
+    monkeypatch, tmp_path, config, message
+):
+    """A misconfigured merge gate must fail at build, never silently at merge
+    time — the one place where a permissive default would be dangerous."""
+    main(["init", "--root", str(tmp_path)])
+    captured = {}
+
+    def fake_build(*args, **kwargs):
+        captured["finishers"] = kwargs.get("finishers")
+        return object()
+
+    async def fake_serve(harness, port, poll_interval, source_interval=30.0,
+                         pr_poll_interval=0.0, reconcile_interval=300.0, registry=None):
+        pass
+
+    monkeypatch.setattr("harness.cli.build", fake_build)
+    monkeypatch.setattr("harness.cli.serve", fake_serve)
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    assert main(["run", "--root", str(tmp_path)]) == 0
+
+    factory = captured["finishers"]["merge-pr"]
+    with pytest.raises(ValueError, match=message):
+        factory("merge", {"from_step": "merge-review", **config}, lambda: None)
+
+
+def test_the_merge_pr_finisher_works_without_a_github_token(monkeypatch, tmp_path):
+    """Registered unconditionally, like `open-issue`: without a token the
+    merger is the in-memory fake, so the seeded workflow stays servable — and
+    harmless — on a root with no GitHub access at all."""
+    main(["init", "--root", str(tmp_path)])
+    captured = {}
+
+    def fake_build(*args, **kwargs):
+        captured["finishers"] = kwargs.get("finishers")
+        return object()
+
+    async def fake_serve(harness, port, poll_interval, source_interval=30.0,
+                         pr_poll_interval=0.0, reconcile_interval=300.0, registry=None):
+        pass
+
+    monkeypatch.setattr("harness.cli.build", fake_build)
+    monkeypatch.setattr("harness.cli.serve", fake_serve)
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    assert main(["run", "--root", str(tmp_path)]) == 0
+
+    behavior = captured["finishers"]["merge-pr"](
+        "merge", {"from_step": "merge-review"}, lambda: None
+    )
+    assert isinstance(behavior, MergePrBehavior)
+
+
+def test_a_credential_less_process_leaves_the_run_alive_and_warns(
+    monkeypatch, tmp_path, capsys
+):
+    """The whole point of `MissingCredential`: a seeded `github-mergeable`
+    process on a tokenless root must degrade, not kill the service.
+
+    Before this, one such file made `harness run` exit 2 — which would have
+    broken the documented promise that "no token is not fatal: GitHub
+    ingestion goes quiet and `harness submit` still works", and turned an
+    expired token or a launchd service that cannot reach the keychain into a
+    dead harness rather than a degraded one."""
+    main(["init", "--root", str(tmp_path)])
+    captured = {}
+
+    async def fake_serve(harness, port, poll_interval, source_interval=30.0,
+                         pr_poll_interval=0.0, reconcile_interval=300.0, registry=None):
+        captured["harness"] = harness
+
+    monkeypatch.setattr("harness.cli.serve", fake_serve)
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    capsys.readouterr()
+
+    assert main(["run", "--root", str(tmp_path)]) == 0
+
+    err = capsys.readouterr().err
+    assert "automerge.json is disabled for this run" in err
+    assert "GITHUB_TOKEN" in err
+    # Degraded, not dead: the rest of the harness is fully wired.
+    harness = captured["harness"]
+    assert "development" in harness.workflows
+    assert [name for name, _ in harness.skipped_processes] == ["automerge.json"]
+
+
+def test_a_genuinely_unknown_check_is_still_fatal(monkeypatch, tmp_path):
+    """The other half of the rule: only a *missing* value warns. A set-and-wrong
+    one (a typo'd action) must still fail the run outright."""
+    main(["init", "--root", str(tmp_path)])
+    (tmp_path / "processes" / "automerge.json").write_text(
+        json.dumps(
+            {
+                "trigger": {"interval": "5m"},
+                "action": {"check": "github-mergable", "params": {}},
+                "target": {"workflow": "automerge"},
+                "dedup": "per-state",
+                "sink": {"kind": "none"},
+            }
+        )
+    )
+
+    async def fake_serve(harness, port, poll_interval, source_interval=30.0,
+                         pr_poll_interval=0.0, reconcile_interval=300.0, registry=None):
+        pass
+
+    monkeypatch.setattr("harness.cli.serve", fake_serve)
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+
+    assert main(["run", "--root", str(tmp_path)]) == 2
