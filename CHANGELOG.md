@@ -1,6 +1,31 @@
 # CHANGELOG
 
 
+## v1.5.1 (2026-07-29)
+
+### Bug Fixes
+
+- **drafts**: End a fenced json block where JSON ends, not at the first fence
+  ([`eb19efc`](https://github.com/onpaj/harness_v2/commit/eb19efc25e3be1755c9d3875d2d2b4b57814937a))
+
+`parse_drafts` closed the block with a non-greedy regex, so the first ``` after the opener ended it.
+  A draft's `body` is markdown, and the healer's whole job is quoting the failure it reports — the
+  draft that broke it filed a body containing a fenced block of the original error. Those backticks
+  are inside a JSON string, but the regex cut the array there and json.loads saw an unterminated
+  string starting at the `body` value.
+
+`raw_decode` reads exactly one JSON value and stops where that value ends, so nested fences, the
+  closing fence and trailing prose are all outside the parser's concern. Openers are tried
+  last-first, preserving "the last fenced block wins" while stepping past an opener that is really
+  inside an earlier body — one that starts mid-string decodes to nothing and is skipped.
+
+`merge_verdict.py` and `drivers/claude_cli.py` share the convention and the latent bug; they read a
+  small verdict object rather than markdown bodies, so the collision is far less likely there. Noted
+  in the docstring, not changed.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+
+
 ## v1.5.0 (2026-07-28)
 
 ### Features
