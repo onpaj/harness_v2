@@ -34,7 +34,7 @@ class ClaudeCliBehavior(ConsumerBehavior):
         runner: AgentRunner,
         spec: AgentSpec,
         events: EventSink,
-        timeout: float = 1800.0,
+        timeout: float = 5400.0,
         workflows: WorkflowRepository | None = None,
     ) -> None:
         self._clock = clock

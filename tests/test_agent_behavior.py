@@ -145,7 +145,7 @@ async def test_runs_agent_in_worktree_cwd_with_spec(tmp_path):
     # freshly `replace()`d instance, not `spec` itself, since Package C.
     assert call["spec"] == spec
     assert call["spec"].allowed_outcomes == spec.allowed_outcomes
-    assert call["timeout"] == 1800.0
+    assert call["timeout"] == 5400.0
 
 
 async def test_prompt_carries_attempt_relpath(tmp_path):

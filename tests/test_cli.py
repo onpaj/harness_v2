@@ -651,7 +651,7 @@ def test_run_heal_repo_needs_claude_agent(monkeypatch, tmp_path):
     assert code == 2
 
 
-def test_run_defaults_agent_timeout_to_1800(monkeypatch, tmp_path):
+def test_run_defaults_agent_timeout_to_5400(monkeypatch, tmp_path):
     main(["init", "--root", str(tmp_path)])
     captured = {}
 
@@ -666,7 +666,7 @@ def test_run_defaults_agent_timeout_to_1800(monkeypatch, tmp_path):
     monkeypatch.setattr("harness.cli.serve", fake_serve)
 
     assert main(["run", "--root", str(tmp_path)]) == 0
-    assert captured["agent_timeout"] == 1800.0
+    assert captured["agent_timeout"] == 5400.0
 
 
 def test_run_accepts_explicit_agent_timeout(monkeypatch, tmp_path):

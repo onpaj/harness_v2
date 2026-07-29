@@ -352,7 +352,7 @@ def build(
     forge: Forge | None = None,
     runner: AgentRunner | None = None,
     catalog: AgentCatalog | None = None,
-    agent_timeout: float = 1800.0,
+    agent_timeout: float = 5400.0,
     artifact_view: ArtifactView | None = None,
     sources: list[TaskSource] | None = None,
     merge_checker: MergeChecker | None = None,
