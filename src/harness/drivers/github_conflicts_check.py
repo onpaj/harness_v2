@@ -22,6 +22,13 @@ from harness.drivers.github_client import GithubClient
 from harness.ports.repos import RepositoryRegistry
 from harness.ports.triggers import Check, CheckSpec, Observation, ParamSpec
 
+SOURCE_KIND = "mergeability"
+"""The `source.kind` this check stamps on every resolver task it mints. Named
+so `failed_tasks_check.py`'s recursion guard (`PR_BORN_SOURCE_KINDS`) can
+import it rather than carry a second, independent copy of the literal — a
+rename here then either propagates there or breaks an import immediately,
+instead of silently disarming the guard."""
+
 SPEC = CheckSpec(
     name="github-conflicts",
     label="GitHub conflicts",
@@ -89,7 +96,7 @@ class GithubConflictsCheck(Check):
                             "branch": pr.head_branch,
                             "title": f"resolve merge conflict on PR #{pr.number}",
                             "source": {
-                                "kind": "mergeability",
+                                "kind": SOURCE_KIND,
                                 "repo": slug,
                                 "pr": pr.number,
                                 "url": pr.url,

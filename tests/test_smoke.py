@@ -22,6 +22,12 @@ RUNNER_TIMEOUT = 5.0
 
 async def test_task_travels_from_submit_to_done(tmp_path, capsys):
     main(["init", "--root", str(tmp_path)])
+    # `init` unconditionally seeds `processes/autoheal.json`, targeting the
+    # `heal` workflow. This test calls `build()` directly with only
+    # `DEFAULT_WORKFLOW` served (unlike `harness run`, which always serves
+    # every workflow on disk) — a real self-healing pipeline is not what's
+    # under test here, so drop the file rather than widen the served set.
+    (tmp_path / "processes" / "autoheal.json").unlink()
     main(["submit", "--root", str(tmp_path), "--repo", "app-backend"])
     task_id = capsys.readouterr().out.strip().splitlines()[-1]
 
@@ -62,6 +68,10 @@ async def test_task_travels_from_submit_to_done(tmp_path, capsys):
 
 async def test_unknown_workflow_lands_in_failed_and_loop_survives(tmp_path):
     main(["init", "--root", str(tmp_path)])
+    # See the comment in test_task_travels_from_submit_to_done: this test's
+    # direct build() call serves only DEFAULT_WORKFLOW, so the unconditionally
+    # seeded autoheal process (targeting `heal`, unserved here) must go.
+    (tmp_path / "processes" / "autoheal.json").unlink()
     broken = Task(
         id="tsk_broken", workflow_template="nonexistent", created="2026-07-19T10:00:00Z"
     )

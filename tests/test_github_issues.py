@@ -12,8 +12,12 @@ def test_open_issue_creates_with_the_marker_embedded():
     tracker = GithubIssueTracker(client)
 
     ref = tracker.open_issue(
-        "o/r", title="Heal it", body="diagnosis", labels=("harness:self-heal",),
+        "o/r",
+        title="Heal it",
+        body="diagnosis",
+        labels=("harness:self-heal",),
         marker="tsk_9",
+        scope_label="harness:self-heal",
     )
 
     created = client.list_issues("o/r", label=SELF_HEAL_LABEL)
@@ -29,10 +33,15 @@ def test_open_issue_is_idempotent_by_marker():
     tracker = GithubIssueTracker(client)
 
     first = tracker.open_issue(
-        "o/r", title="Heal", body="d", labels=(), marker="tsk_9"
+        "o/r", title="Heal", body="d", labels=(), marker="tsk_9", scope_label="harness:self-heal"
     )
     again = tracker.open_issue(
-        "o/r", title="different", body="different", labels=(), marker="tsk_9"
+        "o/r",
+        title="different",
+        body="different",
+        labels=(),
+        marker="tsk_9",
+        scope_label="harness:self-heal",
     )
 
     assert again == first
@@ -43,7 +52,14 @@ def test_open_issue_always_carries_the_self_heal_label():
     client = FakeGithubClient()
     tracker = GithubIssueTracker(client)
 
-    tracker.open_issue("o/r", title="Heal", body="d", labels=("custom",), marker="tsk_9")
+    tracker.open_issue(
+        "o/r",
+        title="Heal",
+        body="d",
+        labels=("custom",),
+        marker="tsk_9",
+        scope_label="harness:self-heal",
+    )
 
     issue = client.list_issues("o/r", label=SELF_HEAL_LABEL)[0]
     assert "custom" in issue.labels and SELF_HEAL_LABEL in issue.labels
@@ -51,7 +67,7 @@ def test_open_issue_always_carries_the_self_heal_label():
 
 def test_client_error_becomes_issue_error():
     class BoomClient(FakeGithubClient):
-        def search_issue_by_marker(self, repo, marker):
+        def search_issue_by_marker(self, repo, marker, *, label):
             return None
 
         def create_issue(self, repo, *, title, body, labels):
@@ -65,7 +81,28 @@ def test_client_error_becomes_issue_error():
     tracker = GithubIssueTracker(BoomClient())
 
     with pytest.raises(IssueError):
-        tracker.open_issue("o/r", title="T", body="B", labels=(), marker="tsk_9")
+        tracker.open_issue(
+            "o/r", title="T", body="B", labels=(), marker="tsk_9", scope_label="harness:self-heal"
+        )
+
+
+def test_the_marker_search_is_scoped_to_the_binding_label():
+    client = FakeGithubClient()
+    tracker = GithubIssueTracker(client)
+
+    tracker.open_issue(
+        "onpaj/harness_v2",
+        title="A finding",
+        body="body",
+        labels=("tech-debt",),
+        marker="tsk_1:abcd1234",
+        scope_label="arch-review",
+    )
+    opened = client.list_issues("onpaj/harness_v2", label="arch-review")
+
+    assert len(opened) == 1
+    assert "<!-- harness-issue:tsk_1:abcd1234 -->" in opened[0].body
+    assert "harness:self-heal" not in opened[0].labels
 
 
 def test_existing_issue_is_returned_without_creating():
@@ -82,7 +119,9 @@ def test_existing_issue_is_returned_without_creating():
     )
     tracker = GithubIssueTracker(client)
 
-    ref = tracker.open_issue("o/r", title="new", body="new", labels=(), marker="tsk_9")
+    ref = tracker.open_issue(
+        "o/r", title="new", body="new", labels=(), marker="tsk_9", scope_label="harness:self-heal"
+    )
 
     assert ref.number == 5
     assert ref.url == "https://github.com/o/r/issues/5"

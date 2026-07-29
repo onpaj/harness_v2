@@ -196,8 +196,12 @@ def _verdict_reprompt(allowed: tuple[str, ...]) -> str:
     names = ", ".join(allowed)
     return (
         "Your previous message did not end with the required machine-readable "
-        "verdict, so the harness could not read a result. Reply with ONLY the "
-        "verdict now — a single fenced json block and nothing else:\n"
+        "verdict, so the harness could not read a result. If you were waiting "
+        "on a background or long-running command, stop waiting: this process "
+        "will not check on it or resume this session again. Check its result "
+        "now if it already finished, or decide based on what you already "
+        "know — either way, this turn ends with a verdict. Reply with ONLY "
+        "the verdict now — a single fenced json block and nothing else:\n"
         "```json\n"
         '{"outcome": "<one of: ' + names + '>", "summary": "<short summary>"}\n'
         "```"

@@ -191,7 +191,12 @@ def test_step_without_queue_lands_in_failed():
 
     dispatcher.tick()
 
-    assert "missing" in failed.list()[0].history[-1].reason
+    reason = failed.list()[0].history[-1].reason
+    assert "missing" in reason
+    # FR-5: the failure is actionable, not just a bare dead end — it names a
+    # concrete remedy for the live-edit/restart-ordering desync (a step valid
+    # at Process/Trigger validation time whose queue set was built earlier).
+    assert "restart" in reason
 
 
 def test_one_bad_task_does_not_stop_the_loop():
