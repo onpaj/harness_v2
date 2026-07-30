@@ -117,11 +117,21 @@ It covers the thin subprocess shell of `ClaudeCliRunner` that the fake runners b
 **The suite is hermetic against the harness's own configuration environment.**
 `tests/conftest.py`'s autouse `hermetic_environment` fixture unsets every variable
 `src/harness` reads as config (`GITHUB_TOKEN`, `HARNESS_HOME`, `SLACK_WEBHOOK_URL`,
-`JIRA_*`) before each test; a test that wants one sets it itself with
+`HARNESS_RETENTION_DAYS`, `JIRA_*`) before each test; a test that wants one sets it itself with
 `monkeypatch.setenv`, which runs after and wins. Not optional tidiness — see the
 gotcha below. `tests/test_hermetic_environment.py` derives the list from the source
 and checks it **both ways**: a new config variable missing from `_HARNESS_ENVIRONMENT`
 fails, and so does a stale entry the package no longer reads.
+
+**Terminal-task retention.** `done`/`failed`/`healed` are queues nobody consumes,
+so without a sweep a settled task stays on the board forever — most visibly in the
+`No workflow` tab, where step-targeted Processes land their completed runs.
+`RetentionReconciler` archives a task once it has been settled longer than
+`HARNESS_RETENTION_DAYS` (default `2`), measuring from the last history entry, not
+from `created`. `0` archives every terminal task on the next sweep; a bad value
+warns to stderr and falls back to the default rather than failing the run. Step
+queues are never swept — a task sitting in a step queue is backlog, not garbage.
+Archived tasks keep their file in `archived/` and stay resolvable by id.
 
 ## Git conventions
 
@@ -397,6 +407,17 @@ Dependencies flow strictly downward, no cycles.
   Only wired when an `issue_checker` is supplied to `build()` (real runs gate it
   on `GITHUB_TOKEN`, exactly like the `MergeReconciler`); a submitted task with no
   `data.source`, or a foreign `kind`, is `None` from the checker and left alone.
+- **`RetentionReconciler`** is a further sibling, retiring a terminal task on
+  age instead of on external state: where `MergeReconciler`/`IssueReconciler`
+  wait for a PR to merge or a source issue to resolve, this one just checks
+  how long a task has sat settled. It sweeps `done`/`failed`/`healed` each
+  tick, archiving every task whose `settled_at` (the last history entry,
+  falling back to `created`) is older than `HARNESS_RETENTION_DAYS` —
+  all-per-tick like `IssueReconciler`, not one-per-tick like `MergeReconciler`.
+  Unlike either sibling it needs no external checker, only the local queues
+  and the clock, so `build()` always constructs it — there is no "not
+  configured" state to gate on, unlike the `GITHUB_TOKEN`-gated pair above.
+  Runs on the same `reconcile_interval` as the others.
 - **`StageOutputView`** is a third, read-only UI surface alongside `BoardView`
   and `ArtifactView`: where `BoardView` shows *where* a task is and
   `ArtifactView` shows *what it produced*, `StageOutputView` shows *what the
@@ -567,6 +588,19 @@ Dependencies flow strictly downward, no cycles.
   could disable reconciliation between restarts). Gating it on `self.reconciler is not
   None` would leave such a task stuck forever; recovering an idle queue is a no-op, so
   it's unconditional and free.
+- **Every loop in `Harness.run()` idles on the `stop` event, never on a blind
+  `sleep(interval)` — don't "simplify" it back.** All seven loops (dispatcher,
+  each consumer, each source poller, the PR watcher and all three reconcilers)
+  share one shape, `_tick_loop`: an idle tick waits `asyncio.wait_for(stop.wait(),
+  timeout=interval)` instead of `asyncio.sleep(interval)`. A plain sleep looks
+  equivalent and simpler, but it cannot be woken — `stop.set()` would then block
+  shutdown until the *longest*-interval loop's sleep happened to elapse, up to
+  `reconcile_interval` (300s by default), which is well past the SIGKILL deadline
+  launchd gives `cli.serve()`. This stopped being a latent risk once
+  `RetentionReconciler` started being built unconditionally (unlike the
+  `GITHUB_TOKEN`-gated `MergeReconciler`/`IssueReconciler`, it is *always* one of
+  the loops), turning a five-minute graceful-shutdown tail from an edge case
+  into every run's default. See `_tick_loop`'s own docstring in `app.py`.
 - **A scheduled trigger's `dedup_key` is NON-constant — this is deliberate, don't
   "fix" it.** A trigger fires *fresh work* each period, so a constant key would make
   `SourcePoller._seen` suppress every fire after the first, forever (the opposite of a
