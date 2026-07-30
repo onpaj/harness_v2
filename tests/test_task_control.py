@@ -187,7 +187,7 @@ def test_delete_loses_claim_race_returns_false():
 # --- resume --------------------------------------------------------------
 
 
-def make_retired_failure(task_id="tsk_r", status=END, with_stamp=True):
+def make_retired_failure(task_id="tsk_r", status=END, with_stamp=True, **kwargs):
     """A task that timed out at `development` after architecture passed."""
     history = [
         HistoryEntry(
@@ -222,6 +222,7 @@ def make_retired_failure(task_id="tsk_r", status=END, with_stamp=True):
         status=status,
         last_outcome="done",
         history=tuple(history),
+        **kwargs,
     )
 
 
@@ -311,3 +312,38 @@ def test_resume_refuses_an_unknown_id():
     service, _, _, _ = build()
 
     assert service.resume("tsk_missing") is False
+
+
+def test_resume_loses_claim_race_returns_false():
+    done = MemoryTaskQueue("done")
+    done.put(make_retired_failure())
+    service, inbox, _, events = build(done=done)
+    # Simulate another actor claiming the task between list() and claim():
+    # the first claim() steals the ready slot, the second (resume's own)
+    # then finds nothing left to claim.
+    original_claim = done.claim
+
+    def steal_then_claim(task, lock_id):
+        original_claim(task, "lck_other")
+        return original_claim(task, lock_id)
+
+    done.claim = steal_then_claim
+
+    assert service.resume("tsk_r") is False
+    assert inbox.list() == []
+    assert [n for n, _ in events.events] == []
+
+
+def test_resume_preserves_repository_worktree_and_data():
+    done = MemoryTaskQueue("done")
+    done.put(
+        make_retired_failure(repository="acme", worktree="/wt/tsk_r", data={"title": "demo"})
+    )
+    service, inbox, _, _ = build(done=done)
+
+    service.resume("tsk_r")
+
+    moved = inbox.list()[0]
+    assert moved.repository == "acme"
+    assert moved.worktree == "/wt/tsk_r"
+    assert moved.data == {"title": "demo"}

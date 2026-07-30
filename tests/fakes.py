@@ -43,8 +43,8 @@ class FakeBoardView(BoardView):
 
 
 class FakeTaskControl(TaskControl):
-    """Records restart/delete calls; returns configurable results. Lets the
-    API be tested without queues."""
+    """Records restart/resume/delete calls; returns configurable results. Lets
+    the API be tested without queues."""
 
     def __init__(
         self,
