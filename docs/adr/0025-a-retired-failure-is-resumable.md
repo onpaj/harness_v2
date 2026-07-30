@@ -60,15 +60,28 @@ which tasks those are.**
   `failed at step 'failed'`. It now reads the same trace.
 - **Invariant #30 loses its justification's absoluteness.** "The original
   worktree is permanently inert once its task reaches a terminal state" is why
-  the harness never cleans up worktrees; a resume revives one. The mechanism
-  copes — invariant #31's reattach path resets only when local `HEAD` is behind
-  or equal to `origin/<branch>` and raises on divergence — but if another task
-  force-checked-out the same branch into a second worktree meanwhile, resuming
-  the original leaves two live worktrees on one branch. Nothing here changes
-  worktree handling; it makes the case reachable.
-- **A resumed step writes a fresh artifact.** `next_attempt` counts existing
-  `<step>-NN.md` files, so the record of the failed attempt is kept, consistent
-  with ADR-0006.
+  the harness never cleans up worktrees; a resume revives one. For the ordinary
+  case — no `task.data["branch"]` — that revival is unconditionally safe:
+  `GitWorkspace.attach`'s plain `else` branch reattaches with a `reset --hard
+  HEAD` + `clean -fd`, the same reset-on-reattach every backward edge already
+  relies on, regardless of anything that happened to the branch elsewhere. Only
+  the `data.branch`-override subset — a resolver or automerge-review task,
+  which `resumable_failure` also admits, since a declined one of those sits in
+  `failed/` too — takes `attach`'s `elif override:` branch, whose ancestry-aware
+  reattach (invariant #31) resets only when local `HEAD` is behind or equal to
+  `origin/<branch>` and raises on divergence; if another task force-checked-out
+  the same branch into a second worktree meanwhile, resuming the original
+  leaves two live worktrees on one branch. Nothing here changes worktree
+  handling; it makes the case reachable.
+- **A resumed step reuses the failed attempt's number, not a fresh one.** In
+  the motivating shape, `ClaudeCliBehavior` commits only once the agent
+  returns, so a timeout raises before any artifact from the failed attempt is
+  ever committed; reset-on-reattach's `clean -fd` then discards that untracked
+  file, `next_attempt` counts zero existing `<step>-NN.md` files for the step,
+  and the resumed run's artifact reuses the same attempt number. Deliberate —
+  invariant #16's attempt numbering is gapless across reset-on-reattach, not a
+  guarantee that every attempt that was ever run leaves a record; an artifact
+  that was never committed leaves nothing to preserve.
 - **The affordance has the retention window's lifetime.** Once terminal tasks
   are archived for age, an archived task is off every board column and its
   Resume button with it.
