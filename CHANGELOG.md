@@ -1,6 +1,9 @@
 # CHANGELOG
 
 
+## v1.8.0 (2026-07-30)
+
+
 ## v1.7.0 (2026-07-30)
 
 ### Features
@@ -11,6 +14,47 @@
 
 
 ## v1.6.0 (2026-07-30)
+
+### Documentation
+
+- Describe the sweep by column, now that healed/ is retired
+  ([`51623b4`](https://github.com/onpaj/harness_v2/commit/51623b414ed3bb1b87622e99642e582728d0a952))
+
+ADR-0024 retired `healed/` — a healed failure lands in `done`, and the queue survives only so an
+  older version's tasks still hydrate into the `done` column. Seven places still described the sweep
+  as covering "done/healed" as though both were live columns. The accurate framing is the `done`
+  column and the two queues behind it, which also states the operator-visible fact: what disappears
+  after the window is the done column, and `failed/` never does.
+
+- Design resuming a retired failure
+  ([`e713546`](https://github.com/onpaj/harness_v2/commit/e7135461669cf811efa061bda8d3650311fd184a))
+
+Six development tasks sat in `done` with no PR: all six timed out at the implementation step, and
+  ADR-0024 retires a healed failure into `done` with `status = END`, so they were indistinguishable
+  from real completions and had no Restart button (it is gated on `status == "failed"`, and
+  `TaskControlService.restart` only searches `failed/`).
+
+Design a `resume` verb that rewinds a task to the hop before the step it died at and lets the
+  dispatcher route it forward again — keeping the worktree and the artifacts the good steps already
+  produced — plus a card-level marker so the two kinds of ending in `done` are told apart at a
+  glance.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+
+- Plan resuming a retired failure
+  ([`53946a6`](https://github.com/onpaj/harness_v2/commit/53946a6bfffbd50765281acfd01a7c2b1ecfdcf4))
+
+Six tasks in Task 1-6 order: the three history derivations in `models`, the healer's own diagnostic
+  step name, the `resume` verb on the port and service (plus both other implementations of the ABC —
+  a new abstract method would otherwise make `_NullTaskControl` and `FakeTaskControl`
+  un-instantiable), the API route and filter, the card and detail templates, then ADR-0025 and the
+  invariant edits.
+
+Also corrects the spec: `LIFECYCLE_DESCRIPTIONS[DONE_COLUMN]` already names both endings —
+  ADR-0024's own change fixed the column text while leaving the card that renders under it lying, so
+  there is no work there.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
 
 ### Features
 
@@ -80,6 +124,82 @@ Co-authored-by: Claude <noreply@anthropic.com>
 
 ### Bug Fixes
 
+- Clamp a negative retention window in the rule itself
+  ([`8650d4b`](https://github.com/onpaj/harness_v2/commit/8650d4bd3fb989a50d61fb480e6e75d31d95a71f))
+
+A negative `days` puts `cutoff` in the future, so the sweep would archive every task in the queues
+  it is given — including ones settled after `now`. `cli._retention_days()` already rejects a
+  negative `HARNESS_RETENTION_DAYS`, but that left the rule's own invariant living in the CLI: any
+  other caller (`build(retention_days=...)`, a test, a future wiring path) could put the cutoff in
+  the future. `max(0, days)` makes `0` the floor, which is the legitimate "archive everything
+  settled" setting.
+
+Covered both directions: a task settled in the future stays put, and a settled one is still
+  archived.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+
+- Give run()-driving tests a fast reconcile_interval now that retention always sweeps
+  ([`0e732ae`](https://github.com/onpaj/harness_v2/commit/0e732aeb5324d327caf944a0998fac260eb6bf42))
+
+The retention reconciler Task 2 wires in is *always* built, so its loop is now unconditionally part
+  of Harness.run()'s loops list at whatever reconcile_interval the caller passes (default 300s).
+  Every test that starts run() and later flips `stop` without passing its own reconcile_interval
+  used to be safe, because no reconciler loop existed unless a merge_checker/ issue_checker was
+  supplied. Now the retention loop is always present, so a plain run() call blocks in its first
+  `await asyncio.sleep(300)` regardless of `stop`, and `asyncio.wait_for(runner,
+  timeout=RUNNER_TIMEOUT)` times out.
+
+Fixes it the same way the codebase's own reconciler-loop tests already do (e.g.
+  test_run_archives_a_done_task_once_its_pr_is_merged): pass reconcile_interval=0.01 alongside
+  poll_interval. One test (test_pr_watcher_loop_does_not_run_when_interval_is_zero) pre-seeds a
+  `done` task with a `created` timestamp far in the past relative to real wall-clock time; with the
+  retention loop now actually ticking, it pins the harness's clock to FakeClock() (defaulting to
+  that same instant) so the always-on sweep sees a freshly-settled task instead of a real
+  nine-day-old one, leaving the PR-watcher-interval assertion under test undisturbed.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+
+- Stop retention sweeping failed/
+  ([`a3f93ed`](https://github.com/onpaj/harness_v2/commit/a3f93ed446dfa5dd52dd2646b87d41cbb1d5fabb))
+
+Retention now sweeps `done` and `healed` only. `failed/` is deliberately excluded, per ADR-0024,
+  which landed on main after this branch's spec was written: a failure the harness declined to heal
+  (`heal-declined`, `heal-failed`) stays in `failed/` on purpose, because nothing is coming to fix
+  it and it must keep reading as a problem exactly where the operator looks. Those are precisely the
+  tasks the sweep was archiving.
+
+Archiving one also took away the operator's only remedy: `TaskControlService.restart` searches
+  `failed/` and nowhere else, so an archived failure is unrestartable, not merely off-board.
+
+The spec's premise for the swept set — "these are finished tasks; moving them off the board loses
+  nothing" — is therefore false for `failed/`. The rule itself stays queue-agnostic; only the wiring
+  changed.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+
+- Wake Harness.run()'s loops on stop instead of sleeping blind
+  ([`20c4338`](https://github.com/onpaj/harness_v2/commit/20c43387bd20011830ba53081ecc203461d1e734))
+
+Every loop in run() slept its full interval between `stop.is_set()` checks, so `stop.set()` could
+  not wake one: `asyncio.gather` over them blocked until the longest sleep elapsed. That shape
+  predates the retention work, but making a 300-second loop unconditional turned a conditional tail
+  into a universal one — `cli.serve()`'s shutdown path (`stop.set()` then `await
+  asyncio.gather(...)`) now blocked for up to five minutes, so a SIGTERM under launchd hit the
+  SIGKILL deadline instead of exiting cleanly. It also forced 13 test call sites to pass
+  `reconcile_interval=0.01` purely so the suite would terminate.
+
+Collapses the same 5-line body written seven times into one `_tick_loop(tick, interval, stop)`
+  helper that waits on the stop event — `asyncio.wait_for(stop.wait(), timeout=interval)` — rather
+  than sleeping. Each loop's semantics are preserved exactly, including the productive-tick fast
+  path (`sleep(0)`, no delay) that keeps a draining queue at full speed. The helper accepts a sync
+  or async `tick` so `_consumer_loop` fits the same shape as the other six.
+
+Measured: with every interval set to 600s, run() now returns 0.0006s after stop.set(); before, it
+  was still blocked past a 10s deadline.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+
 - **board**: Green card accent only for a task that actually finished
   ([`40b8aac`](https://github.com/onpaj/harness_v2/commit/40b8aac2b0afe2435d9ff7ea149512b48dcc85ea))
 
@@ -96,11 +216,130 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
 
 ### Documentation
 
+- Correct how the retention window is set, and its scope
+  ([`2115014`](https://github.com/onpaj/harness_v2/commit/21150148dab63f5d8095ed30400ae7605108ea76))
+
+The spec said retuning the window means editing `harness-run.sh`. That file is generated by `harness
+  service install` and its own header says it is regenerated on every install, so such an edit is
+  silently clobbered — including by the autoupgrade path. The real mechanism is
+  `<root>/secrets.env`, the 0600 file the generated wrapper sources under `set -a`. A shell `export`
+  is no better than the wrapper edit: launchd hands the service almost no environment, so it never
+  reaches the live service at all.
+
+Also recorded here, in the spec, `CLAUDE.md` and `README.md`:
+
+- retention sweeps `done` and `healed`, never `failed/` (ADR-0024), and why the spec's original
+  premise does not hold for a failure; - there is no "off" value — `0` is the *most* aggressive
+  setting, so effectively disabling the sweep means a very large window (`36500`); -
+  `HARNESS_RETENTION_DAYS` now appears in `README.md`, alongside the other variables that belong in
+  `secrets.env`: it changes what the board shows, so it is operator-facing, not only agent-facing; -
+  `--reconcile-poll`'s help text described only the PR-merge sweep; it drives three now, and the
+  newest touches no remote API; - `settled_at`'s docstring notes that it is really "last touched",
+  so a future `HistoryEntry` appended to an already-terminal task restarts its retention window; -
+  the `CLAUDE.md` retention prose no longer calls `failed/` a queue nobody consumes (it has the
+  `failed-tasks` Check), and the "Working here" paragraph and the responsibility bullet no longer
+  restate each other — the former keeps the knob, the latter the rule.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+
+- Design terminal-task retention
+  ([`c4c60c6`](https://github.com/onpaj/harness_v2/commit/c4c60c6d27a5fda7e002318223fddf918a9319a3))
+
+The `No workflow` tab accumulates completed runs of step-targeted Processes forever — nothing ever
+  archives a settled task for age. Design a fourth reconciler that moves terminal tasks to
+  `archived/` after a window, reusing the disposition
+  `PrWatcher`/`MergeReconciler`/`IssueReconciler` already share.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+
+- Document HARNESS_RETENTION_DAYS
+  ([`78e7ec2`](https://github.com/onpaj/harness_v2/commit/78e7ec24bae7448ae9f7cd576f9a46745ef75905))
+
+- Narrow the retention wording to done/healed, complete the env table
+  ([`401b700`](https://github.com/onpaj/harness_v2/commit/401b700bbf475f0770f58453396bd4b7d496e5e9))
+
+The `--reconcile-poll` help and `_retention_days`'s docstring still said "any" / "every terminal
+  task" after `failed/` became exempt. The README's `secrets.env` table is framed as the complete
+  list of settings that belong in that file, so omitting `HARNESS_HOME` and the `JIRA_*` trio
+  invited exactly the "why doesn't my export work?" question the section exists to prevent.
+
 - Plan terminal-task retention
   ([`85313d1`](https://github.com/onpaj/harness_v2/commit/85313d15fef0a01d512d045a2257509f6f859422))
 
 Four TDD tasks: the RetentionReconciler core, its app.py wiring on the existing reconcile loop, the
   HARNESS_RETENTION_DAYS knob, and the docs.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+
+- Point the retention plan at its isolated worktree
+  ([`6eed6dc`](https://github.com/onpaj/harness_v2/commit/6eed6dccfc283c7dda21aab40df6278ff4a2188f))
+
+### Features
+
+- Add RetentionReconciler, archiving terminal tasks by age
+  ([`8e5a19b`](https://github.com/onpaj/harness_v2/commit/8e5a19b32787b869e5640b495ec1c1eb428bf1d1))
+
+- Configure the retention window with HARNESS_RETENTION_DAYS
+  ([`20c46d9`](https://github.com/onpaj/harness_v2/commit/20c46d9e84dc4d77b2bc55f05091b861f80e0281))
+
+- Wire the retention sweep into the reconcile loop
+  ([`07f50d3`](https://github.com/onpaj/harness_v2/commit/07f50d3a04f0ae1b9a83073ccac3c472cedc0c60))
+
+### Testing
+
+- Add retention_reconciler architecture guard
+  ([`550d5d5`](https://github.com/onpaj/harness_v2/commit/550d5d54b326abfc58855dff2fd5265f251a88b1))
+
+Ensures retention_reconciler.py only imports from ports/models/ids, matching the guard tests for
+  pr_watcher, merge_reconciler, and issue_reconciler. Regression-proofs against layering violations.
+
+- Arm the merge-reconciler e2e test and pin prompt shutdown
+  ([`e0d2e41`](https://github.com/onpaj/harness_v2/commit/e0d2e416bfb215600f27d688064280befdcbe7eb))
+
+Two test-only fixes.
+
+`test_run_archives_a_done_task_once_its_pr_is_merged` was silently disarmed. Its task goes straight
+  into `done/` with no history, so `settled_at` falls back to `created` (2026-07-19) — on the
+  default real `SystemClock` that is ~11 days past the retention window, and the always-on retention
+  sweep archived it on its loop's first tick. Deleting `checker.merged.add(...)` left the test
+  green, with `history[-1].actor == "retention"`. It now runs on `FakeClock()`, pinned to the task's
+  own `created` instant, and asserts the archival was the merge reconciler's — the same shape the
+  already-fixed PR-watcher sibling uses. Verified both ways: without `checker.merged.add(...)` the
+  test now fails.
+
+`test_run_stops_promptly_even_on_long_intervals` pins the property Task 2's `_tick_loop` exists for.
+  Every loop idles on `stop`, not on a blind `asyncio.sleep(interval)`, so `stop.set()` wakes all of
+  them; the 600s intervals here are never awaited, so the test costs milliseconds. Restore the blind
+  sleep and it fails in a second (verified) instead of the suite merely getting slower — the real
+  defect being a launchd SIGKILL on every service restart, via `cli.serve()`'s `finally: stop.set()`
+  path.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+
+- Arm the PR-watcher e2e test and cover run()'s retention loop
+  ([`0477373`](https://github.com/onpaj/harness_v2/commit/04773734913a91c2b654a3057006f01905476a2d))
+
+Three test-side follow-ups to the stop-aware loop helper.
+
+1. Reverts commit 0e732ae's collateral `reconcile_interval=0.01` edits — 7 call sites in
+  test_app.py, 2 in test_smoke.py, 3 in test_smoke_git.py. They only ever existed so `stop.set()`
+  could terminate a run() blocked in a 300s sleep; the helper makes that unnecessary. The two
+  pre-existing sites in test_run_archives_a_done_task_once_its_pr_is_merged and
+  test_run_archives_a_task_once_its_source_issue_is_closed stay: those tests need the merge/issue
+  reconciler to actually tick inside their polling window.
+
+2. Pins test_pr_watcher_archives_a_resolved_task_end_to_end to a FakeClock, the way its sibling
+  already is. Its seeded task carries `created` 2026-07-19 and no history, so under the real
+  SystemClock the always-on retention sweep found it stale and archived it — satisfying every
+  assertion identically and leaving the PR watcher, the actual subject, untested. Verified
+  empirically: the test passed with `pr_poll_interval=0.0`, and no `reconcile_interval` could disarm
+  the sweep, because a loop ticks once before it ever waits. With the clock pinned it now fails with
+  the watcher disabled, and a new assertion on the archiving actor pins *which* reconciler retired
+  the task.
+
+3. Adds the missing loop-level test for Task 2's headline deliverable: every existing retention test
+  calls `tick()` by hand, so nothing covered run() hosting the loop at all. The new test drives a
+  real run() and asserts an old settled task lands in `archived/` with the retention actor.
 
 Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
 
