@@ -1,7 +1,8 @@
 """RetentionReconciler: retires terminal tasks that settled long enough ago.
 
-Nobody consumes `done` or `healed`, so a task that reaches one stays on the
-board for the lifetime of the root. Recurring Processes settle several tasks a
+Nobody consumes the queues behind the `done` column — `done/`, and the retired
+`healed/` an older version may still have tasks in (ADR-0024) — so a task that
+reaches one stays on the board for the lifetime of the root. Recurring Processes settle several tasks a
 day, and the board grows without bound — most visibly in the `No workflow` tab,
 where step-targeted Processes land.
 

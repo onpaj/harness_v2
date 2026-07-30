@@ -194,10 +194,11 @@ That is every variable `src/harness` reads as configuration — the same list
 `tests/conftest.py`'s `_HARNESS_ENVIRONMENT` unsets to keep the suite hermetic,
 which `tests/test_hermetic_environment.py` checks in both directions.
 
-**`HARNESS_RETENTION_DAYS`** is the retention window for terminal tasks: a
-`done` or `healed` task is moved to `archived/` — off every board column, still
+**`HARNESS_RETENTION_DAYS`** is the retention window for terminal tasks: a task
+in the **done** column is moved to `archived/` — off every board column, still
 `GET`-able by id — once it has been settled longer than this many days, so the
-board stops growing without bound. Failures are exempt: a task in `failed/` stays
+board stops growing without bound. That covers a completed task, and a failure
+the healer took over (which lands in `done` too). Failures are exempt: a task in `failed/` stays
 put however old it is, because nothing is coming to fix it and it must remain
 visible and restartable. There is no "off" value — `0` is the *most* aggressive
 setting (archive everything settled on the next sweep), so to effectively disable
