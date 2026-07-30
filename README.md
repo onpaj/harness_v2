@@ -172,6 +172,32 @@ what a background agent needs. Running `harness run` yourself in a terminal does
 
 Logs land in `<root>/logs/harness.log` and `<root>/logs/harness.error.log`.
 
+### Settings that live in `secrets.env`
+
+`secrets.env` is not only for secrets: the generated wrapper sources it under
+`set -a`, so every line in it becomes an environment variable for the service.
+That is the only reliable way to configure the service, because launchd hands it
+almost no environment — an `export` in your own shell has no effect on it, and
+editing the generated `harness-run.sh` is undone by the next `service install`
+(the autoupdate path runs one).
+
+| Variable | What it does |
+|---|---|
+| `CLAUDE_CODE_OAUTH_TOKEN` | the claude token above — required for agent steps |
+| `GITHUB_TOKEN` | issue ingestion, PRs, merges; falls back to `gh auth token` |
+| `SLACK_WEBHOOK_URL` | enables a Process's `slack` sink |
+| `HARNESS_RETENTION_DAYS` | how long a settled task stays on the board (default `2`) |
+
+**`HARNESS_RETENTION_DAYS`** is the retention window for terminal tasks: a
+`done` or `healed` task is moved to `archived/` — off every board column, still
+`GET`-able by id — once it has been settled longer than this many days, so the
+board stops growing without bound. Failures are exempt: a task in `failed/` stays
+put however old it is, because nothing is coming to fix it and it must remain
+visible and restartable. There is no "off" value — `0` is the *most* aggressive
+setting (archive everything settled on the next sweep), so to effectively disable
+the sweep use a very large window, e.g. `36500`. An unparseable or negative value
+warns to the error log and falls back to `2` rather than failing the run.
+
 ### Autoupdating the service
 
 `harness update` above is manual. To have it run on a schedule — and, when a

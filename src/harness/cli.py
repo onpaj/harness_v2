@@ -2145,8 +2145,16 @@ def _retention_days() -> int:
     over a typo in a housekeeping number would be a worse failure than the
     window being wrong for one run.
 
+    Set it in `<root>/secrets.env` — the wrapper `harness service install`
+    generates sources that file under `set -a`, so anything in it is exported.
+    An `export` in the operator's own shell never reaches the launchd service,
+    which is handed almost no environment, and editing `harness-run.sh` is
+    silently undone by the next install (including an autoupgrade).
+
     `0` is deliberately valid: it archives every terminal task on the next
-    sweep, which is the "clear the board now" setting.
+    sweep, which is the "clear the board now" setting. There is therefore no
+    "off" value — `0` is the *most* aggressive setting, and effectively
+    disabling the sweep means a very large window (`36500`, a century).
     """
     raw = os.environ.get("HARNESS_RETENTION_DAYS")
     if raw is None:
@@ -2643,9 +2651,11 @@ def main(argv: list[str] | None = None) -> int:
         type=float,
         default=300.0,
         dest="reconcile_poll",
-        help="interval (s) for checking done tasks' PR merge status and "
-        "archiving them once merged; deliberately long to respect GitHub "
-        "rate limits",
+        help="interval (s) for the housekeeping sweeps that archive settled "
+        "tasks: a done task whose PR merged, a task whose source issue was "
+        "closed, and any terminal task past HARNESS_RETENTION_DAYS. "
+        "Deliberately long — none of them is latency-sensitive, and the first "
+        "two poll GitHub, whose rate limits they must respect",
     )
     run.add_argument("--agent-timeout", type=float, default=1800.0, dest="agent_timeout")
     run.add_argument("--request-changes-at", default=None, dest="request_changes_at")

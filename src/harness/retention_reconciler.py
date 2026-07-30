@@ -66,7 +66,12 @@ def _moment(text: str) -> datetime | None:
 
 def settled_at(task: Task) -> str:
     """When the task reached its terminal column: the last history entry's
-    timestamp, falling back to `created` when the history is empty."""
+    timestamp, falling back to `created` when the history is empty.
+
+    It is really "last touched", and that coupling is load-bearing: any future
+    code appending a `HistoryEntry` to an already-terminal task restarts its
+    retention window, however long it had been settled before.
+    """
     return task.history[-1].at if task.history else task.created
 
 

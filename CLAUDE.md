@@ -123,15 +123,19 @@ gotcha below. `tests/test_hermetic_environment.py` derives the list from the sou
 and checks it **both ways**: a new config variable missing from `_HARNESS_ENVIRONMENT`
 fails, and so does a stale entry the package no longer reads.
 
-**Terminal-task retention.** `done`/`failed`/`healed` are queues nobody consumes,
-so without a sweep a settled task stays on the board forever — most visibly in the
-`No workflow` tab, where step-targeted Processes land their completed runs.
-`RetentionReconciler` archives a task once it has been settled longer than
-`HARNESS_RETENTION_DAYS` (default `2`), measuring from the last history entry, not
-from `created`. `0` archives every terminal task on the next sweep; a bad value
-warns to stderr and falls back to the default rather than failing the run. Step
-queues are never swept — a task sitting in a step queue is backlog, not garbage.
-Archived tasks keep their file in `archived/` and stay resolvable by id.
+**Tuning terminal-task retention.** `RetentionReconciler` (see *What is
+responsible for what*) archives a settled `done`/`healed` task once it is older
+than `HARNESS_RETENTION_DAYS` (default `2`). Set that variable in
+`<root>/secrets.env` — the 0600 file the generated wrapper sources under
+`set -a`, so everything in it is exported. **Not** `harness-run.sh`: `harness
+service install` regenerates it, so an edit there is silently clobbered
+(including by the autoupgrade path). And **not** a shell `export` either —
+launchd hands the service almost no environment, so exporting it in your
+terminal has no effect on the live service. There is no "off" value: `0` is the
+*most* aggressive setting (archive everything settled on the next sweep, the
+"clear the board now" case), so effectively disabling the sweep means a very
+large window — `36500`, a century. A value that is unparseable or negative warns
+to stderr and falls back to the default rather than failing the run.
 
 ## Git conventions
 
@@ -270,7 +274,7 @@ Dependencies flow strictly downward, no cycles.
 - `ports/updater.py` — the `Updater` port: `update() -> UpdateResult` (the UI-facing write-side of the version string the footer shows — runs `uv tool upgrade` and, on a version change, restarts the service; a failed restart folds into `UpdateResult.detail`, only a failed upgrade raises `UpdateError`)
 - `drivers/uv_updater.py` — `UvUpdater`: the real `Updater` over `uv tool upgrade` + launchd `kickstart` (the same flow as `harness update`, reached from the board's Update button). Discovers `uv` itself; the installed entry point and the idle gate are injected by `cli.serve()` so the driver never imports back into `cli.py`
 - `issue_reconciler.py` — `IssueReconciler`: the core that sweeps every live queue and archives a task whose source issue was closed or deleted out from under it (knows only ports/models/ids, mirrors `pr_watcher.py`)
-- `retention_reconciler.py` — `RetentionReconciler`: the core that sweeps the terminal queues and archives a task settled longer ago than the retention window, so `done`/`failed`/`healed` stop growing without bound (knows only ports/models/ids, mirrors `issue_reconciler.py`)
+- `retention_reconciler.py` — `RetentionReconciler`: the core that sweeps the terminal queues it is given and archives a task settled longer ago than the retention window, so `done`/`healed` stop growing without bound (`failed/` is deliberately not among them — ADR-0024; knows only ports/models/ids, mirrors `issue_reconciler.py`)
 - `drivers/github_issue_checker.py` — `GithubIssueChecker`: reads `repo`/`issue` straight off `task.data["source"]` at check time; a deleted issue (404) reads as "not open", one checker serves every repo the token can reach
 - `drivers/github_issues_check.py` — `GithubIssuesCheck(Check)`: the inbound `harness:todo` scan as a process `Check` — lists issues by label across the repo registry, claims each via the label swap (default `todo`→`queued`, both configurable per process as `label`/`claimed_label` — invariant #39), and emits one provenance-stamped `Observation` (`data.source`) per issue. Registered as the `github-issues` action by closing a `GithubClient` + registry into a factory in `cli._process_sources`; `BUILTIN_CHECKS` stays client-free. The inbound half of ADR-0015's action seam (the outbound half is a sink, e.g. `SlackWebhookSink`)
 - `drivers/github_conflicts_check.py` — `GithubConflictsCheck(Check)`: conflict detection as a process `Check`, the resolver's mirror of `GithubIssuesCheck`. Lists harness-authored open PRs across the registry; auto-updates a `behind` PR server-side (a side effect, no task) and emits one `Observation` per `dirty` PR carrying `data.branch`/`data.source.base` for the `resolver` workflow, keyed `slug:pr:head_sha` for per-state dedup. Registered as the `github-conflicts` action in `cli._process_sources`; the check-based replacement for the bespoke `mergeability_watcher` detection
@@ -410,14 +414,22 @@ Dependencies flow strictly downward, no cycles.
 - **`RetentionReconciler`** is a further sibling, retiring a terminal task on
   age instead of on external state: where `MergeReconciler`/`IssueReconciler`
   wait for a PR to merge or a source issue to resolve, this one just checks
-  how long a task has sat settled. It sweeps `done`/`failed`/`healed` each
-  tick, archiving every task whose `settled_at` (the last history entry,
-  falling back to `created`) is older than `HARNESS_RETENTION_DAYS` —
-  all-per-tick like `IssueReconciler`, not one-per-tick like `MergeReconciler`.
-  Unlike either sibling it needs no external checker, only the local queues
-  and the clock, so `build()` always constructs it — there is no "not
-  configured" state to gate on, unlike the `GITHUB_TOKEN`-gated pair above.
-  Runs on the same `reconcile_interval` as the others.
+  how long a task has sat settled. It sweeps `done` and `healed` — the queues
+  nothing else ever takes a task out of — each tick, archiving every task whose
+  `settled_at` (the last history entry, falling back to `created`; keying off
+  `created` would archive a long-running task the moment it finished) is older
+  than `HARNESS_RETENTION_DAYS`: all-per-tick like `IssueReconciler`, not
+  one-per-tick like `MergeReconciler`. **`failed/` is deliberately not swept**
+  (ADR-0024): a failure the harness declined to heal must keep reading as a
+  problem exactly where the operator looks, and archiving it would also make it
+  unrestartable, since `TaskControlService.restart` searches `failed/` and
+  nowhere else. Step queues are never swept either — a task sitting in one is
+  backlog, not garbage, however long it has sat there. Unlike either sibling it
+  needs no external checker, only the local queues and the clock, so `build()`
+  always constructs it — there is no "not configured" state to gate on, unlike
+  the `GITHUB_TOKEN`-gated pair above. Runs on the same `reconcile_interval` as
+  the others; an archived task keeps its file in `archived/` and stays
+  resolvable by id, like every other archival.
 - **`StageOutputView`** is a third, read-only UI surface alongside `BoardView`
   and `ArtifactView`: where `BoardView` shows *where* a task is and
   `ArtifactView` shows *what it produced*, `StageOutputView` shows *what the

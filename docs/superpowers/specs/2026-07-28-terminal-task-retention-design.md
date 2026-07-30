@@ -39,21 +39,34 @@ A fourth reconciler, `RetentionReconciler`, alongside `MergeReconciler` and
 `IssueReconciler`, on the existing 300s reconcile loop:
 
 ```
-RetentionReconciler(queues=[done, failed, healed], archived=archived,
+RetentionReconciler(queues=[done, healed], archived=archived,
                     days=2, events=events, clock=clock)
   .tick() -> bool     # True if anything archived
 ```
 
-Every terminal task, on every tab, moves to `archived/` once `days` have passed
-since it settled. Nothing else changes: no new API surface, no template change,
-no new orchestration concept.
+Every task in a swept terminal queue, on every tab, moves to `archived/` once
+`days` have passed since it settled. Nothing else changes: no new API surface,
+no template change, no new orchestration concept.
 
 ## Rules
 
-### Scope: terminal columns only
+### Scope: `done` and `healed` only — never `failed`
 
-`done`, `failed` and `healed`, across every tab. These are finished tasks;
-moving them off the board loses nothing.
+`done` and `healed`, across every tab. These are finished tasks; moving them off
+the board loses nothing.
+
+**`failed/` is deliberately excluded**, and the original premise above — "these
+are finished tasks; moving them off the board loses nothing" — is exactly what
+is false for it. ADR-0024 landed after this spec was first written: a failure
+the harness *declined* to heal (`heal-declined`, `heal-failed`) stays in
+`failed/` on purpose, because nothing is coming to fix it and it must keep
+reading as a problem where the operator looks. Archiving it would lose two
+things: the signal itself, and the operator's one remedy — `TaskControlService.
+restart` searches `failed/` and nowhere else, so an archived failure is
+unrestartable, not merely off-board.
+
+So a `failed/` card is not garbage accumulating on the board; it is an open item
+addressed to a human, and it stays until that human deals with it.
 
 Step queues are **never** touched. A task sitting in `plan` for two weeks is
 backlog, not garbage — archiving it would silently destroy live work. (At the
@@ -80,8 +93,18 @@ model needs no change (see *Why the UI needs no work*).
 ### Window: 2 days, from the environment
 
 `HARNESS_RETENTION_DAYS`, read at wiring time in `cli.py` alongside the other
-environment reads, defaulting to `2`. Retuning means editing `harness-run.sh`
-and restarting — no release.
+environment reads, defaulting to `2`. Retuning means adding a line to
+`<root>/secrets.env` and restarting the service — no release. That file (0600,
+created by `harness service install`) is sourced by the generated wrapper under
+`set -a`, so everything in it is exported. Not `harness-run.sh`: its own header
+says it is regenerated on every install, so an edit there is silently clobbered,
+including by the autoupgrade path. And not a shell `export` either — launchd
+hands the service almost no environment, so a variable exported in the
+operator's terminal never reaches it.
+
+There is no "off" value: `0` is the *most* aggressive setting (archive every
+settled task on the next sweep, the "clear the board now" case), so effectively
+disabling the sweep means a very large window — `36500`, a century.
 
 A value that is unparseable or negative falls back to the default and prints a
 non-fatal startup warning to stderr, the same convention
@@ -132,9 +155,9 @@ the read model, the event stream and the restart path are all already correct.
 
 `app.py`: construct the reconciler next to `issue_reconciler` and host it on a
 `_retention_loop` at the existing `reconcile_interval` (300s), the same shape as
-`_issue_reconcile_loop`. A sweep that finds nothing is three `list()` calls
-against directories holding tens of files — too cheap to justify its own
-cadence.
+`_issue_reconcile_loop`, over `done` and `healed`. A sweep that finds nothing is
+two `list()` calls against directories holding tens of files — too cheap to
+justify its own cadence.
 
 ## Testing
 
@@ -146,6 +169,9 @@ cadence.
 - empty history → falls back to `created`
 - unparseable timestamp → left in place, `tick()` continues
 - step queues untouched even when their tasks are older than the window
+- `failed/` untouched however old the failure is — the wiring never passes it in
+- a negative `days` is clamped to `0` by the reconciler itself, so no sign error
+  can put the cutoff in the future and sweep the whole board
 - `claim()` returning `None` → skipped, `tick()` does not raise
 - `tick()` returns True only when something was archived
 - the emitted `archived` event drives `BoardProjection.archive` — round-trip
