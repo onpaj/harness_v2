@@ -1,9 +1,14 @@
 """RetentionReconciler: retires terminal tasks that settled long enough ago.
 
-`done`, `failed` and `healed` are queues nobody consumes, so a task that
-reaches one stays on the board for the lifetime of the root. Recurring
-Processes settle several tasks a day, and the board grows without bound —
-most visibly in the `No workflow` tab, where step-targeted Processes land.
+Nobody consumes `done` or `healed`, so a task that reaches one stays on the
+board for the lifetime of the root. Recurring Processes settle several tasks a
+day, and the board grows without bound — most visibly in the `No workflow` tab,
+where step-targeted Processes land.
+
+Which queues get swept is the caller's decision, not this module's, and `app.py`
+deliberately leaves `failed/` out: a failure the harness declined to heal must
+keep reading as a problem where the operator looks, and stay restartable
+(ADR-0024 — `TaskControlService.restart` searches `failed/` and nowhere else).
 
 This is the rule that says *when* a settled task should go. "Go" is the exact
 `archived/` disposition `PrWatcher`, `MergeReconciler` and `IssueReconciler`

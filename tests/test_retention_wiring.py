@@ -45,7 +45,7 @@ def test_build_always_wires_a_retention_reconciler(tmp_path):
     assert harness.retention_reconciler is not None
 
 
-def test_the_sweep_archives_old_terminal_tasks_from_all_three_queues(tmp_path):
+def test_the_sweep_archives_old_tasks_from_done_and_healed(tmp_path):
     seed(tmp_path)
     harness = build(
         tmp_path,
@@ -55,16 +55,34 @@ def test_the_sweep_archives_old_terminal_tasks_from_all_three_queues(tmp_path):
         retention_days=2,
     )
     harness._done.put(_settled("tsk_d", at="2026-07-20T12:00:00Z", status="done"))
-    harness._failed.put(_settled("tsk_f", at="2026-07-20T12:00:00Z", status="failed"))
     harness._healed.put(_settled("tsk_h", at="2026-07-20T12:00:00Z", status="healed"))
 
     assert harness.retention_reconciler.tick() is True
 
     assert harness._done.list() == []
-    assert harness._failed.list() == []
     assert harness._healed.list() == []
-    assert sorted(t.id for t in harness.archived.list()) == ["tsk_d", "tsk_f", "tsk_h"]
+    assert sorted(t.id for t in harness.archived.list()) == ["tsk_d", "tsk_h"]
     assert all(t.status == ARCHIVED for t in harness.archived.list())
+
+
+def test_the_sweep_never_touches_failed(tmp_path):
+    """`failed/` is out of scope, however old the failure is (ADR-0024). A
+    failure the harness declined to heal must keep reading as a problem where
+    the operator looks — and `TaskControlService.restart` only ever searches
+    `failed/`, so archiving one would take away the operator's one remedy."""
+    seed(tmp_path)
+    harness = build(
+        tmp_path,
+        "default",
+        events=MemoryEventSink(),
+        clock=FakeClock(NOW),
+        retention_days=2,
+    )
+    harness._failed.put(_settled("tsk_f", at="2026-01-01T12:00:00Z", status="failed"))
+
+    assert harness.retention_reconciler.tick() is False
+    assert [t.id for t in harness._failed.list()] == ["tsk_f"]
+    assert harness.archived.list() == []
 
 
 def test_the_sweep_never_touches_a_step_queue(tmp_path):

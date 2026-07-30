@@ -472,7 +472,7 @@ class Harness:
         self, reconcile_interval: float, stop: asyncio.Event
     ) -> None:
         # Shares the reconcilers' cadence. This is the cheapest sweep of the
-        # three — three local `list()` calls over directories holding tens of
+        # three — two local `list()` calls over directories holding tens of
         # files, no remote API — and the slowest-moving: whether a task settled
         # two days ago does not change between ticks.
         assert self.retention_reconciler is not None
@@ -654,12 +654,18 @@ def build(
             clock=clock,
         )
 
-    # Terminal queues are consumed by nobody, so without this a settled task
-    # stays on the board for the lifetime of the root. Unlike the merge and
-    # issue reconcilers this is *always* built: it needs no external service,
-    # only the local queues and the clock.
+    # Nobody consumes `done`/`healed`, so without this a settled task stays on
+    # the board for the lifetime of the root. Unlike the merge and issue
+    # reconcilers this is *always* built: it needs no external service, only the
+    # local queues and the clock.
+    #
+    # `failed/` is deliberately NOT swept. A failure the harness declined to
+    # heal stays in `failed/` on purpose (ADR-0024): nothing is coming to fix
+    # it, so it must keep reading as a problem exactly where the operator
+    # looks. Archiving it would also make it unrestartable — the operator's one
+    # remedy, `TaskControlService.restart`, searches `failed/` and nowhere else.
     retention_reconciler = RetentionReconciler(
-        queues=[done, failed, healed_queue],
+        queues=[done, healed_queue],
         archived=archived,
         days=retention_days,
         events=events,
