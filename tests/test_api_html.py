@@ -131,6 +131,42 @@ UNATTRIBUTED = Task(
 )
 
 
+# A failure the healer retired into `done` (ADR-0024): status `end` and a
+# leftover `done` outcome from the step that passed *before* the timeout, which
+# is exactly why the accent chain must not read it as a completion.
+RETIRED = Task(
+    id="tsk_r",
+    workflow_template="default",
+    created="2026-07-19T10:00:11Z",
+    repository="app-backend",
+    status="end",
+    last_outcome="done",
+    history=(
+        HistoryEntry(
+            at="2026-07-19T10:30:00Z",
+            actor="dispatcher",
+            from_step="architecture",
+            to_step="development",
+            outcome="done",
+        ),
+        HistoryEntry(
+            at="2026-07-19T11:00:00Z",
+            actor="consumer:development",
+            from_step="development",
+            to_step="failed",
+            reason="behavior raised an exception: claude timed out after 1800.0s",
+        ),
+        HistoryEntry(
+            at="2026-07-19T11:00:06Z",
+            actor="failed-tasks",
+            from_step="failed",
+            to_step="end",
+            summary="queued for healing",
+        ),
+    ),
+)
+
+
 WORKFLOW_LESS = Task(
     id="tsk_4",
     workflow_template=None,
@@ -171,7 +207,7 @@ def client() -> TestClient:
                         tasks=(MIDFLIGHT, WORKING, WAITING, TITLED, HANDED_OFF, BOUNCED),
                     ),
                     BoardColumn(
-                        name="done", tasks=(UNATTRIBUTED,), kind=COLUMN_TERMINAL
+                        name="done", tasks=(UNATTRIBUTED, RETIRED), kind=COLUMN_TERMINAL
                     ),
                     BoardColumn(name="failed", tasks=(), kind=COLUMN_TERMINAL),
                 ),
@@ -182,7 +218,8 @@ def client() -> TestClient:
     # BROKEN is retrievable via get() (for the detail fragment) without cluttering
     # the rendered columns, so the board-rendering tests stay undisturbed.
     view = FakeBoardView(
-        board, {"tsk_1": WORKING, "tsk_4": WORKFLOW_LESS, "tsk_9": BROKEN}
+        board,
+        {"tsk_1": WORKING, "tsk_4": WORKFLOW_LESS, "tsk_9": BROKEN, "tsk_r": RETIRED},
     )
     return TestClient(create_app(view=view, clock=FakeClock()))
 
@@ -322,7 +359,12 @@ def test_outcome_badge_falls_back_to_bare_outcome_without_history(client):
     than inventing a step."""
     body = client.get("/fragment/board").text
 
-    card = body[body.index("tsk_6") :]
+    # Bounded to tsk_6's own card: an unbounded slice to end-of-body would also
+    # pick up whatever card follows it in the same column (now RETIRED, which
+    # does have history to attribute its outcome to).
+    start = body.index('hx-get="/fragment/task/tsk_6"')
+    next_card = body.find('hx-get="/fragment/task/', start + 1)
+    card = body[start : next_card if next_card != -1 else len(body)]
     assert "badge__step" not in card
     assert "badge done" in card
 
@@ -729,3 +771,77 @@ def test_index_marks_default_tab_active_via_data_attribute():
     body = api.get("/").text
 
     assert 'data-active-workflow="default"' in body
+
+
+# --- Resume a retired failure ------------------------------------------
+
+
+def test_a_retired_failure_is_not_rendered_as_a_finished_task(client):
+    """`tsk_6` and `tsk_r` sit in the same terminal column with the same
+    `last_outcome`. Only one of them finished."""
+    body = client.get("/fragment/board").text
+
+    tag = _card_open_tag(body, "tsk_r")
+    assert "is-retired" in tag
+    assert "is-done" not in tag
+    assert "is-done" in _card_open_tag(body, "tsk_6")
+
+
+def test_a_retired_failure_card_names_the_step_it_died_at(client):
+    body = client.get("/fragment/board").text
+
+    assert "development</span>retired" in body
+
+
+def test_a_retired_failure_card_is_findable_by_the_board_filter(client):
+    body = client.get("/fragment/board").text
+
+    assert "retired development" in _card_open_tag(body, "tsk_r")
+
+
+def test_resume_button_shown_only_for_a_resumable_failure(client):
+    retired_body = client.get("/fragment/task/tsk_r").text
+    assert "/tasks/tsk_r/resume" in retired_body
+    assert "Resume at development" in retired_body
+
+    working_body = client.get("/fragment/task/tsk_1").text
+    assert "/tasks/tsk_1/resume" not in working_body
+
+
+def _board_with_retired() -> Board:
+    return Board(
+        revision=9,
+        workflows=(
+            BoardTab(
+                name="default",
+                columns=(
+                    BoardColumn(name="todo", tasks=()),
+                    BoardColumn(name="development", tasks=(WORKING,)),
+                    BoardColumn(name="done", tasks=(RETIRED,), kind=COLUMN_TERMINAL),
+                ),
+            ),
+        ),
+    )
+
+
+def test_resume_invokes_control_and_returns_refreshed_fragment():
+    view = FakeBoardView(_board_with_retired(), {"tsk_r": RETIRED})
+    control = FakeTaskControl(resume_result=True)
+    api = TestClient(create_app(view=view, control=control, clock=FakeClock()))
+
+    response = api.post("/tasks/tsk_r/resume")
+
+    assert response.status_code == 200
+    assert control.resumed == ["tsk_r"]
+    assert "tsk_r" in response.text
+
+
+def test_resume_returns_404_when_control_reports_nothing():
+    view = FakeBoardView(_board_with_retired(), {"tsk_r": RETIRED})
+    control = FakeTaskControl(resume_result=False)
+    api = TestClient(create_app(view=view, control=control, clock=FakeClock()))
+
+    response = api.post("/tasks/tsk_r/resume")
+
+    assert response.status_code == 404
+    assert control.resumed == ["tsk_r"]

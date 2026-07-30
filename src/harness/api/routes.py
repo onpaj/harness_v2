@@ -21,7 +21,14 @@ from fastapi.responses import (
 )
 from fastapi.templating import Jinja2Templates
 
-from harness.models import END, Task
+from harness.models import (
+    END,
+    FailureTrace,
+    Task,
+    failure_trace,
+    is_retired_failure,
+    resumable_failure,
+)
 from harness.ports.agent import AgentNotFound, AgentSpec
 from harness.ports.agent_admin import AgentAdmin, AgentFields, AgentValidationError
 from harness.ports.artifacts import ArtifactView
@@ -128,6 +135,23 @@ def _outcome_step(task: Task) -> str:
 
 
 TEMPLATES.env.filters["outcome_step"] = _outcome_step
+
+
+def _retired_failure(task: Task) -> FailureTrace | None:
+    """The failure a `done` task actually ended on, or None for a real
+    completion.
+
+    ADR-0024 puts both kinds of ending in `done` and leaves the difference in
+    history; without this the accent chain reads a retired failure's leftover
+    `last_outcome == "done"` and paints the card green, asserting the one thing
+    that is not true of it.
+    """
+    if not is_retired_failure(task):
+        return None
+    return failure_trace(task)
+
+
+TEMPLATES.env.filters["retired_failure"] = _retired_failure
 
 
 def _split_refs(text: str) -> list[str]:
@@ -582,7 +606,11 @@ def build_html_router(
         return TEMPLATES.TemplateResponse(
             request=request,
             name="_task.html",
-            context={"task": found, "artifacts": artifacts.list(task_id)},
+            context={
+                "task": found,
+                "artifacts": artifacts.list(task_id),
+                "retired": resumable_failure(found),
+            },
         )
 
     @router.get("/", response_class=HTMLResponse)
@@ -615,6 +643,16 @@ def build_html_router(
             )
         # The projection updated synchronously via the emitted event, so the
         # refreshed fragment shows the task now in `todo`. The board redraws via SSE.
+        return _task_fragment(request, task_id)
+
+    @router.post("/tasks/{task_id}/resume", response_class=HTMLResponse)
+    def resume_task(request: Request, task_id: str) -> HTMLResponse:
+        if not control.resume(task_id):
+            raise HTTPException(
+                status_code=404, detail=f"task {task_id} is not a resumable failure"
+            )
+        # Same shape as restart: the projection updated synchronously off the
+        # emitted event, so the refreshed fragment shows the task in `todo`.
         return _task_fragment(request, task_id)
 
     @router.post("/tasks/{task_id}/delete", response_class=HTMLResponse)

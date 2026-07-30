@@ -56,10 +56,13 @@ class _EmptyStageOutputView(StageOutputView):
 
 class _NullTaskControl(TaskControl):
     """No-op control for a board wired without one. Keeps `create_app` backward
-    compatible — restart simply reports nothing was done. Behind the port, so
-    api/ still knows no driver."""
+    compatible — restart and resume simply report nothing was done. Behind the
+    port, so api/ still knows no driver."""
 
     def restart(self, task_id: str) -> bool:
+        return False
+
+    def resume(self, task_id: str) -> bool:
         return False
 
     def delete(self, task_id: str) -> bool:

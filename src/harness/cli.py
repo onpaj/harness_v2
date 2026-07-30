@@ -2152,8 +2152,8 @@ def _retention_days() -> int:
     silently undone by the next install (including an autoupgrade).
 
     `0` is deliberately valid: it archives every settled task in the `done`
-    column on the next
-    sweep, which is the "clear the board now" setting. There is therefore no
+    column on the next sweep, which is the "clear the board now" setting.
+    There is therefore no
     "off" value — `0` is the *most* aggressive setting, and effectively
     disabling the sweep means a very large window (`36500`, a century).
     """
@@ -2177,6 +2177,25 @@ def _retention_days() -> int:
         )
         return DEFAULT_RETENTION_DAYS
     return days
+
+
+def _label_list(step: str, config: dict, key: str) -> tuple[str, ...]:
+    """One of the `open-issue` binding's two label lists, validated.
+
+    A plain `ValueError` on a malformed value, so ADR-0022's rule applies
+    unchanged: the binding is unwirable, `_validate_served_workflows` drops
+    that one workflow with a warning naming file/step/reason, and the rest of
+    the run is unaffected. A bare string is rejected rather than iterated into
+    characters — the likeliest way to get this wrong by hand."""
+    value = config.get(key, ())
+    if not isinstance(value, (list, tuple)) or not all(
+        isinstance(one, str) and one for one in value
+    ):
+        raise ValueError(
+            f"step {step!r} binds the 'open-issue' finisher with an invalid "
+            f"{key!r} — expected a list of non-empty strings, got {value!r}"
+        )
+    return tuple(value)
 
 
 def _run(args: argparse.Namespace) -> int:
@@ -2243,7 +2262,8 @@ def _run(args: argparse.Namespace) -> int:
             slug_for=slug_for,
             label=label,
             from_step=from_step,
-            allowed_labels=tuple(config.get("allowed_labels", ())),
+            labels=_label_list(step, config, "labels"),
+            allowed_labels=_label_list(step, config, "allowed_labels"),
             # Replace shape when a step is named; wrap shape otherwise. The
             # thunk is only called in the wrap shape, so a step bound in the
             # replace shape never triggers `catalog.get` (ADR-0018).
