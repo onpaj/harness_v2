@@ -8,6 +8,11 @@
             hx-target="#detail"
             hx-swap="innerHTML">Restart</button>
     {% endif %}
+    {% if retired %}
+    <button class="btn small primary" hx-post="/tasks/{{ task.id }}/resume"
+            hx-target="#detail"
+            hx-swap="innerHTML">Resume at {{ retired.failed_step }}</button>
+    {% endif %}
     <button class="btn small" hx-post="/tasks/{{ task.id }}/delete"
             hx-target="#detail"
             hx-swap="innerHTML"
@@ -32,6 +37,10 @@
         <li><span class="k">step</span><span class="v">{{ task.step or "—" }}</span></li>
         <li><span class="k">status</span><span class="v">{{ task.status or "—" }}</span></li>
         <li><span class="k">lastOutcome</span><span class="v">{{ task.last_outcome or "—" }}</span></li>
+        {% if retired %}
+        <li><span class="k">retired</span>
+            <span class="v">failed at <code>{{ retired.failed_step }}</code>{% if retired.reason %} — {{ retired.reason }}{% endif %}</span></li>
+        {% endif %}
         {% if task.data.tokens_total %}
         <li><span class="k">tokens</span>
             <span class="v">{{ task.data.tokens_total.input or 0 }} in / {{ task.data.tokens_total.output or 0 }} out</span></li>
