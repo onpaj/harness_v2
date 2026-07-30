@@ -82,7 +82,12 @@ class RetentionReconciler:
     ) -> None:
         self._queues = queues
         self._archived = archived
-        self._days = days
+        # A negative window would put `cutoff` in the *future* and archive the
+        # entire board on the first tick. `cli._retention_days()` already
+        # rejects one, but that leaves the rule's own invariant in the caller —
+        # so clamp here too. `0` (archive everything settled) is the floor and
+        # is legitimate; below it there is nothing to express.
+        self._days = max(0, days)
         self._events = events
         self._clock = clock
 

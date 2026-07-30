@@ -149,5 +149,31 @@ def test_days_zero_archives_every_terminal_task_on_the_next_sweep():
     assert [t.id for t in archived.list()] == ["tsk_1"]
 
 
+def test_a_negative_window_is_clamped_to_zero_not_a_future_cutoff():
+    """Defence in depth on the rule's own invariant: a negative window would put
+    `cutoff` in the future, archiving even a task settled *after* `now`. The CLI
+    already rejects one, but the rule must not depend on that. Clamped to `0`,
+    only what has actually settled is swept — a task settled in the future is
+    absurd, and must stay put rather than be swept by a sign error."""
+    done = MemoryTaskQueue("done")
+    reconciler, archived, _ = _build(done, days=-5)
+    done.put(_task("tsk_future", settled="2026-07-30T12:00:00Z"))  # after NOW
+
+    assert reconciler.tick() is False
+    assert [t.id for t in done.list()] == ["tsk_future"]
+    assert archived.list() == []
+
+
+def test_a_negative_window_still_sweeps_what_has_settled():
+    """The clamp is `max(0, days)`, not "ignore the value": a settled task is
+    still archived, the same as `days=0`."""
+    done = MemoryTaskQueue("done")
+    reconciler, archived, _ = _build(done, days=-5)
+    done.put(_task(settled=NOW))
+
+    assert reconciler.tick() is True
+    assert [t.id for t in archived.list()] == ["tsk_1"]
+
+
 def test_the_default_window_is_two_days():
     assert DEFAULT_RETENTION_DAYS == 2
