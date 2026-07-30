@@ -3723,3 +3723,43 @@ def test_a_genuinely_unknown_check_is_still_fatal(monkeypatch, tmp_path):
     monkeypatch.delenv("GITHUB_TOKEN", raising=False)
 
     assert main(["run", "--root", str(tmp_path)]) == 2
+
+
+def test_retention_days_defaults_when_unset():
+    from harness.cli import _retention_days
+    from harness.retention_reconciler import DEFAULT_RETENTION_DAYS
+
+    assert _retention_days() == DEFAULT_RETENTION_DAYS
+
+
+def test_retention_days_reads_the_environment(monkeypatch):
+    from harness.cli import _retention_days
+
+    monkeypatch.setenv("HARNESS_RETENTION_DAYS", "5")
+    assert _retention_days() == 5
+
+
+def test_retention_days_accepts_zero(monkeypatch):
+    """0 is a real setting — archive every terminal task on the next sweep."""
+    from harness.cli import _retention_days
+
+    monkeypatch.setenv("HARNESS_RETENTION_DAYS", "0")
+    assert _retention_days() == 0
+
+
+def test_unparseable_retention_days_warns_and_falls_back(monkeypatch, capsys):
+    from harness.cli import _retention_days
+    from harness.retention_reconciler import DEFAULT_RETENTION_DAYS
+
+    monkeypatch.setenv("HARNESS_RETENTION_DAYS", "a fortnight")
+    assert _retention_days() == DEFAULT_RETENTION_DAYS
+    assert "HARNESS_RETENTION_DAYS" in capsys.readouterr().err
+
+
+def test_negative_retention_days_warns_and_falls_back(monkeypatch, capsys):
+    from harness.cli import _retention_days
+    from harness.retention_reconciler import DEFAULT_RETENTION_DAYS
+
+    monkeypatch.setenv("HARNESS_RETENTION_DAYS", "-1")
+    assert _retention_days() == DEFAULT_RETENTION_DAYS
+    assert "HARNESS_RETENTION_DAYS" in capsys.readouterr().err

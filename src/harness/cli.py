@@ -77,6 +77,7 @@ from harness.drivers.system_clock import SystemClock
 from harness.drivers.worktree_artifacts import WorktreeArtifactView
 from harness.ids import new_task_id
 from harness.models import DONE, REQUEST_CHANGES, Task
+from harness.retention_reconciler import DEFAULT_RETENTION_DAYS
 from harness.ports.behavior import ConsumerBehavior
 from harness.ports.clock import Clock
 from harness.ports.issue_state import IssueChecker
@@ -2136,6 +2137,39 @@ def _slug_resolver(registry: RepositoryRegistry) -> Callable[[str | None], str]:
     return slug_for
 
 
+def _retention_days() -> int:
+    """The terminal-task retention window, from `HARNESS_RETENTION_DAYS`.
+
+    A tuning knob, not a secret — so a bad value is a non-fatal startup
+    warning and the default, never an exit. The harness refusing to start
+    over a typo in a housekeeping number would be a worse failure than the
+    window being wrong for one run.
+
+    `0` is deliberately valid: it archives every terminal task on the next
+    sweep, which is the "clear the board now" setting.
+    """
+    raw = os.environ.get("HARNESS_RETENTION_DAYS")
+    if raw is None:
+        return DEFAULT_RETENTION_DAYS
+    try:
+        days = int(raw)
+    except ValueError:
+        print(
+            f"warning: HARNESS_RETENTION_DAYS={raw!r} is not an integer; "
+            f"using {DEFAULT_RETENTION_DAYS}",
+            file=sys.stderr,
+        )
+        return DEFAULT_RETENTION_DAYS
+    if days < 0:
+        print(
+            f"warning: HARNESS_RETENTION_DAYS={raw!r} is negative; "
+            f"using {DEFAULT_RETENTION_DAYS}",
+            file=sys.stderr,
+        )
+        return DEFAULT_RETENTION_DAYS
+    return days
+
+
 def _run(args: argparse.Namespace) -> int:
     root = _root(args.root)
     layout = HarnessLayout(root)
@@ -2419,6 +2453,7 @@ def _run(args: argparse.Namespace) -> int:
             repository_registry=registry,
             command_runner=SubprocessCommandRunner(),
             dropped_workflows=dropped_workflows,
+            retention_days=_retention_days(),
         )
     except WorkflowNotFound as error:
         print(f"error: {error}", file=sys.stderr)
