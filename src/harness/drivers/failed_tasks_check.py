@@ -47,7 +47,15 @@ from dataclasses import replace
 from harness.drivers.github_conflicts_check import SOURCE_KIND as MERGEABILITY_SOURCE_KIND
 from harness.drivers.github_issues import MARKER_PREFIX
 from harness.drivers.github_mergeable_check import SOURCE_KIND as PULL_REQUEST_SOURCE_KIND
-from harness.models import END, FAILED, HistoryEntry, Task, append_history
+from harness.models import (
+    END,
+    FAILED,
+    HEAL_ACTOR,
+    HistoryEntry,
+    Task,
+    append_history,
+    failure_trace,
+)
 from harness.ids import new_lock_id
 from harness.ports.board import DONE_COLUMN, FAILED_COLUMN
 from harness.ports.clock import Clock
@@ -55,7 +63,10 @@ from harness.ports.events import EventSink
 from harness.ports.queue import TaskQueue
 from harness.ports.triggers import Check, CheckSpec, Observation
 
-ACTOR = "failed-tasks"
+ACTOR = HEAL_ACTOR
+"""This check's actor name in a task's history. The literal lives in `models`
+(`HEAL_ACTOR`) because the derivations that read the stamp back live there too;
+this alias keeps every existing reference in this module unchanged."""
 
 PR_BORN_SOURCE_KINDS = frozenset({MERGEABILITY_SOURCE_KIND, PULL_REQUEST_SOURCE_KIND})
 """`source.kind` values stamped by the two Checks that mint tasks from the
@@ -235,9 +246,16 @@ def _already_declined(task: Task) -> bool:
 
 def _diagnostic_request(task: Task) -> str:
     """A short, synthesized diagnostic line — deliberately not the original
-    task's own request (see `original_request`, carried separately)."""
+    task's own request (see `original_request`, carried separately).
+
+    The failing step comes from history, not from `task.status`: by the time a
+    failure is claimed its status is the word `failed`, so reading it named the
+    step `'failed'` in every request this ever produced.
+    """
+    trace = failure_trace(task)
+    step = trace.failed_step if trace is not None else task.status
     return (
-        f"Diagnose why task {task.id} failed at step {task.status!r} "
+        f"Diagnose why task {task.id} failed at step {step!r} "
         f"(workflow {task.workflow_template!r})."
     )
 
