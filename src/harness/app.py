@@ -509,7 +509,7 @@ def build(
     forge: Forge | None = None,
     runner: AgentRunner | None = None,
     catalog: AgentCatalog | None = None,
-    agent_timeout: float = 1800.0,
+    agent_timeout: float = 5400.0,
     artifact_view: ArtifactView | None = None,
     sources: list[TaskSource] | None = None,
     merge_checker: MergeChecker | None = None,
@@ -587,6 +587,7 @@ def build(
     projection = BoardProjection(
         steps=steps,
         workflows=list(discovered.values()),
+        repository_names=repository_registry.names() if repository_registry is not None else (),
     )
     stage_output = StageOutputProjection()
     # The reflector comes after ProjectionSink: the outward projection must not
@@ -603,9 +604,11 @@ def build(
     failed = FilesystemTaskQueue(name="failed", root=layout.failed, events=events)
     done = FilesystemTaskQueue(name="done", root=layout.done, events=events)
     archived = FilesystemTaskQueue(name="archived", root=layout.archived, events=events)
-    # `healed/` is the never-consumed terminal `failed/` drains into once a
-    # `failed-tasks`-driving process is configured (invariant 24); it is
-    # unconditional, like `done`/`archived` — an idle terminal costs nothing.
+    # `healed/` is legacy (ADR-0024): the `failed-tasks` check used to retire
+    # each claimed failure here, and now settles it into `done/` instead.
+    # Nothing writes this queue any more — it is still built, and still
+    # hydrated, so tasks a previous version left in it stay on the board (in
+    # the `done` column) and gettable by id rather than silently vanishing.
     healed_queue = FilesystemTaskQueue(name="healed", root=layout.healed, events=events)
     inbox = FilesystemTaskQueue(
         name="tasks", root=layout.tasks, events=events, quarantine=failed
@@ -872,7 +875,7 @@ def build(
             spec=FAILED_TASKS_SPEC,
             factory=lambda params: FailedTasksCheck(
                 failed=failed,
-                healed=healed_queue,
+                done=done,
                 events=events,
                 clock=clock,
                 repository=params.get("repository"),

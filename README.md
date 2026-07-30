@@ -279,9 +279,8 @@ locally with `python scripts/build_docs.py --out site` and open `site/index.html
 ## Board
 
 Alongside the orchestration loop, `harness run` serves a board at
-`http://127.0.0.1:8420/`. The columns are the workflow steps plus `done` and
-`failed` (and `healed` when [self-healing](#self-healing-the-failed-queue) is
-enabled), the cards are tasks, and a click shows metadata, history, the
+`http://127.0.0.1:8420/`. The columns are the workflow steps plus the two
+terminals, `done` and `failed`, the cards are tasks, and a click shows metadata, history, the
 artifacts each step wrote, and — while a step is actively running — a live tail
 of the agent's output, streamed over SSE. A task in `failed/` gets a **Restart**
 control, which resets it and re-inboxes it for the dispatcher to route again.
@@ -445,7 +444,8 @@ needed, once the file names a repo.
 
 Self-healing is an ordinary Process, not bespoke machinery. The
 `failed-tasks` action drains `failed/`: on each tick it claims one failed
-task, settles the original to a new terminal `healed/` queue, and fires a
+task, retires the original into `done/` — the healer has taken it over, and
+says so in the task's history — and fires a
 fresh task through the three-step `heal` workflow (`workflows/heal.json`:
 `heal` → `dedup` → `file-issue`). The `heal` step reads a **failure report**
 built from that task's reason and history, inside a worktree — a scratch one
@@ -464,9 +464,11 @@ finisher** open the diagnostic **issue** on the repo named in
 
 The heal step's persona only ever drafts an *issue* — never a PR, never a new
 task. Recursion is guarded by a marker: the check stamps `data.heal` on the heal
-task it produces, and a heal task that itself fails is board-visible in `failed/`
-once before the check retires it to `healed/` without re-observing it, so nothing
-loops. The issue is idempotent per `(repo, scope_label, marker)` — a hidden
+task it produces, and a heal task that itself fails is *declined* rather than
+healed — it stays in `failed/`, annotated once with why nothing is coming to
+fix it, and is never re-observed, so nothing loops. That is the rule for every
+decline: no automated fix is coming, so it keeps reading as a problem in the
+column you actually watch. The issue is idempotent per `(repo, scope_label, marker)` — a hidden
 marker in its body, scoped to the *heal* task and the draft's title
 (`marker_for(task.id, draft.title)`), not the original failed task (whose id
 survives as `data.heal.of` and in the heal task's `dedup_key`). That protects
@@ -482,12 +484,13 @@ run`) and files nothing until `action.params.repository` names a registered
 repo. With a `GITHUB_TOKEN` present the
 issue is opened on GitHub; offline it falls back to an in-memory tracker so
 the finisher runs harmlessly. Until `action.params.repository` is set,
-`failed/` still drains into `healed/` on each tick and `heal`/`dedup` still
+`failed/` still drains into `done/` on each tick and `heal`/`dedup` still
 run (a repo-less task gets a scratch worktree, not a failure) — only on the
 `unique` path does `file-issue`'s `open-issue` finisher hit a repo-less task
 and fail it, with a message saying exactly that ("set the process's
-params.repository"); that failed heal task is retired to `healed/` on the
-next tick without re-observing it (invariant 25), so it doesn't loop.
+params.repository"); that failed heal task is declined on the next tick
+without re-observing it (invariant 25), so it doesn't loop — it just sits in
+`failed/` with the reason on it, waiting for you.
 
 ## How work flows
 

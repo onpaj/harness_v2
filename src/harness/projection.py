@@ -17,7 +17,6 @@ from harness.ports.board import (
     COLUMN_TERMINAL,
     DONE_COLUMN,
     FAILED_COLUMN,
-    HEALED_COLUMN,
     LIFECYCLE_DESCRIPTIONS,
     TODO_COLUMN,
     UNKNOWN_WORKFLOW,
@@ -28,16 +27,16 @@ from harness.ports.board import (
     BoardView,
 )
 
-_TERMINAL_COLUMNS = (DONE_COLUMN, FAILED_COLUMN, HEALED_COLUMN)
+_TERMINAL_COLUMNS = (DONE_COLUMN, FAILED_COLUMN)
 
 
 def column_kind(name: str) -> str:
     """Which of the three kinds a column is, by name.
 
-    `todo`/`done`/`failed`/`healed` are the harness's own lifecycle queues and
-    are never step names (a workflow referencing one would collide with the
-    reserved column, which is why they read as a fixed set here); everything
-    else on a board is a step."""
+    `todo`/`done`/`failed` are the harness's own lifecycle queues and are never
+    step names (a workflow referencing one would collide with the reserved
+    column, which is why they read as a fixed set here); everything else on a
+    board is a step."""
     if name == TODO_COLUMN:
         return COLUMN_INBOX
     if name in _TERMINAL_COLUMNS:
@@ -82,9 +81,8 @@ def column_order(
     workflows[1]'s not-yet-seen steps, and so on; a step shared by two
     workflows shows up once. Any remaining known step (workflow-less, or
     unreferenced by any workflow) then follows in the order `steps` was given.
-    The `healed` terminal column is unconditional — an empty, harmless column
-    when nothing ever heals, exactly like an unused workflow step's column
-    already is.
+    There are exactly two terminal columns: a healed failure lands in `done`
+    and a declined one stays in `failed` (ADR-0024).
     """
     order: list[str] = []
     for workflow in workflows:
@@ -96,7 +94,7 @@ def column_order(
         if step != END and step not in order:
             order.append(step)
 
-    tail = (DONE_COLUMN, FAILED_COLUMN, HEALED_COLUMN)
+    tail = (DONE_COLUMN, FAILED_COLUMN)
     return (TODO_COLUMN,) + tuple(order) + tail
 
 
@@ -105,9 +103,10 @@ class BoardProjection(BoardView):
         self,
         steps: Iterable[str],
         workflows: Sequence[Workflow] = (),
+        repository_names: Sequence[str] = (),
     ) -> None:
         # One tab per served workflow, each carrying that workflow's own column
-        # order (including the unconditional `healed` terminal column).
+        # order (plus the two terminal columns, `done` and `failed`).
         self._orders: dict[str, tuple[str, ...]] = {
             workflow.name: column_order((), [workflow]) for workflow in workflows
         }
@@ -126,6 +125,7 @@ class BoardProjection(BoardView):
         # become real columns here. TODO_COLUMN must stay or such a task is
         # silently dropped from the board until the dispatcher fails it.
         self._orders[UNKNOWN_WORKFLOW] = column_order(steps)
+        self._repository_names: tuple[str, ...] = tuple(sorted(repository_names))
         self._tasks: dict[str, Task] = {}
         self._locations: dict[str, tuple[str, str]] = {}
         self._revision = 0
@@ -154,8 +154,12 @@ class BoardProjection(BoardView):
         for task in failed.list():
             self._store(FAILED_COLUMN, task)
         if healed is not None:
+            # Legacy (ADR-0024): `healed/` is no longer written — the healer
+            # settles a claimed failure straight into `done/`. Anything a
+            # previous version left behind is shown where such a task would
+            # land today, rather than dropping off the board on upgrade.
             for task in healed.list():
-                self._store(HEALED_COLUMN, task)
+                self._store(DONE_COLUMN, task)
         for task in inbox.list():
             # A fresh task (never dispatched) shows in `todo`; one transiting the
             # inbox between steps keeps the column of the step it just left.
@@ -217,7 +221,11 @@ class BoardProjection(BoardView):
             )
             tabs.append(BoardTab(name=tab_name, columns=columns))
         tabs.sort(key=lambda tab: tab.name)
-        return Board(revision=self._revision, workflows=tuple(tabs))
+        return Board(
+            revision=self._revision,
+            workflows=tuple(tabs),
+            repository_names=self._repository_names,
+        )
 
     def get(self, task_id: str) -> Task | None:
         return self._tasks.get(task_id)

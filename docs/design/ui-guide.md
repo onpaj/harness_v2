@@ -136,7 +136,7 @@ Layout constants: 44px minimum tap target (`.btn`, inputs, tabbar links),
   (`.board-group--inbox`, the `todo` queue), the workflow's own steps
   (`.board-group--steps`, labelled `<name> workflow` and joined by
   `.board-flow` arrows in edge order) and **Finished**
-  (`.board-group--terminal`: `done`/`failed`/`healed`). The zones exist
+  (`.board-group--terminal`: `done`/`failed`). The zones exist
   because a step column is a place *inside* a workflow while an
   inbox/terminal column is a state of the task *relative to* one — rendering
   the two identically was what made a column row unreadable. A column head

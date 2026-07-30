@@ -1,6 +1,92 @@
 # CHANGELOG
 
 
+## v1.5.1 (2026-07-29)
+
+### Bug Fixes
+
+- **drafts**: End a fenced json block where JSON ends, not at the first fence
+  ([`eb19efc`](https://github.com/onpaj/harness_v2/commit/eb19efc25e3be1755c9d3875d2d2b4b57814937a))
+
+`parse_drafts` closed the block with a non-greedy regex, so the first ``` after the opener ended it.
+  A draft's `body` is markdown, and the healer's whole job is quoting the failure it reports — the
+  draft that broke it filed a body containing a fenced block of the original error. Those backticks
+  are inside a JSON string, but the regex cut the array there and json.loads saw an unterminated
+  string starting at the `body` value.
+
+`raw_decode` reads exactly one JSON value and stops where that value ends, so nested fences, the
+  closing fence and trailing prose are all outside the parser's concern. Openers are tried
+  last-first, preserving "the last fenced block wins" while stepping past an opener that is really
+  inside an earlier body — one that starts mid-string decodes to nothing and is skipped.
+
+`merge_verdict.py` and `drivers/claude_cli.py` share the convention and the latent bug; they read a
+  small verdict object rather than markdown bodies, so the collision is far less likely there. Noted
+  in the docstring, not changed.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+
+
+## v1.5.0 (2026-07-28)
+
+### Features
+
+- Retire a healed failure into done, leave a declined one in failed
+  ([#140](https://github.com/onpaj/harness_v2/pull/140),
+  [`568be73`](https://github.com/onpaj/harness_v2/commit/568be7325b2ef9890ca357642738c6369bb21260))
+
+The `failed-tasks` check settled every claim onto a `healed/` terminal of its own — both the
+  failures it took over and the ones its guards declined. That column answered no question an
+  operator has: "healed" reads as success, but it also held the one case where the automation gave
+  up, which is why the docs had to spell out that `heal-declined` in `healed/` means "it's yours
+  now".
+
+Split the two along the columns that already mean what they mean. A claimed failure is retired into
+  `done/` with `status = END` — nobody has to do anything about it any more — and the healer's
+  involvement is recorded in the task's history as the `failed-tasks` actor moving it `failed →
+  end`. A declined failure stays in `failed/`: it is claimed exactly once, to append one history
+  line saying why nothing is coming to fix it, and that line is also the marker that makes every
+  later tick skip it without claiming. So `failed/` no longer drains to empty, but what remains is
+  bounded and inert — no loop, no repeated work, no failure healed twice.
+
+The `healed` status, queue and column are retired. `healed/` is still built and still hydrated, into
+  the `done` column, so tasks an older version left there stay on the board and gettable by id.
+
+See ADR-0024.
+
+Claude-Session: https://claude.ai/code/session_01WUQgssgPZzvk5ZZ6Gim9qR
+
+Co-authored-by: Claude <noreply@anthropic.com>
+
+
+## v1.4.2 (2026-07-28)
+
+### Bug Fixes
+
+- **board**: Green card accent only for a task that actually finished
+  ([`40b8aac`](https://github.com/onpaj/harness_v2/commit/40b8aac2b0afe2435d9ff7ea149512b48dcc85ea))
+
+The stripe answers "what is happening to this task", but it painted green on any card whose
+  `last_outcome` was `done` — including one idle two columns into a workflow, where `done` is only
+  the previous step's verdict. Same lie the bare `done` badge told, in colour.
+
+Green is now gated on the card sitting in a terminal column; a step column falls back to the neutral
+  stripe, which is the honest answer (waiting its turn). `request_changes` keeps its accent
+  everywhere — "it came back" is not something a column name says — and `is-working` still outranks
+  both.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+
+### Documentation
+
+- Plan terminal-task retention
+  ([`85313d1`](https://github.com/onpaj/harness_v2/commit/85313d15fef0a01d512d045a2257509f6f859422))
+
+Four TDD tasks: the RetentionReconciler core, its app.py wiring on the existing reconcile loop, the
+  HARNESS_RETENTION_DAYS knob, and the docs.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+
+
 ## v1.4.1 (2026-07-28)
 
 ### Bug Fixes

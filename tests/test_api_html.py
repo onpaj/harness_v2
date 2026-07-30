@@ -82,6 +82,44 @@ MIDFLIGHT = Task(
     ),
 )
 
+# Idle in a step column after a clean hand-off: the shape whose green accent
+# stripe read as "this task is finished".
+HANDED_OFF = Task(
+    id="tsk_8",
+    workflow_template="default",
+    created="2026-07-19T09:58:00Z",
+    status="development",
+    last_outcome="done",
+    history=(
+        HistoryEntry(
+            at="2026-07-19T09:58:10Z",
+            actor="dispatcher",
+            from_step="plan",
+            to_step="development",
+            outcome="done",
+        ),
+    ),
+)
+
+# Bounced back for rework, idle in the same step column. "It came back" is not
+# something a column name says, so this one keeps its accent everywhere.
+BOUNCED = Task(
+    id="tsk_10",
+    workflow_template="default",
+    created="2026-07-19T09:58:30Z",
+    status="development",
+    last_outcome="request_changes",
+    history=(
+        HistoryEntry(
+            at="2026-07-19T09:58:40Z",
+            actor="dispatcher",
+            from_step="review",
+            to_step="development",
+            outcome="request_changes",
+        ),
+    ),
+)
+
 # An outcome with no history to attribute it to — the badge falls back to the
 # bare word rather than inventing a step.
 UNATTRIBUTED = Task(
@@ -127,15 +165,19 @@ def client() -> TestClient:
             BoardTab(
                 name="default",
                 columns=(
-                    BoardColumn(name="todo", tasks=()),
+                    BoardColumn(name="todo", tasks=(), kind=COLUMN_INBOX),
                     BoardColumn(
-                        name="development", tasks=(MIDFLIGHT, WORKING, WAITING, TITLED)
+                        name="development",
+                        tasks=(MIDFLIGHT, WORKING, WAITING, TITLED, HANDED_OFF, BOUNCED),
                     ),
-                    BoardColumn(name="done", tasks=(UNATTRIBUTED,)),
-                    BoardColumn(name="failed", tasks=()),
+                    BoardColumn(
+                        name="done", tasks=(UNATTRIBUTED,), kind=COLUMN_TERMINAL
+                    ),
+                    BoardColumn(name="failed", tasks=(), kind=COLUMN_TERMINAL),
                 ),
             ),
         ),
+        repository_names=("app-backend", "other-repo"),
     )
     # BROKEN is retrievable via get() (for the detail fragment) without cluttering
     # the rendered columns, so the board-rendering tests stay undisturbed.
@@ -222,10 +264,47 @@ def test_card_shows_repo_and_worktree_basename_not_path(client):
     assert "/Users/x/" not in body
 
 
+def test_card_renders_repository_as_a_badge_with_a_derived_hue(client):
+    body = client.get("/fragment/board").text
+
+    assert '<span class="badge repo-badge" style="--repo-hue: 192">my-repo</span>' in body
+
+
+def test_card_with_no_repository_renders_no_badge(client):
+    body = client.get("/fragment/board").text
+
+    # tsk_2 (WAITING) has neither repository nor worktree; it's the card
+    # rendered between tsk_1's and tsk_3's in the "development" column.
+    after_tsk2 = body.split('hx-get="/fragment/task/tsk_2"', 1)[1]
+    tsk2_card = after_tsk2.split('hx-get="/fragment/task/tsk_3"', 1)[0]
+    assert "repo-badge" not in tsk2_card
+    assert "card__repo" not in tsk2_card
+
+
 def test_card_shows_last_outcome(client):
     body = client.get("/fragment/board").text
 
     assert "request_changes" in body
+
+
+def test_index_renders_filter_bar_with_repository_options(client):
+    body = client.get("/").text
+
+    assert 'id="filter-repo"' in body
+    assert 'id="filter-text"' in body
+    assert "All repositories" in body
+    assert '<option value="app-backend">app-backend</option>' in body
+    assert '<option value="other-repo">other-repo</option>' in body
+
+
+def test_card_carries_data_repository_and_data_search_attributes(client):
+    body = client.get("/fragment/board").text
+
+    assert 'data-repository="app-backend"' in body
+    # WAITING has no repository — the attribute is present but empty, not
+    # omitted, so the client-side script never has to null-check it.
+    assert 'data-repository=""' in body
+    assert 'data-search="fix the login bug tsk_3' in body
 
 
 def test_outcome_badge_names_the_step_that_reported_it(client):
@@ -246,6 +325,41 @@ def test_outcome_badge_falls_back_to_bare_outcome_without_history(client):
     card = body[body.index("tsk_6") :]
     assert "badge__step" not in card
     assert "badge done" in card
+
+
+def _card_open_tag(body: str, task_id: str) -> str:
+    """The opening `<div class="card …">` of one card. The accent class sits
+    before the card's id in the markup, so splitting the page on the id would
+    cut it off."""
+    marker = f'hx-get="/fragment/task/{task_id}"'
+    end = body.index(marker)
+    return body[body.rindex('<div class="card', 0, end) : end]
+
+
+def test_green_accent_is_only_for_a_task_that_actually_finished(client):
+    """The stripe says what is happening to the *task*. A `done` outcome in a
+    step column is the previous step's verdict — green there read as complete."""
+    body = client.get("/fragment/board").text
+
+    assert "is-done" not in _card_open_tag(body, "tsk_8")
+    assert "is-done" in _card_open_tag(body, "tsk_6")
+
+
+def test_request_changes_accent_survives_in_a_step_column(client):
+    """Unlike `done`, "it came back" is not something a column name says — so
+    the amber stripe stays wherever the task sits."""
+    body = client.get("/fragment/board").text
+
+    assert "is-changes" in _card_open_tag(body, "tsk_10")
+
+
+def test_working_accent_wins_over_a_finished_column(client):
+    """A claimed task is blue whatever its last outcome was — the accent is
+    ordered, and "being worked on right now" outranks a stale verdict."""
+    body = client.get("/fragment/board").text
+
+    assert "is-working" in _card_open_tag(body, "tsk_5")
+    assert "is-done" not in _card_open_tag(body, "tsk_5")
 
 
 def test_outcome_step_reads_the_consumer_delivery_entry():
@@ -295,6 +409,19 @@ def test_fragment_task_shows_metadata_and_history(client):
     assert "development" in body
     assert "2026-07-19T10:00:05Z" in body
     assert "dispatcher" in body
+
+
+def test_fragment_task_shows_repository_as_a_badge_with_same_hue_as_the_card(client):
+    body = client.get("/fragment/task/tsk_1").text
+
+    assert '<span class="badge repo-badge" style="--repo-hue: 57">app-backend</span>' in body
+
+
+def test_fragment_task_with_no_repository_shows_a_dash(client):
+    body = client.get("/fragment/task/tsk_4").text
+
+    assert "repo-badge" not in body
+    assert '<span class="v">—</span>' in body
 
 
 def test_fragment_task_times_are_time_elements_for_client_side_localization(client):

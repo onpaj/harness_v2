@@ -1,8 +1,9 @@
 """End-to-end self-healing as a Process (ADR-0018/ADR-0019), on in-memory drivers.
 
 A task fails and lands in `failed/`. The `autoheal` process (`failed-tasks`
-check, targeting the `heal` workflow) claims it on its next tick, settles the
-original to `healed/`, and fires a fresh `heal`-workflow task through the
+check, targeting the `heal` workflow) claims it on its next tick, retires the
+original into `done/` (ADR-0024 — the healer took it over, and says so in the
+task's history), and fires a fresh `heal`-workflow task through the
 ordinary dispatcher/consumer path — now three steps: `heal`
 (`ClaudeCliBehavior` + the `healer` persona) triages the failure and returns
 `file` (a harness bug worth filing) or `skip` (nothing to file); `file` routes
@@ -42,7 +43,7 @@ from harness.drivers.memory import (
     MemoryWorkspace,
 )
 from harness.issue_drafts import marker_for
-from harness.models import HEALED, Task
+from harness.models import Task
 from harness.ports.agent import AgentRun, AgentSpec
 
 HEAL_SPEC = AgentSpec(
@@ -58,6 +59,38 @@ DEDUP_SPEC = AgentSpec(
 )
 
 MAX_STEPS = 1000
+
+ORIGINAL_ID = "tsk_e2e"
+"""The id `put_failed_task` gives the task that failed — the one the healer
+claims. Since ADR-0024 it is retired into `done/` alongside the fresh heal task
+the check fires, so most assertions here have to tell the two apart by id."""
+
+
+def done_tasks(tmp_path) -> dict[str, Task]:
+    return {
+        task.id: task
+        for task in (
+            Task.from_dict(json.loads(path.read_text()))
+            for path in (tmp_path / "done").glob("*.json")
+        )
+    }
+
+
+def retired_original(tmp_path) -> Task:
+    """The original failure, retired into `done/` by the healer."""
+    return done_tasks(tmp_path)[ORIGINAL_ID]
+
+
+def finished_heal_task(tmp_path) -> Task:
+    """The fresh heal-workflow task — the one in `done/` that isn't the
+    original. Its id is minted by the check, so it can't be named up front."""
+    finished = {
+        task_id: task
+        for task_id, task in done_tasks(tmp_path).items()
+        if task_id != ORIGINAL_ID
+    }
+    assert len(finished) == 1, finished
+    return next(iter(finished.values()))
 
 
 def seed(tmp_path, *, interval="1s", repository=None) -> None:
@@ -202,12 +235,12 @@ async def test_heal_file_dedup_unique_opens_exactly_one_issue(tmp_path):
 
     await drive_until_quiet(harness)
 
-    # the original task left failed/ for healed/
+    # the original task left failed/ for done/ — the healer took it over,
+    # which is recorded in its history rather than in a column of its own.
     assert list((tmp_path / "failed").glob("*.json")) == []
-    healed_files = list((tmp_path / "healed").glob("*.json"))
-    assert len(healed_files) == 1
-    healed = Task.from_dict(json.loads(healed_files[0].read_text()))
-    assert healed.status == HEALED
+    healed = retired_original(tmp_path)
+    assert healed.status == "end"
+    assert healed.history[-1].actor == "failed-tasks"
     assert "queued for healing" in healed.history[-1].summary
 
     # both agent steps ran, in order — proof `dedup` was actually reached.
@@ -221,9 +254,7 @@ async def test_heal_file_dedup_unique_opens_exactly_one_issue(tmp_path):
     assert "## Failure report" in heal_call["prompt"]
 
     # the fresh heal-workflow task itself reached a clean end.
-    done_files = list((tmp_path / "done").glob("*.json"))
-    assert len(done_files) == 1
-    heal_task = Task.from_dict(json.loads(done_files[0].read_text()))
+    heal_task = finished_heal_task(tmp_path)
     assert heal_task.status == "end"
 
     # exactly one issue filed, marker derived from the *running* heal task's
@@ -259,15 +290,13 @@ async def test_heal_file_dedup_duplicate_settles_silently(tmp_path):
     await drive_until_quiet(harness)
 
     assert list((tmp_path / "failed").glob("*.json")) == []
-    assert len(list((tmp_path / "healed").glob("*.json"))) == 1
+    assert "queued for healing" in retired_original(tmp_path).history[-1].summary
     assert tracker.opened == []  # no issue filed — settled as a duplicate
 
     # both agent steps ran — `dedup` was reached and made the call.
     assert [call["spec"].name for call in runner.calls] == ["heal", "dedup"]
 
-    done_files = list((tmp_path / "done").glob("*.json"))
-    assert len(done_files) == 1
-    assert Task.from_dict(json.loads(done_files[0].read_text())).status == "end"
+    assert finished_heal_task(tmp_path).status == "end"
 
 
 async def test_heal_skip_never_reaches_dedup(tmp_path):
@@ -284,15 +313,13 @@ async def test_heal_skip_never_reaches_dedup(tmp_path):
     await drive_until_quiet(harness)
 
     assert list((tmp_path / "failed").glob("*.json")) == []
-    assert len(list((tmp_path / "healed").glob("*.json"))) == 1
+    assert "queued for healing" in retired_original(tmp_path).history[-1].summary
     assert tracker.opened == []  # no issue filed
 
     # only `heal` ran — `dedup` was never invoked.
     assert [call["spec"].name for call in runner.calls] == ["heal"]
 
-    done_files = list((tmp_path / "done").glob("*.json"))
-    assert len(done_files) == 1
-    assert Task.from_dict(json.loads(done_files[0].read_text())).status == "end"
+    assert finished_heal_task(tmp_path).status == "end"
 
 
 async def test_heal_time_error_does_not_loop_back_to_failed(tmp_path):
@@ -311,28 +338,27 @@ async def test_heal_time_error_does_not_loop_back_to_failed(tmp_path):
 
     await drive_until_quiet(harness)
 
-    # First bucket: the original settles to healed/; the fresh heal task's own
-    # agent error lands it in failed/ like any other step failure — no
+    # First bucket: the original is retired into done/; the fresh heal task's
+    # own agent error lands it in failed/ like any other step failure — no
     # special-cased re-entry, just the ordinary Consumer._fail path.
     assert len(list((tmp_path / "failed").glob("*.json"))) == 1
-    assert len(list((tmp_path / "healed").glob("*.json"))) == 1
+    assert "queued for healing" in retired_original(tmp_path).history[-1].summary
 
     # Cross the interval boundary so the process's next tick actually fires.
     clock.instant = "2026-07-19T11:00:00Z"
     await drive_until_quiet(harness)
 
-    # The recursion guard retires the failed heal attempt too — settled, not
-    # looped: no second heal task, no issue ever filed, drive_until_quiet
-    # settling at all is itself proof a failed->failed bounce didn't happen.
-    assert list((tmp_path / "failed").glob("*.json")) == []
-    healed_files = list((tmp_path / "healed").glob("*.json"))
-    assert len(healed_files) == 2  # the original, plus the failed heal attempt
-    notes = {
-        Task.from_dict(json.loads(f.read_text())).history[-1].summary
-        for f in healed_files
-    }
-    assert any("queued for healing" in note for note in notes)
-    assert any("heal-failed" in note for note in notes)
+    # The recursion guard declines the failed heal attempt: no second heal
+    # task and no issue, but the failure stays in failed/ where the operator
+    # will see it — annotated once with why nothing is coming to fix it
+    # (ADR-0024). drive_until_quiet settling at all is itself proof the
+    # decline doesn't bounce the task around the queue forever.
+    failed_files = list((tmp_path / "failed").glob("*.json"))
+    assert len(failed_files) == 1
+    declined = Task.from_dict(json.loads(failed_files[0].read_text()))
+    assert declined.status == "failed"
+    assert "heal-failed" in declined.history[-1].summary
+    assert set(done_tasks(tmp_path)) == {ORIGINAL_ID}
     assert tracker.opened == []
 
 
@@ -352,7 +378,7 @@ async def test_no_autoheal_process_leaves_the_task_in_failed(tmp_path):
     await drive_until_quiet(harness)
 
     assert len(list((tmp_path / "failed").glob("*.json"))) == 1
-    assert list((tmp_path / "healed").glob("*.json")) == []
+    assert done_tasks(tmp_path) == {}
     assert tracker.opened == []
 
 
@@ -374,9 +400,7 @@ async def test_autoheal_process_repository_is_stamped_on_the_fired_heal_task(
 
     await drive_until_quiet(harness)
 
-    done_files = list((tmp_path / "done").glob("*.json"))
-    assert len(done_files) == 1
-    heal_task = Task.from_dict(json.loads(done_files[0].read_text()))
+    heal_task = finished_heal_task(tmp_path)
     assert heal_task.status == "end"
     assert heal_task.repository == "onpaj/harness_v2"
 
@@ -397,8 +421,6 @@ async def test_autoheal_process_without_repository_leaves_it_unset(tmp_path):
 
     await drive_until_quiet(harness)
 
-    done_files = list((tmp_path / "done").glob("*.json"))
-    assert len(done_files) == 1
-    heal_task = Task.from_dict(json.loads(done_files[0].read_text()))
+    heal_task = finished_heal_task(tmp_path)
     assert heal_task.status == "end"
     assert heal_task.repository is None

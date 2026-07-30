@@ -2659,7 +2659,7 @@ def main(argv: list[str] | None = None) -> int:
         "Deliberately long — none of them is latency-sensitive, and the first "
         "two poll GitHub, whose rate limits they must respect",
     )
-    run.add_argument("--agent-timeout", type=float, default=1800.0, dest="agent_timeout")
+    run.add_argument("--agent-timeout", type=float, default=5400.0, dest="agent_timeout")
     run.add_argument("--request-changes-at", default=None, dest="request_changes_at")
     run.add_argument(
         "--github-label",

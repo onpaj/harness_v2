@@ -14,20 +14,72 @@ Two deliberate asymmetries:
   agent's final message, so an example earlier in the report cannot be
   mistaken for the findings.
 
+Where the block *ends* is decided by JSON, not by the closing fence — see
+`_decode_last_block`. `merge_verdict.py` and `drivers/claude_cli.py` still
+close on the fence with a regex; they read a small verdict object rather than
+an array of markdown bodies, so the nested-fence collision is far less likely
+there, but it is the same convention and the same latent bug.
+
 The module imports nothing from the `harness` package — like `models`,
-`ids` and `artifacts_layout`. That is also why `_FENCED_JSON` is a local copy
-of the regex `drivers/claude_cli.py` uses: the convention is shared by design,
-but this module must stay driver-free.
+`ids` and `artifacts_layout` — so the shared convention is deliberately
+duplicated rather than imported from a driver.
 """
 
 from __future__ import annotations
 
 import json
-import re
 from dataclasses import dataclass
 from hashlib import sha1
 
-_FENCED_JSON = re.compile(r"```json\s*(.*?)```", re.DOTALL)
+_OPENER = "```json"
+
+
+def _decode_last_block(artifact: str) -> object:
+    """The decoded value of the artifact's last fenced json block.
+
+    Raises `DraftError` when there is no block, or when the last one that
+    could be a block does not decode.
+
+    The closing fence is deliberately *not* what ends the block — JSON itself
+    is. A draft's `body` is markdown, and markdown quotes things in fenced
+    blocks: the healer reporting a failure writes a ``` fence inside the very
+    string it is filing. Those backticks sit inside a JSON string, but a regex
+    closing on the first fence cannot know that, and cut the array mid-string.
+    `raw_decode` reads exactly one JSON value and stops where that value ends,
+    so everything after it — the closing fence, nested fences, trailing prose
+    — is none of the parser's business.
+
+    Openers are tried last-first and the first one that decodes at all wins,
+    which keeps the documented "the last fenced block wins" rule while
+    stepping back past an opener that is really part of an earlier draft's
+    body — such an opener decodes to nothing, since it starts mid-string.
+    """
+    decoder = json.JSONDecoder()
+    starts = [
+        index + len(_OPENER)
+        for index in range(len(artifact))
+        if artifact.startswith(_OPENER, index)
+    ]
+    if not starts:
+        raise DraftError("the artifact has no fenced json block of issue drafts")
+
+    failure = None
+    for start in reversed(starts):
+        try:
+            value, _ = decoder.raw_decode(artifact, _skip_space(artifact, start))
+        except ValueError as error:
+            # The last opener is the likeliest real one, so its message is the
+            # one worth reporting even if an earlier candidate also fails.
+            failure = failure or str(error)
+            continue
+        return value
+    raise DraftError(f"the artifact's json block is not valid JSON: {failure}")
+
+
+def _skip_space(text: str, index: int) -> int:
+    while index < len(text) and text[index].isspace():
+        index += 1
+    return index
 
 
 @dataclass(frozen=True)
@@ -53,14 +105,7 @@ def parse_drafts(artifact: str) -> list[IssueDraft]:
     if not artifact.strip():
         return []
 
-    blocks = _FENCED_JSON.findall(artifact)
-    if not blocks:
-        raise DraftError("the artifact has no fenced json block of issue drafts")
-
-    try:
-        raw = json.loads(blocks[-1])
-    except (json.JSONDecodeError, ValueError) as error:
-        raise DraftError(f"the artifact's json block is not valid JSON: {error}") from None
+    raw = _decode_last_block(artifact)
 
     if not isinstance(raw, list):
         raise DraftError(

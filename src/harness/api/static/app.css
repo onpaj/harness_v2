@@ -145,6 +145,15 @@ h3 {
 .page { max-width: 1200px; margin: 0 auto; padding: 16px; }
 .page-header { display: flex; align-items: center; gap: 12px; margin: 4px 2px 16px; }
 
+.filter-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin: 0 2px 16px; }
+.filter-bar select {
+  font: inherit; font-size: 15px; min-height: 44px;
+  padding: 10px 12px; border-radius: var(--radius-sm);
+  border: 1px solid var(--border-strong); background: var(--surface); color: var(--text);
+}
+.filter-bar select:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+.filter-bar input[type="search"] { flex: 1 1 200px; min-width: 160px; }
+
 .btn {
   font: inherit; font-size: 15px; font-weight: 600;
   padding: 9px 16px; border-radius: var(--radius-pill);
@@ -233,9 +242,14 @@ h3 {
 .card.is-done::before { background: var(--done-fg); }
 .card.is-changes::before { background: var(--changes-fg); }
 .card.is-failed::before { background: var(--failed-fg); }
+.card.hidden-by-filter { display: none; }
 .card__title { font-size: 16px; font-weight: 600; line-height: 1.3; }
 .card__repo {
+  display: flex; align-items: center; gap: 6px; flex-wrap: nowrap;
   color: var(--text-2); font-size: 13px; margin-top: 3px;
+  overflow: hidden;
+}
+.card__repo .card__worktree {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
@@ -255,6 +269,17 @@ h3 {
 .badge.request_changes { background: var(--changes-bg); color: var(--changes-fg); }
 .badge.working { background: var(--working-bg); color: var(--working-fg); }
 .badge.failed { background: var(--failed-bg); color: var(--failed-fg); }
+
+.badge.repo-badge {
+  background: hsl(var(--repo-hue) 50% 92%);
+  color: hsl(var(--repo-hue) 70% 22%);
+}
+@media (prefers-color-scheme: dark) {
+  .badge.repo-badge {
+    background: hsl(var(--repo-hue) 45% 22%);
+    color: hsl(var(--repo-hue) 70% 82%);
+  }
+}
 
 /* --- Per-workflow tabs ----------------------------------------------------
  * The board renders one panel per served workflow; when more than one exists
@@ -348,6 +373,12 @@ dialog#add-issue[open] { display: flex; }
   color: var(--text-2); background: var(--surface-2); border-radius: var(--radius-pill);
 }
 .tabs .tab.active { color: var(--on-accent); background: var(--accent); }
+.tab__count {
+  font-size: 11px; font-weight: 700;
+  background: var(--surface); color: var(--text-3);
+  border-radius: var(--radius-pill); padding: 1px 7px; margin-left: 2px;
+}
+.tabs .tab.active .tab__count { background: var(--on-accent); color: var(--accent); }
 
 .tab-panels {
   flex: 1; min-height: 0; overflow: auto; padding: 16px;
@@ -471,18 +502,18 @@ td.wrap, th.wrap { white-space: normal; }
   color: var(--text-2); margin-bottom: 6px;
 }
 
-input[type="text"], textarea {
+input[type="text"], input[type="search"], textarea {
   width: 100%; box-sizing: border-box; font: inherit; font-size: 15px;
   padding: 10px 12px; border-radius: var(--radius-sm);
   border: 1px solid var(--border-strong); background: var(--surface); color: var(--text);
 }
-input[type="text"] { min-height: 44px; }
+input[type="text"], input[type="search"] { min-height: 44px; }
 textarea { min-height: 44px; resize: vertical; }
 textarea.editor {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 13px; line-height: 1.5;
 }
-input[type="text"]:focus, textarea:focus {
+input[type="text"]:focus, input[type="search"]:focus, textarea:focus {
   outline: 2px solid var(--accent); outline-offset: 1px;
 }
 

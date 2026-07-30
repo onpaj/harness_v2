@@ -19,13 +19,14 @@
     <button class="tab active" data-tab="info">Info</button>
     <button class="tab" data-tab="history">History</button>
     <button class="tab" data-tab="output">Output</button>
+    <button class="tab" data-tab="artifacts">Artifacts{% if artifacts %} <span class="tab__count">{{ artifacts|length }}</span>{% endif %}</button>
   </nav>
 
   <div class="tab-panels">
     <section class="tab-panel active" data-panel="info">
       <ul class="kv">
         <li><span class="k">id</span><span class="v">{{ task.id }}</span></li>
-        <li><span class="k">repository</span><span class="v">{{ task.repository or "—" }}</span></li>
+        <li><span class="k">repository</span><span class="v">{% if task.repository %}<span class="badge repo-badge" style="--repo-hue: {{ task.repository | repo_hue }}">{{ task.repository | basename }}</span>{% else %}—{% endif %}</span></li>
         <li><span class="k">worktree</span><span class="v">{{ task.worktree or "—" }}</span></li>
         <li><span class="k">workflow</span><span class="v">{{ task.workflow_template or "—" }}</span></li>
         <li><span class="k">step</span><span class="v">{{ task.step or "—" }}</span></li>
@@ -39,24 +40,6 @@
         <li><span class="k">created</span><span class="v"><time datetime="{{ task.created }}" title="{{ task.created }} UTC">{{ task.created | shorttime }}</time></span></li>
         <li><span class="k">data</span><span class="v"><pre>{{ task.data }}</pre></span></li>
       </ul>
-
-      <h3>artifacts</h3>
-      {% if artifacts %}
-      <div class="table-scroll">
-      <table>
-        <tr><th>step</th><th>attempt</th><th>name</th></tr>
-        {% for ref in artifacts %}
-        <tr>
-          <td>{{ ref.step }}</td>
-          <td>{{ ref.attempt }}</td>
-          <td class="wrap"><a href="/api/tasks/{{ task.id }}/artifacts/{{ ref.step }}/{{ ref.attempt }}/{{ ref.name }}">{{ ref.name }}</a></td>
-        </tr>
-        {% endfor %}
-      </table>
-      </div>
-      {% else %}
-      <p class="hint">No artifacts yet.</p>
-      {% endif %}
     </section>
 
     <section class="tab-panel" data-panel="history">
@@ -82,6 +65,25 @@
       <div hx-ext="sse" sse-connect="/api/tasks/{{ task.id }}/output/events" sse-close="end" style="flex: 1; min-height: 0; display: flex; flex-direction: column;">
         <div id="stage-output" class="terminal" sse-swap="line" hx-swap="beforeend scroll:bottom"></div>
       </div>
+    </section>
+
+    <section class="tab-panel" data-panel="artifacts">
+      {% if artifacts %}
+      <div class="table-scroll">
+      <table>
+        <tr><th>step</th><th>attempt</th><th>name</th></tr>
+        {% for ref in artifacts %}
+        <tr>
+          <td>{{ ref.step }}</td>
+          <td>{{ ref.attempt }}</td>
+          <td class="wrap"><a href="/api/tasks/{{ task.id }}/artifacts/{{ ref.step }}/{{ ref.attempt }}/{{ ref.name }}">{{ ref.name }}</a></td>
+        </tr>
+        {% endfor %}
+      </table>
+      </div>
+      {% else %}
+      <p class="hint">No artifacts yet.</p>
+      {% endif %}
     </section>
   </div>
 </div>

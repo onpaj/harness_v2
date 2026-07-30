@@ -15,14 +15,30 @@
   {% if col.tasks %}
   <div class="column__list">
   {% for task in col.tasks %}
-  <div class="card{% if task.status == 'failed' %} is-failed{% elif task.lock_id %} is-working{% elif task.last_outcome == 'done' %} is-done{% elif task.last_outcome == 'request_changes' %} is-changes{% endif %}"
+  {#
+    The accent stripe answers "what is happening to this task", so green has to
+    mean the *task* is finished. In a step column a `done` outcome is only the
+    previous step's verdict, and a green card there told the same lie the bare
+    `done` badge did — a task mid-workflow reading as complete. Neutral is the
+    honest answer there: it is sitting in a step column, waiting its turn.
+    `request_changes` keeps its stripe in every column — "it came back" is as
+    true mid-workflow as anywhere, and no column name says it.
+  #}
+  {% set accent = 'is-failed' if task.status == 'failed'
+     else 'is-working' if task.lock_id
+     else 'is-done' if task.last_outcome == 'done' and col.kind == 'terminal'
+     else 'is-changes' if task.last_outcome == 'request_changes'
+     else '' %}
+  <div class="card{% if accent %} {{ accent }}{% endif %}"
+       data-repository="{{ task.repository | basename }}"
+       data-search="{{ ((task.data.title or task.id) ~ ' ' ~ task.id ~ ' ' ~ (task.repository | basename) ~ ' ' ~ (task.worktree | basename) ~ ' ' ~ (task.last_outcome or '')) | lower }}"
        hx-get="/fragment/task/{{ task.id }}"
        hx-target="#detail"
        hx-swap="innerHTML">
     <div class="card__title">{{ task.data.title or task.id }}</div>
     {% if task.repository or task.worktree %}
     <div class="card__repo">
-      {{ task.repository | basename }}{% if task.repository and task.worktree %} · {% endif %}{{ task.worktree | basename }}
+      {% if task.repository %}<span class="badge repo-badge" style="--repo-hue: {{ task.repository | repo_hue }}">{{ task.repository | basename }}</span>{% endif %}{% if task.repository and task.worktree %} · {% endif %}{% if task.worktree %}<span class="card__worktree">{{ task.worktree | basename }}</span>{% endif %}
     </div>
     {% endif %}
     <div class="card__meta">
