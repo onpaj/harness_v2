@@ -1,14 +1,19 @@
 from harness.models import (
     DONE,
     END,
+    FAILED,
+    HEAL_ACTOR,
+    HistoryEntry,
+    Task,
+    failure_trace,
+    is_retired_failure,
+    resumable_failure,
     REQUEST_CHANGES,
     BehaviorResult,
     Failed,
     FinisherBinding,
     Finished,
-    HistoryEntry,
     MoveTo,
-    Task,
     Transition,
     Workflow,
     append_history,
@@ -375,3 +380,222 @@ def test_decisions_carry_their_payload():
     assert MoveTo("design").step == "design"
     assert Failed("nope").reason == "nope"
     assert Finished() == Finished()
+
+
+def _timed_out_at_development(status=END, extra=()):
+    """A task that passed plan/design/architecture and timed out in development.
+
+    `status=END` plus the trailing `failed-tasks` entry is the retired-failure
+    shape; `status=FAILED` without it is the shape a declined failure has.
+    """
+    history = (
+        HistoryEntry(
+            at="2026-07-28T19:15:29Z", actor="dispatcher", from_step=None, to_step="plan"
+        ),
+        HistoryEntry(
+            at="2026-07-28T20:02:05Z",
+            actor="consumer:plan",
+            from_step="plan",
+            to_step=None,
+            outcome="done",
+        ),
+        HistoryEntry(
+            at="2026-07-28T20:02:05Z",
+            actor="dispatcher",
+            from_step="plan",
+            to_step="design",
+            outcome="done",
+        ),
+        HistoryEntry(
+            at="2026-07-28T20:31:29Z",
+            actor="dispatcher",
+            from_step="design",
+            to_step="architecture",
+            outcome="done",
+        ),
+        HistoryEntry(
+            at="2026-07-28T20:31:29Z",
+            actor="dispatcher",
+            from_step="architecture",
+            to_step="development",
+            outcome="done",
+        ),
+        HistoryEntry(
+            at="2026-07-29T00:05:45Z",
+            actor="consumer:development",
+            from_step="development",
+            to_step=FAILED,
+            reason="behavior raised an exception: claude timed out after 1800.0s",
+        ),
+    ) + tuple(extra)
+    return Task(
+        id="tsk_1",
+        workflow_template="development",
+        created="2026-07-28T19:14:54Z",
+        status=status,
+        last_outcome="done",
+        history=history,
+    )
+
+
+RETIRED_STAMP = HistoryEntry(
+    at="2026-07-29T00:06:06Z",
+    actor=HEAL_ACTOR,
+    from_step=FAILED,
+    to_step=END,
+    summary="queued for healing",
+)
+
+
+def test_failure_trace_reads_the_failed_step_reason_and_rewind_pair():
+    trace = failure_trace(_timed_out_at_development(extra=(RETIRED_STAMP,)))
+
+    assert trace is not None
+    assert trace.failed_step == "development"
+    assert trace.reason == "behavior raised an exception: claude timed out after 1800.0s"
+    assert trace.resume_status == "architecture"
+    assert trace.resume_outcome == "done"
+
+
+def test_failure_trace_is_none_when_the_task_never_failed():
+    task = Task(
+        id="tsk_2",
+        created="2026-07-28T19:14:54Z",
+        status=END,
+        last_outcome="done",
+        history=(
+            HistoryEntry(
+                at="2026-07-28T19:15:29Z",
+                actor="dispatcher",
+                from_step="land",
+                to_step=END,
+                outcome="done",
+            ),
+        ),
+    )
+
+    assert failure_trace(task) is None
+
+
+def test_failure_trace_rewind_pair_is_none_when_the_start_step_failed():
+    """A first-step failure has no prior hop — the dispatcher entry reads
+    None -> plan, so there is nothing to rewind to and route() falls back to
+    the workflow's start."""
+    task = Task(
+        id="tsk_3",
+        workflow_template="development",
+        created="2026-07-28T19:14:54Z",
+        status=END,
+        history=(
+            HistoryEntry(
+                at="2026-07-28T19:15:29Z",
+                actor="dispatcher",
+                from_step=None,
+                to_step="plan",
+            ),
+            HistoryEntry(
+                at="2026-07-28T19:45:29Z",
+                actor="consumer:plan",
+                from_step="plan",
+                to_step=FAILED,
+                reason="behavior raised an exception: boom",
+            ),
+            RETIRED_STAMP,
+        ),
+    )
+
+    trace = failure_trace(task)
+
+    assert trace is not None
+    assert trace.failed_step == "plan"
+    assert trace.resume_status is None
+    assert trace.resume_outcome is None
+
+
+def test_failure_trace_is_none_for_a_failure_with_no_step_to_return_to():
+    """A dispatcher failure of a task that was never in a step (status None):
+    there is no step to resume into, so this is a restart case, not a resume."""
+    task = Task(
+        id="tsk_4",
+        created="2026-07-28T19:14:54Z",
+        status=FAILED,
+        history=(
+            HistoryEntry(
+                at="2026-07-28T19:15:29Z",
+                actor="dispatcher",
+                from_step=None,
+                to_step=FAILED,
+                reason="workflow-less task has no usable step",
+            ),
+        ),
+    )
+
+    assert failure_trace(task) is None
+
+
+def test_is_retired_failure_recognises_the_healer_stamp():
+    assert is_retired_failure(_timed_out_at_development(extra=(RETIRED_STAMP,))) is True
+
+
+def test_is_retired_failure_rejects_an_ordinary_completion():
+    task = Task(
+        id="tsk_5",
+        created="2026-07-28T19:14:54Z",
+        status=END,
+        last_outcome="done",
+        history=(
+            HistoryEntry(
+                at="2026-07-28T19:15:29Z",
+                actor="dispatcher",
+                from_step="land",
+                to_step=END,
+                outcome="done",
+            ),
+        ),
+    )
+
+    assert is_retired_failure(task) is False
+
+
+def test_is_retired_failure_rejects_a_task_still_sitting_in_failed():
+    assert is_retired_failure(_timed_out_at_development(status=FAILED)) is False
+
+
+def test_resumable_failure_admits_a_retired_failure():
+    trace = resumable_failure(_timed_out_at_development(extra=(RETIRED_STAMP,)))
+
+    assert trace is not None
+    assert trace.failed_step == "development"
+
+
+def test_resumable_failure_admits_a_declined_failure_still_in_failed():
+    trace = resumable_failure(_timed_out_at_development(status=FAILED))
+
+    assert trace is not None
+    assert trace.failed_step == "development"
+
+
+def test_resumable_failure_rejects_a_completion_that_failed_earlier_in_its_life():
+    """Failed at development, was restarted, then ran through to `end`. Its
+    current terminal position was NOT reached by failing, so resuming it would
+    re-run a step of an already-finished task."""
+    task = _timed_out_at_development(
+        extra=(
+            HistoryEntry(
+                at="2026-07-29T01:00:00Z",
+                actor="operator",
+                from_step=FAILED,
+                to_step=None,
+                reason="restarted by operator",
+            ),
+            HistoryEntry(
+                at="2026-07-29T02:00:00Z",
+                actor="dispatcher",
+                from_step="land",
+                to_step=END,
+                outcome="done",
+            ),
+        )
+    )
+
+    assert resumable_failure(task) is None

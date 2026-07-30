@@ -377,3 +377,97 @@ def test_an_ordinary_github_issue_sourced_task_is_still_healed():
 
     assert observation.state_key == "tsk_issue_1"
     assert "queued for healing" in done.list()[0].history[-1].summary
+
+
+def test_diagnostic_request_names_the_step_that_failed_not_the_word_failed():
+    from harness.drivers.failed_tasks_check import _diagnostic_request
+    from harness.models import FAILED, HistoryEntry, Task
+
+    task = Task(
+        id="tsk_1",
+        workflow_template="development",
+        created="2026-07-28T19:14:54Z",
+        status=FAILED,
+        history=(
+            HistoryEntry(
+                at="2026-07-28T20:31:29Z",
+                actor="dispatcher",
+                from_step="architecture",
+                to_step="development",
+                outcome="done",
+            ),
+            HistoryEntry(
+                at="2026-07-29T00:05:45Z",
+                actor="consumer:development",
+                from_step="development",
+                to_step=FAILED,
+                reason="behavior raised an exception: claude timed out after 1800.0s",
+            ),
+        ),
+    )
+
+    request = _diagnostic_request(task)
+
+    assert "'development'" in request
+    assert "'failed'" not in request
+
+
+def test_diagnostic_request_falls_back_to_status_when_there_is_no_trace():
+    from harness.drivers.failed_tasks_check import _diagnostic_request
+    from harness.models import FAILED, Task
+
+    task = Task(
+        id="tsk_2",
+        workflow_template="development",
+        created="2026-07-28T19:14:54Z",
+        status=FAILED,
+    )
+
+    assert "'failed'" in _diagnostic_request(task)
+
+
+def test_render_failure_report_names_the_step_that_failed_not_the_word_failed():
+    from harness.drivers.failed_tasks_check import _render_failure_report
+    from harness.models import FAILED, HistoryEntry, Task
+
+    task = Task(
+        id="tsk_1",
+        workflow_template="development",
+        created="2026-07-28T19:14:54Z",
+        status=FAILED,
+        history=(
+            HistoryEntry(
+                at="2026-07-28T20:31:29Z",
+                actor="dispatcher",
+                from_step="architecture",
+                to_step="development",
+                outcome="done",
+            ),
+            HistoryEntry(
+                at="2026-07-29T00:05:45Z",
+                actor="consumer:development",
+                from_step="development",
+                to_step=FAILED,
+                reason="behavior raised an exception: claude timed out after 1800.0s",
+            ),
+        ),
+    )
+
+    report = _render_failure_report(task)
+
+    assert "- failing step: development" in report
+    assert "- failing step: failed" not in report
+
+
+def test_render_failure_report_falls_back_to_status_when_there_is_no_trace():
+    from harness.drivers.failed_tasks_check import _render_failure_report
+    from harness.models import FAILED, Task
+
+    task = Task(
+        id="tsk_2",
+        workflow_template="development",
+        created="2026-07-28T19:14:54Z",
+        status=FAILED,
+    )
+
+    assert "- failing step: failed" in _render_failure_report(task)

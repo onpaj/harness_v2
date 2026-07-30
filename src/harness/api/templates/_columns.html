@@ -24,14 +24,16 @@
     `request_changes` keeps its stripe in every column — "it came back" is as
     true mid-workflow as anywhere, and no column name says it.
   #}
+  {% set retired = task | retired_failure %}
   {% set accent = 'is-failed' if task.status == 'failed'
      else 'is-working' if task.lock_id
+     else 'is-retired' if retired
      else 'is-done' if task.last_outcome == 'done' and col.kind == 'terminal'
      else 'is-changes' if task.last_outcome == 'request_changes'
      else '' %}
   <div class="card{% if accent %} {{ accent }}{% endif %}"
        data-repository="{{ task.repository | basename }}"
-       data-search="{{ ((task.data.title or task.id) ~ ' ' ~ task.id ~ ' ' ~ (task.repository | basename) ~ ' ' ~ (task.worktree | basename) ~ ' ' ~ (task.last_outcome or '')) | lower }}"
+       data-search="{{ ((task.data.title or task.id) ~ ' ' ~ task.id ~ ' ' ~ (task.repository | basename) ~ ' ' ~ (task.worktree | basename) ~ ' ' ~ (task.last_outcome or '') ~ ' ' ~ ('retired ' ~ retired.failed_step if retired else '')) | lower }}"
        hx-get="/fragment/task/{{ task.id }}"
        hx-target="#detail"
        hx-swap="innerHTML">
@@ -42,6 +44,11 @@
     </div>
     {% endif %}
     <div class="card__meta">
+      {% if retired %}
+      <span class="badge retired"
+            title="{{ retired.reason or 'the self-healer took this failure over' }}">
+        <span class="badge__step">{{ retired.failed_step }}</span>retired</span>
+      {% endif %}
       {% if task.lock_id %}<span class="badge working">processing</span>{% endif %}
       {#
         The outcome badge is a *step's* verdict, never the task's — a bare
