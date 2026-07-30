@@ -2151,7 +2151,8 @@ def _retention_days() -> int:
     which is handed almost no environment, and editing `harness-run.sh` is
     silently undone by the next install (including an autoupgrade).
 
-    `0` is deliberately valid: it archives every terminal task on the next
+    `0` is deliberately valid: it archives every settled `done`/`healed` task
+    on the next
     sweep, which is the "clear the board now" setting. There is therefore no
     "off" value — `0` is the *most* aggressive setting, and effectively
     disabling the sweep means a very large window (`36500`, a century).
@@ -2653,7 +2654,8 @@ def main(argv: list[str] | None = None) -> int:
         dest="reconcile_poll",
         help="interval (s) for the housekeeping sweeps that archive settled "
         "tasks: a done task whose PR merged, a task whose source issue was "
-        "closed, and any terminal task past HARNESS_RETENTION_DAYS. "
+        "closed, and a settled `done`/`healed` task past HARNESS_RETENTION_DAYS "
+        "(`failed/` is exempt). "
         "Deliberately long — none of them is latency-sensitive, and the first "
         "two poll GitHub, whose rate limits they must respect",
     )

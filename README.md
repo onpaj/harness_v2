@@ -186,7 +186,13 @@ editing the generated `harness-run.sh` is undone by the next `service install`
 | `CLAUDE_CODE_OAUTH_TOKEN` | the claude token above — required for agent steps |
 | `GITHUB_TOKEN` | issue ingestion, PRs, merges; falls back to `gh auth token` |
 | `SLACK_WEBHOOK_URL` | enables a Process's `slack` sink |
+| `JIRA_BASE_URL`, `JIRA_EMAIL`, `JIRA_API_TOKEN` | enable the `jira-issues` action; all three or none |
+| `HARNESS_HOME` | the harness root, when it is not `~/.harness` |
 | `HARNESS_RETENTION_DAYS` | how long a settled task stays on the board (default `2`) |
+
+That is every variable `src/harness` reads as configuration — the same list
+`tests/conftest.py`'s `_HARNESS_ENVIRONMENT` unsets to keep the suite hermetic,
+which `tests/test_hermetic_environment.py` checks in both directions.
 
 **`HARNESS_RETENTION_DAYS`** is the retention window for terminal tasks: a
 `done` or `healed` task is moved to `archived/` — off every board column, still
