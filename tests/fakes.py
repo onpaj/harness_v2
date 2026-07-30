@@ -46,15 +46,26 @@ class FakeTaskControl(TaskControl):
     """Records restart/delete calls; returns configurable results. Lets the
     API be tested without queues."""
 
-    def __init__(self, result: bool = True, delete_result: bool = True) -> None:
+    def __init__(
+        self,
+        result: bool = True,
+        delete_result: bool = True,
+        resume_result: bool = True,
+    ) -> None:
         self._result = result
         self._delete_result = delete_result
+        self._resume_result = resume_result
         self.restarted: list[str] = []
         self.deleted: list[str] = []
+        self.resumed: list[str] = []
 
     def restart(self, task_id: str) -> bool:
         self.restarted.append(task_id)
         return self._result
+
+    def resume(self, task_id: str) -> bool:
+        self.resumed.append(task_id)
+        return self._resume_result
 
     def delete(self, task_id: str) -> bool:
         self.deleted.append(task_id)
