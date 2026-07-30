@@ -1,6 +1,15 @@
 # CHANGELOG
 
 
+## v1.7.0 (2026-07-30)
+
+### Features
+
+- **open-issue**: Guarantee a configured label set on every filed issue
+  ([#147](https://github.com/onpaj/harness_v2/pull/147),
+  [`e922d4b`](https://github.com/onpaj/harness_v2/commit/e922d4b29938cc2bdff80803cbe8614c39482a0c))
+
+
 ## v1.6.0 (2026-07-30)
 
 ### Features
