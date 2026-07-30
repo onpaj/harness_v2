@@ -261,6 +261,40 @@ async def test_run_drives_a_task_all_the_way_to_done(tmp_path):
     assert visited == ["plan", "review", "plan", "review", "end"]
 
 
+async def test_run_stops_promptly_even_on_long_intervals(tmp_path):
+    """Every loop idles on `stop`, never on a blind `sleep(interval)`.
+
+    The intervals here are longer than any test could wait for, and none of them
+    is ever actually awaited: each loop ticks once over empty queues, then parks
+    on `asyncio.wait_for(stop.wait(), timeout=interval)`. `stop.set()` wakes all
+    of them at once, so `run()` returns immediately. Restore a plain
+    `asyncio.sleep(interval)` in `_tick_loop` and this test hangs for ten minutes
+    instead — which is what `cli.serve()`'s `finally: stop.set(); await
+    asyncio.gather(...)` does under launchd, well past its SIGKILL deadline.
+    """
+    seed(tmp_path)
+    harness = build(tmp_path, "default", events=MemoryEventSink(), delay=0.0)
+
+    stop = asyncio.Event()
+    runner = asyncio.create_task(
+        harness.run(
+            poll_interval=600,
+            source_interval=600,
+            reconcile_interval=600,
+            stop=stop,
+        )
+    )
+    # Let every loop tick once and park on its idle wait. A bare `sleep(0)` is
+    # not enough — it only gets `run()` as far as its `gather`, before the loop
+    # bodies have run at all, and every loop would then exit on its `while not
+    # stop.is_set()` guard whatever it idles on. One real timer tick drains all
+    # ready callbacks, so each loop is genuinely waiting when `stop` is set.
+    await asyncio.sleep(0.01)
+    stop.set()
+
+    await asyncio.wait_for(runner, timeout=1)
+
+
 def test_build_without_a_workflow_name_has_no_workflow(tmp_path):
     """FR-6/FR-7: a --no-workflow harness (no workflow name given) still
     builds — queue discovery no longer depends on a mandatory workflow."""
@@ -639,8 +673,19 @@ async def test_run_archives_a_done_task_once_its_pr_is_merged(tmp_path):
     checker = FakeMergeChecker()
     checker.merged.add(("o/r", 1))
     events = MemoryEventSink()
+    # Pinned to the seeded task's own `created` instant (`FakeClock`'s default)
+    # so the always-on retention sweep sees a freshly-settled task and leaves it
+    # alone. On the real `SystemClock` this history-less 2026-07-19 task reads as
+    # ~11 days past the retention window, so the *retention* sweep archived it on
+    # its loop's first tick — satisfying every assertion below with the merge
+    # reconciler never involved at all.
     harness = build(
-        tmp_path, "default", events=events, delay=0.0, merge_checker=checker
+        tmp_path,
+        "default",
+        events=events,
+        delay=0.0,
+        merge_checker=checker,
+        clock=FakeClock(),
     )
     done_task = Task(
         id="tsk_1",
@@ -664,6 +709,12 @@ async def test_run_archives_a_done_task_once_its_pr_is_merged(tmp_path):
 
     assert (tmp_path / "archived" / "tsk_1.json").exists()
     assert not (tmp_path / "done" / "tsk_1.json").exists()
+    archived = Task.from_dict(
+        json.loads((tmp_path / "archived" / "tsk_1.json").read_text())
+    )
+    # It was the *merge reconciler* that archived it, not the always-on retention
+    # sweep — the other reconciler that lands a task in exactly this state.
+    assert archived.history[-1].actor == "merge_reconciler"
     assert harness.projection.get("tsk_1") is not None
     assert all(
         task.id != "tsk_1"
