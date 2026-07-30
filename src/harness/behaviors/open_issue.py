@@ -15,8 +15,11 @@ other purpose:
   the step's own behavior — `inner` runs first, then its artifact is filed.
 - `label` is carried by every issue and is the scope the idempotency search
   reads.
+- `labels` is the guaranteed set — carried by every issue this binding files,
+  whatever the persona did or didn't draft. Config sets the *floor*.
 - `allowed_labels` is the allowlist a draft's own labels are filtered against,
-  so a hallucinated label cannot 422 the whole step.
+  so a hallucinated label cannot 422 the whole step. Config sets the *ceiling*;
+  the agent picks in between.
 
 The repository is derived from the *task*, not from wiring: `slug_for` is an
 injected callable (`task.repository` → `owner/repo`). It is injected rather
@@ -48,6 +51,7 @@ class OpenIssueBehavior(ConsumerBehavior):
         slug_for: Callable[[str | None], str],
         label: str,
         from_step: str | None = None,
+        labels: tuple[str, ...] = (),
         allowed_labels: tuple[str, ...] = (),
         inner: ConsumerBehavior | None = None,
     ) -> None:
@@ -56,6 +60,7 @@ class OpenIssueBehavior(ConsumerBehavior):
         self._slug_for = slug_for
         self._label = label
         self._from_step = from_step
+        self._labels = labels
         self._allowed_labels = allowed_labels
         self._inner = inner
 
@@ -80,9 +85,13 @@ class OpenIssueBehavior(ConsumerBehavior):
             # so `slug_for` is only called once there is something to file.
             repo = self._slug_for(task.repository)
             for draft in drafts:
-                allowed: list[str] = []
+                # The binding's own labels are the floor: always applied, and
+                # implicitly allowed. A draft suggesting one of them is a
+                # no-op, never a *dropped* label — reporting it as dropped
+                # would be a lie, since it is on the issue either way.
+                allowed: list[str] = list(self._labels)
                 for label in draft.labels:
-                    if label in self._allowed_labels:
+                    if label in self._allowed_labels or label in self._labels:
                         allowed.append(label)
                     else:
                         dropped.append(label)
@@ -91,7 +100,7 @@ class OpenIssueBehavior(ConsumerBehavior):
                         repo,
                         title=draft.title,
                         body=draft.body,
-                        labels=tuple(allowed),
+                        labels=tuple(dict.fromkeys(allowed)),
                         marker=marker_for(task.id, draft.title),
                         scope_label=self._label,
                     )
