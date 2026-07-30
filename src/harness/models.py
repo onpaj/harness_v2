@@ -273,3 +273,85 @@ Decision = Union[MoveTo, Finished, Failed]
 
 def append_history(task: Task, entry: HistoryEntry) -> Task:
     return replace(task, history=task.history + (entry,))
+
+
+HEAL_ACTOR = "failed-tasks"
+"""The `failed-tasks` Check's actor name in a task's history. Defined here, in
+the base layer, because it has two readers: the driver that writes the stamp
+(`drivers/failed_tasks_check.py`) and the derivations below that read it back —
+the same one-source-two-readers shape as `github_issues.MARKER_PREFIX`."""
+
+
+@dataclass(frozen=True)
+class FailureTrace:
+    """How a task's most recent failure happened, and where to rewind to so the
+    dispatcher routes it back into the step that failed.
+
+    `resume_status`/`resume_outcome` are the `(status, lastOutcome)` pair the
+    task held just before it was dispatched into `failed_step` — feeding that
+    pair back through `route()` yields `MoveTo(failed_step)` again, which is how
+    a resume avoids naming a queue itself (invariant #3). Both are None when
+    `failed_step` was the workflow's start: `route()` already sends a
+    status-less task to `workflow.start`.
+    """
+
+    failed_step: str
+    reason: str | None
+    resume_status: str | None
+    resume_outcome: str | None
+
+
+def failure_trace(task: Task) -> FailureTrace | None:
+    """The task's most recent failure, or None if it records none usable.
+
+    None in two cases: the history holds no `-> failed` entry at all, and the
+    failing entry's `from_step` is None — a dispatcher failure of a task that
+    was never in a step, where there is no step to return to (that is a
+    `restart`, not a `resume`).
+    """
+    failing = next(
+        (entry for entry in reversed(task.history) if entry.to_step == FAILED), None
+    )
+    if failing is None or failing.from_step is None:
+        return None
+
+    step = failing.from_step
+    entered = next(
+        (entry for entry in reversed(task.history) if entry.to_step == step), None
+    )
+    return FailureTrace(
+        failed_step=step,
+        reason=failing.reason,
+        resume_status=entered.from_step if entered else None,
+        resume_outcome=entered.outcome if entered else None,
+    )
+
+
+def is_retired_failure(task: Task) -> bool:
+    """True when a `done` task got there via the healer, not via the workflow.
+
+    ADR-0024 retires a claimed failure into `done/` with `status = END` and
+    records the healer's involvement only in history — this reads exactly that
+    record: the last entry being the `failed-tasks` actor's `failed -> end`
+    move. Anchored on the *last* entry, so a task that failed earlier and later
+    completed normally is not one of these.
+    """
+    if task.status != END or not task.history:
+        return False
+    last = task.history[-1]
+    return (
+        last.actor == HEAL_ACTOR
+        and last.from_step == FAILED
+        and last.to_step == END
+    )
+
+
+def resumable_failure(task: Task) -> FailureTrace | None:
+    """The rewind target for a task whose *current* terminal position was
+    reached by failing — a healer-retired `done` task, or one still sitting in
+    `failed/`. None for everything else, so an ordinary completion (including
+    one that failed once and was restarted) can never be resumed.
+    """
+    if not (is_retired_failure(task) or task.status == FAILED):
+        return None
+    return failure_trace(task)
