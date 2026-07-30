@@ -241,11 +241,13 @@ step reported the outcome — and it is informative here.
 `detail=f"task {task_id} is not a resumable failure"` when `resume()` returns
 `False`, else the re-rendered fragment.
 
-## Two truth fixes in the same pass
+## One truth fix in the same pass
 
-- `LIFECYCLE_DESCRIPTIONS[DONE_COLUMN]` reads "Reached `end` — the workflow ran
-  to completion." That is false for half the column's contents now. It must name
-  both endings.
+`LIFECYCLE_DESCRIPTIONS[DONE_COLUMN]` already names both endings ("the workflow
+ran to completion, or the self-healer took the failure over. The task's history
+says which") — ADR-0024's own change fixed the column *text* while leaving the
+card that renders under it lying. No work needed there.
+
 - `_diagnosis()` becomes `f"failed at step {trace.failed_step!r}"` off
   `failure_trace(task)`, falling back to the current `task.status` rendering when
   the trace is `None`, so the healer's own prompt stops saying **failed at step
