@@ -266,11 +266,13 @@ def _render_failure_report(task: Task) -> str:
     through the generic `ClaudeCliBehavior`/`compose_prompt`, which has no
     concept of a structured failure report — without this rendered form the
     persona would receive no failure-report content in its prompt at all."""
+    trace = failure_trace(task)
+    step = trace.failed_step if trace is not None else task.status
     lines = [
         "## Failure report",
         f"- task id: {task.id}",
         f"- workflow: {task.workflow_template}",
-        f"- failing step: {task.status or '(none)'}",
+        f"- failing step: {step or '(none)'}",
         f"- repository: {task.repository or '(none)'}",
     ]
     reason = _failure_reason(task)

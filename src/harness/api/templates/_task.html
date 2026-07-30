@@ -38,7 +38,7 @@
         <li><span class="k">status</span><span class="v">{{ task.status or "—" }}</span></li>
         <li><span class="k">lastOutcome</span><span class="v">{{ task.last_outcome or "—" }}</span></li>
         {% if retired %}
-        <li><span class="k">retired</span>
+        <li><span class="k">failure</span>
             <span class="v">failed at <code>{{ retired.failed_step }}</code>{% if retired.reason %} — {{ retired.reason }}{% endif %}</span></li>
         {% endif %}
         {% if task.data.tokens_total %}
