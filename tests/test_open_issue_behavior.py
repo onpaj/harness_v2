@@ -207,6 +207,68 @@ async def test_per_draft_labels_are_filtered_against_the_allowlist():
     assert "invented-label" in result.summary
 
 
+async def test_the_bindings_own_labels_are_carried_by_every_issue():
+    """The floor: config's labels land on each issue whatever the persona
+    drafted — including on a draft carrying no labels at all."""
+    artifacts = MemoryArtifactStore()
+    tracker = MemoryIssueTracker()
+    text = block('{"title": "first"}', '{"title": "second", "labels": ["tech-debt"]}')
+    behavior = make(
+        tracker=tracker,
+        artifacts=artifacts,
+        labels=("harness:todo", "needs-triage"),
+        allowed_labels=("tech-debt",),
+        inner=StubInner(artifacts=artifacts, text=text),
+    )
+
+    await behavior.run(task())
+
+    assert tracker.opened[0]["labels"] == ("harness:todo", "needs-triage", "arch-review")
+    assert tracker.opened[1]["labels"] == (
+        "harness:todo",
+        "needs-triage",
+        "tech-debt",
+        "arch-review",
+    )
+
+
+async def test_a_guaranteed_label_is_implicitly_allowed_and_never_doubled():
+    """A persona drafting a label config already guarantees is a no-op — it is
+    on the issue either way, so reporting it as dropped would be a lie."""
+    artifacts = MemoryArtifactStore()
+    tracker = MemoryIssueTracker()
+    text = block('{"title": "A finding", "labels": ["harness:todo"]}')
+    behavior = make(
+        tracker=tracker,
+        artifacts=artifacts,
+        labels=("harness:todo",),
+        inner=StubInner(artifacts=artifacts, text=text),
+    )
+
+    result = await behavior.run(task())
+
+    assert tracker.opened[0]["labels"] == ("harness:todo", "arch-review")
+    assert "dropped" not in result.summary
+
+
+async def test_with_no_allowlist_the_binding_labels_still_apply():
+    """The two lists are independent: withholding the agent's vocabulary does
+    not withhold the operator's own guaranteed set."""
+    artifacts = MemoryArtifactStore()
+    tracker = MemoryIssueTracker()
+    behavior = make(
+        tracker=tracker,
+        artifacts=artifacts,
+        labels=("harness:todo",),
+        inner=StubInner(artifacts=artifacts),
+    )
+
+    result = await behavior.run(task())
+
+    assert tracker.opened[0]["labels"] == ("harness:todo", "arch-review")
+    assert "tech-debt" in result.summary  # the draft's own label, dropped
+
+
 async def test_with_no_allowlist_no_per_draft_label_gets_through():
     artifacts = MemoryArtifactStore()
     tracker = MemoryIssueTracker()

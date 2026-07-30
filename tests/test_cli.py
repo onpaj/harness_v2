@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from harness.app import HarnessLayout
+from harness.app import HarnessLayout, UnknownFinisherKind
 from harness.behaviors.merge_pr import MergePrBehavior
 from harness.cli import (
     AGENT_PERSONAS,
@@ -231,6 +231,65 @@ def test_run_wires_open_issue_finisher_and_tracker(monkeypatch, tmp_path):
     # exactly like it would for any other GitHub-touching driver.
     with pytest.raises(IssueError):
         behavior._slug_for("some-unregistered-repo-name")
+
+
+def test_the_open_issue_factory_reads_both_label_lists_off_the_binding(
+    monkeypatch, tmp_path
+):
+    """`labels` (the guaranteed floor) and `allowed_labels` (the ceiling on
+    the persona's own suggestions) are independent binding config, wired the
+    same way `label`/`from_step` are."""
+    main(["init", "--root", str(tmp_path)])
+    captured = {}
+
+    def fake_build(*args, **kwargs):
+        captured["finishers"] = kwargs.get("finishers")
+        return object()
+
+    async def fake_serve(harness, port, poll_interval, source_interval=30.0, pr_poll_interval=0.0, reconcile_interval=300.0, registry=None):
+        pass
+
+    monkeypatch.setattr("harness.cli.build", fake_build)
+    monkeypatch.setattr("harness.cli.serve", fake_serve)
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    assert main(["run", "--root", str(tmp_path)]) == 0
+
+    behavior = captured["finishers"]["open-issue"](
+        "file-issue",
+        {**HEAL_FINISHER_CONFIG, "labels": ["harness:todo"], "allowed_labels": ["bug"]},
+        lambda: None,
+    )
+    assert behavior._labels == ("harness:todo",)
+    assert behavior._allowed_labels == ("bug",)
+
+
+@pytest.mark.parametrize("bad", ["harness:todo", ["ok", ""], ["ok", 7], "", {}])
+def test_a_malformed_labels_list_is_a_plain_value_error(monkeypatch, tmp_path, bad):
+    """ADR-0022's rule, unchanged: a known kind whose config is wrong is a
+    plain `ValueError`, so `_validate_served_workflows` drops that one
+    workflow with a warning rather than failing the run. A bare string is
+    rejected outright — iterating it into characters is the likeliest way to
+    get this wrong by hand."""
+    main(["init", "--root", str(tmp_path)])
+    captured = {}
+
+    def fake_build(*args, **kwargs):
+        captured["finishers"] = kwargs.get("finishers")
+        return object()
+
+    async def fake_serve(harness, port, poll_interval, source_interval=30.0, pr_poll_interval=0.0, reconcile_interval=300.0, registry=None):
+        pass
+
+    monkeypatch.setattr("harness.cli.build", fake_build)
+    monkeypatch.setattr("harness.cli.serve", fake_serve)
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    assert main(["run", "--root", str(tmp_path)]) == 0
+
+    with pytest.raises(ValueError, match="labels") as excinfo:
+        captured["finishers"]["open-issue"](
+            "file-issue", {**HEAL_FINISHER_CONFIG, "labels": bad}, lambda: None
+        )
+    assert not isinstance(excinfo.value, UnknownFinisherKind)
 
 
 def test_a_binding_without_a_label_is_dropped_from_the_served_set(monkeypatch, tmp_path, capsys):
