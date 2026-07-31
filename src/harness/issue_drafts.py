@@ -6,10 +6,13 @@ block holding an **array** of issue drafts. This module turns that text into
 
 Two deliberate asymmetries:
 
-- **An empty artifact is zero drafts, not an error.** "The step wrote no file"
-  is a legitimate report (the healer's `skip` path). A *non-empty* artifact
-  with no readable block is an error — a persona that wrote a report but
-  malformed its block is a real fault worth surfacing.
+- **An empty artifact, an explicit `[]`, and a report with no fenced block at
+  all are all zero drafts, not an error.** "The step wrote no file", and "the
+  step wrote a report but concluded there was nothing to file", are both
+  legitimate (the healer's `skip` path, or a clean review). Only a block that
+  *is present* but fails to decode, or decodes to something other than an
+  array, is an error — a persona that attempted a machine-readable block and
+  garbled it is a real fault worth surfacing.
 - **The last fenced block wins**, mirroring `_extract_verdict`'s rule for the
   agent's final message, so an example earlier in the report cannot be
   mistaken for the findings.
@@ -33,12 +36,17 @@ from hashlib import sha1
 
 _OPENER = "```json"
 
+# Distinguishes "no opener anywhere" from every real decoded value, including
+# a legitimate bare `null` — `None` cannot be used for that since `raw_decode`
+# could itself return it.
+_NO_BLOCK = object()
+
 
 def _decode_last_block(artifact: str) -> object:
     """The decoded value of the artifact's last fenced json block.
 
-    Raises `DraftError` when there is no block, or when the last one that
-    could be a block does not decode.
+    Returns `_NO_BLOCK` when there is no opener at all. Raises `DraftError`
+    when an opener is found but none of the candidates decode.
 
     The closing fence is deliberately *not* what ends the block — JSON itself
     is. A draft's `body` is markdown, and markdown quotes things in fenced
@@ -53,15 +61,21 @@ def _decode_last_block(artifact: str) -> object:
     which keeps the documented "the last fenced block wins" rule while
     stepping back past an opener that is really part of an earlier draft's
     body — such an opener decodes to nothing, since it starts mid-string.
+
+    The opener is matched case-insensitively (`` ```JSON `` counts) by
+    scanning a lower-cased copy of the artifact; offsets found there apply
+    unchanged to the original text since lower-casing ASCII letters never
+    changes the string's length.
     """
     decoder = json.JSONDecoder()
+    lowered = artifact.lower()
     starts = [
         index + len(_OPENER)
-        for index in range(len(artifact))
-        if artifact.startswith(_OPENER, index)
+        for index in range(len(lowered))
+        if lowered.startswith(_OPENER, index)
     ]
     if not starts:
-        raise DraftError("the artifact has no fenced json block of issue drafts")
+        return _NO_BLOCK
 
     failure = None
     for start in reversed(starts):
@@ -99,13 +113,17 @@ class DraftError(ValueError):
 def parse_drafts(artifact: str) -> list[IssueDraft]:
     """The drafts in `artifact`'s last fenced json block.
 
-    An empty/blank artifact yields `[]`. Anything else that cannot be read as
-    an array of `{title, body?, labels?}` objects raises `DraftError`.
+    An empty/blank artifact, or one with no fenced json block at all, yields
+    `[]` — both are "nothing to report", not a fault. A block that *is*
+    present but cannot be read as an array of `{title, body?, labels?}`
+    objects raises `DraftError`.
     """
     if not artifact.strip():
         return []
 
     raw = _decode_last_block(artifact)
+    if raw is _NO_BLOCK:
+        return []
 
     if not isinstance(raw, list):
         raise DraftError(

@@ -44,9 +44,29 @@ def test_an_empty_artifact_is_zero_drafts_not_an_error():
     assert parse_drafts("   \n") == []
 
 
-def test_a_report_with_no_fenced_block_is_an_error():
-    with pytest.raises(DraftError, match="no fenced json block"):
-        parse_drafts("# A report with no machine-readable block\n")
+def test_a_report_with_no_fenced_block_is_zero_drafts_not_an_error():
+    """A clean review that concludes in prose, with no ```json block at all,
+    is 'nothing to file' — same bucket as an empty artifact or an explicit
+    `[]`, not a malformed-output error."""
+    assert parse_drafts("# A report with no machine-readable block\n") == []
+
+
+def test_an_uppercase_opener_tag_is_matched():
+    assert parse_drafts('```JSON\n[{"title": "ok"}]\n```') == [
+        IssueDraft(title="ok", body="", labels=())
+    ]
+
+
+def test_a_mixed_case_opener_tag_is_matched():
+    assert parse_drafts('```Json\n[{"title": "ok"}]\n```') == [
+        IssueDraft(title="ok", body="", labels=())
+    ]
+
+
+def test_a_fence_indented_or_followed_by_blank_lines_still_parses():
+    artifact = '  ```json\n  [{"title": "ok"}]\n  ```\n\n\n'
+
+    assert [d.title for d in parse_drafts(artifact)] == ["ok"]
 
 
 def test_a_block_that_is_not_an_array_is_an_error():
