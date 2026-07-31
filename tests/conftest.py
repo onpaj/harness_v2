@@ -45,6 +45,7 @@ if str(_SRC) not in sys.path:
 _HARNESS_ENVIRONMENT = (
     "GITHUB_TOKEN",
     "HARNESS_HOME",
+    "HARNESS_RETENTION_DAYS",
     "JIRA_API_TOKEN",
     "JIRA_BASE_URL",
     "JIRA_EMAIL",
