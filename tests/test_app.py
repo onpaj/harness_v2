@@ -243,7 +243,7 @@ async def test_resolver_task_flows_through_unblock_and_land_to_done(tmp_path):
     assert unblock_entries[0].summary == "merged main cleanly, nothing to fix"
 
 
-def _unblock_behavior(tmp_path, *, spec):
+def _unblock_behavior(tmp_path, *, spec, pr_labeller=None):
     """The `UnblockPrBehavior` `build()` wires onto the `unblock` step."""
     from harness.drivers.memory import MemoryWorkspace
 
@@ -265,6 +265,7 @@ def _unblock_behavior(tmp_path, *, spec):
         forge=MemoryForge(),
         catalog=catalog,
         delay=0.0,
+        pr_labeller=pr_labeller,
     )
     consumer = next(c for c in harness.consumers if c.step == "unblock")
     return consumer.behavior
@@ -291,6 +292,31 @@ def test_unblock_behavior_honours_a_per_persona_timeout(tmp_path):
     )
 
     assert behavior._timeout == 123.0
+
+
+def test_unblock_behavior_is_wired_with_the_give_up_labeller(tmp_path):
+    """ADR-0026: `stuck` moves no head sha, so the check's attempt budget can
+    never label the PR — the behavior does it, and only if `build()` hands it
+    the capability `cli.py` closes over the GitHub client."""
+    calls: list[tuple[str, int, str]] = []
+
+    behavior = _unblock_behavior(
+        tmp_path,
+        spec=AgentSpec(name="unblock", prompt="p"),
+        pr_labeller=lambda repo, number, label: calls.append((repo, number, label)),
+    )
+
+    assert behavior._pr_labeller is not None
+    behavior._pr_labeller("o/r", 42, "harness:needs-human")
+    assert calls == [("o/r", 42, "harness:needs-human")]
+
+
+def test_unblock_behavior_without_a_labeller_is_wired_with_none(tmp_path):
+    """The no-`GITHUB_TOKEN` run: no labeller, and no crash — the check that
+    mints these tasks is skipped on the same condition."""
+    behavior = _unblock_behavior(tmp_path, spec=AgentSpec(name="unblock", prompt="p"))
+
+    assert behavior._pr_labeller is None
 
 
 def test_build_without_sources_has_no_pollers(tmp_path):

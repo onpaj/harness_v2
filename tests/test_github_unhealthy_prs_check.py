@@ -5,7 +5,10 @@ from __future__ import annotations
 from pathlib import Path
 
 from harness.drivers.github_client import CheckRun, FakeGithubClient, PullRequestInfo
-from harness.drivers.github_unhealthy_prs_check import GithubUnhealthyPrsCheck
+from harness.drivers.github_unhealthy_prs_check import (
+    DEFAULT_GIVE_UP_LABEL,
+    GithubUnhealthyPrsCheck,
+)
 from harness.drivers.memory import MemoryRepositoryRegistry
 
 
@@ -419,3 +422,93 @@ def test_no_label_is_written_for_a_behind_or_clean_pr():
 
     for pull in client.list_pull_requests("o/r"):
         assert pull.labels == ()
+
+
+def test_the_fork_guard_compares_the_two_slugs_case_insensitively():
+    """`slug` comes verbatim from `remote.origin.url`, `head_repo` from
+    GitHub's canonical `full_name`. A clone made with
+    `git clone git@github.com:OnPaj/Harness_v2.git` yields a differently-cased
+    local slug, and a case-sensitive compare then fails the guard for *every*
+    PR of that repo — no observations, no warning, a green board. GitHub repo
+    paths are case-insensitive, so every API call keeps working, which is
+    exactly what makes it invisible."""
+    registry = MemoryRepositoryRegistry({"harness_v2": Path("/repos/harness_v2")})
+    client = FakeGithubClient([])
+    client.add_pull_request(_pr(90, "dirty", sha="s90", head_repo="onpaj/harness_v2"))
+    check = GithubUnhealthyPrsCheck(
+        client=client, registry=registry, slug_of=lambda path: "OnPaj/Harness_v2"
+    )
+
+    (obs,) = check.evaluate()
+
+    assert obs.data["source"]["pr"] == 90
+
+
+def test_a_genuine_fork_is_still_skipped_when_the_casing_differs():
+    registry = MemoryRepositoryRegistry({"harness_v2": Path("/repos/harness_v2")})
+    client = FakeGithubClient([])
+    client.add_pull_request(
+        _pr(91, "dirty", sha="s91", head_repo="Contributor/Harness_v2")
+    )
+    check = GithubUnhealthyPrsCheck(
+        client=client, registry=registry, slug_of=lambda path: "OnPaj/Harness_v2"
+    )
+
+    assert check.evaluate() == []
+
+
+# --- the give-up label travels with the task (ADR-0026) ----------------------
+
+
+def test_the_observation_carries_the_give_up_label_the_check_would_read():
+    """The agent's give-up is the only thing that can reach `harness:needs-human`
+    on the `stuck` path — the head sha never moves there, so no attempt is ever
+    spent and the check would re-mint the same task forever. The behavior
+    applies the label, and it must be *this* check's configured one, not a
+    constant duplicated in the wiring."""
+    client = FakeGithubClient([])
+    client.add_pull_request(_pr(92, "dirty", sha="s92"))
+
+    (obs,) = _check(client, give_up_label="team:needs-human").evaluate()
+
+    assert obs.data["give_up_label"] == "team:needs-human"
+
+
+def test_the_give_up_label_defaults_to_the_module_constant():
+    client = FakeGithubClient([])
+    client.add_pull_request(_pr(93, "dirty", sha="s93"))
+
+    (obs,) = _check(client).evaluate()
+
+    assert obs.data["give_up_label"] == DEFAULT_GIVE_UP_LABEL
+
+
+# --- an attempt is spent only once the brief is actually assembled -----------
+
+
+def test_a_log_fetch_failure_spends_no_attempt_and_is_retried():
+    """`check_run_log` is a network call that can 5xx. Bumping the label (and
+    marking the PR seen) before it means a transient failure burns an attempt
+    with zero work done and is not retried until the next restart."""
+    fail = {"now": True}
+
+    class Flaky(FakeGithubClient):
+        def check_run_log(self, repo, check_run_id):
+            if fail["now"]:
+                raise RuntimeError("502 Bad Gateway")
+            return super().check_run_log(repo, check_run_id)
+
+    client = Flaky([])
+    client.add_pull_request(_pr(94, "unstable", sha="s94"))
+    client.add_check_run("s94", CheckRun(1, "pytest", "failure", "https://gh/run/1"))
+    client.set_check_run_log(1, "boom")
+    check = _check(client)
+
+    assert check.evaluate() == []
+    assert client.list_pull_requests("o/r")[0].labels == ()
+
+    fail["now"] = False
+    (obs,) = check.evaluate()
+
+    assert obs.data["problem"]["attempt"] == 1
+    assert client.list_pull_requests("o/r")[0].labels == ("harness:autofix-1@s94",)

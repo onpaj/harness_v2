@@ -14,10 +14,21 @@ thing this behavior knows that the check could not is whether the merge it just
 ran actually conflicts — the check's flag was true at *scan* time, and the base
 moves — so a disagreement between the two is amended onto the brief before the
 prompt is composed.
+
+The other thing only this side knows is that the agent **gave up**. `stuck` is a
+first-class answer, and it pushes nothing — so the head sha never moves, so the
+check never spends an attempt, so its `harness:needs-human` budget can never end
+the PR. This behavior therefore applies that label itself (`data`-carried,
+through an injected `PrLabeller` — `behaviors/` may not import `drivers/`), which
+both tells a human and makes the check skip the PR forever. Without it the
+settled task is archived by retention, drops out of `SourcePoller._seen`'s
+seeded set, and the identical task is re-minted on the next restart — every
+retention window, indefinitely. See ADR-0026.
 """
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import replace
 from typing import Any
 
@@ -50,6 +61,34 @@ CONFLICT_GONE = (
 the conflict since, so the agent would otherwise hunt for markers that are not
 there."""
 
+GIVE_UP_LABEL_KEY = "give_up_label"
+"""Where the check leaves the label this behavior applies when the agent gives
+up. A plain `data` key, like `branch`/`body`/`problem`, rather than an import:
+`behaviors/` may not import `drivers/` (invariant 1), and the *value* travels
+in the task precisely so an operator renaming
+`processes/unblock-pr.json`'s `give_up_label` renames both halves at once."""
+
+PrLabeller = Callable[[str, int, str], None]
+"""`(repo_slug, pr_number, label) -> None`, injected by wiring.
+
+Applying a label needs a `GithubClient`, which is a driver — so this behavior
+takes the *capability* rather than the client, exactly as `OpenIssueBehavior`
+takes an injected `slug_for`. `cli.py` closes one over the client it already
+built when `GITHUB_TOKEN` is set, and passes `None` otherwise: without a token
+the `github-unhealthy-prs` check is skipped too, so there is no task to give up
+on and nothing to re-mint."""
+
+
+class UnblockPrError(RuntimeError):
+    """A task routed to `unblock` that this behavior cannot read.
+
+    Every task `GithubUnhealthyPrsCheck` mints carries `data.source.base` —
+    the branch the PR targets, which the merge needs. A hand-submitted or
+    hand-edited one may not, and a bare `KeyError: 'base'` names neither the
+    task nor the shape it should have had. `LandingBehavior` avoids the
+    question entirely by reading its base through `Forge.base_branch(task)`;
+    this behavior has no forge, so it says so itself."""
+
 
 class UnblockPrBehavior(ConsumerBehavior):
     def __init__(
@@ -62,6 +101,7 @@ class UnblockPrBehavior(ConsumerBehavior):
         events: EventSink,
         timeout: float = 600.0,
         workflows: WorkflowRepository | None = None,
+        pr_labeller: PrLabeller | None = None,
     ) -> None:
         self._clock = clock
         self._workspace = workspace
@@ -70,11 +110,14 @@ class UnblockPrBehavior(ConsumerBehavior):
         self._events = events
         self._timeout = timeout
         self._workflows = workflows
+        self._pr_labeller = pr_labeller
 
     async def run(self, task: Task) -> BehaviorResult:
         step = task.status or ""
+        # Read before attaching: an unreadable task must fail saying which key
+        # it wanted, not after a worktree has been created for it.
+        base = _base_branch(task)
         handle = self._workspace.attach(task)
-        base = task.data["source"]["base"]
         problem = task.data.get("problem") or {}
         failing = problem.get("failing_checks") or []
 
@@ -130,15 +173,38 @@ class UnblockPrBehavior(ConsumerBehavior):
             on_output=on_output,
         )
 
-        if conflicted and run.outcome != DONE:
+        summary = run.summary
+        if run.outcome != DONE:
             # The agent gave up (`stuck`: "you could not fix this from what you
-            # were given — push nothing"). Committing anyway would turn its
-            # unresolved conflict markers into a two-parent merge commit on a
-            # branch that may belong to a human — the exact thing landing
-            # already refuses to do when it has no agent to resolve a conflict
-            # (`LandingBehavior`, invariant 12). Abandon the merge instead.
-            handle.abort_merge()
-            return BehaviorResult(run.outcome, run.summary)
+            # were given — push nothing"). Tell a human, because nothing else
+            # will: this path pushes nothing, so the head sha never moves, so
+            # the check never spends an attempt and its budget can never reach
+            # `harness:needs-human` on its own. The label is also what makes
+            # the give-up *terminal* — the check's give-up guard skips a
+            # labelled PR on every later tick, which is what stops the settled
+            # task being re-minted every time retention archives it (ADR-0026).
+            summary = self._label_give_up(task, run.summary)
+            if conflicted:
+                # Committing would turn the agent's unresolved conflict markers
+                # into a two-parent merge commit on a branch that may belong to
+                # a human — the exact thing landing already refuses to do when
+                # it has no agent to resolve a conflict (`LandingBehavior`,
+                # invariant 12). Abandon the merge instead.
+                #
+                # A *clean* merge is deliberately not aborted here, and the
+                # reason is not that there is nothing to abandon — `merge()`
+                # runs `git merge --no-commit --no-ff`, so a clean, non-empty
+                # merge does leave `MERGE_HEAD` and a staged merge in progress,
+                # and the fall-through below commits it. It is that
+                # `abort_merge` cannot tell that case from the far commoner one
+                # where the base was already merged and git reported "Already
+                # up to date" — no `MERGE_HEAD`, and `git merge --abort` then
+                # exits non-zero and fails a task whose only sin was a red
+                # check. The two-parent commit that shape produces is local
+                # only: `stuck` routes straight to `end`, nothing pushes, and
+                # the next task's worktree is `reset --hard origin/<branch>`.
+                handle.abort_merge()
+                return BehaviorResult(run.outcome, summary)
 
         # The worker commits, never the agent (invariant 9). `git commit` with
         # MERGE_HEAD present produces the two-parent merge commit — no special
@@ -148,8 +214,56 @@ class UnblockPrBehavior(ConsumerBehavior):
         # persisted anywhere on the success path: it stays untracked in the
         # worktree, and `land`'s reattach (`GitWorkspace.attach`, invariant 31)
         # ends in an unconditional `clean -fd` that deletes it. See ADR-0026.
+        #
+        # Reached on a give-up too, when the merge was clean: nothing to
+        # abandon that this behavior can safely detect (see above), and the
+        # branch carries the agent's own work in progress. The commit is local
+        # — `stuck` routes to `end` and nothing pushes it.
         handle.commit(run.summary, exclude=(".artifacts",))
-        return BehaviorResult(run.outcome, run.summary)
+        return BehaviorResult(run.outcome, summary)
+
+    def _label_give_up(self, task: Task, summary: str) -> str:
+        """Apply the give-up label to the task's pull request, best-effort.
+
+        Best-effort, not fatal: the agent's verdict is real work already done,
+        and a transient 5xx on one label call must not turn it into a failed
+        task. The cost of swallowing it is that the check re-mints this task
+        once retention archives the settled one — the very loop the label
+        exists to close — so the failure is written into the summary, where it
+        lands in the task's history and on the board rather than in a log
+        nobody reads. A no-op when nothing here is configured: no labeller
+        wired (no `GITHUB_TOKEN`), no label on the task (hand-submitted), or no
+        pull request to label.
+        """
+        label = task.data.get(GIVE_UP_LABEL_KEY)
+        source = task.data.get("source") or {}
+        repo, number = source.get("repo"), source.get("pr")
+        if self._pr_labeller is None or not label or not repo or number is None:
+            return summary
+        try:
+            self._pr_labeller(repo, number, label)
+        except Exception as error:  # noqa: BLE001 - a label is not the work
+            return (
+                f"{summary} (could not apply {label} to {repo}#{number}: "
+                f"{type(error).__name__}: {error})"
+            )
+        return summary
+
+
+def _base_branch(task: Task) -> str:
+    """The branch the pull request targets, which the merge needs.
+
+    Named rather than subscripted: `LandingBehavior` reads its base through
+    `Forge.base_branch(task)` and this behavior has no forge, so an
+    unreadable task must still say which key it wanted."""
+    base = (task.data.get("source") or {}).get("base")
+    if not base:
+        raise UnblockPrError(
+            f"task {task.id}: no base branch to merge — data['source']['base'] "
+            "is missing. Every task GithubUnhealthyPrsCheck mints carries it; a "
+            "hand-submitted task routed to this step must supply it too."
+        )
+    return base
 
 
 def _briefed(task: Task, problem: dict[str, Any], conflicted: bool) -> Task:

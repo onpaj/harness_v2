@@ -2356,7 +2356,14 @@ def test_init_also_writes_unblock_pr_workflow_and_unblock_agent(tmp_path):
     assert not (tmp_path / "agents" / "land.json").exists()
 
 
-def test_init_writes_the_unblock_pr_process_pointed_at_every_open_pr(tmp_path):
+def test_init_writes_the_unblock_pr_process_withheld_to_harness_branches(tmp_path):
+    """A fresh install must not start pushing to branches a human authored.
+
+    The check can work any open PR (ADR-0026) and widening it is one field of
+    this file — but a default `harness init` plus a `GITHUB_TOKEN` would
+    otherwise begin merging into, committing to and pushing every unhealthy
+    open PR in every registered repo from the first tick, with no withholding
+    at all. `automerge.json`'s seeded blast radius is the same `harness/`."""
     assert main(["init", "--root", str(tmp_path)]) == 0
 
     process = json.loads((tmp_path / "processes" / "unblock-pr.json").read_text())
@@ -2365,7 +2372,12 @@ def test_init_writes_the_unblock_pr_process_pointed_at_every_open_pr(tmp_path):
     # Per-state, or the check's one-observation-per-PR would collapse onto a
     # single task per tick.
     assert process["dedup"] == "per-state"
-    assert process["action"]["params"]["head_prefix"] == ""
+    assert process["action"]["params"]["head_prefix"] == "harness/"
+    automerge = json.loads((tmp_path / "processes" / "automerge.json").read_text())
+    assert (
+        process["action"]["params"]["head_prefix"]
+        == automerge["action"]["params"]["head_prefix"]
+    )
     assert process["action"]["params"]["skip_label"] == "harness:no-autofix"
     assert process["action"]["params"]["max_attempts"] == 3
 

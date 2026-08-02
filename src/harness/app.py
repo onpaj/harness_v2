@@ -9,7 +9,7 @@ from pathlib import Path
 
 from harness.behaviors.agent import ClaudeCliBehavior
 from harness.behaviors.landing import LandingBehavior
-from harness.behaviors.unblock_pr import UnblockPrBehavior
+from harness.behaviors.unblock_pr import PrLabeller, UnblockPrBehavior
 from harness.behaviors.verify import VerifyBehavior
 from harness.consumer import Consumer
 from harness.dispatcher import Dispatcher
@@ -528,6 +528,7 @@ def build(
     command_runner: CommandRunner | None = None,
     dropped_workflows: set[str] | None = None,
     retention_days: int = DEFAULT_RETENTION_DAYS,
+    pr_labeller: PrLabeller | None = None,
 ) -> Harness:
     layout = HarnessLayout(Path(root))
     events = events or StdoutEventSink()
@@ -799,6 +800,13 @@ def build(
                 # `unblock-pr` workflow's authored `done`/`stuck` hints and
                 # `descriptions.unblock` never reach the agent.
                 workflows=served_workflows,
+                # The give-up label capability (ADR-0026). `None` here is the
+                # no-`GITHUB_TOKEN` run, where the check that mints these
+                # tasks is skipped anyway — so nothing gives up and nothing is
+                # re-minted. Injected as a callable rather than as a client
+                # because `behaviors/` may not import `drivers/` (invariant 1),
+                # the same shape `OpenIssueBehavior` takes `slug_for` in.
+                pr_labeller=pr_labeller,
             )
         if catalog is not None:
             # Missing spec → AgentNotFound surfaces already at build time (fail fast).

@@ -14,7 +14,9 @@ import json
 from pathlib import Path
 
 from harness.drivers.github_client import CheckRun, FakeGithubClient, PullRequestInfo
+from harness.behaviors.unblock_pr import UnblockPrBehavior
 from harness.drivers.memory import (
+    FakeAgentRunner,
     FakeClock,
     MemoryArtifactStore,
     MemoryEventSink,
@@ -23,6 +25,7 @@ from harness.drivers.memory import (
     MemoryWorkspace,
 )
 from harness.models import DONE, BehaviorResult, Task
+from harness.ports.agent import AgentRun, AgentSpec
 from harness.ports.behavior import ConsumerBehavior
 
 MAX_STEPS = 1000
@@ -87,7 +90,9 @@ def _pr(number, sha, *, state, labels=(), head_repo=SLUG):
     )
 
 
-async def _run(tmp_path, prs, check_runs=(), logs=(), outcomes=None):
+async def _run(
+    tmp_path, prs, check_runs=(), logs=(), outcomes=None, behavior=None, client=None
+):
     from harness.cli import _process_check_factories
     import harness.drivers.github_unhealthy_prs_check as up_mod
     from harness.app import HarnessLayout, build
@@ -95,7 +100,7 @@ async def _run(tmp_path, prs, check_runs=(), logs=(), outcomes=None):
     layout = HarnessLayout(tmp_path)
     layout.workflows.mkdir(parents=True, exist_ok=True)
     (layout.workflows / "unblock-pr.json").write_text(json.dumps(UNBLOCK_WORKFLOW))
-    (tmp_path / "processes").mkdir()
+    (tmp_path / "processes").mkdir(exist_ok=True)
     (tmp_path / "processes" / "resolve-failing-pr.json").write_text(
         json.dumps(
             {
@@ -111,7 +116,7 @@ async def _run(tmp_path, prs, check_runs=(), logs=(), outcomes=None):
         )
     )
 
-    client = FakeGithubClient([])
+    client = client if client is not None else FakeGithubClient([])
     for pr in prs:
         client.add_pull_request(pr)
     for sha, run in check_runs:
@@ -123,7 +128,7 @@ async def _run(tmp_path, prs, check_runs=(), logs=(), outcomes=None):
     original_slug = up_mod.github_slug
     up_mod.github_slug = lambda path: SLUG  # type: ignore[assignment]
 
-    behavior = CapturingBehavior(outcomes)
+    behavior = behavior if behavior is not None else CapturingBehavior(outcomes)
     harness = None
     try:
         args = argparse.Namespace(worktree_root=None, github_label="harness:todo")
@@ -226,3 +231,78 @@ async def test_an_opted_out_pr_is_not_touched_at_all(tmp_path):
 
     assert behavior.seen == []
     assert client.list_pull_requests(SLUG)[0].labels == ("harness:no-autofix",)
+
+
+# --- a give-up is terminal, and stays terminal across archival ---------------
+
+
+def _unblock_behavior(client, outcome="stuck"):
+    """The real `UnblockPrBehavior`, wired the way `build()` wires it — with the
+    give-up labeller closed over the same client the check reads."""
+    runner = FakeAgentRunner(runs={"unblock": AgentRun(outcome, f"unblock: {outcome}")})
+    behavior = UnblockPrBehavior(
+        clock=FakeClock("2026-07-31T10:00:00Z"),
+        workspace=MemoryWorkspace(),
+        runner=runner,
+        spec=AgentSpec(name="unblock", prompt="unblock the PR"),
+        events=MemoryEventSink(),
+        pr_labeller=client.add_label,
+    )
+    return behavior, runner
+
+
+async def test_a_stuck_pr_is_labelled_for_a_human(tmp_path):
+    """`stuck` pushes nothing, so the head sha never moves and the check's
+    attempt budget can never end this PR. The label is the whole
+    externally-visible half of the containment — without it the PR carries
+    `harness:autofix-1@<sha>` and no signal to anyone."""
+    client = FakeGithubClient([])
+    behavior, runner = _unblock_behavior(client)
+
+    await _run(
+        tmp_path,
+        [_pr(20, "s20", state="unstable")],
+        check_runs=[("s20", CheckRun(1, "pytest", "failure", "https://gh/run/1"))],
+        logs=[(1, "boom")],
+        client=client,
+        behavior=behavior,
+    )
+
+    assert len(runner.calls) == 1
+    assert "harness:needs-human" in client.list_pull_requests(SLUG)[0].labels
+
+
+async def test_a_stuck_pr_is_not_re_observed_after_its_task_is_archived(tmp_path):
+    """The loop this closes: `stuck` settles into `done/`, `RetentionReconciler`
+    archives it after `HARNESS_RETENTION_DAYS`, and `_seed_pollers` seeds
+    `SourcePoller._seen` from `inbox`/step queues/`done`/`failed` — never
+    `archived/`. So the next restart re-minted the identical `slug:pr:sha` task
+    and spent another agent run on the same unchanged PR, every retention
+    window, forever. The give-up label is what makes the check skip it instead.
+    """
+    client = FakeGithubClient([])
+    behavior, runner = _unblock_behavior(client)
+    prs = [_pr(21, "s21", state="unstable")]
+    check_runs = [("s21", CheckRun(1, "pytest", "failure", "https://gh/run/1"))]
+
+    await _run(
+        tmp_path, prs, check_runs=check_runs, logs=[(1, "boom")],
+        client=client, behavior=behavior,
+    )
+    assert len(runner.calls) == 1
+
+    # Retention archives the settled task: off the board, out of every queue
+    # `_seed_pollers` reads. The PR itself is untouched and still unhealthy.
+    settled = sorted((tmp_path / "done").glob("tsk_*.json"))
+    assert len(settled) == 1
+    (tmp_path / "archived").mkdir(exist_ok=True)
+    settled[0].rename(tmp_path / "archived" / settled[0].name)
+
+    # A restart: a fresh harness, a fresh check with an empty `_seen`, the same
+    # root and the same still-broken PR.
+    second, second_runner = _unblock_behavior(client)
+    await _run(tmp_path, [], client=client, behavior=second)
+
+    assert second_runner.calls == []
+    assert sorted((tmp_path / "done").glob("tsk_*.json")) == []
+    assert sorted((tmp_path / "inbox").glob("tsk_*.json")) == []

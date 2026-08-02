@@ -52,7 +52,15 @@ adds this label; nothing else about the process needs to change."""
 
 DEFAULT_GIVE_UP_LABEL = "harness:needs-human"
 """Stamped once the attempt budget is spent, and read on every later tick as
-"stop touching this". Removing it by hand is how an operator re-arms a PR."""
+"stop touching this". Removing it by hand is how an operator re-arms a PR.
+
+There are **two** ways a PR reaches it, and only one of them is the budget.
+The other is the agent itself reporting `stuck` — a first-class answer the
+`unblock` persona is explicitly told to give — which routes straight to `end`
+after pushing nothing, so the head sha never moves and no attempt is ever
+spent. `UnblockPrBehavior` therefore applies this label itself on any non-`done`
+outcome, reading it off the task (`data["give_up_label"]`, stamped by
+`_triage`), and the give-up guard in `_triage` is what makes it stick."""
 
 DEFAULT_MAX_ATTEMPTS = 3
 DEFAULT_LOG_TAIL_LINES = 200
@@ -201,9 +209,21 @@ class GithubUnhealthyPrsCheck(Check):
         """One PR's whole decision, in the order of the spec's table. Returns
         an `Observation` only for row 9; every earlier row returns None, some
         after a side effect."""
-        if pull.head_repo != slug:
+        if pull.head_repo.casefold() != slug.casefold():
+            # Casefolded on both sides, and that is load-bearing rather than
+            # defensive: `slug` is parsed verbatim out of `remote.origin.url`
+            # (`git_remote.py`), while `head_repo` is GitHub's canonical
+            # `full_name`. A clone made with
+            # `git clone git@github.com:OnPaj/Harness_v2.git` therefore yields
+            # `OnPaj/Harness_v2` locally and `onpaj/harness_v2` from the API,
+            # and a case-sensitive compare fails this guard for *every* PR of
+            # that repo — no observations, no warning, a permanently green
+            # board. GitHub repo paths are case-insensitive, so every other API
+            # call keeps working, which is what makes it invisible.
+            #
             # A fork PR (or one whose fork has been deleted, reported as no
-            # head repo at all). Its head branch lives in someone else's repo,
+            # head repo at all — `""`, which casefolds harmlessly and still
+            # never matches). Its head branch lives in someone else's repo,
             # so `data.branch` would name a branch of *this* repo that merely
             # shares the name — commonly `main`, since a fork PR is usually
             # opened from the contributor's own default branch. The workspace
@@ -252,10 +272,6 @@ class GithubUnhealthyPrsCheck(Check):
         key = f"{slug}:{pull.number}:{pull.head_sha}"
         if key in self._seen:
             return None
-        self._seen.add(key)
-
-        if fresh_head:
-            self._bump_attempt_label(slug, pull, attempt, head)
 
         failing_checks = [
             {
@@ -265,6 +281,17 @@ class GithubUnhealthyPrsCheck(Check):
             }
             for run in failing
         ]
+
+        # Only now — with the brief actually in hand — is the attempt spent and
+        # the PR marked seen. `check_run_log` is one network call per failing
+        # run, and a transient 5xx there is caught by `evaluate()`'s per-PR
+        # handler; committing either side above it meant the attempt was burnt
+        # with zero work done *and* the key was in `_seen`, so the PR was not
+        # retried until the next restart. Everything after this point is local.
+        self._seen.add(key)
+        if fresh_head:
+            self._bump_attempt_label(slug, pull, attempt, head)
+
         problem: dict[str, Any] = {
             "conflicted": conflicted,
             "attempt": attempt,
@@ -278,6 +305,19 @@ class GithubUnhealthyPrsCheck(Check):
                 "title": f"unblock PR #{pull.number}",
                 "body": _render_brief(problem, self._max_attempts),
                 "problem": problem,
+                # The give-up label travels with the task because the *agent*
+                # can also give up, and that path never moves the head sha —
+                # so no attempt is ever spent on it and the budget above can
+                # never end it (ADR-0026). `UnblockPrBehavior` applies this
+                # label when its run reports anything but `done`, which both
+                # tells a human and makes the give-up guard at the top of this
+                # method skip the PR on every later tick. It is carried in the
+                # task rather than duplicated in the wiring so an operator who
+                # renames the label in `processes/unblock-pr.json` renames the
+                # one the behavior writes too — otherwise the behavior would
+                # stamp a label this check never reads, and the PR would be
+                # re-minted every retention window, forever.
+                "give_up_label": self._give_up_label,
                 "source": {
                     "kind": SOURCE_KIND,
                     "repo": slug,

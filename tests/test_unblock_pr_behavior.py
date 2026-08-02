@@ -278,3 +278,159 @@ async def test_falls_back_to_the_persona_without_a_workflow_repository():
     await behavior.run(task)
 
     assert runner.calls[0]["spec"].allowed_outcomes == (DONE, STUCK)
+
+
+# --- a give-up is told to a human (ADR-0026) --------------------------------
+
+
+def build_with_labeller(*, runner=None, labeller=None):
+    calls: list[tuple[str, int, str]] = []
+
+    def record(repo: str, number: int, label: str) -> None:
+        calls.append((repo, number, label))
+
+    workspace = MemoryWorkspace()
+    behavior = UnblockPrBehavior(
+        clock=FakeClock(),
+        workspace=workspace,
+        runner=runner
+        or FakeAgentRunner(runs={"unblock": AgentRun(DONE, "unblock: fixed it")}),
+        spec=AgentSpec(name="unblock", prompt="unblock the PR"),
+        events=MemoryEventSink(),
+        pr_labeller=labeller if labeller is not None else record,
+    )
+    return behavior, workspace, calls
+
+
+async def test_a_give_up_labels_the_pull_request_for_a_human():
+    """`stuck` never moves the head sha, so the check's attempt budget can
+    never end this PR: without the label it carries `harness:autofix-1@<sha>`,
+    no human is told, and the task is re-minted every retention window."""
+    runner = FakeAgentRunner(runs={"unblock": AgentRun(STUCK, "unblock: gave up")})
+    behavior, workspace, calls = build_with_labeller(runner=runner)
+    task = make_task(conflicted=True, failing_checks=[])
+    task.data["give_up_label"] = "harness:needs-human"
+    workspace.attach(task).conflicted = True
+
+    result = await behavior.run(task)
+
+    assert calls == [("o/r", 42, "harness:needs-human")]
+    assert result.outcome == STUCK
+
+
+async def test_the_label_applied_is_the_one_the_check_configured():
+    runner = FakeAgentRunner(runs={"unblock": AgentRun(STUCK, "unblock: gave up")})
+    behavior, workspace, calls = build_with_labeller(runner=runner)
+    task = make_task(conflicted=True, failing_checks=[])
+    task.data["give_up_label"] = "team:needs-human"
+    workspace.attach(task).conflicted = True
+
+    await behavior.run(task)
+
+    assert calls == [("o/r", 42, "team:needs-human")]
+
+
+async def test_a_done_outcome_labels_nothing():
+    behavior, workspace, calls = build_with_labeller()
+    task = make_task(conflicted=True, failing_checks=[])
+    task.data["give_up_label"] = "harness:needs-human"
+    workspace.attach(task).conflicted = True
+
+    await behavior.run(task)
+
+    assert calls == []
+
+
+async def test_the_clean_merge_shortcut_labels_nothing():
+    """Nothing was wrong by the time the task ran — that is a success, not a
+    give-up, and the agent was never even called."""
+    behavior, workspace, calls = build_with_labeller()
+    task = make_task(conflicted=True, failing_checks=[])
+    task.data["give_up_label"] = "harness:needs-human"
+
+    await behavior.run(task)
+
+    assert calls == []
+
+
+async def test_a_task_carrying_no_give_up_label_is_not_labelled():
+    """A hand-submitted task routed to `unblock` carries no label to apply —
+    a no-op, never a guess and never an exception."""
+    runner = FakeAgentRunner(runs={"unblock": AgentRun(STUCK, "unblock: gave up")})
+    behavior, workspace, calls = build_with_labeller(runner=runner)
+    task = make_task(conflicted=True, failing_checks=[])
+    workspace.attach(task).conflicted = True
+
+    result = await behavior.run(task)
+
+    assert calls == []
+    assert result.outcome == STUCK
+
+
+async def test_a_failing_label_call_notes_itself_instead_of_failing_the_task():
+    """The agent's verdict is real work already done; a 5xx on one label call
+    must not turn it into a failed task. The next tick re-mints and retries."""
+
+    def explode(repo, number, label):
+        raise RuntimeError("502 Bad Gateway")
+
+    runner = FakeAgentRunner(runs={"unblock": AgentRun(STUCK, "unblock: gave up")})
+    behavior, workspace, _ = build_with_labeller(runner=runner, labeller=explode)
+    task = make_task(conflicted=True, failing_checks=[])
+    task.data["give_up_label"] = "harness:needs-human"
+    workspace.attach(task).conflicted = True
+
+    result = await behavior.run(task)
+
+    assert result.outcome == STUCK
+    assert "harness:needs-human" in result.summary
+    assert "502 Bad Gateway" in result.summary
+
+
+async def test_a_give_up_without_a_labeller_wired_is_still_a_clean_give_up():
+    """No `GITHUB_TOKEN`, no labeller — and no crash. The check that would
+    re-mint the task is gated on the same token, so nothing is re-minted."""
+    runner = FakeAgentRunner(runs={"unblock": AgentRun(STUCK, "unblock: gave up")})
+    behavior, workspace, _runner, _ = build(runner=runner)
+    task = make_task(conflicted=True, failing_checks=[])
+    task.data["give_up_label"] = "harness:needs-human"
+    workspace.attach(task).conflicted = True
+
+    result = await behavior.run(task)
+
+    assert result == BehaviorResult(STUCK, "unblock: gave up")
+
+
+# --- a malformed task says which key is missing ------------------------------
+
+
+async def test_a_task_with_no_base_branch_raises_a_named_error():
+    """Every task the check mints carries `data.source.base`. A hand-submitted
+    or hand-edited one routed to this step must fail with a message an
+    operator can act on, not a bare `KeyError: 'base'`."""
+    import pytest
+
+    from harness.behaviors.unblock_pr import UnblockPrError
+
+    behavior, workspace, _runner, _ = build()
+    task = make_task(conflicted=True, failing_checks=[])
+    del task.data["source"]["base"]
+
+    with pytest.raises(UnblockPrError) as error:
+        await behavior.run(task)
+
+    assert "base" in str(error.value)
+    assert task.id in str(error.value)
+
+
+async def test_a_task_with_no_source_at_all_raises_the_same_named_error():
+    import pytest
+
+    from harness.behaviors.unblock_pr import UnblockPrError
+
+    behavior, workspace, _runner, _ = build()
+    task = make_task(conflicted=True, failing_checks=[])
+    del task.data["source"]
+
+    with pytest.raises(UnblockPrError):
+        await behavior.run(task)

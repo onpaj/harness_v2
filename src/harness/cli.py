@@ -1429,7 +1429,7 @@ UNBLOCK_PR_PROCESS_DEFINITION = {
     "action": {
         "check": "github-unhealthy-prs",
         "params": {
-            "head_prefix": "",
+            "head_prefix": "harness/",
             "skip_label": UNHEALTHY_SKIP_LABEL,
             "give_up_label": DEFAULT_GIVE_UP_LABEL,
             "max_attempts": DEFAULT_MAX_ATTEMPTS,
@@ -1445,15 +1445,22 @@ UNBLOCK_PR_PROCESS_DEFINITION = {
 adding a repo to `repos.json` puts its open PRs under triage automatically and
 a non-GitHub repo is skipped.
 
-`head_prefix` is seeded **empty**, and that is the widest setting there is: a
-seeded root watches every open pull request in every registered repository,
-including ones a human authored (ADR-0026). That is the decision this feature
-exists to make, not an oversight — what contains it is on the PR rather than in
-this file: nothing is ever force-pushed, `harness:no-autofix` vetoes one PR
-with no config change, and the three-attempt budget ends at
-`harness:needs-human` instead of looping. An operator who wants the old,
-harness-only blast radius sets `head_prefix` back to `"harness/"` here; no code
-changes.
+`head_prefix` is seeded `"harness/"`, matching `automerge.json` — a fresh
+`harness init` plus a `GITHUB_TOKEN` therefore touches only branches the
+harness itself authored. ADR-0026's decision is that the *feature* may work any
+open PR, and it can: widening it is one field of this file and no code change.
+But the widening is the operator's explicit act, not something a default install
+does on its own, because the widest setting means merging into, committing to
+and pushing every unhealthy open PR in every registered repository — including
+branches a human has checked out — from the first tick. The sibling automerge
+Process ships equally withheld (`dry_run: true` in its finisher binding); this
+is the same posture expressed with the knob this check actually has.
+
+What contains the widened setting, once an operator chooses it, is on the PR
+rather than in this file: nothing is ever force-pushed, a fork PR is never
+touched, `harness:no-autofix` vetoes one PR with no config change, and both the
+three-attempt budget and the agent's own give-up end at `harness:needs-human`
+instead of looping.
 
 `dedup` is `per-state`, and load-bearing rather than stylistic: the check emits
 one observation *per unhealthy PR*, and under the default `per-interval` every
@@ -2631,6 +2638,16 @@ def _run(args: argparse.Namespace) -> int:
             command_runner=SubprocessCommandRunner(),
             dropped_workflows=dropped_workflows,
             retention_days=_retention_days(),
+            # The `unblock` step's give-up label (ADR-0026). The capability,
+            # not the client: `behaviors/` may not import `drivers/`, so
+            # `UnblockPrBehavior` takes a callable and the wiring closes the
+            # client into it — the shape `OpenIssueBehavior` already uses for
+            # `slug_for`. `None` without a token, exactly like the
+            # `github-unhealthy-prs` check that mints those tasks, so the two
+            # halves of the containment are never configured apart.
+            pr_labeller=(
+                github_client.add_label if github_client is not None else None
+            ),
         )
     except WorkflowNotFound as error:
         print(f"error: {error}", file=sys.stderr)
