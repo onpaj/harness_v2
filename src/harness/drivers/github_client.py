@@ -79,6 +79,25 @@ class PullRequestInfo:
     draft: bool = False
 
 
+@dataclass(frozen=True)
+class CheckRun:
+    """One CI check on a commit, as the unhealthy-PRs check sees it.
+
+    `conclusion` is GitHub's own vocabulary and is `""` while the run is still
+    in progress. Only `failure` and `timed_out` are things an agent can fix —
+    `cancelled` and `skipped` are states of the world, not defects.
+    """
+
+    id: int
+    name: str
+    conclusion: str
+    url: str
+
+
+FAILING_CONCLUSIONS = frozenset({"failure", "timed_out"})
+"""The conclusions that make a check-run worth waking an agent for."""
+
+
 class GithubClient(ABC):
     """The minimal GitHub API the connector needs."""
 
@@ -142,6 +161,20 @@ class GithubClient(ABC):
 
         Idempotent: a PR that is already up to date / not behind is a no-op,
         not a failure — safe to call every tick.
+        """
+
+    @abstractmethod
+    def list_check_runs(self, repo: str, sha: str) -> list[CheckRun]:
+        """Every check run GitHub has recorded against this commit."""
+
+    @abstractmethod
+    def check_run_log(self, repo: str, check_run_id: int) -> str:
+        """The run's plain-text log, or "" when there is none to fetch.
+
+        Only GitHub Actions check runs have a log at this endpoint (their
+        check-run ids *are* job ids). A third-party check, or a log that has
+        aged out, yields "" rather than raising — an absent log degrades the
+        brief, it does not fail the tick.
         """
 
     @abstractmethod
@@ -215,6 +248,8 @@ class FakeGithubClient(GithubClient):
         # from `pulls`' "does a PR already exist for this branch".
         self._pull_requests: dict[int, PullRequestInfo] = {}
         self.updated_branches: list[tuple[str, int]] = []
+        self._check_runs: dict[str, list[CheckRun]] = {}
+        self._check_run_logs: dict[int, str] = {}
 
     def add_issue(self, issue: Issue) -> None:
         self._issues[issue.number] = issue
@@ -244,17 +279,26 @@ class FakeGithubClient(GithubClient):
         ]
 
     def add_label(self, repo: str, number: int, label: str) -> None:
-        issue = self._issues[number]
-        if label not in issue.labels:
+        issue = self._issues.get(number)
+        if issue is not None and label not in issue.labels:
             self._issues[number] = replace(issue, labels=issue.labels + (label,))
+        pull = self._pull_requests.get(number)
+        if pull is not None and label not in pull.labels:
+            self._pull_requests[number] = replace(
+                pull, labels=pull.labels + (label,)
+            )
 
     def remove_label(self, repo: str, number: int, label: str) -> None:
         issue = self._issues.get(number)
-        if issue is None or label not in issue.labels:
-            return
-        self._issues[number] = replace(
-            issue, labels=tuple(l for l in issue.labels if l != label)
-        )
+        if issue is not None and label in issue.labels:
+            self._issues[number] = replace(
+                issue, labels=tuple(l for l in issue.labels if l != label)
+            )
+        pull = self._pull_requests.get(number)
+        if pull is not None and label in pull.labels:
+            self._pull_requests[number] = replace(
+                pull, labels=tuple(l for l in pull.labels if l != label)
+            )
 
     def default_branch(self, repo: str) -> str:
         return self._default_branch
@@ -369,6 +413,18 @@ class FakeGithubClient(GithubClient):
         info = self._pull_requests.get(number)
         if info is not None:
             self._pull_requests[number] = replace(info, mergeable_state="clean")
+
+    def add_check_run(self, sha: str, run: CheckRun) -> None:
+        self._check_runs.setdefault(sha, []).append(run)
+
+    def set_check_run_log(self, check_run_id: int, text: str) -> None:
+        self._check_run_logs[check_run_id] = text
+
+    def list_check_runs(self, repo: str, sha: str) -> list[CheckRun]:
+        return list(self._check_runs.get(sha, ()))
+
+    def check_run_log(self, repo: str, check_run_id: int) -> str:
+        return self._check_run_logs.get(check_run_id, "")
 
     def create_issue(
         self, repo: str, *, title: str, body: str, labels: tuple[str, ...]
@@ -655,6 +711,36 @@ class HttpGithubClient(GithubClient):
         except urllib.error.HTTPError as error:
             if error.code == 422:  # not behind / already up to date
                 return
+            raise
+
+    def list_check_runs(self, repo: str, sha: str) -> list[CheckRun]:
+        url = f"{self._api}/repos/{repo}/commits/{sha}/check-runs"
+        request = urllib.request.Request(url, headers=self._headers(), method="GET")
+        with self._opener.open(request) as response:
+            raw = json.loads(response.read())
+        return [
+            CheckRun(
+                id=int(item["id"]),
+                name=item.get("name", ""),
+                conclusion=item.get("conclusion") or "",
+                url=item.get("html_url", ""),
+            )
+            for item in raw.get("check_runs", [])
+        ]
+
+    def check_run_log(self, repo: str, check_run_id: int) -> str:
+        # An Actions check-run id is its job id; the endpoint 302s to a signed
+        # URL that the opener follows for us, and the body is plain text.
+        url = f"{self._api}/repos/{repo}/actions/jobs/{check_run_id}/logs"
+        request = urllib.request.Request(url, headers=self._headers(), method="GET")
+        try:
+            with self._opener.open(request) as response:
+                return response.read().decode("utf-8", errors="replace")
+        except urllib.error.HTTPError as error:
+            # 404: not an Actions run, or the log has aged out. 410: expired.
+            # Neither is a fault — the brief simply carries no log.
+            if error.code in (404, 410):
+                return ""
             raise
 
     def create_issue(

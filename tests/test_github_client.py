@@ -8,6 +8,7 @@ import pytest
 
 from harness.drivers.github_client import (
     SELF_HEAL_LABEL,
+    CheckRun,
     FakeGithubClient,
     HttpGithubClient,
     Issue,
@@ -902,3 +903,106 @@ def test_http_search_issue_by_marker_returns_none_when_no_body_matches():
         )
         is None
     )
+
+
+# --- check runs ------------------------------------------------------------
+
+
+class FakeTextResponse:
+    def __init__(self, text):
+        self._body = text.encode("utf-8")
+
+    def read(self):
+        return self._body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def test_fake_list_check_runs_is_keyed_by_sha():
+    client = FakeGithubClient([])
+    client.add_check_run("abc", CheckRun(1, "pytest", "failure", "u1"))
+    client.add_check_run("def", CheckRun(2, "lint", "success", "u2"))
+
+    assert [r.id for r in client.list_check_runs("o/r", "abc")] == [1]
+    assert client.list_check_runs("o/r", "zzz") == []
+
+
+def test_fake_check_run_log_defaults_to_empty():
+    client = FakeGithubClient([])
+    client.set_check_run_log(1, "boom")
+
+    assert client.check_run_log("o/r", 1) == "boom"
+    assert client.check_run_log("o/r", 99) == ""
+
+
+def test_http_list_check_runs_reads_the_commit_endpoint():
+    payload = {
+        "check_runs": [
+            {"id": 7, "name": "pytest (3.12)", "conclusion": "failure",
+             "html_url": "https://gh/run/7"},
+            {"id": 8, "name": "lint", "conclusion": "success",
+             "html_url": "https://gh/run/8"},
+        ]
+    }
+    opener = FakeOpener(payload)
+    client = HttpGithubClient("tok", opener=opener)
+
+    runs = client.list_check_runs("o/r", "abc123")
+
+    assert [(r.id, r.name, r.conclusion, r.url) for r in runs] == [
+        (7, "pytest (3.12)", "failure", "https://gh/run/7"),
+        (8, "lint", "success", "https://gh/run/8"),
+    ]
+    req = opener.requests[0]
+    assert req.get_method() == "GET"
+    assert req.full_url == "https://api.github.com/repos/o/r/commits/abc123/check-runs"
+
+
+def test_http_check_run_log_returns_plain_text():
+    class TextOpener:
+        def __init__(self):
+            self.requests = []
+
+        def open(self, request):
+            self.requests.append(request)
+            return FakeTextResponse("line one\nline two\n")
+
+    opener = TextOpener()
+    client = HttpGithubClient("tok", opener=opener)
+
+    assert client.check_run_log("o/r", 7) == "line one\nline two\n"
+    assert opener.requests[0].full_url == (
+        "https://api.github.com/repos/o/r/actions/jobs/7/logs"
+    )
+
+
+def test_http_check_run_log_404_is_empty_string():
+    class GoneOpener:
+        def open(self, request):
+            raise urllib.error.HTTPError(
+                request.full_url, 404, "Not Found", {}, io.BytesIO(b"")
+            )
+
+    client = HttpGithubClient("tok", opener=GoneOpener())
+
+    assert client.check_run_log("o/r", 7) == ""
+
+
+def test_fake_labels_apply_to_pull_requests_too():
+    client = FakeGithubClient([])
+    client.add_pull_request(
+        PullRequestInfo(
+            number=42, url="u", head_branch="b", head_sha="s",
+            base_branch="main", mergeable_state="unstable",
+        )
+    )
+
+    client.add_label("o/r", 42, "harness:autofix-1")
+    assert client.list_pull_requests("o/r")[0].labels == ("harness:autofix-1",)
+
+    client.remove_label("o/r", 42, "harness:autofix-1")
+    assert client.list_pull_requests("o/r")[0].labels == ()
