@@ -94,6 +94,7 @@ Stamps `SOURCE_KIND = "pull-request-health"`.
 
 | # | Condition | Action |
 |---|---|---|
+| 0 | `head_repo != slug` (a fork, or a deleted one) | skip, and label nothing |
 | 1 | `skip_label` present | skip |
 | 2 | `give_up_label` present | skip |
 | 3 | `draft` | skip |
@@ -107,6 +108,15 @@ Stamps `SOURCE_KIND = "pull-request-health"`.
 Rows 6 and 7 are exhaustive over the remaining states, so nothing reaches row 8
 without a known reason to act on it.
 
+Row 0 is deliberately *ahead of the skip and give-up labels*, so a fork PR is
+not merely skipped for work — it is never labelled either. A fork PR's head
+branch lives in someone else's repository, so `data.branch` would name a branch
+of *this* repo that merely shares the name, commonly `main` (a fork PR is
+usually opened from the contributor's own default branch). The workspace would
+then check out, commit to and push the base repo's `main`, violating ADR-0009.
+An unknown head repo (GitHub nulls `head.repo` once a fork is deleted) fails
+closed: unknown is not ours.
+
 Row 7 is what keeps a `blocked` PR that is merely awaiting human review out of
 scope — no agent can supply a required review. It is also what makes `unknown`
 safe: GitHub reports `unknown` while it is still computing mergeability, and a
@@ -118,14 +128,32 @@ no tokens.
 `skipped` are not something to fix.
 
 **Attempt counting** lives in a single rolling label on the PR,
-`harness:autofix-<n>`. The check reads it off `pr.labels`, which it already has
-from the detail call, so counting is free; it removes the old label and adds the
-new one at emit time (two API calls per *attempt*, none per tick). A PR with no
-such label is at attempt 0, and the first emit stamps `harness:autofix-1`; row 8
-therefore lets exactly `max_attempts` emits through. Counting here
-rather than in the behavior makes it a pure function of PR state: it survives
-restarts, cannot drift from what is on the PR, and an operator resets the budget
-by deleting a label.
+`harness:autofix-<n>@<sha7>` — the count, then the first seven characters of
+the head sha the count was written against (`harness:autofix-2@3035f7d`, 25
+characters, well inside GitHub's 50-character label limit). The check reads it
+off `pr.labels`, which it already has from the detail call, so counting is
+free; it adds the new label and then removes the old one at emit time (two API
+calls per *attempt*, none per tick — add-first, so a failure between the two
+leaves two counters rather than none, and `_attempt_of` resolves that by taking
+the maximum). A PR with no such label is at attempt 0, and the first emit stamps
+`harness:autofix-1@<sha7>`; row 8 therefore lets exactly `max_attempts` emits
+through.
+
+**The `@<sha7>` stamp is what makes the counter count attempts rather than
+triages, and it is not decorative.** `evaluate()` is gated only by an
+in-process ledger; the cross-restart guarantee lives downstream in
+`SourcePoller._seen`, which drops the duplicate observation *after* the label
+has already been written. Without the stamp, every restart — and the live
+service restarts twice an hour — re-triaged an unchanged head and burned an
+attempt, so a PR could reach `harness:needs-human` having had zero completed
+attempts. The rule is therefore: **a label already naming the current head is
+not bumped**, no label API call is made, and the observation is still emitted;
+only a genuinely new head sha — what a real fix push produces — spends an
+attempt.
+
+Counting here rather than in the behavior makes it a pure function of PR state:
+it survives restarts, cannot drift from what is on the PR, and an operator
+resets the budget by deleting a label.
 
 **Per-PR isolation:** each PR is processed in its own `try/except`, as
 `GithubConflictsCheck` does today. One PR that 500s must not sink the tick. A
@@ -204,8 +232,13 @@ changes:
 1. The "merged cleanly, no conflicts" early return fires **only when there is
    also nothing red** (`problem.failing_checks` empty). Otherwise it falls
    through to the agent.
-2. Before committing, `.artifacts/` is appended to `.git/info/exclude` so the
-   agent's artifact is not committed onto the PR branch (see *Artifacts*, below).
+2. The commit stages with `exclude=(".artifacts",)` so the agent's artifact is
+   not committed onto the PR branch (see *Artifacts*, below, for why the
+   `.git/info/exclude` route was rejected).
+3. A conflicted merge the agent did not finish (`stuck`, or any non-`DONE`
+   outcome) is `abort_merge`d instead of committed — a give-up pushes nothing.
+   A non-`DONE` outcome with a clean merge still commits: there is no merge to
+   abandon, and the branch holds the agent's own work in progress.
 
 `app.py`'s `RESOLVE_STEP` constant becomes `UNBLOCK_STEP`.
 
@@ -325,8 +358,18 @@ of a bare `git add -A`. `UnblockPrBehavior` calls
 never staged for this commit at all. The exclusion is scoped to the single
 `add` invocation that produces this commit — it says nothing about any other
 commit in the worktree, and nothing is written to disk outside the repo's
-normal git plumbing. The artifact still exists on disk for the operator and
-in the task's history; it just does not ride along on someone else's PR. A
+normal git plumbing. It just does not ride along on someone else's PR.
+
+The price of that, measured against a real git repo rather than assumed: on the
+success path the write-up is **not persisted anywhere**. It is untracked (so
+not in git history) and `land`'s reattach ends in an unconditional `clean -fd`
+that deletes it, after which `WorktreeArtifactView` — which reads only the
+worktree — reports no artifacts for the task. It is reachable on the board in
+the window between `unblock` finishing and `land` attaching, and permanently on
+the `stuck` path, which routes straight to `end` and never reattaches. So the
+give-up case keeps its write-up and the success case loses it, which is the
+opposite of what an operator would guess. Persisting it is a follow-up, not
+part of this increment. A
 git-status check that only asked "is the working tree clean" would be fooled
 here — an excluded file still shows as untracked in `status --porcelain`, so
 `commit()` instead checks `git diff --cached --name-only` to tell "nothing to
@@ -387,7 +430,8 @@ Also:
 - `cancelled` / `skipped` conclusions not counting as failures
 - `UnblockPrBehavior`: clean merge + red checks still calls the agent; clean
   merge + nothing red returns early without one
-- `.git/info/exclude` written before commit; artifact absent from the commit
+- the commit's pathspec exclusion: artifact absent from the commit, and an
+  ordinary (non-`data.branch`) task still commits its artifacts
 - e2e through the fake client: dirty → fix → land, and three failed rounds to
   the give-up label
 - `test_architecture.py` already forbids the new driver importing `cli` — free
@@ -403,4 +447,12 @@ self-upgrades within 30 minutes. A harness-root still holding `resolver.json`
 after the upgrade names a workflow whose agent no longer exists.
 
 Any PR already carrying a `harness:autofix-<n>` label from a previous run keeps
-its count; there is no state to migrate beyond the config files.
+its count; there is no state to migrate beyond the config files. Such a label
+is *legacy* — it predates the `@<sha7>` stamp, so it names no head, and a head
+it does not name can never be the current one. Its count is therefore honoured
+and the next triage bumps it to `harness:autofix-<n+1>@<sha7>`: exactly the
+pre-stamp behaviour, neither losing nor regaining budget on upgrade. The one
+visible consequence is that each already-labelled PR spends one extra attempt
+at rollout. A label whose count is not a positive integer
+(`harness:autofix-oops`) is ignored entirely — a human editing labels by hand
+must not be able to wedge the check.

@@ -32,13 +32,28 @@ split. A PR that is both conflicted and red is one problem and gets one run.
 
 **The process is scoped to all open PRs, not the harness's own.** This is the
 sharp edge: the harness pushes commits onto branches humans have checked out.
-Three things contain it — it never force-pushes, `harness:no-autofix` is a
-per-PR veto needing no config change, and a three-attempt budget held in a
-`harness:autofix-<n>` label ends in `harness:needs-human` rather than looping.
+Four things contain it — it never force-pushes, a PR whose head lives in a fork
+is never touched at all (its head branch is somebody else's, so acting on it
+would mean committing to a same-named branch of the base repo, usually `main`),
+`harness:no-autofix` is a per-PR veto needing no config change, and a
+three-attempt budget held in a `harness:autofix-<n>@<sha7>` label ends in
+`harness:needs-human` rather than looping.
 
 The budget lives on the PR because harness's own dedup ledger keys on
 `head_sha`, and every fix push mints a new one — a counter there would reset
 exactly when it matters.
+
+**The label carries the head sha it was written against, and that is what makes
+it count attempts rather than triages.** The cross-restart guarantee lives in
+`SourcePoller._seen`, which drops the duplicate observation only *after* the
+check has already written the label — so without the stamp, every restart of
+the service (twice an hour on this machine) re-triaged an unchanged head and
+spent an attempt, and a PR could reach `harness:needs-human` having had zero
+completed attempts. A label already naming the current head is therefore never
+bumped and writes no label at all; only a new head sha, which is what a real
+fix push produces, spends an attempt. A legacy label with no `@sha` names no
+head, so its count is honoured and the next triage bumps it — the pre-stamp
+behaviour, kept deliberately so an upgrade neither loses nor regains budget.
 
 ## Consequences
 
@@ -51,3 +66,25 @@ exactly when it matters.
   loudly instead of silently disarming the healer's one-hop guard.
 - Reverting the blast radius is a one-line config change: set `head_prefix`
   back to `harness/`. No code change.
+- **On the success path the `unblock` agent's write-up is not persisted
+  anywhere.** The commit excludes `.artifacts` so the write-up cannot ride into
+  a human's pull request, which leaves it untracked in the worktree — and
+  `land`'s reattach ends in an unconditional `clean -fd` (invariant 31) that
+  deletes it. `WorktreeArtifactView` reads only the worktree, so from then on
+  the board shows the task with no artifacts at all. Verified against a real
+  git repository, not inferred. It *is* readable in the window between
+  `unblock` finishing and `land` attaching, and it survives permanently on the
+  `stuck` path, which goes straight to `end` and never reattaches — so the
+  give-up case keeps its write-up and the success case loses it, the opposite
+  of what an operator would guess. Anyone reasoning about "the write-up is in
+  the task record" should read this bullet first: there is no record.
+  Persisting it (copying the artifact out before the reattach, or committing it
+  on a harness-owned branch) is a follow-up, deliberately not in this ADR.
+- `harness init` seeds `workflows/unblock-pr.json`, `agents/unblock.json` and
+  `processes/unblock-pr.json`, so a fresh root runs this — with
+  `head_prefix: ""`, i.e. every open PR of every registered repository. That is
+  this ADR's decision applied to the default install, not a separate one; the
+  containment above is what makes it acceptable, and an operator who wants the
+  old radius edits one field of the seeded process. Unlike `automerge`, there
+  is no `dry_run` half-measure available: an unblock attempt either pushes a
+  fix or does not run.

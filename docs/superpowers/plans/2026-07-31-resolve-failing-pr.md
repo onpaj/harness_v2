@@ -50,7 +50,7 @@
 - `tests/test_github_conflicts_check.py`, `tests/test_resolve_conflict_behavior.py`
 
 **Outside the repo (Task 8), in `~/harness-root`:**
-- Create `processes/resolve-failing-pr.json`, `workflows/unblock-pr.json`, `agents/unblock.json`
+- Create `processes/unblock-pr.json`, `workflows/unblock-pr.json`, `agents/unblock.json` — the same three filenames `harness init` now seeds, so a later init over this root adds nothing
 - Delete `processes/resolve-conflicts.json`, `workflows/resolver.json`, `agents/resolve.json`
 
 ---
@@ -1890,7 +1890,7 @@ git commit -m "docs: ADR-0026, one agent unblocks a pull request"
 
 **This is the one step that can take the live harness down, and the usual "migrate `~/harness-root` before pushing" advice in `~/CLAUDE.md` is not sufficient here.** An unknown check name is a fatal `ProcessValidationError`, not a skipped-with-warning one (`fs_processes.py:255-259`). That makes *both* naive orders fatal:
 
-- **Config first.** `resolve-failing-pr.json` names `github-unhealthy-prs`, which the currently-running release does not register → the running service fails on its next process build.
+- **Config first.** `unblock-pr.json` names `github-unhealthy-prs`, which the currently-running release does not register → the running service fails on its next process build.
 - **Push first.** The release lands, the service self-upgrades within 30 minutes, and the still-present `resolve-conflicts.json` names `github-conflicts`, which the new build no longer registers → same fatality, now on a service that upgraded itself while nobody was watching.
 
 So code and config must change together, with the service stopped across the gap:
@@ -1907,17 +1907,38 @@ Do not start step 1 until Task 8 Step 4 is committed and the full suite is green
 
 - [ ] **Step 6: Migrate ~/harness-root**
 
+**Preconditions before deleting `workflows/resolver.json`.** `build()`
+constructs step queues only for the steps of the workflows it *serves*, so a
+task still sitting in `queues/resolve/` after the workflow file is gone has no
+consumer: it is not hydrated, it vanishes from the board, and its JSON stays on
+disk unread. Check both the queue and its in-flight subdirectory are empty
+first, and drain or re-file anything that is there:
+
+```bash
+ls -A ~/harness-root/queues/resolve ~/harness-root/queues/resolve/.processing
+```
+
+The same consideration applies to `worktrees/`, more mildly. Each old resolver
+task's worktree still has a `harness/*` branch checked out, and invariant 30
+says nothing under `src/harness` ever removes a worktree — those directories
+are *meant* to stay, inert, so that `GitWorkspace.attach`'s branch-override
+path can force-check the branch out into a second worktree. Do not tidy them
+away as part of this migration; deleting one is what would make the invariant's
+"safe because the original worktree is inert" reasoning false.
+
 ```bash
 rm ~/harness-root/processes/resolve-conflicts.json \
    ~/harness-root/workflows/resolver.json \
    ~/harness-root/agents/resolve.json
 ```
 
-Create `~/harness-root/processes/resolve-failing-pr.json`:
+Create `~/harness-root/processes/unblock-pr.json` — the same filename
+`harness init` now seeds (`cli._ensure_unblock_pr_process`), so a later `init`
+over this root is inert rather than adding a second, identical process under a
+different name:
 
 ```json
 {
-  "name": "resolve-failing-pr",
   "trigger": {"interval": "60s"},
   "action": {"check": "github-unhealthy-prs", "params": {
     "head_prefix": "",
@@ -1949,9 +1970,13 @@ Create `~/harness-root/workflows/unblock-pr.json`:
     "unblock": "fix whatever is blocking this pull request — merge conflicts, failing checks, or both",
     "land": "commit the fix and push it to the pull request's branch"
   },
-  "max_parallel": {"unblock": 2}
+  "maxParallel": {"unblock": 2}
 }
 ```
+
+`maxParallel`, **not** `max_parallel`: `fs_workflows._parse_workflow` reads the
+camelCase key and silently ignores everything else, so the snake_case spelling
+would leave the step on the default limit of 1 with nothing to show for it.
 
 Create `~/harness-root/agents/unblock.json`. The `prompt` value is the text below with real newlines encoded as `\n` — write the file with a JSON serializer rather than by hand:
 
@@ -1961,25 +1986,59 @@ Create `~/harness-root/agents/unblock.json`. The `prompt` value is the text belo
   "model": "sonnet",
   "fallback_model": null,
   "allowed_tools": ["Read", "Write", "Edit", "Bash", "Grep", "Glob"],
-  "allowed_outcomes": ["done", "stuck"],
+  "allowed_outcomes": ["done"],
   "timeout": null
 }
 ```
 
+`allowed_outcomes` is `["done"]`, **not** `["done", "stuck"]`, and this is not a
+detail to "correct" back: `fs_agents._parse_agent_spec` accepts only `done` and
+`request_changes` in that field, so a file naming `stuck` there raises
+`AgentNotFound: invalid allowed_outcomes` the moment the catalog reads it — the
+step would be dead on arrival. It costs nothing, because this field is only the
+workflow-*less* fallback (invariant #42): `UnblockPrBehavior` is wired with the
+served workflow repository, so the live vocabulary — and the `stuck` hint — come
+from `unblock-pr.json`'s own edges. `harness init` writes exactly this file.
+
 - [ ] **Step 7: Verify the migrated root builds**
 
-There is no `validate` subcommand — `harness` exposes `init`, `submit`, `run`, `agent`, `service`, `update`. Compile the process files directly instead:
+There is no `validate` subcommand — `harness` exposes `init`, `submit`, `run`, `agent`, `service`, `update`. Compile the process files directly instead. **Constructing `FilesystemProcessRepository` and printing it validates nothing** — reading the directory happens in `build()`, and the fatal unknown-check error this step exists to catch is raised there. Call it:
 
 ```bash
-cd ~/harness_v2 && PYTHONPATH=src python -c "
+cd ~/harness_v2 && PYTHONPATH=src .venv/bin/python -c "
+import argparse
 from pathlib import Path
+from harness.cli import _process_check_factories
+from harness.drivers.checks import BUILTIN_CHECKS, AlwaysCheck
 from harness.drivers.fs_processes import FilesystemProcessRepository
-repo = FilesystemProcessRepository(Path.home() / 'harness-root' / 'processes')
-print(repo)
+from harness.drivers.fs_repos import FilesystemRepositoryRegistry
+from harness.drivers.fs_workflows import FilesystemWorkflowRepository
+from harness.drivers.system_clock import SystemClock
+
+root = Path.home() / 'harness-root'
+registry = FilesystemRepositoryRegistry(root / 'repos.json')
+workflows = FilesystemWorkflowRepository(root / 'workflows')
+names = {p.stem for p in (root / 'workflows').glob('*.json')}
+steps = {s for n in names for s in workflows.get(n).steps()}
+checks = {
+    **BUILTIN_CHECKS,
+    **_process_check_factories(argparse.Namespace(github_label='harness:todo'), registry),
+    # \`failed-tasks\` is registered inside \`app.build()\` (it closes over the
+    # harness's own live queues), so a standalone compile needs a stand-in or
+    # \`autoheal.json\` fails as an unknown check for the wrong reason.
+    'failed-tasks': lambda params: AlwaysCheck(),
+}
+repo = FilesystemProcessRepository(root / 'processes')
+triggers = repo.build(clock=SystemClock(), checks=checks,
+                      known_workflows=names, known_steps=steps)
+print('compiled:', sorted(t.kind for t in triggers))
+print('skipped :', repo.skipped)
 "
 ```
 
-Read `fs_processes.py`'s `build()` signature and pass what it needs (it takes the check registry and the workflow names). If wiring that up by hand is more trouble than it is worth, the equivalent smoke test is Step 5's restart: start the service and check `~/harness-root/logs/harness.log` — **not** `~/harness-root/harness.log`, which is stale since 2026-07-20 and reads as a live OAuth outage. A `MissingCredential` warning for `github-unhealthy-prs` is expected and harmless when `GITHUB_TOKEN` is absent from the service environment; an "unknown check" line is the failure this step exists to catch.
+Expected with `GITHUB_TOKEN` exported: `compiled` lists `scheduled:autoheal`, `scheduled:automerge` and `scheduled:unblock-pr`, and `skipped` is empty. Without a token the two GitHub processes move to `skipped` with a `requires GITHUB_TOKEN` reason — expected and harmless (`MissingCredential`, ADR-0022). A raised `ProcessValidationError` naming an *unknown check* is the failure this step exists to catch; nothing else should raise.
+
+The fallback, if that is more trouble than it is worth, is Step 5's restart: start the service and check `~/harness-root/logs/harness.log` — **not** `~/harness-root/harness.log`, which is stale since 2026-07-20 and reads as a live OAuth outage. A `MissingCredential` warning for `github-unhealthy-prs` is expected there too; an "unknown check" line is the real failure.
 
 - [ ] **Step 8: Hand back**
 
