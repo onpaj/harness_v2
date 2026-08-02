@@ -54,6 +54,7 @@ from harness.ports.merge import MergeChecker
 from harness.ports.queue import TaskQueue
 from harness.ports.repos import RepositoryRegistry
 from harness.ports.source import TaskSource
+from harness.ports.stats import StatsView
 from harness.ports.triggers import Check, CheckDefinition, CheckFactory
 from harness.ports.workflows import WorkflowNotFound
 from harness.ports.workspace import Workspace
@@ -64,6 +65,7 @@ from harness.merge_reconciler import MergeReconciler
 from harness.pr_watcher import PrWatcher
 from harness.retention_reconciler import DEFAULT_RETENTION_DAYS, RetentionReconciler
 from harness.source_poller import SourcePoller
+from harness.stats import QueueStatsView
 from harness.task_control import TaskControlService
 
 LANDING_STEP = "land"
@@ -236,6 +238,7 @@ class Harness:
         control: TaskControl,
         events: EventSink,
         clock: Clock,
+        stats: StatsView | None = None,
         pollers: list[SourcePoller] | None = None,
         pr_watcher: PrWatcher | None = None,
         reconciler: MergeReconciler | None = None,
@@ -256,6 +259,12 @@ class Harness:
         self.artifacts = artifacts
         self.stage_output = stage_output
         self.control = control
+        # Fourth UI read surface (ADR-0026), next to projection/artifacts/
+        # stage_output. `build()` always supplies one — it derives from the
+        # queues built there and needs no external service, the same posture as
+        # `RetentionReconciler` — so the None is only for a hand-constructed
+        # `Harness`, and `create_app` falls back to an empty view.
+        self.stats = stats
         # UI-facing write port for the Ahanas board's manual "Add issue" button
         # (invariant #43): always a concrete `IssueImport`, never `None`,
         # mirroring `self.control` — `NullIssueImport` when no factory was
@@ -925,6 +934,23 @@ def build(
         events=events, clock=clock,
     )
 
+    # The delivery report (ADR-0026). Derived on demand from the task files
+    # themselves, so it is built unconditionally — like the retention sweep it
+    # needs only the local queues and the clock, with no "not configured" state
+    # to gate on. `archived/` is in the list on purpose: once the retention
+    # sweep has run, that is where most of a week's window lives.
+    stats = QueueStatsView(
+        queues=[
+            inbox,
+            *step_queues.values(),
+            done,
+            failed,
+            healed_queue,
+            archived,
+        ],
+        clock=clock,
+    )
+
     return Harness(
         layout=layout,
         workflows=resolved,
@@ -939,6 +965,7 @@ def build(
         artifacts=view,
         stage_output=stage_output,
         control=control,
+        stats=stats,
         events=events,
         clock=clock,
         pollers=pollers,

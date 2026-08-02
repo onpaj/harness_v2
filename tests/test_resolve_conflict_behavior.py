@@ -50,6 +50,9 @@ async def test_clean_merge_commits_without_calling_the_agent():
     assert handle.commits == ["[resolve] merge main — no conflicts"]
     assert result.outcome == DONE
     assert "no conflicts" in result.summary
+    # Which of the two paths ran must be legible without parsing the summary's
+    # wording — the delivery report counts them apart (ADR-0026).
+    assert result.data == {"resolve": {"clean": True}}
 
 
 async def test_conflict_runs_the_agent_and_commits_its_summary():
@@ -62,7 +65,9 @@ async def test_conflict_runs_the_agent_and_commits_its_summary():
     handle = workspace.handles[task.id]
     assert len(runner.calls) == 1
     assert handle.commits == ["resolve: fixed conflict"]
-    assert result == BehaviorResult(DONE, "resolve: fixed conflict")
+    assert result == BehaviorResult(
+        DONE, "resolve: fixed conflict", data={"resolve": {"clean": False}}
+    )
 
 
 async def test_conflict_prompt_carries_attempt_relpath():

@@ -96,6 +96,7 @@ died at (ADR-0025). A failure the check **declines** to heal (invariant 25's thr
 42. **A step's outcome vocabulary is the workflow's, derived live.** `Workflow.outcomes_for(step)` — the unique `on` values of the edges leaving `step`, in definition order — is the single, authoritative declaration of what a step may report, computed from the graph itself on every run, never frozen. `AgentSpec.allowed_outcomes` is only the fallback for a workflow-less task (no `workflow_template`, an unresolvable one, or a step with no outgoing edges) and for any behavior with no `WorkflowRepository` wired at all — it is not the primary declaration once a workflow is driving the step. Two hints exist to steer an agent's choice and are BOTH prompt-only, read only by `ClaudeCliBehavior`'s prompt composition, and never touched by `route()` or the dispatcher: `Transition.hint` (per outcome) and `Workflow.descriptions` (per step). See ADR-0018.
 43. **A component needing both a live harness queue and an external-system dependency is built inside `build()` from a factory `cli.py` supplies.** Neither wired standalone in `cli.py`'s `serve()` (that shape needs no queue — the admin ports) nor built directly by name inside `build()` (that shape needs no external client — `FailedTasksCheck`). `IssueImport`/`GithubIssueImportService` (the Ahanas board's manual "Add issue" button) follows this: `cli.py` closes the `GithubClient`/`RepositoryRegistry` it already built into an `IssueImportFactory`, and `build()` invokes it once `inbox`/`step_queues`/`done`/`failed`/`healed`/`archived`/`events` exist, exposing the result as `harness.issue_import` — always concrete, mirroring `harness.control`. `IssueImport` is touched only by `api/routes.py`'s `POST /issues/import` handler and `build()`'s own wiring — `dispatcher.py`/`consumer.py` don't import it; guarded by `test_architecture.py` the same way invariants #23/#32/#34 guard `TaskControl`/`MergeChecker`/`IssueChecker`.
 44. **Merging a PR is a fourth port, and the operator sets the bar — not the agent.** `PullRequestMerger` (`ports/pr_merge.py`) is distinct from `Forge` (opens PRs), `MergeChecker` (reads PR state) and `IssueTracker` (creates issues) — the port is where ADR-0009's "the harness never touches `main`, it only proposes" is deliberately relaxed, so the relaxation stays explicit and revocable: wire no merger and nothing can merge. `dispatcher.py`/`consumer.py` don't import it (guarded by `test_architecture.py`, mirroring invariants #27/#32/#34), so "only a bound finisher can merge" is structural. Two safety properties belong to the **contract**, not to a driver: (a) **the merge is pinned to a sha** — `expected_sha` is the head the reviewer read, and a driver MUST refuse when the head moved past it, which is what makes merging unreviewed code structurally impossible; (b) **a refusal is not a failure** — a moved head / red check / protection rule raises `MergeRefused` (settled benignly, the next scan re-reviews the new head), only a genuine fault raises `MergeError` (fails the task); `MergeRefused` subclasses `MergeError` so a forgetful driver author fails *safe*. The `merge-review` persona supplies a **confidence** in a fenced json block (`merge_verdict.py`, `issue_drafts.py`'s twin); the `merge-pr` finisher compares it against `min_confidence` **from the workflow binding** — the agent never supplies the threshold it is judged against and has no tool that can merge (invariant #9's philosophy at its most consequential). The whole path is **asymmetric by design**: many states refuse (no source, no head sha, unreadable verdict, confidence below the bar, a moved head), none merges by accident. See ADR-0023.
+45. **Delivery statistics are derived from the task record, never stored — and the derivation reads *history*, never `status`.** `StatsView` (`ports/stats.py`) is a fourth read-only UI surface next to `BoardView`/`ArtifactView`/`StageOutputView`; `stats.summarize()` is a pure function of `(tasks, now, days)` and `QueueStatsView` is the thin part that lists the queues — including `archived/`, where most of a week's window lives once the retention sweep has run. Nothing is written and no new state exists (ADR-0026), which is why the first render already covers the whole life of the root. Two reads that look obvious are **wrong**, and one derivation replaces both: once a task is archived its `status` is `archived` whichever way it ended, and its *last* history entry is the archival stamp appended days later. `stats.settling_entry` — the last entry whose `to_step` is `end` or `failed` — is therefore the source of both the outcome and the moment it settled. It is deliberately **not** `models.is_retired_failure`, which asks whether a task's *current position* is a retired failure and stops holding the moment it is archived; `stats.is_retired` asks the historical question instead (the same two-predicates-one-history split ADR-0025 made). A healer-retired failure counts as a **failure**, reported separately, never as a delivery. `dispatcher.py`/`consumer.py` import neither the port nor the module — guarded by `test_architecture.py`, mirroring invariants #23/#32/#34 — and two record-only stamps feed it (`data.source.labels` at both GitHub ingestion sites, `data.resolve.clean` from `ResolveConflictBehavior`), neither ever read by `route()` (invariant #8). See ADR-0026.
 
 ## Working here
 
@@ -178,7 +179,7 @@ Dependencies flow strictly downward, no cycles.
 | Base | `models` (imports nothing from the package), `ids` |
 | Logic | `router` (knows only `models`) |
 | Base (package-free) | `models`, `ids`, `artifacts_layout` (the `.artifacts/<id>/<step>-NN` convention), `issue_drafts`, `merge_verdict` |
-| Ports | `ports/{queue,workflows,strategy,behavior,events,clock,workspace,artifacts,forge,board,agent,repos,source,control,logs,issues,merge,pr_merge,issue_state,triggers,updater,process_admin,issue_import,command}` |
+| Ports | `ports/{queue,workflows,strategy,behavior,events,clock,workspace,artifacts,forge,board,agent,repos,source,control,logs,issues,merge,pr_merge,issue_state,triggers,updater,process_admin,issue_import,command,stats}` |
 | Orchestration | `dispatcher`, `consumer`, `source_poller`, `task_control`, `pr_watcher`, `merge_reconciler`, `issue_reconciler`, `retention_reconciler` — know only ports (and, for `pr_watcher`/`merge_reconciler`/`issue_reconciler`/`retention_reconciler`, the base `ids` module — not `workspace`/`forge`/`artifacts`/`agent`/`repos`/`drivers`) |
 | Behaviors | `behaviors/{landing,agent,resolve_conflict,verify,open_issue,merge_pr}` — touch ports, not drivers |
 | Drivers | `drivers/{fs_queue,fs_workflows,fifo_strategy,dummy_behavior,stdout_events,system_clock,memory,git_workspace,fake_forge,claude_cli,fs_agents,fs_repos,worktree_artifacts,source_reflector,github_client,github_source,github_forge,github_issues,github_issues_check,github_conflicts_check,github_mergeable_check,github_pr_merger,jira_client,jira_issues_check,failed_tasks_check,github_merge_checker,github_issue_checker,launchd,composite_events,git_remote,projection_events,stage_output,scheduled_trigger,checks,fs_triggers,fs_processes,slack_sink,uv_updater,label_issue,github_issue_import,subprocess_command}` |
@@ -186,6 +187,16 @@ Dependencies flow strictly downward, no cycles.
 | Edges | `app` (wiring), `cli` |
 
 - `projection.py` — in-memory read model of the board; hydration from queues + event stream
+- `stats.py` — the delivery report, derived on demand from the tasks themselves
+  (ADR-0026): `settling_entry` (the one entry that says both *when* a task
+  settled and *how* it ended), `task_kind`, the pure `summarize()`, and
+  `QueueStatsView` — a `StatsView` over the live queues including `archived/`.
+  Sibling of `projection.py` in shape: core, reads through `TaskQueue`, imports
+  no driver
+- `ports/stats.py` — the `StatsView` port the stats page looks through, plus its
+  report dataclasses (`StatsReport`/`Outcomes`/`Group`/`Delivery`/`Cost`) and
+  `clamp_window` — the same "dataclasses live with the ABC" shape as
+  `ports/board.py`
 - `artifacts_layout.py` — the single source of truth for artifact placement in the worktree (`next_attempt`, `artifacts_dir`); read by both the behavior and `WorktreeArtifactView`
 - `issue_drafts.py` — parse a step's issue drafts from a fenced JSON array in its artifact; derives idempotency markers (`IssueDraft`, `parse_drafts`, `marker_for`, `DraftError`); imports nothing from the `harness` package, like `models`/`ids`/`artifacts_layout`
 - `ports/board.py` — the `BoardView` port through which the UI looks
@@ -451,6 +462,13 @@ Dependencies flow strictly downward, no cycles.
   `ArtifactView` shows *what it produced*, `StageOutputView` shows *what the
   running stage is doing right now* — a bounded, in-memory, live-only tail
   (`drivers/stage_output.py`), gone once the stage ends. See ADR-0012.
+- **`StatsView`** is the fourth, answering *what the harness delivered over a
+  window* — throughput, success rate, where it fails, auto-merges, conflict
+  resolution and cost, on a `/stats` subpage plus `GET /api/stats?days=N`.
+  Unlike the other three it holds nothing: it derives from the task files on
+  every request (ADR-0026), memoised for a few seconds. Always built, like
+  `RetentionReconciler` — it needs no external service, so there is no "not
+  configured" state to gate on. See ADR-0026.
 - **A trigger** is a third way a task is born (alongside `harness submit` and a
   `TaskSource.poll()` over the outside world): a `Trigger` is a `TaskSource` that
   *produces* tasks and reflects nothing outward — it implements only `poll()`, its
@@ -661,6 +679,15 @@ Dependencies flow strictly downward, no cycles.
   Process's payoff is its *nested roles* and its `sink` slot, the structure the
   future increments hang on. Folding `triggers/` into `processes/` is a later
   cleanup, not this increment's job.
+- **`archived/` is now the stats window, so pruning it would silently shorten
+  the report.** It was load-bearing for one reason (keep a resolved task
+  gettable by id); ADR-0026 gave it a second — every task that settled more
+  than `HARNESS_RETENTION_DAYS` ago lives there, which is most of any window
+  worth looking at. Nothing prunes it today. If a prune is ever added, the stats
+  window has to stay inside it, and the failure mode to watch for is that the
+  report gets *shorter* rather than failing. Note also what the retention
+  window does **not** affect: a task archived for age is still counted, because
+  `QueueStatsView` reads `archived/` too — only the board hides it.
 - **"Artifact" is reserved vocabulary — an action's outputs are Observations.**
   A `Check` returns `Observation`s that become inbox *tasks*; an **artifact** is
   a step's work product versioned in the worktree (`.artifacts/<id>/`,

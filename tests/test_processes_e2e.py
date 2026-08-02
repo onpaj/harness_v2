@@ -321,6 +321,7 @@ def test_github_issues_process_ingests_a_labelled_issue_once_per_bucket(tmp_path
         assert task.data["source"] == {
             "kind": "github", "repo": "onpaj/Anela.Heblo",
             "issue": 42, "url": "https://gh/i/42",
+            "labels": ["harness:todo"],
         }
 
         # Same 30s bucket → no re-fire.
