@@ -56,6 +56,15 @@ DEFAULT_GIVE_UP_LABEL = "harness:needs-human"
 DEFAULT_MAX_ATTEMPTS = 3
 DEFAULT_LOG_TAIL_LINES = 200
 
+ATTEMPT_LABEL_PREFIX = "harness:autofix-"
+"""The rolling attempt counter, stored on the PR itself.
+
+The count cannot live in harness's own ledger: that keys on `head_sha`, and
+every fix push mints a new one, so a counter there would reset exactly when it
+matters. On the PR it is free to read (the labels arrive with the detail call
+the check already makes), visible to whoever is looking at the PR, and an
+operator resets the budget by deleting the label."""
+
 SPEC = CheckSpec(
     name="github-unhealthy-prs",
     label="GitHub unhealthy PRs",
@@ -180,12 +189,20 @@ class GithubUnhealthyPrsCheck(Check):
             # is still computing — nothing here an agent could fix.
             return None
 
+        attempt = self._attempt_of(pull) + 1
+        if attempt > self._max_attempts:
+            # Budget spent. Label it once and never look at it again — the
+            # give-up check at the top of this method is what makes that stick.
+            self._client.add_label(slug, pull.number, self._give_up_label)
+            return None
+
         key = f"{slug}:{pull.number}:{pull.head_sha}"
         if key in self._seen:
             return None
         self._seen.add(key)
 
-        attempt = 1
+        self._bump_attempt_label(slug, pull, attempt)
+
         failing_checks = [
             {
                 "name": run.name,
@@ -226,6 +243,28 @@ class GithubUnhealthyPrsCheck(Check):
             return None
         lines = log.rstrip("\n").split("\n")
         return "\n".join(lines[-self._log_tail_lines :])
+
+    def _attempt_of(self, pull: PullRequestInfo) -> int:
+        """How many attempts this PR has already had, read off its labels. An
+        unparseable suffix counts as zero rather than raising — a human editing
+        labels by hand must not be able to wedge the check."""
+        for label in pull.labels:
+            if not label.startswith(ATTEMPT_LABEL_PREFIX):
+                continue
+            suffix = label[len(ATTEMPT_LABEL_PREFIX) :]
+            if suffix.isdigit():
+                return int(suffix)
+        return 0
+
+    def _bump_attempt_label(
+        self, slug: str, pull: PullRequestInfo, attempt: int
+    ) -> None:
+        for label in pull.labels:
+            if label.startswith(ATTEMPT_LABEL_PREFIX):
+                self._client.remove_label(slug, pull.number, label)
+        self._client.add_label(
+            slug, pull.number, f"{ATTEMPT_LABEL_PREFIX}{attempt}"
+        )
 
 
 def _render_brief(problem: dict[str, Any], max_attempts: int) -> str:

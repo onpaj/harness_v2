@@ -194,3 +194,67 @@ def test_seen_ledger_suppresses_a_relist_at_the_same_head():
 
     assert len(check.evaluate()) == 1
     assert check.evaluate() == []
+
+
+def test_first_emit_stamps_attempt_one():
+    client = FakeGithubClient([])
+    client.add_pull_request(_pr(70, "dirty", sha="s70"))
+
+    (obs,) = _check(client).evaluate()
+
+    assert obs.data["problem"]["attempt"] == 1
+    assert client.list_pull_requests("o/r")[0].labels == ("harness:autofix-1",)
+
+
+def test_existing_attempt_label_is_read_and_rolled_forward():
+    client = FakeGithubClient([])
+    client.add_pull_request(
+        _pr(71, "dirty", sha="s71", labels=("harness:autofix-1",))
+    )
+
+    (obs,) = _check(client).evaluate()
+
+    assert obs.data["problem"]["attempt"] == 2
+    assert client.list_pull_requests("o/r")[0].labels == ("harness:autofix-2",)
+
+
+def test_budget_exhausted_labels_needs_human_and_emits_nothing():
+    client = FakeGithubClient([])
+    client.add_pull_request(
+        _pr(72, "dirty", sha="s72", labels=("harness:autofix-3",))
+    )
+
+    assert _check(client).evaluate() == []
+    assert "harness:needs-human" in client.list_pull_requests("o/r")[0].labels
+
+
+def test_max_attempts_is_configurable():
+    client = FakeGithubClient([])
+    client.add_pull_request(
+        _pr(73, "dirty", sha="s73", labels=("harness:autofix-1",))
+    )
+
+    assert _check(client, max_attempts=1).evaluate() == []
+    assert "harness:needs-human" in client.list_pull_requests("o/r")[0].labels
+
+
+def test_a_malformed_attempt_label_is_treated_as_zero():
+    client = FakeGithubClient([])
+    client.add_pull_request(
+        _pr(74, "dirty", sha="s74", labels=("harness:autofix-oops",))
+    )
+
+    (obs,) = _check(client).evaluate()
+
+    assert obs.data["problem"]["attempt"] == 1
+
+
+def test_no_label_is_written_for_a_behind_or_clean_pr():
+    client = FakeGithubClient([])
+    client.add_pull_request(_pr(75, "behind", sha="s75"))
+    client.add_pull_request(_pr(76, "clean", sha="s76"))
+
+    _check(client).evaluate()
+
+    for pull in client.list_pull_requests("o/r"):
+        assert pull.labels == ()
