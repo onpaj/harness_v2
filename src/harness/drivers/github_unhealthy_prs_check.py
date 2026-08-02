@@ -57,13 +57,33 @@ DEFAULT_MAX_ATTEMPTS = 3
 DEFAULT_LOG_TAIL_LINES = 200
 
 ATTEMPT_LABEL_PREFIX = "harness:autofix-"
-"""The rolling attempt counter, stored on the PR itself.
+ATTEMPT_LABEL_SEPARATOR = "@"
+ATTEMPT_LABEL_SHA_LENGTH = 7
+"""The rolling attempt counter, stored on the PR itself as
+`harness:autofix-<n>@<sha7>` (e.g. `harness:autofix-2@3035f7d`, comfortably
+inside GitHub's 50-character label limit).
 
 The count cannot live in harness's own ledger: that keys on `head_sha`, and
 every fix push mints a new one, so a counter there would reset exactly when it
 matters. On the PR it is free to read (the labels arrive with the detail call
 the check already makes), visible to whoever is looking at the PR, and an
-operator resets the budget by deleting the label."""
+operator resets the budget by deleting the label.
+
+The `@<sha7>` half is what makes the counter count *attempts* rather than
+*triages*. `evaluate()` is gated only by the in-process `_seen` ledger, while
+the cross-restart guarantee lives downstream in `SourcePoller._seen`: the
+poller silently drops a duplicate observation, but only after this check has
+already written the label. Without the stamp, every restart — and this machine
+restarts the service twice an hour — re-triaged an unchanged head and burned an
+attempt, so a PR could reach `harness:needs-human` having had zero completed
+attempts. The rule is therefore: **a label already naming the current head is
+not bumped**, because re-triaging the same head is exactly the free case; only
+a genuinely new head sha (what a real fix push produces) spends an attempt.
+
+A *legacy* label written before the stamp existed (`harness:autofix-2`, no
+`@sha`) names no head, so it can never match the current one: its count is
+honoured and the next triage bumps it — the pre-stamp behaviour, which is the
+backwards-compatible reading."""
 
 SPEC = CheckSpec(
     name="github-unhealthy-prs",
@@ -164,6 +184,15 @@ class GithubUnhealthyPrsCheck(Check):
         """One PR's whole decision, in the order of the spec's table. Returns
         an `Observation` only for row 9; every earlier row returns None, some
         after a side effect."""
+        if pull.head_repo != slug:
+            # A fork PR (or one whose fork has been deleted, reported as no
+            # head repo at all). Its head branch lives in someone else's repo,
+            # so `data.branch` would name a branch of *this* repo that merely
+            # shares the name — commonly `main`, since a fork PR is usually
+            # opened from the contributor's own default branch. The workspace
+            # would then check out, commit to and push the base repo's `main`,
+            # violating ADR-0009. Fail closed: unknown head repo is not ours.
+            return None
         if self._skip_label and self._skip_label in pull.labels:
             return None
         if self._give_up_label and self._give_up_label in pull.labels:
@@ -189,7 +218,14 @@ class GithubUnhealthyPrsCheck(Check):
             # is still computing — nothing here an agent could fix.
             return None
 
-        attempt = self._attempt_of(pull) + 1
+        spent, stamped_head = self._attempt_of(pull)
+        head = pull.head_sha[:ATTEMPT_LABEL_SHA_LENGTH]
+        # A label already naming this head means the attempt it counts is the
+        # one being re-triaged (a restart, or a retry after the unblock task
+        # failed) — free, by design. Anything else is a genuinely new head, and
+        # that is what an attempt is spent on.
+        fresh_head = stamped_head != head
+        attempt = spent + 1 if fresh_head else spent
         if attempt > self._max_attempts:
             # Budget spent. Label it once and never look at it again — the
             # give-up check at the top of this method is what makes that stick.
@@ -201,7 +237,8 @@ class GithubUnhealthyPrsCheck(Check):
             return None
         self._seen.add(key)
 
-        self._bump_attempt_label(slug, pull, attempt)
+        if fresh_head:
+            self._bump_attempt_label(slug, pull, attempt, head)
 
         failing_checks = [
             {
@@ -244,27 +281,51 @@ class GithubUnhealthyPrsCheck(Check):
         lines = log.rstrip("\n").split("\n")
         return "\n".join(lines[-self._log_tail_lines :])
 
-    def _attempt_of(self, pull: PullRequestInfo) -> int:
-        """How many attempts this PR has already had, read off its labels. An
-        unparseable suffix counts as zero rather than raising — a human editing
-        labels by hand must not be able to wedge the check."""
+    def _attempt_of(self, pull: PullRequestInfo) -> tuple[int, str | None]:
+        """How many attempts this PR has already had and against which head,
+        read off its labels: `(attempt, sha7)`, or `(0, None)` when nothing
+        readable is there.
+
+        The **highest** attempt number wins, not the first one encountered:
+        `_bump_attempt_label` adds before it removes, so two counters can
+        legitimately be present at once, and `labels` is an unordered tuple —
+        taking the first match would pick between them arbitrarily and could
+        hand the budget back.
+
+        An unparseable label counts as nothing rather than raising — a human
+        editing labels by hand must not be able to wedge the check. A legacy
+        label with no `@sha` parses to a real attempt with an unknown head
+        (`None`), which never equals the current head, so it bumps.
+        """
+        attempt = 0
+        head: str | None = None
         for label in pull.labels:
             if not label.startswith(ATTEMPT_LABEL_PREFIX):
                 continue
             suffix = label[len(ATTEMPT_LABEL_PREFIX) :]
-            if suffix.isdigit():
-                return int(suffix)
-        return 0
+            count, _, sha = suffix.partition(ATTEMPT_LABEL_SEPARATOR)
+            if not count.isdigit() or int(count) < 1:
+                continue
+            if int(count) > attempt:
+                attempt, head = int(count), sha or None
+        return attempt, head
 
     def _bump_attempt_label(
-        self, slug: str, pull: PullRequestInfo, attempt: int
+        self, slug: str, pull: PullRequestInfo, attempt: int, head: str
     ) -> None:
+        """Stamp the new counter on, then clear the old ones — in that order.
+
+        Removing first would mean a failure between the two calls (swallowed by
+        `evaluate()`'s per-PR `except Exception: continue`) left the PR with no
+        counter at all, silently resetting the budget to zero. Add-first fails
+        the other way: the transient state is two counters, which `_attempt_of`
+        resolves by taking the maximum.
+        """
+        fresh = f"{ATTEMPT_LABEL_PREFIX}{attempt}{ATTEMPT_LABEL_SEPARATOR}{head}"
+        self._client.add_label(slug, pull.number, fresh)
         for label in pull.labels:
-            if label.startswith(ATTEMPT_LABEL_PREFIX):
+            if label.startswith(ATTEMPT_LABEL_PREFIX) and label != fresh:
                 self._client.remove_label(slug, pull.number, label)
-        self._client.add_label(
-            slug, pull.number, f"{ATTEMPT_LABEL_PREFIX}{attempt}"
-        )
 
 
 def _render_brief(problem: dict[str, Any], max_attempts: int) -> str:

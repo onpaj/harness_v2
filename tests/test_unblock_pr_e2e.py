@@ -66,7 +66,7 @@ class CapturingBehavior(ConsumerBehavior):
         return BehaviorResult(DONE, f"{task.status}: ok")
 
 
-def _pr(number, sha, *, state, labels=()):
+def _pr(number, sha, *, state, labels=(), head_repo=SLUG):
     return PullRequestInfo(
         number=number,
         url=f"https://gh/pr/{number}",
@@ -76,6 +76,7 @@ def _pr(number, sha, *, state, labels=()):
         mergeable_state=state,
         title=f"PR {number}",
         labels=tuple(labels),
+        head_repo=head_repo,
     )
 
 
@@ -153,7 +154,7 @@ async def test_a_conflicted_pr_travels_unblock_then_land(tmp_path):
     problem = behavior.seen[0].data["problem"]
     assert problem["conflicted"] is True
     assert problem["attempt"] == 1
-    assert client.list_pull_requests(SLUG)[0].labels == ("harness:autofix-1",)
+    assert client.list_pull_requests(SLUG)[0].labels == ("harness:autofix-1@abc123",)
 
 
 async def test_a_red_pr_carries_its_log_tail_through_the_loop(tmp_path):
@@ -173,11 +174,22 @@ async def test_a_red_pr_carries_its_log_tail_through_the_loop(tmp_path):
 async def test_a_pr_that_spent_its_budget_is_labelled_and_never_dispatched(tmp_path):
     behavior, client = await _run(
         tmp_path,
-        [_pr(9, "s9", state="dirty", labels=("harness:autofix-3",))],
+        [_pr(9, "s9", state="dirty", labels=("harness:autofix-3@older12",))],
     )
 
     assert behavior.seen == []
     assert "harness:needs-human" in client.list_pull_requests(SLUG)[0].labels
+
+
+async def test_a_fork_pr_never_reaches_a_step(tmp_path):
+    """The whole loop, not just the check: a fork PR opened from the
+    contributor's own `main` must mint no task at all — the workspace would
+    otherwise attach to, commit to and push the *base* repo's `main`."""
+    fork = _pr(11, "s11", state="dirty", head_repo="contributor/harness_v2")
+    behavior, client = await _run(tmp_path, [fork])
+
+    assert behavior.seen == []
+    assert client.list_pull_requests(SLUG)[0].labels == ()
 
 
 async def test_an_opted_out_pr_is_not_touched_at_all(tmp_path):

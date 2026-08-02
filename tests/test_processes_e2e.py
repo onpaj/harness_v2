@@ -526,7 +526,10 @@ async def test_dirty_pr_via_autoresolver_process_flows_through_resolver_to_a_sin
 ):
     client = FakeGithubClient()
     client.add_pull_request(
-        PullRequestInfo(42, "https://github.com/o/r/pull/42", "harness/tsk_original", "sha1", "main", "dirty")
+        PullRequestInfo(
+            42, "https://github.com/o/r/pull/42", "harness/tsk_original", "sha1", "main", "dirty",
+            head_repo="o/r",
+        )
     )
     workspace = MemoryWorkspace()
     harness, _, _, _ = build_autoresolver_harness(tmp_path, client, workspace)
@@ -549,7 +552,10 @@ async def test_dirty_pr_via_autoresolver_process_flows_through_resolver_to_a_sin
 async def test_behind_pr_via_autoresolver_process_is_auto_updated_with_no_task_created(tmp_path):
     client = FakeGithubClient()
     client.add_pull_request(
-        PullRequestInfo(7, "https://github.com/o/r/pull/7", "harness/tsk_7", "sha7", "main", "behind")
+        PullRequestInfo(
+            7, "https://github.com/o/r/pull/7", "harness/tsk_7", "sha7", "main", "behind",
+            head_repo="o/r",
+        )
     )
     workspace = MemoryWorkspace()
     harness, _, _, _ = build_autoresolver_harness(tmp_path, client, workspace)
@@ -564,7 +570,10 @@ async def test_behind_pr_via_autoresolver_process_is_auto_updated_with_no_task_c
 async def test_restart_does_not_duplicate_the_autoresolver_task_for_the_same_conflict(tmp_path):
     client = FakeGithubClient()
     client.add_pull_request(
-        PullRequestInfo(42, "https://github.com/o/r/pull/42", "harness/tsk_original", "sha1", "main", "dirty")
+        PullRequestInfo(
+            42, "https://github.com/o/r/pull/42", "harness/tsk_original", "sha1", "main", "dirty",
+            head_repo="o/r",
+        )
     )
     workspace = MemoryWorkspace()
     harness, _, registry, slugs = build_autoresolver_harness(tmp_path, client, workspace)

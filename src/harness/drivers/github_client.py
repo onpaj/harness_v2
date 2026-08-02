@@ -77,6 +77,14 @@ class PullRequestInfo:
     body: str = ""
     labels: tuple[str, ...] = ()
     draft: bool = False
+    # The repo the head branch actually lives in (`owner/name`), which is what
+    # distinguishes a fork PR from a same-repo one — `head_branch` alone cannot:
+    # a fork PR opened from the contributor's own `main` reads as `"main"`, the
+    # base repo's own default branch. `""` means unknown, which GitHub reports
+    # as a null `head.repo` once the fork has been deleted. Defaulted like the
+    # four fields above, so every existing construction site compiles unchanged
+    # — but a caller that acts on a PR must treat the default as "not mine".
+    head_repo: str = ""
 
 
 @dataclass(frozen=True)
@@ -642,6 +650,10 @@ class HttpGithubClient(GithubClient):
                 detail = json.loads(response.read())
             base = item.get("base") or detail.get("base") or {}
             head_detail = detail.get("head") or item.get("head") or {}
+            # `head.repo` is null once a fork has been deleted, so `or {}` is
+            # load-bearing rather than defensive: the read must degrade to the
+            # unknown-repo default, never raise.
+            head_repo = (head_detail.get("repo") or {}).get("full_name") or ""
             infos.append(
                 PullRequestInfo(
                     number=number,
@@ -658,6 +670,7 @@ class HttpGithubClient(GithubClient):
                         if isinstance(label, dict) and "name" in label
                     ),
                     draft=bool(detail.get("draft", item.get("draft", False))),
+                    head_repo=head_repo,
                 )
             )
         return infos

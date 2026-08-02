@@ -712,6 +712,27 @@ def test_fake_list_pull_requests_without_prefix_returns_all():
     assert len(client.list_pull_requests("o/r")) == 1
 
 
+def test_fake_carries_the_head_repo_so_a_fork_pr_can_be_constructed():
+    client = FakeGithubClient()
+    client.add_pull_request(
+        PullRequestInfo(1, "u1", "main", "sha1", "main", "dirty", head_repo="fork/r")
+    )
+    client.add_pull_request(
+        PullRequestInfo(2, "u2", "main", "sha2", "main", "dirty", head_repo="o/r")
+    )
+
+    assert [pr.head_repo for pr in client.list_pull_requests("o/r")] == [
+        "fork/r",
+        "o/r",
+    ]
+
+
+def test_head_repo_defaults_to_unknown():
+    info = PullRequestInfo(1, "u", "b", "s", "main", "dirty")
+
+    assert info.head_repo == ""
+
+
 def test_fake_update_branch_records_call_and_flips_to_clean():
     client = FakeGithubClient()
     client.add_pull_request(
@@ -741,7 +762,7 @@ def test_http_list_pull_requests_two_tier_fetch():
         },
     ]
     detail_payload = {
-        "head": {"sha": "abc123"},
+        "head": {"sha": "abc123", "repo": {"full_name": "o/r"}},
         "base": {"ref": "main"},
         "mergeable_state": "behind",
     }
@@ -768,8 +789,69 @@ def test_http_list_pull_requests_two_tier_fetch():
     assert info.head_sha == "abc123"
     assert info.base_branch == "main"
     assert info.mergeable_state == "behind"
+    assert info.head_repo == "o/r"
     # exactly one list call + one detail call (for the matching PR only)
     assert len(opener.requests) == 2
+
+
+def test_http_list_pull_requests_reads_the_head_repo_of_a_fork():
+    class TieredOpener:
+        def open(self, request):
+            if request.full_url.endswith("/pulls/1"):
+                return FakeResponse(
+                    {
+                        "head": {"sha": "x", "repo": {"full_name": "contributor/r"}},
+                        "base": {"ref": "main"},
+                        "mergeable_state": "dirty",
+                    }
+                )
+            return FakeResponse(
+                [
+                    {
+                        "number": 1,
+                        "html_url": "u",
+                        "head": {"ref": "main", "repo": {"full_name": "contributor/r"}},
+                        "base": {"ref": "main"},
+                    }
+                ]
+            )
+
+    client = HttpGithubClient("tok", opener=TieredOpener())
+
+    [info] = client.list_pull_requests("o/r")
+
+    assert info.head_repo == "contributor/r"
+
+
+def test_http_list_pull_requests_null_head_repo_reads_as_unknown():
+    """GitHub nulls `head.repo` once the fork has been deleted."""
+
+    class TieredOpener:
+        def open(self, request):
+            if request.full_url.endswith("/pulls/1"):
+                return FakeResponse(
+                    {
+                        "head": {"sha": "x", "repo": None},
+                        "base": {"ref": "main"},
+                        "mergeable_state": "dirty",
+                    }
+                )
+            return FakeResponse(
+                [
+                    {
+                        "number": 1,
+                        "html_url": "u",
+                        "head": {"ref": "gone", "repo": None},
+                        "base": {"ref": "main"},
+                    }
+                ]
+            )
+
+    client = HttpGithubClient("tok", opener=TieredOpener())
+
+    [info] = client.list_pull_requests("o/r")
+
+    assert info.head_repo == ""
 
 
 def test_http_list_pull_requests_missing_mergeable_state_is_unknown():
