@@ -2589,6 +2589,7 @@ async def serve(
         ),
         updater=updater,
         issue_import=harness.issue_import,
+        stats=harness.stats,
         version=version_string(),
         build_time=build_timestamp(),
     )

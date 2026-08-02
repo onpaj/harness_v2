@@ -174,6 +174,10 @@ class GithubTaskSource(TaskSource):
                             "repo": self._repo,
                             "issue": issue.number,
                             "url": issue.url,
+                            # Record-only, for the delivery report's "what kind
+                            # of issue" breakdown (ADR-0026). Never read by
+                            # route() or the dispatcher (invariant #8).
+                            "labels": list(issue.labels),
                         },
                     },
                 )

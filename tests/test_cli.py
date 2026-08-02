@@ -34,6 +34,7 @@ from harness.drivers.jira_client import FakeJiraClient
 from harness.drivers.memory import MemoryArtifactStore, MemoryRepositoryRegistry
 from harness.drivers.stage_output import StageOutputProjection
 from harness.models import DONE, END, REQUEST_CHANGES, Task, Transition, Workflow
+from harness.api.app import _EmptyStatsView
 from harness.ports.issue_import import NullIssueImport
 from harness.projection import BoardProjection
 from tests.fakes import FakeTaskControl
@@ -715,6 +716,7 @@ async def test_serve_passes_the_harness_issue_import_into_create_app(monkeypatch
             self.known_steps = frozenset()
             self.workflows = {}
             self.issue_import = sentinel
+            self.stats = _EmptyStatsView()
 
         async def run(
             self, poll_interval, source_interval=30.0, pr_poll_interval=0.0, reconcile_interval=300.0, stop=None
@@ -2391,6 +2393,7 @@ async def test_serve_returns_when_uvicorn_stops_before_the_loop(monkeypatch, tmp
             self.known_steps = frozenset()
             self.workflows = {}
             self.issue_import = NullIssueImport()
+            self.stats = _EmptyStatsView()
             self.stop_seen: asyncio.Event | None = None
 
         async def run(
@@ -2464,6 +2467,7 @@ async def test_serve_wires_the_filesystem_process_admin(monkeypatch, tmp_path):
             self.known_steps = frozenset()
             self.workflows = {}
             self.issue_import = NullIssueImport()
+            self.stats = _EmptyStatsView()
 
         async def run(
             self, poll_interval, source_interval=30.0, pr_poll_interval=0.0, reconcile_interval=300.0, stop=None
@@ -2518,6 +2522,7 @@ async def test_serve_wires_the_registry_into_the_filesystem_process_admin(
             self.known_steps = frozenset()
             self.workflows = {}
             self.issue_import = NullIssueImport()
+            self.stats = _EmptyStatsView()
 
         async def run(
             self, poll_interval, source_interval=30.0, pr_poll_interval=0.0, reconcile_interval=300.0, stop=None
@@ -2575,6 +2580,7 @@ async def test_serve_wires_known_steps_and_workflows_into_the_process_admin(
             self.known_steps = frozenset({"plan", "review"})
             self.workflows = {"resolver": SERVE_TEST_WORKFLOW}
             self.issue_import = NullIssueImport()
+            self.stats = _EmptyStatsView()
 
         async def run(
             self, poll_interval, source_interval=30.0, pr_poll_interval=0.0, reconcile_interval=300.0, stop=None

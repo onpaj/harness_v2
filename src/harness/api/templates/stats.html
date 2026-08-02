@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#f8f8fa" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#141416" media="(prefers-color-scheme: dark)">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <title>harness board — stats</title>
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+  {% include "_nav.html" %}
+  <main class="page">
+    <div class="page-header">
+      <h1>Stats</h1>
+      <span class="page-header__action window-picker">
+        {% for choice in windows %}
+        <a class="btn small{% if choice == window %} primary{% endif %}"
+           href="/stats?days={{ choice }}">{{ choice }}d</a>
+        {% endfor %}
+      </span>
+    </div>
+
+    {% macro outcome_row(label, outcomes) %}
+    <tr>
+      <td>{{ label }}</td>
+      <td class="num">{{ outcomes.settled }}</td>
+      <td class="num">{{ outcomes.completed }}</td>
+      <td class="num">{{ outcomes.failed }}{% if outcomes.retired %}
+        <span class="hint">({{ outcomes.retired }} retired)</span>{% endif %}</td>
+      <td class="num">{{ outcomes.success_rate | percent }}</td>
+    </tr>
+    {% endmacro %}
+
+    {% macro breakdown(title, rows, empty) %}
+    <section class="report-section">
+      <h2>{{ title }}</h2>
+      {% if rows %}
+      <div class="table-scroll">
+        <table class="report-table">
+          <thead>
+            <tr>
+              <th>{{ title }}</th><th class="num">Settled</th><th class="num">Completed</th>
+              <th class="num">Failed</th><th class="num">Success</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for row in rows %}{{ outcome_row(row.name, row.outcomes) }}{% endfor %}
+          </tbody>
+        </table>
+      </div>
+      {% else %}
+      <p class="hint">{{ empty }}</p>
+      {% endif %}
+    </section>
+    {% endmacro %}
+
+    <p class="hint">
+      Everything that settled in the last {{ report.window_days }} days. Derived
+      from the tasks themselves, including archived ones — a task counts on the
+      day it reached <code>end</code> or <code>failed</code>, not the day it was
+      archived.
+    </p>
+
+    <section class="report-section">
+      <div class="stat-tiles">
+        <div class="stat-tile">
+          <span class="stat-tile__value">{{ report.overall.settled }}</span>
+          <span class="stat-tile__label">settled</span>
+        </div>
+        <div class="stat-tile">
+          <span class="stat-tile__value">{{ report.overall.completed }}</span>
+          <span class="stat-tile__label">completed</span>
+        </div>
+        <div class="stat-tile">
+          <span class="stat-tile__value">{{ report.overall.failed }}</span>
+          <span class="stat-tile__label">failed{% if report.overall.retired %},
+            {{ report.overall.retired }} retired{% endif %}</span>
+        </div>
+        <div class="stat-tile">
+          <span class="stat-tile__value">{{ report.overall.success_rate | percent }}</span>
+          <span class="stat-tile__label">success rate</span>
+        </div>
+        <div class="stat-tile">
+          <span class="stat-tile__value">{{ report.in_flight }}</span>
+          <span class="stat-tile__label">in flight now</span>
+        </div>
+      </div>
+    </section>
+
+    {{ breakdown("Kind", report.by_kind, "Nothing settled in this window.") }}
+    {{ breakdown("Repository", report.by_repository, "No repositories to report.") }}
+    {{ breakdown("Workflow", report.by_workflow, "No workflows to report.") }}
+    {{ breakdown("Issue label", report.by_label, "No labelled issues settled — labels are recorded from ingestion onwards.") }}
+
+    <section class="report-section">
+      <h2>Where it fails</h2>
+      {% if report.failures_by_step %}
+      <div class="table-scroll">
+        <table class="report-table">
+          <thead><tr><th>Step</th><th class="num">Failures</th></tr></thead>
+          <tbody>
+            {% for step, count in report.failures_by_step %}
+            <tr><td>{{ step }}</td><td class="num">{{ count }}</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      {% else %}
+      <p class="hint">No failures in this window.</p>
+      {% endif %}
+    </section>
+
+    <section class="report-section">
+      <h2>Delivery</h2>
+      <div class="table-scroll">
+        <table class="report-table">
+          <tbody>
+            <tr><td>Pull requests opened</td><td class="num">{{ report.delivery.prs_opened }}</td></tr>
+            <tr><td>Pull requests merged</td><td class="num">{{ report.delivery.prs_merged }}</td></tr>
+            <tr>
+              <td>Merged by the harness</td>
+              <td class="num">{{ report.delivery.auto_merged }}</td>
+            </tr>
+            <tr>
+              <td>Withheld (dry run)
+                <span class="hint">would have merged — flip <code>dry_run</code> to let it</span>
+              </td>
+              <td class="num">{{ report.delivery.merge_withheld }}</td>
+            </tr>
+            <tr><td>Conflicts detected</td><td class="num">{{ report.delivery.conflicts }}</td></tr>
+            <tr>
+              <td>— gone by the time the resolver looked</td>
+              <td class="num">{{ report.delivery.conflicts_clean }}</td>
+            </tr>
+            <tr>
+              <td>— resolved by the agent</td>
+              <td class="num">{{ report.delivery.conflicts_resolved }}</td>
+            </tr>
+            <tr><td>— unresolved (failed)</td><td class="num">{{ report.delivery.conflicts_failed }}</td></tr>
+            <tr>
+              <td>Review bounces
+                <span class="hint"><code>request_changes</code> sent back for another pass</span>
+              </td>
+              <td class="num">{{ report.delivery.review_bounces }}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="report-section">
+      <h2>Cost</h2>
+      <div class="table-scroll">
+        <table class="report-table">
+          <tbody>
+            <tr><td>Input tokens</td><td class="num">{{ report.cost.input_tokens | thousands }}</td></tr>
+            <tr><td>Output tokens</td><td class="num">{{ report.cost.output_tokens | thousands }}</td></tr>
+            <tr><td>Spend</td><td class="num">{{ report.cost.usd | usd }}</td></tr>
+            <tr>
+              <td>Per completed task</td>
+              <td class="num">
+                {% set per = report.cost.usd_per_completed(report.overall.completed) %}
+                {% if per is none %}—{% else %}{{ per | usd }}{% endif %}
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="hint">
+        Best-effort: an agent run that reported no usage contributes nothing, and
+        a task's whole spend is attributed to the window it settled in.
+      </p>
+    </section>
+
+    <footer class="status-bar">harness {{ version }} · built {% if build_time %}<time datetime="{{ build_time }}" title="{{ build_time }} UTC">{{ build_time | shorttime }}</time>{% else %}unknown{% endif %}</footer>
+  </main>
+</body>
+</html>
