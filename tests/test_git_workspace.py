@@ -637,6 +637,26 @@ def test_commit_can_exclude_a_pathspec(tmp_path):
     assert not any(p.startswith(".artifacts") for p in tracked)
 
 
+def test_commit_with_only_excluded_changes_commits_nothing(tmp_path):
+    """The motivating case for checking `diff --cached` instead of `status
+    --porcelain`: when the *only* change on disk lives under the excluded
+    path, staging with the pathspec exclusion leaves nothing staged. A
+    status-based check would still see the untracked `.artifacts/note.md` and
+    wrongly conclude there was something to commit, then crash inside `git
+    commit` on an empty index."""
+    handle = _workspace(tmp_path).attach(_make_task())
+    head_before = _git(["rev-parse", "HEAD"], handle.path).strip()
+
+    (handle.path / ".artifacts").mkdir(exist_ok=True)
+    (handle.path / ".artifacts" / "note.md").write_text("scratch\n")
+
+    result = handle.commit("only artifacts", exclude=(".artifacts",))
+
+    assert result is None
+    head_after = _git(["rev-parse", "HEAD"], handle.path).strip()
+    assert head_after == head_before
+
+
 def test_commit_without_exclude_still_stages_everything(tmp_path):
     handle = _workspace(tmp_path).attach(_make_task())
 
