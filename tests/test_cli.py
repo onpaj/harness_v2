@@ -29,7 +29,7 @@ from harness.cli import (
     serve,
 )
 from harness.drivers.fs_agents import FilesystemAgentCatalog
-from harness.drivers.github_client import FakeGithubClient
+from harness.drivers.github_client import FakeGithubClient, HttpGithubClient
 from harness.drivers.jira_client import FakeJiraClient
 from harness.drivers.memory import MemoryArtifactStore, MemoryRepositoryRegistry
 from harness.drivers.stage_output import StageOutputProjection
@@ -672,6 +672,38 @@ def test_run_passes_issue_import_factory_to_build_only_with_a_token(monkeypatch,
     monkeypatch.setenv("GITHUB_TOKEN", "tok")
     assert main(["run", "--root", str(tmp_path)]) == 0
     assert captured["issue_import_factory"] is not None
+
+
+def test_run_wires_pr_labeller_to_add_label_only_with_a_token(monkeypatch, tmp_path):
+    """`pr_labeller` is the other half of the give-up containment (ADR-0026):
+    `UnblockPrBehavior` calls it to stamp `harness:needs-human` itself when the
+    agent gives up. `None` without a token, exactly like the
+    `github-unhealthy-prs` check that mints those tasks in the first place, so
+    the two halves are never configured apart — bound to `GithubClient.add_label`
+    the same way `issue_import_factory` is only present with a token."""
+    main(["init", "--root", str(tmp_path)])
+    captured = {}
+
+    def fake_build(*args, **kwargs):
+        captured["pr_labeller"] = kwargs.get("pr_labeller")
+        return object()
+
+    async def fake_serve(harness, port, poll_interval, source_interval=30.0, pr_poll_interval=0.0, reconcile_interval=300.0, registry=None):
+        pass
+
+    monkeypatch.setattr("harness.cli.build", fake_build)
+    monkeypatch.setattr("harness.cli.serve", fake_serve)
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+
+    assert main(["run", "--root", str(tmp_path)]) == 0
+    assert captured["pr_labeller"] is None
+
+    monkeypatch.setenv("GITHUB_TOKEN", "tok")
+    assert main(["run", "--root", str(tmp_path)]) == 0
+    pr_labeller = captured["pr_labeller"]
+    assert pr_labeller is not None
+    assert pr_labeller.__self__.__class__.__name__ == "HttpGithubClient"
+    assert pr_labeller.__func__ is HttpGithubClient.add_label
 
 
 async def test_serve_passes_the_harness_issue_import_into_create_app(monkeypatch, tmp_path):
@@ -1817,11 +1849,17 @@ def test_process_check_factories_builds_an_unblock_pr_process(tmp_path):
 
 
 def test_github_unhealthy_prs_factory_defaults_match_the_check_s_own():
-    """The factory is the only place a `processes/*.json` reaches the check, so
-    an omitted param must land on the driver's own constant — in particular the
-    empty `head_prefix` (every open PR, not just `harness/`) and the autofix
-    skip label, which is *not* the automerge one the same name is bound to a
-    few lines above it in `cli.py`."""
+    """The factory is the only place a `processes/*.json` reaches the check —
+    including one authored blank through the dashboard's process editor, not
+    just the seeded `unblock-pr.json` (which pins `head_prefix: "harness/"`
+    explicitly). So an omitted `head_prefix` must land on the same narrow
+    default as its sibling `github_mergeable_factory`, not the check
+    class's own wide-open constant (see
+    `test_the_check_s_own_head_prefix_constant_stays_empty` for why that one
+    is different). The other omitted params still land on the driver's own
+    constants — in particular the autofix skip label, which is *not* the
+    automerge one the same name is bound to a few lines above it in
+    `cli.py`."""
     from harness.drivers.github_unhealthy_prs_check import (
         DEFAULT_GIVE_UP_LABEL,
         DEFAULT_LOG_TAIL_LINES,
@@ -1834,7 +1872,7 @@ def test_github_unhealthy_prs_factory_defaults_match_the_check_s_own():
 
     check = checks["github-unhealthy-prs"]({})
 
-    assert check._head_prefix == ""
+    assert check._head_prefix == "harness/"
     assert check._skip_label == DEFAULT_SKIP_LABEL == "harness:no-autofix"
     assert check._give_up_label == DEFAULT_GIVE_UP_LABEL
     assert check._max_attempts == DEFAULT_MAX_ATTEMPTS

@@ -232,9 +232,10 @@ class GitWorkspaceHandle(WorkspaceHandle):
 
     def abort_merge(self) -> None:
         # `git merge --abort` restores the pre-merge HEAD, index and working
-        # tree (clears MERGE_HEAD and the conflict markers). Landing calls this
-        # only when merge() reported a conflict, so a merge is always in
-        # progress here — there is nothing to abort otherwise.
+        # tree (clears MERGE_HEAD and the conflict markers). Landing and
+        # UnblockPrBehavior both call this only when merge() reported a
+        # conflict, so a merge is always in progress here — there is nothing
+        # to abort otherwise.
         _git(["-C", str(self._path), "merge", "--abort"])
 
 

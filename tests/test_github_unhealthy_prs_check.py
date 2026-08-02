@@ -150,6 +150,30 @@ def test_head_prefix_narrows_the_scan():
     assert [o.data["branch"] for o in obs] == ["harness/y"]
 
 
+def test_the_check_s_own_head_prefix_constant_stays_empty():
+    """The *class*'s own default is deliberately kept at `""` (every open PR),
+    separate from `cli.py`'s `github_unhealthy_prs_factory` default (narrowed
+    to `"harness/"`, matching the seeded process file and the sibling
+    `github_mergeable_factory` — see `test_cli.py`'s
+    `test_github_unhealthy_prs_factory_defaults_match_the_check_s_own`).
+
+    Narrowing the class default too would be pure symmetry with no payoff: the
+    factory already stands between every caller and the constructor, so a
+    tightened factory default already closes the dashboard-authored blast
+    radius the finding was about. Meanwhile every construct-the-class-directly
+    test in this file (`_check`, above) relies on the wide default to see
+    PRs on branches like `feature/x` without passing `head_prefix` on every
+    call — narrowing it here would just be test churn with no user-facing
+    change, since nothing reaches this constructor except the factory."""
+    import inspect
+
+    default = inspect.signature(GithubUnhealthyPrsCheck.__init__).parameters[
+        "head_prefix"
+    ].default
+
+    assert default == ""
+
+
 def test_missing_log_degrades_to_none_rather_than_skipping():
     client = FakeGithubClient([])
     client.add_pull_request(_pr(30, "unstable", sha="s30"))

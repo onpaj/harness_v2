@@ -106,10 +106,8 @@ SPEC = CheckSpec(
         ParamSpec(
             key="head_prefix",
             label="Branch prefix",
-            hint=(
-                "Only PRs whose head branch starts with this are watched. "
-                "Empty means every open PR."
-            ),
+            placeholder="harness/",
+            hint="Only PRs whose head branch starts with this prefix are watched.",
         ),
         ParamSpec(
             key="skip_label",

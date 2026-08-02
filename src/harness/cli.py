@@ -1171,7 +1171,7 @@ def _process_check_factories(
         return GithubUnhealthyPrsCheck(
             client=client,
             registry=registry,
-            head_prefix=params.get("head_prefix", ""),
+            head_prefix=params.get("head_prefix", "harness/"),
             skip_label=params.get("skip_label", UNHEALTHY_SKIP_LABEL),
             give_up_label=params.get("give_up_label", DEFAULT_GIVE_UP_LABEL),
             max_attempts=max_attempts,
