@@ -106,7 +106,7 @@ here as one shape:
   (the `failed-tasks` check, the `open-issue` finisher, the recursion guard,
   the Process-compilation wiring) is unchanged and still authoritative.
 - **The check's `repository` param must equal `HARNESS_HEAL_REPO`.**
-  *(Superseded by ADR-0021: `HARNESS_HEAL_REPO` is gone and the process file's
+  *(Superseded by ADR-0022: `HARNESS_HEAL_REPO` is gone and the process file's
   own param is the single source both are wired from, so the drift described
   below is no longer reachable.)* Both
   `_ensure_autoheal_process`'s generated `processes/autoheal.json` (`action.
@@ -128,6 +128,20 @@ here as one shape:
   goes silently inert. `cli._run` now checks this at startup and prints a
   `warning:` to stderr (never a hard error — the rest of the harness still
   starts) when the configured `heal_repo` isn't in the registry.
+
+  > **Superseded 2026-07-26 (ADR-0022).** There is no `HARNESS_HEAL_REPO` or
+  > `heal_repo` variable to drift any more: `--heal-repo`/`HARNESS_HEAL_REPO`
+  > were removed, and `processes/autoheal.json`'s `action.params.repository`
+  > is now the single place self-healing names a repo — both the check and
+  > the `open-issue` finisher derive their repo from that one field (the
+  > finisher via `task.repository`, stamped from the same param), so the
+  > two-variable drift risk described above no longer exists by
+  > construction. The "not something the harness validates today" and
+  > "goes silently inert" / "prints a `warning:`" outcomes above are also
+  > superseded: an unregistered `params.repository` now fails the process
+  > file at compile time (`ProcessValidationError`, `field="params"`),
+  > exiting the run with `error: …` instead of a warning or silent
+  > inertness.
 - The invariant #24–#27 prose in `CLAUDE.md` is refined (not renumbered) to
   describe the three-step `heal → dedup → file-issue` shape and the
   `repository`-carrying check.

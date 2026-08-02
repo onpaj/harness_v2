@@ -5,6 +5,7 @@ from __future__ import annotations
 import html
 import json
 import re
+import zlib
 from collections.abc import AsyncIterator
 from datetime import datetime
 from pathlib import Path
@@ -20,7 +21,14 @@ from fastapi.responses import (
 )
 from fastapi.templating import Jinja2Templates
 
-from harness.models import END
+from harness.models import (
+    END,
+    FailureTrace,
+    Task,
+    failure_trace,
+    is_retired_failure,
+    resumable_failure,
+)
 from harness.ports.agent import AgentNotFound, AgentSpec
 from harness.ports.agent_admin import AgentAdmin, AgentFields, AgentValidationError
 from harness.ports.artifacts import ArtifactView
@@ -28,6 +36,7 @@ from harness.ports.board import (
     DONE_COLUMN,
     FAILED_COLUMN,
     TODO_COLUMN,
+    UNKNOWN_WORKFLOW_NOTE,
     AgentActivity,
     BoardView,
 )
@@ -47,6 +56,11 @@ from harness.ports.workflows import WorkflowNotFound
 
 TEMPLATES = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 
+# A global, not a per-render context entry: `_columns.html` is rendered both
+# inside board.html and standalone as the /fragment/board swap target, and the
+# note is a fixed string either way.
+TEMPLATES.env.globals["unknown_workflow_note"] = UNKNOWN_WORKFLOW_NOTE
+
 
 def _basename(value: str | None) -> str:
     """The last path segment. A name without a slash passes through unchanged.
@@ -60,6 +74,24 @@ def _basename(value: str | None) -> str:
 
 
 TEMPLATES.env.filters["basename"] = _basename
+
+
+def _repo_hue(value: str | None) -> str:
+    """Deterministic hue in [0, 360) for a repository name, as a plain
+    decimal string ready for a CSS custom property. `zlib.crc32`, not the
+    builtin `hash()` — the latter is salted per-process for strings, which
+    would flip every badge's color on each server restart.
+
+    Falsy input passes through as "" (not "0") so a template checking
+    `{% if task.repository %}` never emits a badge span with an empty-but-
+    present --repo-hue for a repository-less task.
+    """
+    if not value:
+        return ""
+    return str(zlib.crc32(value.encode("utf-8")) % 360)
+
+
+TEMPLATES.env.filters["repo_hue"] = _repo_hue
 
 
 def _shorttime(value: str | None) -> str:
@@ -80,6 +112,46 @@ def _shorttime(value: str | None) -> str:
 
 
 TEMPLATES.env.filters["shorttime"] = _shorttime
+
+
+def _outcome_step(task: Task) -> str:
+    """The step whose verdict `task.last_outcome` is — "" when unknowable.
+
+    A bare `done` badge on a card two columns into a workflow reads as "this
+    task is done" when all it ever meant is "the step it just left reported
+    done". The board had one word for two different things (a step's verdict
+    and the terminal `done` queue), so the badge names the step it belongs to.
+
+    Both entry shapes that carry an outcome agree on which step that is: the
+    consumer's delivery entry (`from_step` = the step it ran) and the
+    dispatcher's routing entry (`from_step` = the step being left, with the
+    outcome copied forward). So the last entry carrying an outcome is the
+    answer whichever of the two it is.
+    """
+    for entry in reversed(task.history):
+        if entry.outcome:
+            return entry.from_step or ""
+    return ""
+
+
+TEMPLATES.env.filters["outcome_step"] = _outcome_step
+
+
+def _retired_failure(task: Task) -> FailureTrace | None:
+    """The failure a `done` task actually ended on, or None for a real
+    completion.
+
+    ADR-0024 puts both kinds of ending in `done` and leaves the difference in
+    history; without this the accent chain reads a retired failure's leftover
+    `last_outcome == "done"` and paints the card green, asserting the one thing
+    that is not true of it.
+    """
+    if not is_retired_failure(task):
+        return None
+    return failure_trace(task)
+
+
+TEMPLATES.env.filters["retired_failure"] = _retired_failure
 
 
 def _split_refs(text: str) -> list[str]:
@@ -534,7 +606,11 @@ def build_html_router(
         return TEMPLATES.TemplateResponse(
             request=request,
             name="_task.html",
-            context={"task": found, "artifacts": artifacts.list(task_id)},
+            context={
+                "task": found,
+                "artifacts": artifacts.list(task_id),
+                "retired": resumable_failure(found),
+            },
         )
 
     @router.get("/", response_class=HTMLResponse)
@@ -567,6 +643,16 @@ def build_html_router(
             )
         # The projection updated synchronously via the emitted event, so the
         # refreshed fragment shows the task now in `todo`. The board redraws via SSE.
+        return _task_fragment(request, task_id)
+
+    @router.post("/tasks/{task_id}/resume", response_class=HTMLResponse)
+    def resume_task(request: Request, task_id: str) -> HTMLResponse:
+        if not control.resume(task_id):
+            raise HTTPException(
+                status_code=404, detail=f"task {task_id} is not a resumable failure"
+            )
+        # Same shape as restart: the projection updated synchronously off the
+        # emitted event, so the refreshed fragment shows the task in `todo`.
         return _task_fragment(request, task_id)
 
     @router.post("/tasks/{task_id}/delete", response_class=HTMLResponse)

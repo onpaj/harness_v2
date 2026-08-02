@@ -3,10 +3,16 @@ import json
 
 import pytest
 
-from harness.app import HarnessLayout, build
+from harness.app import (
+    HarnessLayout,
+    UnknownFinisherKind,
+    build,
+    validate_workflow_finishers,
+)
 from harness.behaviors.landing import LandingBehavior
 from harness.drivers.fake_forge import FakeForge
 from harness.drivers.memory import (
+    FakeClock,
     FakeIssueChecker,
     FakeMergeChecker,
     MemoryAgentCatalog,
@@ -14,7 +20,7 @@ from harness.drivers.memory import (
     MemoryForge,
     MemoryRepositoryRegistry,
 )
-from harness.models import ARCHIVED, DONE, BehaviorResult, Task
+from harness.models import ARCHIVED, DONE, END, BehaviorResult, FinisherBinding, Task, Transition, Workflow
 from harness.ports.agent import AgentRun, AgentSpec
 from harness.ports.behavior import ConsumerBehavior
 from harness.ports.board import UNKNOWN_WORKFLOW
@@ -92,6 +98,17 @@ def test_build_creates_one_queue_per_step(tmp_path):
     assert (tmp_path / "queues" / "plan").is_dir()
     assert (tmp_path / "queues" / "review").is_dir()
     assert not (tmp_path / "queues" / "end").exists()
+
+
+def test_harness_known_steps_matches_the_live_step_queues(tmp_path):
+    """`Harness.known_steps` is derived from `_step_queues`, not a second
+    stored copy — it must always equal exactly the steps that have a live
+    dispatch queue, the same set `Dispatcher.tick` routes into."""
+    seed(tmp_path)
+
+    harness = build(tmp_path, "default", events=MemoryEventSink())
+
+    assert harness.known_steps == {"plan", "review"}
 
 
 def test_build_gives_every_discovered_workflow_a_board_tab(tmp_path):
@@ -242,6 +259,40 @@ async def test_run_drives_a_task_all_the_way_to_done(tmp_path):
     finished = Task.from_dict(json.loads((tmp_path / "done" / "tsk_1.json").read_text()))
     visited = [entry.to_step for entry in finished.history if entry.actor == "dispatcher"]
     assert visited == ["plan", "review", "plan", "review", "end"]
+
+
+async def test_run_stops_promptly_even_on_long_intervals(tmp_path):
+    """Every loop idles on `stop`, never on a blind `sleep(interval)`.
+
+    The intervals here are longer than any test could wait for, and none of them
+    is ever actually awaited: each loop ticks once over empty queues, then parks
+    on `asyncio.wait_for(stop.wait(), timeout=interval)`. `stop.set()` wakes all
+    of them at once, so `run()` returns immediately. Restore a plain
+    `asyncio.sleep(interval)` in `_tick_loop` and this test hangs for ten minutes
+    instead — which is what `cli.serve()`'s `finally: stop.set(); await
+    asyncio.gather(...)` does under launchd, well past its SIGKILL deadline.
+    """
+    seed(tmp_path)
+    harness = build(tmp_path, "default", events=MemoryEventSink(), delay=0.0)
+
+    stop = asyncio.Event()
+    runner = asyncio.create_task(
+        harness.run(
+            poll_interval=600,
+            source_interval=600,
+            reconcile_interval=600,
+            stop=stop,
+        )
+    )
+    # Let every loop tick once and park on its idle wait. A bare `sleep(0)` is
+    # not enough — it only gets `run()` as far as its `gather`, before the loop
+    # bodies have run at all, and every loop would then exit on its `while not
+    # stop.is_set()` guard whatever it idles on. One real timer tick drains all
+    # ready callbacks, so each loop is genuinely waiting when `stop` is set.
+    await asyncio.sleep(0.01)
+    stop.set()
+
+    await asyncio.wait_for(runner, timeout=1)
 
 
 def test_build_without_a_workflow_name_has_no_workflow(tmp_path):
@@ -445,7 +496,21 @@ async def test_pr_watcher_archives_a_resolved_task_end_to_end(tmp_path):
     seed(tmp_path)
     forge = FakeForge(tmp_path / "forge")
     events = MemoryEventSink()
-    harness = build(tmp_path, "default", events=events, forge=forge, delay=0.0)
+    # Pinned to the seeded task's own `created` instant (`FakeClock`'s default)
+    # so the always-on retention sweep sees a freshly-settled task and leaves it
+    # alone. Without this the harness runs on the real `SystemClock`, the 2026-07-19
+    # task reads as long past the retention window, and the *retention* reconciler
+    # archives it — satisfying every assertion below and leaving the PR watcher,
+    # the actual subject, untested. The sweep runs on its loop's first tick, before
+    # any interval elapses, so no `reconcile_interval` can disarm it.
+    harness = build(
+        tmp_path,
+        "default",
+        events=events,
+        forge=forge,
+        delay=0.0,
+        clock=FakeClock(),
+    )
     landed = Task(
         id="tsk_1",
         workflow_template="default",
@@ -480,6 +545,9 @@ async def test_pr_watcher_archives_a_resolved_task_end_to_end(tmp_path):
     assert not (tmp_path / "done" / "tsk_1.json").exists()
     archived = Task.from_dict(json.loads((tmp_path / "archived" / "tsk_1.json").read_text()))
     assert archived.status == ARCHIVED
+    # It was the *PR watcher* that archived it, not the always-on retention
+    # sweep — the other reconciler that lands a task in exactly this state.
+    assert archived.history[-1].actor == "pr_watcher"
     assert harness.projection.get("tsk_1") is not None
     assert all(
         task.id != "tsk_1"
@@ -492,7 +560,19 @@ async def test_pr_watcher_archives_a_resolved_task_end_to_end(tmp_path):
 async def test_pr_watcher_loop_does_not_run_when_interval_is_zero(tmp_path):
     seed(tmp_path)
     forge = FakeForge(tmp_path / "forge")
-    harness = build(tmp_path, "default", events=MemoryEventSink(), forge=forge, delay=0.0)
+    # Pinned to the task's own `created` instant (`FakeClock`'s default) so the
+    # always-on retention sweep — which ticks once at startup, whatever the
+    # interval — sees a freshly-settled task, not a real-world multi-day-old
+    # one, and leaves it alone; only the PR watcher's own zero-interval gate is
+    # under test here.
+    harness = build(
+        tmp_path,
+        "default",
+        events=MemoryEventSink(),
+        forge=forge,
+        delay=0.0,
+        clock=FakeClock(),
+    )
     landed = Task(
         id="tsk_1",
         workflow_template="default",
@@ -593,8 +673,19 @@ async def test_run_archives_a_done_task_once_its_pr_is_merged(tmp_path):
     checker = FakeMergeChecker()
     checker.merged.add(("o/r", 1))
     events = MemoryEventSink()
+    # Pinned to the seeded task's own `created` instant (`FakeClock`'s default)
+    # so the always-on retention sweep sees a freshly-settled task and leaves it
+    # alone. On the real `SystemClock` this history-less 2026-07-19 task reads as
+    # ~11 days past the retention window, so the *retention* sweep archived it on
+    # its loop's first tick — satisfying every assertion below with the merge
+    # reconciler never involved at all.
     harness = build(
-        tmp_path, "default", events=events, delay=0.0, merge_checker=checker
+        tmp_path,
+        "default",
+        events=events,
+        delay=0.0,
+        merge_checker=checker,
+        clock=FakeClock(),
     )
     done_task = Task(
         id="tsk_1",
@@ -618,6 +709,12 @@ async def test_run_archives_a_done_task_once_its_pr_is_merged(tmp_path):
 
     assert (tmp_path / "archived" / "tsk_1.json").exists()
     assert not (tmp_path / "done" / "tsk_1.json").exists()
+    archived = Task.from_dict(
+        json.loads((tmp_path / "archived" / "tsk_1.json").read_text())
+    )
+    # It was the *merge reconciler* that archived it, not the always-on retention
+    # sweep — the other reconciler that lands a task in exactly this state.
+    assert archived.history[-1].actor == "merge_reconciler"
     assert harness.projection.get("tsk_1") is not None
     assert all(
         task.id != "tsk_1"
@@ -955,6 +1052,135 @@ def test_caller_supplied_finisher_registry_entry_is_used(tmp_path):
     assert by_actor["consumer:publish"]._behavior is recorder
 
 
+# --- ADR-0022: pre-flight finisher-binding validation (cli._run's served-set
+# filter, before build()'s own eager fail-fast) -------------------------------
+
+
+def _one_step_workflow(step: str, binding: FinisherBinding) -> Workflow:
+    return Workflow(
+        name="w",
+        start=step,
+        transitions=(Transition(from_step=step, on="done", to_step=END),),
+        finishers={step: binding},
+    )
+
+
+def test_validate_workflow_finishers_passes_a_wirable_binding():
+    workflow = _one_step_workflow(
+        "file-issue", FinisherBinding(kind="open-issue", config={"label": "x"})
+    )
+    calls = []
+
+    def factory(step, config, inner):
+        assert config["label"] == "x"
+        calls.append((step, config))
+        return RecordingFinisher()
+
+    validate_workflow_finishers(workflow, {"open-issue": factory})
+    # A call-count assertion, not just an in-factory one: without it this test
+    # stays green even if `validate_workflow_finishers` became a no-op for a
+    # known kind and never called the factory at all.
+    assert calls == [("file-issue", {"label": "x"})]
+
+
+def test_validate_workflow_finishers_raises_when_the_factory_raises():
+    """Mirrors the reference-install bug: the old string form `"open-issue"`
+    parses to an empty config, and the real factory raises over the missing
+    `label` — this must propagate, not be swallowed. It must also NOT be an
+    `UnknownFinisherKind` — `open-issue` is a perfectly well-known kind here,
+    only its config is incomplete, and `cli._validate_served_workflows` tells
+    the two shapes apart by this exact type, not by matching on message text
+    (warn-and-drop for this one, fail-the-whole-run for the other)."""
+    workflow = _one_step_workflow("file-issue", FinisherBinding(kind="open-issue"))
+
+    def factory(step, config, inner):
+        if not config.get("label"):
+            raise ValueError(f"step {step!r} has no label")
+        return RecordingFinisher()
+
+    with pytest.raises(ValueError, match="file-issue") as excinfo:
+        validate_workflow_finishers(workflow, {"open-issue": factory})
+    assert not isinstance(excinfo.value, UnknownFinisherKind)
+
+
+def test_validate_workflow_finishers_raises_on_unknown_kind():
+    """A distinct type (`UnknownFinisherKind`, still a `ValueError` so any
+    caller matching on the base type keeps working) — an unknown kind is a
+    value that's *set and wrong* (invariant: fails fast), unlike a known kind
+    with incomplete config (invariant: only that binding is unwirable). The
+    enumeration mirrors `build()`'s own diagnostic (`(known: ...)`), the hint
+    that tells an operator a kind is token-gated rather than misspelled."""
+    workflow = _one_step_workflow("publish", FinisherBinding(kind="call-api"))
+
+    with pytest.raises(UnknownFinisherKind, match="call-api") as excinfo:
+        validate_workflow_finishers(workflow, {"open-issue": lambda *a: None})
+    assert "known: open-issue, open-pr, verify" in str(excinfo.value)
+
+
+def test_validate_workflow_finishers_never_raises_for_the_builtin_kinds():
+    """`open-pr`/`verify` are always wirable — no factory needs to be
+    supplied for them, exactly as `build()`'s own default registry needs
+    none from the caller."""
+    workflow = Workflow(
+        name="w",
+        start="land",
+        transitions=(Transition(from_step="land", on="done", to_step=END),),
+        finishers={"land": FinisherBinding(kind="open-pr")},
+    )
+
+    validate_workflow_finishers(workflow, None)
+
+
+def test_validate_workflow_finishers_calls_inner_for_a_wrap_shaped_factory():
+    """A wrap-shaped finisher (like `label-issue`) calls its `inner` thunk
+    eagerly; the thunk this validator hands it is inert (returns `None`), so
+    the factory must not choke on that to prove its own kind/config
+    resolution works."""
+    workflow = _one_step_workflow("triage", FinisherBinding(kind="label-issue"))
+    seen = {}
+
+    def factory(step, config, inner):
+        seen["inner"] = inner()
+        return RecordingFinisher()
+
+    validate_workflow_finishers(workflow, {"label-issue": factory})
+    assert seen["inner"] is None
+
+
+def test_validate_workflow_finishers_raises_unknown_kind_regardless_of_binding_order():
+    """Reproduces the reviewer's exact finding: a single loop that did the
+    unknown-kind lookup and the factory invocation together let whichever
+    binding a dict iterates first win, so "an unknown kind is fatal" silently
+    depended on JSON key order. Two bindings in the *losing* order — the
+    config-shaped failure (`open-issue` with no `label`, a known kind whose
+    factory raises a plain `ValueError`) iterated before the unknown kind —
+    used to let that `ValueError` escape first and mask the unknown kind
+    entirely. This must still raise `UnknownFinisherKind`, not the earlier
+    `ValueError`. A test in the winning order alone (unknown kind first)
+    would not gate a regression back to the single-loop shape."""
+    workflow = Workflow(
+        name="w",
+        start="a",
+        transitions=(
+            Transition(from_step="a", on="done", to_step="b"),
+            Transition(from_step="b", on="done", to_step=END),
+        ),
+        finishers={
+            # Losing order: the config-shaped failure comes first.
+            "a": FinisherBinding(kind="open-issue"),
+            "b": FinisherBinding(kind="call-a-webhook"),
+        },
+    )
+
+    def open_issue_factory(step, config, inner):
+        if not config.get("label"):
+            raise ValueError(f"step {step!r} has no label")
+        return RecordingFinisher()
+
+    with pytest.raises(UnknownFinisherKind, match="call-a-webhook"):
+        validate_workflow_finishers(workflow, {"open-issue": open_issue_factory})
+
+
 # --- ADR-0018: process compilation moved inside build() ---------------------
 
 
@@ -965,12 +1191,12 @@ def _write_process(tmp_path, name, body):
 
 
 def test_build_compiles_processes_root_targeting_a_served_workflow_by_name(tmp_path):
-    """architecture-02 §2.2's fix, made explicit and readable: `known_targets`
-    passed to `FilesystemProcessRepository.build()` must include served
-    *workflow* names, not just step names — a `{"workflow": "default"}`
-    target names the workflow itself, which is not one of DEFINITION's own
-    step names (plan/development/review/land). Before the fix this process
-    would fail `ProcessValidationError` at every `build()` call."""
+    """architecture-02 §2.2's fix, made explicit and readable: `known_workflows`
+    passed to `FilesystemProcessRepository.build()` must be the served
+    *workflow* name set — a `{"workflow": "default"}` target names the
+    workflow itself, which is not one of DEFINITION's own step names
+    (plan/development/review/land). Before the fix this process would fail
+    `ProcessValidationError` at every `build()` call."""
     seed_definition(tmp_path, DEFINITION)
     _write_process(
         tmp_path,
@@ -989,6 +1215,30 @@ def test_build_compiles_processes_root_targeting_a_served_workflow_by_name(tmp_p
         getattr(poller, "_source", None) is not None for poller in harness.pollers
     )
     assert len(harness.pollers) == 1
+
+
+def test_build_rejects_a_step_target_naming_a_served_workflow_name(tmp_path):
+    """The bug this change fixes, reproduced at the `build()` boundary: a
+    `{"step": "default"}` target where "default" is a served workflow's
+    *name*, not a queued step, used to pass the old merged `known_targets`
+    check and only fail later at dispatch (`step 'default' has no queue`).
+    It must now fail fast at `build()`, before any task is ever produced."""
+    from harness.drivers.fs_processes import ProcessValidationError
+
+    seed_definition(tmp_path, DEFINITION)
+    _write_process(
+        tmp_path,
+        "nightly",
+        {
+            "trigger": {"interval": "1h"},
+            "action": {"check": "always"},
+            "target": {"step": "default"},
+            "sink": {"kind": "none"},
+        },
+    )
+
+    with pytest.raises(ProcessValidationError):
+        build(tmp_path, "default", events=MemoryEventSink())
 
 
 def test_build_processes_root_defaults_to_layout_processes(tmp_path):
@@ -1115,7 +1365,8 @@ def test_build_processes_root_parameter_points_at_a_different_directory(tmp_path
 def test_build_repository_registry_validates_the_process_repository_field(tmp_path):
     """`repository_registry=` computes `known_repositories` for the internal
     `FilesystemProcessRepository.build()` call — a process naming a repository
-    outside the registry fails fast, matching `known_targets`'s shape."""
+    outside the registry fails fast, matching `known_steps`/`known_workflows`'s
+    shape."""
     from pathlib import Path
 
     from harness.drivers.fs_processes import ProcessValidationError
@@ -1155,6 +1406,29 @@ def test_build_repository_registry_omitted_is_lenient(tmp_path):
     harness = build(tmp_path, "default", events=MemoryEventSink())
 
     assert len(harness.pollers) == 1
+
+
+def test_build_threads_repository_registry_names_into_the_board(tmp_path):
+    """The board's filter-bar repository options come from the registry, sorted
+    — not from an ad-hoc scan of whatever tasks happen to be on the board."""
+    from pathlib import Path
+
+    seed_definition(tmp_path, DEFINITION)
+    registry = MemoryRepositoryRegistry(
+        {"harness_v2": Path("/repos/harness_v2"), "another": Path("/repos/another")}
+    )
+
+    harness = build(tmp_path, "default", events=MemoryEventSink(), repository_registry=registry)
+
+    assert harness.projection.snapshot().repository_names == ("another", "harness_v2")
+
+
+def test_build_without_repository_registry_leaves_board_repository_names_empty(tmp_path):
+    seed_definition(tmp_path, DEFINITION)
+
+    harness = build(tmp_path, "default", events=MemoryEventSink())
+
+    assert harness.projection.snapshot().repository_names == ()
 
 
 def test_finisher_factory_receives_step_config_and_a_lazy_inner_thunk(tmp_path):

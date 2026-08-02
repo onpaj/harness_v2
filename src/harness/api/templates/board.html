@@ -21,6 +21,15 @@
       <button type="button" id="add-issue-open"
               class="btn small primary page-header__action">+ Add issue</button>
     </div>
+    <div class="filter-bar">
+      <select id="filter-repo" aria-label="Filter by repository">
+        <option value="">All repositories</option>
+        {% for name in board.repository_names %}
+        <option value="{{ name }}">{{ name }}</option>
+        {% endfor %}
+      </select>
+      <input type="search" id="filter-text" placeholder="Filter…" aria-label="Filter tasks">
+    </div>
     <div id="board"
          data-revision="{{ board.revision }}"
          data-active-workflow="{{ board.default_tab() or '' }}"
@@ -81,6 +90,34 @@
     applyActiveTab(document.getElementById('board'));
     localizeTimes();
 
+    // Filter bar: repository select + fulltext input, both applied
+    // client-side against the already-rendered cards. Placed as a sibling of
+    // #board (not inside it), so its live values survive the SSE
+    // innerHTML swap with no data- round-trip; only the *effect* of the
+    // filter needs reapplying after a swap, from htmx:afterSwap below.
+    function applyFilters(boardEl) {
+      var repo = document.getElementById('filter-repo').value;
+      var text = document.getElementById('filter-text').value.trim().toLowerCase();
+      boardEl.querySelectorAll('.card').forEach(function (card) {
+        var repoOk = !repo || card.dataset.repository === repo;
+        var textOk = !text || card.dataset.search.indexOf(text) !== -1;
+        card.classList.toggle('hidden-by-filter', !(repoOk && textOk));
+      });
+      boardEl.querySelectorAll('.column').forEach(function (column) {
+        var visible = column.querySelectorAll('.card:not(.hidden-by-filter)').length;
+        var countEl = column.querySelector('.column__count');
+        if (countEl) { countEl.textContent = visible; }
+        column.classList.toggle('column--empty', visible === 0);
+      });
+    }
+    applyFilters(document.getElementById('board'));
+    document.getElementById('filter-repo').addEventListener('change', function () {
+      applyFilters(document.getElementById('board'));
+    });
+    document.getElementById('filter-text').addEventListener('input', function () {
+      applyFilters(document.getElementById('board'));
+    });
+
     // "Add issue" dialog: plain showModal()/close(), no htmx round trip to
     // open it — nothing to fetch until the operator submits. Mirrors #detail's
     // delegated close idiom (backdrop click + explicit close button).
@@ -93,7 +130,10 @@
     });
 
     document.body.addEventListener('htmx:afterSwap', function (event) {
-      if (event.detail.target.id === 'board') { applyActiveTab(event.detail.target); }
+      if (event.detail.target.id === 'board') {
+        applyActiveTab(event.detail.target);
+        applyFilters(event.detail.target);
+      }
       localizeTimes(event.detail.target);
       if (event.detail.target.id !== 'detail') { return; }
       var detail = document.getElementById('detail');

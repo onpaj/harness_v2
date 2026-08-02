@@ -470,3 +470,75 @@ def test_write_accepts_any_repository_when_no_registry_wired(tmp_path: Path) -> 
     written = admin.write("with-repo", _valid(repository="whatever"))
 
     assert written.repository == "whatever"
+
+
+# --- target reachability (known_steps / known_workflows, FR-4) --------------
+
+
+def test_write_rejects_a_step_target_naming_a_served_workflow_not_a_step(
+    tmp_path: Path,
+) -> None:
+    """The admin-side twin of the build-time fix: a `{"step": "resolver"}`
+    submission where "resolver" is a served workflow's name, not a queued
+    step, must be rejected at save time — not written to disk to fail only
+    later at dispatch."""
+    admin = FilesystemProcessAdmin(
+        tmp_path,
+        known_steps={"plan", "review"},
+        known_workflows={"resolver"},
+    )
+
+    with pytest.raises(ProcessAdminValidationError) as excinfo:
+        admin.write(
+            "bad-target",
+            _valid(target_kind="step", target="resolver"),
+        )
+
+    assert "target" in excinfo.value.errors
+    assert not (tmp_path / "bad-target.json").exists()
+
+
+def test_write_rejects_a_workflow_target_naming_a_step_not_a_served_workflow(
+    tmp_path: Path,
+) -> None:
+    admin = FilesystemProcessAdmin(
+        tmp_path,
+        known_steps={"plan", "review"},
+        known_workflows={"resolver"},
+    )
+
+    with pytest.raises(ProcessAdminValidationError) as excinfo:
+        admin.write(
+            "bad-target",
+            _valid(target_kind="workflow", target="plan"),
+        )
+
+    assert "target" in excinfo.value.errors
+    assert not (tmp_path / "bad-target.json").exists()
+
+
+def test_write_accepts_a_step_target_reachable_via_known_steps(
+    tmp_path: Path,
+) -> None:
+    admin = FilesystemProcessAdmin(
+        tmp_path,
+        known_steps={"plan", "review"},
+        known_workflows={"resolver"},
+    )
+
+    written = admin.write("good-target", _valid(target_kind="step", target="plan"))
+
+    assert written.target == "plan"
+    assert admin.read("good-target") == written
+    _compiles(tmp_path)
+
+
+def test_write_skips_target_validation_when_no_snapshot_wired(tmp_path: Path) -> None:
+    """No `known_steps`/`known_workflows` supplied (the default) is lenient,
+    matching every other `known_*=None` escape hatch — the dashboard's
+    pre-FR-4 behavior for a caller that hasn't wired a live snapshot."""
+    admin = FilesystemProcessAdmin(tmp_path)
+
+    written = admin.write("with-target", _valid(target_kind="step", target="whatever"))
+
+    assert written.target == "whatever"
