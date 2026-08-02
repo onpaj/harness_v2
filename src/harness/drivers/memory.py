@@ -172,6 +172,7 @@ class MemoryWorkspaceHandle(WorkspaceHandle):
         self._path = Path("/memory/worktrees") / task_id
         self.writes: list[tuple[str, str]] = []
         self.commits: list[str] = []
+        self.commit_excludes: list[tuple[str, ...]] = []
         self.pushes: list[str] = []
         # Test seam for ResolveConflictBehavior: preset whether the next
         # merge() call should report a conflict.
@@ -190,8 +191,9 @@ class MemoryWorkspaceHandle(WorkspaceHandle):
     def write(self, relpath: str, content: str) -> None:
         self.writes.append((relpath, content))
 
-    def commit(self, message: str) -> str | None:
+    def commit(self, message: str, *, exclude: tuple[str, ...] = ()) -> str | None:
         self.commits.append(message)
+        self.commit_excludes.append(exclude)
         return f"sha{len(self.commits)}"
 
     def push(self) -> None:

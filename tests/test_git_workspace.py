@@ -618,3 +618,35 @@ def test_attach_repo_less_reattach_is_idempotent_across_two_crash_retries(tmp_pa
 
     assert first.path == second.path
     assert second.path.is_dir()
+
+
+def test_commit_can_exclude_a_pathspec(tmp_path):
+    handle = _workspace(tmp_path).attach(_make_task())
+
+    (handle.path / "keep.txt").write_text("kept\n")
+    (handle.path / ".artifacts").mkdir(exist_ok=True)
+    (handle.path / ".artifacts" / "note.md").write_text("scratch\n")
+
+    handle.commit("with exclusion", exclude=(".artifacts",))
+
+    tracked = subprocess.run(
+        ["git", "-C", str(handle.path), "ls-files"],
+        capture_output=True, text=True, check=True,
+    ).stdout.split()
+    assert "keep.txt" in tracked
+    assert not any(p.startswith(".artifacts") for p in tracked)
+
+
+def test_commit_without_exclude_still_stages_everything(tmp_path):
+    handle = _workspace(tmp_path).attach(_make_task())
+
+    (handle.path / ".artifacts").mkdir(exist_ok=True)
+    (handle.path / ".artifacts" / "note.md").write_text("scratch\n")
+
+    handle.commit("no exclusion")
+
+    tracked = subprocess.run(
+        ["git", "-C", str(handle.path), "ls-files"],
+        capture_output=True, text=True, check=True,
+    ).stdout.split()
+    assert ".artifacts/note.md" in tracked

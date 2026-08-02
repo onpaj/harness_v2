@@ -36,8 +36,13 @@ class WorkspaceHandle(ABC):
         """
 
     @abstractmethod
-    def commit(self, message: str) -> str | None:
-        """Stage everything and commit. Return the sha, or None if there is nothing to commit."""
+    def commit(self, message: str, *, exclude: tuple[str, ...] = ()) -> str | None:
+        """Stage everything and commit; None when there was nothing to commit.
+
+        `exclude` names paths to leave unstaged — used to keep a step's own
+        scratch output off a branch it does not own. It is a pathspec
+        exclusion on this one commit, not a persistent ignore rule.
+        """
 
     @abstractmethod
     def push(self) -> None:

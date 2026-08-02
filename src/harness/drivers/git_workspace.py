@@ -164,10 +164,20 @@ class GitWorkspaceHandle(WorkspaceHandle):
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content, encoding="utf-8")
 
-    def commit(self, message: str) -> str | None:
-        _git(["-C", str(self._path), "add", "-A"])
-        status = _git(["-C", str(self._path), "status", "--porcelain"])
-        if status.strip() == "":
+    def commit(self, message: str, *, exclude: tuple[str, ...] = ()) -> str | None:
+        add = ["-C", str(self._path), "add", "-A"]
+        if exclude:
+            # `git add -A -- . ':(exclude)<path>'` — the pathspec applies to
+            # this staging call alone, unlike .gitignore or info/exclude (the
+            # latter lives in the *common* dir and would leak across every
+            # worktree of this clone).
+            add += ["--", "."] + [f":(exclude){path}" for path in exclude]
+        _git(add)
+        # Excluded files still show up as untracked in `status --porcelain`,
+        # so that check alone can't tell "nothing to commit" apart from "only
+        # excluded files changed". Check what's actually staged instead.
+        staged = _git(["-C", str(self._path), "diff", "--cached", "--name-only"])
+        if staged.strip() == "":
             return None
         _git(
             ["-C", str(self._path), "commit", "-m", message],
