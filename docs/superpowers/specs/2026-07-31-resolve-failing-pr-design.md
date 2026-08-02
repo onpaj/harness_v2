@@ -318,15 +318,35 @@ files are tracked in this repo today. On harness-authored PRs that is intended.
 On a human's PR it means the harness commits `.artifacts/tsk_.../unblock-01.md`
 onto their branch, and it rides into main on merge.
 
-**Decision:** `UnblockPrBehavior` appends `.artifacts/` to `.git/info/exclude`
-before committing. That file is local to the clone and never tracked, so the
-repo's own `.gitignore` is untouched. The artifact still exists on disk for the
-operator and in the task's history; it just does not ride along on someone
-else's PR.
+**Decision:** `WorkspaceHandle.commit()` takes an `exclude` tuple of pathspecs
+and, when given one, stages with `git add -A -- . ':(exclude)<path>'` instead
+of a bare `git add -A`. `UnblockPrBehavior` calls
+`handle.commit(run.summary, exclude=(".artifacts",))`, so `.artifacts/` is
+never staged for this commit at all. The exclusion is scoped to the single
+`add` invocation that produces this commit — it says nothing about any other
+commit in the worktree, and nothing is written to disk outside the repo's
+normal git plumbing. The artifact still exists on disk for the operator and
+in the task's history; it just does not ride along on someone else's PR. A
+git-status check that only asked "is the working tree clean" would be fooled
+here — an excluded file still shows as untracked in `status --porcelain`, so
+`commit()` instead checks `git diff --cached --name-only` to tell "nothing to
+commit" apart from "only excluded files changed".
 
-Rejected: branching on the head-branch name inside the behavior (puts policy
-where invariant 14 says it should not go), and accepting the extra commit
-(a surprise that lands in main).
+Rejected: appending `.artifacts/` to `.git/info/exclude` before committing.
+That was the original design, and it does not work for this repo's layout.
+Task worktrees are created with `git worktree add`, and per the
+[gitignore documentation](https://git-scm.com/docs/gitignore), `info/exclude`
+is read from the **common** `.git` dir, not the worktree's own — so it is
+shared by every worktree of the clone, including the operator's own checkout.
+An entry appended by one task's `UnblockPrBehavior` run would silently start
+excluding `.artifacts/` from every other task's commit and from a manual
+`git add -A` in the operator's own working copy, for as long as the entry
+sat there. A single-commit pathspec has no such blast radius: it is gone the
+moment the `add` call returns.
+
+Also rejected: branching on the head-branch name inside the behavior (puts
+policy where invariant 14 says it should not go), and accepting the extra
+commit (a surprise that lands in main).
 
 ## Consequences of widening `head_prefix`
 
