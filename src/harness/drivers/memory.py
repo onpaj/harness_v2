@@ -174,7 +174,7 @@ class MemoryWorkspaceHandle(WorkspaceHandle):
         self.commits: list[str] = []
         self.commit_excludes: list[tuple[str, ...]] = []
         self.pushes: list[str] = []
-        # Test seam for ResolveConflictBehavior: preset whether the next
+        # Test seam for UnblockPrBehavior: preset whether the next
         # merge() call should report a conflict.
         self.conflicted: bool = False
         self.merges: list[str] = []

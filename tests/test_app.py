@@ -203,7 +203,7 @@ async def test_resolver_task_flows_through_resolve_and_land_to_done(tmp_path):
         repository="app",
         data={
             "branch": "harness/tsk_original",
-            "source": {"kind": "mergeability", "repo": "o/r", "pr": 1, "url": "u", "base": "main"},
+            "source": {"kind": "pull-request-health", "repo": "o/r", "pr": 1, "url": "u", "base": "main"},
         },
     )
     (tmp_path / "tasks" / "tsk_resolver_1.json").write_text(json.dumps(task.to_dict()))

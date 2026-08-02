@@ -1,12 +1,15 @@
-"""`ResolveConflictBehavior` — merges the base branch, hands the agent a real
-conflict if there is one, then commits (invariant 9: the worker commits).
+"""`UnblockPrBehavior` — merges the base branch, hands the agent whatever is
+wrong with the pull request, then commits (invariant 9: the worker commits).
 
-The resolver task's own PR branch (`task.data["branch"]`) is already checked
-out by `GitWorkspace.attach` before `run()` is called — this behavior only
-adds the merge-then-maybe-agent step in front of the same
+The unblock task's own PR branch (`task.data["branch"]`) is already checked out
+by `GitWorkspace.attach` before `run()` is called. This behavior adds the
+merge-then-brief-then-commit step in front of the same
 `AgentRunner`/`AgentSpec`/artifact machinery `ClaudeCliBehavior` uses, so it
 stays a dedicated class instead of a branch inside the generic one
 (invariant 14: persona is data, not control flow).
+
+The brief itself needs no code here: `GithubUnhealthyPrsCheck` renders it into
+`data.body`, which `compose_prompt` already puts in front of the agent.
 """
 
 from __future__ import annotations
@@ -21,7 +24,7 @@ from harness.ports.events import EventSink
 from harness.ports.workspace import Workspace
 
 
-class ResolveConflictBehavior(ConsumerBehavior):
+class UnblockPrBehavior(ConsumerBehavior):
     def __init__(
         self,
         *,
@@ -43,19 +46,19 @@ class ResolveConflictBehavior(ConsumerBehavior):
         step = task.status or ""
         handle = self._workspace.attach(task)
         base = task.data["source"]["base"]
+        problem = task.data.get("problem") or {}
+        failing = problem.get("failing_checks") or []
 
-        if not handle.merge(base):
-            # The conflict is already gone by the time this task got here (a
-            # race: the PR was updated by someone/something else in the
-            # meantime) — commit the clean merge result, no agent call spent.
-            handle.commit(f"[{step}] merge {base} — no conflicts")
-            return BehaviorResult(DONE, f"merged {base} cleanly, no conflicts")
+        conflicted = handle.merge(base)
+        if not conflicted and not failing:
+            # The conflict resolved itself between the check emitting and this
+            # task running (someone else pushed, or GitHub updated the branch),
+            # and nothing was red to begin with. Commit the clean merge; no
+            # agent call spent.
+            handle.commit(f"[{step}] merge {base} — nothing left to fix")
+            return BehaviorResult(DONE, f"merged {base} cleanly, nothing to fix")
 
         attempt, relpath = next_attempt(handle.path, task.id, step)
-        # Out of Package C's scope: the resolver keeps sourcing its outcomes
-        # from `spec.allowed_outcomes` unconditionally (no `WorkflowRepository`
-        # threaded in here) — only the shared `compose_prompt` rendering
-        # changed underneath it.
         prompt = compose_prompt(
             task,
             step=step,
@@ -82,9 +85,10 @@ class ResolveConflictBehavior(ConsumerBehavior):
             on_output=on_output,
         )
 
-        # The agent only resolved the conflict markers; the worker runs the
-        # commit (invariant 9). `git commit` while a merge is in progress
-        # (MERGE_HEAD present) produces the two-parent merge commit — no
-        # special flag needed.
-        handle.commit(run.summary)
+        # The worker commits, never the agent (invariant 9). `git commit` with
+        # MERGE_HEAD present produces the two-parent merge commit — no special
+        # flag needed. `.artifacts` is excluded because this branch may belong
+        # to a human: the agent's write-up belongs in the task record, not in
+        # somebody else's pull request.
+        handle.commit(run.summary, exclude=(".artifacts",))
         return BehaviorResult(run.outcome, run.summary)

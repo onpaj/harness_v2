@@ -9,7 +9,7 @@ from pathlib import Path
 
 from harness.behaviors.agent import ClaudeCliBehavior
 from harness.behaviors.landing import LandingBehavior
-from harness.behaviors.resolve_conflict import ResolveConflictBehavior
+from harness.behaviors.unblock_pr import UnblockPrBehavior
 from harness.behaviors.verify import VerifyBehavior
 from harness.consumer import Consumer
 from harness.dispatcher import Dispatcher
@@ -71,9 +71,9 @@ LANDING_STEP = "land"
 workflow binds it — a workflow file written before `finishers` existed keeps
 landing exactly as it always did (ADR-0016)."""
 
-RESOLVE_STEP = "resolve"
-"""The step to which the wiring assigns ResolveConflictBehavior, when a catalog
-is configured — the resolver workflow's first step."""
+UNBLOCK_STEP = "unblock"
+"""The step to which the wiring assigns UnblockPrBehavior, when a catalog is
+configured — the unblock-pr workflow's first step."""
 
 _ALWAYS_WIRABLE_FINISHER_KINDS = frozenset({"open-pr", "verify"})
 """The two kinds `build()` always registers itself (see `finisher_registry`
@@ -782,8 +782,8 @@ def build(
         a finisher actually reads `inner()` — never for a step exclusively
         finished by "open-pr", so a landing-only step with no catalog agent
         never triggers `catalog.get(step)`."""
-        if step == RESOLVE_STEP and catalog is not None:
-            return ResolveConflictBehavior(
+        if step == UNBLOCK_STEP and catalog is not None:
+            return UnblockPrBehavior(
                 clock=clock,
                 workspace=workspace,
                 runner=runner,

@@ -180,7 +180,7 @@ Dependencies flow strictly downward, no cycles.
 | Base (package-free) | `models`, `ids`, `artifacts_layout` (the `.artifacts/<id>/<step>-NN` convention), `issue_drafts`, `merge_verdict` |
 | Ports | `ports/{queue,workflows,strategy,behavior,events,clock,workspace,artifacts,forge,board,agent,repos,source,control,logs,issues,merge,pr_merge,issue_state,triggers,updater,process_admin,issue_import,command}` |
 | Orchestration | `dispatcher`, `consumer`, `source_poller`, `task_control`, `pr_watcher`, `merge_reconciler`, `issue_reconciler`, `retention_reconciler` — know only ports (and, for `pr_watcher`/`merge_reconciler`/`issue_reconciler`/`retention_reconciler`, the base `ids` module — not `workspace`/`forge`/`artifacts`/`agent`/`repos`/`drivers`) |
-| Behaviors | `behaviors/{landing,agent,resolve_conflict,verify,open_issue,merge_pr}` — touch ports, not drivers |
+| Behaviors | `behaviors/{landing,agent,unblock_pr,verify,open_issue,merge_pr}` — touch ports, not drivers |
 | Drivers | `drivers/{fs_queue,fs_workflows,fifo_strategy,dummy_behavior,stdout_events,system_clock,memory,git_workspace,fake_forge,claude_cli,fs_agents,fs_repos,worktree_artifacts,source_reflector,github_client,github_source,github_forge,github_issues,github_issues_check,github_mergeable_check,github_unhealthy_prs_check,github_pr_merger,jira_client,jira_issues_check,failed_tasks_check,github_merge_checker,github_issue_checker,launchd,composite_events,git_remote,projection_events,stage_output,scheduled_trigger,checks,fs_triggers,fs_processes,slack_sink,uv_updater,label_issue,github_issue_import,subprocess_command}` |
 | UI | `api/{app,routes}` — reads through `BoardView`/`ArtifactView`/`StageOutputView`, writes through `TaskControl`; never a driver |
 | Edges | `app` (wiring), `cli` |
@@ -270,9 +270,11 @@ Dependencies flow strictly downward, no cycles.
   downstream consumer (dispatcher, label reflection, the reconcilers) need no
   change. Best-effort claims the issue's `harness:queued` label; a failure
   there is swallowed, never fatal, since the task is already real by then
-- `behaviors/resolve_conflict.py` — `ResolveConflictBehavior`: merges the base
-  into the attached branch; a clean merge commits without spending an agent
-  call, a real conflict runs the `resolve` persona then the worker commits
+- `behaviors/unblock_pr.py` — `UnblockPrBehavior`: merges the base into the
+  attached branch; a clean merge with nothing red commits without spending an
+  agent call, a real conflict or a failing check runs the `unblock` persona
+  over the triage brief (`data.body`) then the worker commits, excluding
+  `.artifacts` since the branch may belong to a human
 - `api/` — FastAPI board and admin UI; sees only `BoardView`, `ArtifactView`,
   `TaskControl`, `AgentAdmin`, `WorkflowAdmin`, `ProcessAdmin` and `IssueImport`
   — never a driver or `ArtifactStore`

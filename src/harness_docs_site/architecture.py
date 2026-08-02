@@ -445,17 +445,19 @@ MODEL = ArchitectureModel(
                     ),
                 ),
                 Driver(
-                    id="resolve-conflict-behavior",
-                    name="ResolveConflictBehavior",
-                    tagline="Merges base into the branch; escalates real conflicts.",
+                    id="unblock-pr-behavior",
+                    name="UnblockPrBehavior",
+                    tagline="Merges base into the branch; briefs the agent on whatever is red.",
                     description=(
-                        "The resolver step's behavior: a clean merge commits "
-                        "without spending an agent call; a real conflict runs "
-                        "the resolve persona, then the worker commits. Always a "
-                        "merge, never a rebase — pushed history is never "
-                        "rewritten."
+                        "The unblock-pr step's behavior: a clean merge with "
+                        "nothing red commits without spending an agent call; a "
+                        "real conflict or a failing check runs the unblock "
+                        "persona over the triage brief, then the worker "
+                        "commits, excluding `.artifacts` since the branch may "
+                        "belong to a human. Always a merge, never a rebase — "
+                        "pushed history is never rewritten."
                     ),
-                    sources=("src/harness/behaviors/resolve_conflict.py",),
+                    sources=("src/harness/behaviors/unblock_pr.py",),
                 ),
                 Driver(
                     id="open-issue-behavior",
