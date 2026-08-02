@@ -1,3 +1,5 @@
+from dataclasses import replace
+
 from harness.behaviors.landing import LandingBehavior
 from harness.drivers.memory import (
     FakeClock,
@@ -186,6 +188,33 @@ async def test_conflict_aborts_the_merge_but_still_opens_a_flagged_pr():
     assert handle.pushes == ["harness/tsk_1"]
     assert result.outcome == DONE
     assert "conflicts with main" in result.summary
+
+
+async def test_an_ordinary_task_still_commits_its_artifacts():
+    """Invariant 16 / ADR-0006: on a harness-owned branch the write-up rides
+    along in the same commit and the same PR. Nothing is excluded."""
+    behavior, workspace, _, _ = build()
+
+    await behavior.run(make_task())
+
+    handle = workspace.handles["tsk_1"]
+    assert handle.commit_excludes == [(), ()]
+
+
+async def test_landing_a_branch_override_excludes_artifacts_from_every_commit():
+    """A `data.branch` task lands onto a branch that may belong to a human
+    (invariant 28: the `unblock-pr`/`automerge` case). The agent's write-up
+    must not be staged onto somebody else's pull request — and the exclusion
+    has to be stated here, not left to `GitWorkspace`'s `clean -fd` happening
+    to delete the untracked file first."""
+    behavior, workspace, _, _ = build()
+    task = replace(make_task(), data={"title": "unblock PR #42", "branch": "feature/x"})
+
+    await behavior.run(task)
+
+    handle = workspace.handles["tsk_1"]
+    assert handle.commits  # it did commit something
+    assert all(exclude == (".artifacts",) for exclude in handle.commit_excludes)
 
 
 async def test_no_pull_request_when_the_push_fails():

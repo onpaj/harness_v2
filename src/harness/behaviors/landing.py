@@ -35,6 +35,19 @@ class LandingBehavior(ConsumerBehavior):
     async def run(self, task: Task) -> BehaviorResult:
         handle = self._workspace.attach(task)
 
+        # A branch-override task (invariant 28 — the `unblock-pr` and
+        # `automerge` workflows) is landing onto a branch that may belong to a
+        # human, so the agent's write-up must not be staged onto their pull
+        # request; the step that produced it excludes `.artifacts` for the same
+        # reason. On an ordinary, harness-owned branch the artifacts are
+        # committed exactly as before — invariant 16 / ADR-0006 has them ride
+        # along with the code they document, in the same commit and the same
+        # PR. Stated here rather than left to `GitWorkspace`'s reattach
+        # `clean -fd` deleting the untracked file first: that is an
+        # implementation detail of the workspace driver, and a refactor of it
+        # must not silently re-open this.
+        exclude = (".artifacts",) if task.data.get("branch") else ()
+
         # Phase 3: the artifacts are already versioned in the worktree (the
         # agent wrote them straight into `.artifacts/`), so there's nowhere to
         # copy them — just open the PR. Phase 2 (a separate artifact store)
@@ -46,7 +59,7 @@ class LandingBehavior(ConsumerBehavior):
                     continue
                 relpath = f"{self._dest}/{task.id}/{ref.step}/{ref.attempt}/{ref.name}"
                 handle.write(relpath, content)
-            handle.commit("[land] task artifacts")
+            handle.commit("[land] task artifacts", exclude=exclude)
 
         # Pre-landing sync: merge the PR's base branch into the task branch so
         # the PR is born up-to-date with base — mergeable, no stale-base
@@ -63,7 +76,7 @@ class LandingBehavior(ConsumerBehavior):
         if conflicted:
             handle.abort_merge()
         else:
-            handle.commit(f"[land] merge {base}")
+            handle.commit(f"[land] merge {base}", exclude=exclude)
 
         # The forge cannot open a PR for a ref the remote has never seen. A
         # failure here raises, and the consumer writes the task into `failed/`.

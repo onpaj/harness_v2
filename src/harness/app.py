@@ -783,13 +783,22 @@ def build(
         finished by "open-pr", so a landing-only step with no catalog agent
         never triggers `catalog.get(step)`."""
         if step == UNBLOCK_STEP and catalog is not None:
+            spec = catalog.get(step)
             return UnblockPrBehavior(
                 clock=clock,
                 workspace=workspace,
                 runner=runner,
-                spec=catalog.get(step),
+                spec=spec,
                 events=events,
-                timeout=agent_timeout,
+                # A per-persona timeout on `agents/unblock.json` is honoured
+                # here exactly as it is on the generic branch below.
+                timeout=spec.timeout if spec.timeout is not None else agent_timeout,
+                # Invariant 42: the workflow declares the step's outcome
+                # vocabulary, its per-edge hints and its description. Threaded
+                # the same way `ClaudeCliBehavior` gets it — without it the
+                # `unblock-pr` workflow's authored `done`/`stuck` hints and
+                # `descriptions.unblock` never reach the agent.
+                workflows=served_workflows,
             )
         if catalog is not None:
             # Missing spec → AgentNotFound surfaces already at build time (fail fast).

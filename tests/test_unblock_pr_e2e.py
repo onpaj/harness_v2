@@ -56,14 +56,21 @@ async def drive_until_quiet(harness) -> int:
 
 
 class CapturingBehavior(ConsumerBehavior):
-    """Stands in for every step: records the task it saw and passes it on."""
+    """Stands in for every step: records the task it saw and passes it on.
 
-    def __init__(self) -> None:
+    `outcomes` overrides what a given step reports, so the workflow's own
+    give-up edge (`unblock → stuck → end`) can be driven end to end and not
+    merely declared."""
+
+    def __init__(self, outcomes: dict[str, str] | None = None) -> None:
         self.seen: list[Task] = []
+        self._outcomes = outcomes or {}
 
     async def run(self, task: Task) -> BehaviorResult:
         self.seen.append(task)
-        return BehaviorResult(DONE, f"{task.status}: ok")
+        step = task.status or ""
+        outcome = self._outcomes.get(step, DONE)
+        return BehaviorResult(outcome, f"{step}: {outcome}")
 
 
 def _pr(number, sha, *, state, labels=(), head_repo=SLUG):
@@ -80,7 +87,7 @@ def _pr(number, sha, *, state, labels=(), head_repo=SLUG):
     )
 
 
-async def _run(tmp_path, prs, check_runs=(), logs=()):
+async def _run(tmp_path, prs, check_runs=(), logs=(), outcomes=None):
     from harness.cli import _process_check_factories
     import harness.drivers.github_unhealthy_prs_check as up_mod
     from harness.app import HarnessLayout, build
@@ -116,7 +123,8 @@ async def _run(tmp_path, prs, check_runs=(), logs=()):
     original_slug = up_mod.github_slug
     up_mod.github_slug = lambda path: SLUG  # type: ignore[assignment]
 
-    behavior = CapturingBehavior()
+    behavior = CapturingBehavior(outcomes)
+    harness = None
     try:
         args = argparse.Namespace(worktree_root=None, github_label="harness:todo")
         harness = build(
@@ -143,11 +151,11 @@ async def _run(tmp_path, prs, check_runs=(), logs=()):
         await drive_until_quiet(harness)
     finally:
         up_mod.github_slug = original_slug  # type: ignore[assignment]
-    return behavior, client
+    return behavior, client, harness
 
 
 async def test_a_conflicted_pr_travels_unblock_then_land(tmp_path):
-    behavior, client = await _run(tmp_path, [_pr(85, "abc123", state="dirty")])
+    behavior, client, _harness = await _run(tmp_path, [_pr(85, "abc123", state="dirty")])
 
     steps = [task.status for task in behavior.seen]
     assert steps == ["unblock", "land"]
@@ -157,8 +165,26 @@ async def test_a_conflicted_pr_travels_unblock_then_land(tmp_path):
     assert client.list_pull_requests(SLUG)[0].labels == ("harness:autofix-1@abc123",)
 
 
+async def test_a_stuck_unblock_settles_at_end_without_landing(tmp_path):
+    """The give-up edge, driven rather than merely declared: the agent says it
+    could not fix the PR, so nothing is landed and nothing is pushed — the task
+    settles at `end` carrying the outcome it reported."""
+    behavior, _client, _harness = await _run(
+        tmp_path,
+        [_pr(12, "s12", state="dirty")],
+        outcomes={"unblock": "stuck"},
+    )
+
+    assert [task.status for task in behavior.seen] == ["unblock"]
+    settled = sorted((tmp_path / "done").glob("tsk_*.json"))
+    assert len(settled) == 1
+    task = Task.from_dict(json.loads(settled[0].read_text()))
+    assert task.status == "end"
+    assert task.last_outcome == "stuck"
+
+
 async def test_a_red_pr_carries_its_log_tail_through_the_loop(tmp_path):
-    behavior, _ = await _run(
+    behavior, _client, _harness = await _run(
         tmp_path,
         [_pr(7, "deadbee", state="unstable")],
         check_runs=[("deadbee", CheckRun(1, "pytest", "failure", "https://gh/run/1"))],
@@ -172,7 +198,7 @@ async def test_a_red_pr_carries_its_log_tail_through_the_loop(tmp_path):
 
 
 async def test_a_pr_that_spent_its_budget_is_labelled_and_never_dispatched(tmp_path):
-    behavior, client = await _run(
+    behavior, client, _harness = await _run(
         tmp_path,
         [_pr(9, "s9", state="dirty", labels=("harness:autofix-3@older12",))],
     )
@@ -186,14 +212,14 @@ async def test_a_fork_pr_never_reaches_a_step(tmp_path):
     contributor's own `main` must mint no task at all — the workspace would
     otherwise attach to, commit to and push the *base* repo's `main`."""
     fork = _pr(11, "s11", state="dirty", head_repo="contributor/harness_v2")
-    behavior, client = await _run(tmp_path, [fork])
+    behavior, client, _harness = await _run(tmp_path, [fork])
 
     assert behavior.seen == []
     assert client.list_pull_requests(SLUG)[0].labels == ()
 
 
 async def test_an_opted_out_pr_is_not_touched_at_all(tmp_path):
-    behavior, client = await _run(
+    behavior, client, _harness = await _run(
         tmp_path,
         [_pr(10, "s10", state="dirty", labels=("harness:no-autofix",))],
     )
