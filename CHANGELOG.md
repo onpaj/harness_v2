@@ -1,6 +1,47 @@
 # CHANGELOG
 
 
+## v1.9.0 (2026-08-02)
+
+### Features
+
+- **stats**: Add a delivery report derived from the task record
+  ([#153](https://github.com/onpaj/harness_v2/pull/153),
+  [`9434bb5`](https://github.com/onpaj/harness_v2/commit/9434bb56a43e92a52067c89e60f5cc213581ef4c))
+
+The board answers "where is each task now" and cannot be made to answer "what did the harness
+  deliver last week" — the retention sweep archives a settled task after two days, so the week is
+  off the board by design.
+
+Everything needed is already recorded: each task carries its full history (actor, from/to step,
+  outcome, reason, token usage) plus the structured stamps the behaviours write, and nothing is ever
+  deleted — the reconcilers transfer into `archived/`, which has no reader and no pruning. So this
+  is a derivation over data already on disk, not a new subsystem: the first render covers the whole
+  life of the root, where a metrics store would have started empty.
+
+- `ports/stats.py` — `StatsView`, a fourth read-only UI surface next to
+  BoardView/ArtifactView/StageOutputView, with its report dataclasses. - `stats.py` — the pure
+  `summarize()` plus `QueueStatsView` over the live queues including `archived/`. Sibling of
+  `projection.py` in shape: core, reads through `TaskQueue`, imports no driver. - `/stats` subpage
+  and `GET /api/stats?days=N`.
+
+Two reads that look obvious are wrong, and one derivation replaces both: once a task is archived its
+  `status` is `archived` whichever way it ended, and its last history entry is the archival stamp
+  appended days later. `settling_entry` — the last entry whose `to_step` is `end` or `failed` — is
+  therefore the source of both the outcome and the moment it settled. A healer-retired failure
+  counts as a failure, reported separately.
+
+Two record-only stamps feed it, neither read by `route()`: issue `labels` onto `data.source` at both
+  GitHub ingestion sites, and `data.resolve.clean` from `ResolveConflictBehavior` — previously the
+  only way to tell a resolved conflict from one that had evaporated was the summary's wording.
+
+See ADR-0026.
+
+Claude-Session: https://claude.ai/code/session_01UYWgfwQB3zV3KKwz9iCNJN
+
+Co-authored-by: Claude <noreply@anthropic.com>
+
+
 ## v1.8.0 (2026-07-30)
 
 
