@@ -123,7 +123,8 @@ class GithubMergeableCheck(Check):
                         repository=name,
                         data={
                             # The task works on the PR's own branch — invariant
-                            # #28's override, the same path the resolver uses.
+                            # #28's override, the same path the `unblock-pr`
+                            # workflow uses.
                             "branch": pr.head_branch,
                             "title": f"review PR #{pr.number} for automatic merge",
                             "source": {

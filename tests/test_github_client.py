@@ -224,8 +224,11 @@ def test_http_get_issue_other_error_propagates():
 
 
 class FakeResponse:
-    def __init__(self, payload):
+    def __init__(self, payload, headers=None):
         self._body = json.dumps(payload).encode("utf-8")
+        # A real `urllib` response always carries headers; `list_pull_requests`
+        # reads `Link` off them to follow pagination.
+        self.headers = headers if headers is not None else {}
 
     def read(self):
         return self._body
@@ -792,6 +795,74 @@ def test_http_list_pull_requests_two_tier_fetch():
     assert info.head_repo == "o/r"
     # exactly one list call + one detail call (for the matching PR only)
     assert len(opener.requests) == 2
+
+
+def test_http_list_pull_requests_asks_for_a_full_page_and_follows_link_next():
+    """GitHub's default page is 30 open PRs. Without `per_page` + `Link`
+    following, a busy repo (dependabot alone crosses 30) is silently truncated
+    and the harness simply never sees the rest — invisible from the outside."""
+
+    def _item(number):
+        return {
+            "number": number,
+            "html_url": f"u{number}",
+            "head": {"ref": f"b{number}", "sha": f"s{number}", "repo": {"full_name": "o/r"}},
+            "base": {"ref": "main"},
+        }
+
+    class PagingOpener:
+        def __init__(self):
+            self.urls = []
+
+        def open(self, request):
+            self.urls.append(request.full_url)
+            if "/pulls/" in request.full_url:
+                return FakeResponse({"head": {"sha": "x"}, "mergeable_state": "dirty"})
+            if "page=2" in request.full_url:
+                return FakeResponse([_item(2)])
+            return FakeResponse(
+                [_item(1)],
+                headers={"Link": '<https://api.github.com/x?page=2>; rel="next", '
+                                 '<https://api.github.com/x?page=9>; rel="last"'},
+            )
+
+    opener = PagingOpener()
+    client = HttpGithubClient("tok", opener=opener)
+
+    infos = client.list_pull_requests("o/r")
+
+    assert [i.number for i in infos] == [1, 2]
+    assert "per_page=100" in opener.urls[0]
+    assert opener.urls[1] == "https://api.github.com/x?page=2"
+
+
+def test_http_list_pull_requests_stops_when_there_is_no_next_link():
+    class SinglePageOpener:
+        def __init__(self):
+            self.calls = 0
+
+        def open(self, request):
+            self.calls += 1
+            if "/pulls/" in request.full_url:
+                return FakeResponse({"head": {"sha": "x"}, "mergeable_state": "dirty"})
+            # `last`/`prev` present, `next` absent — the final page.
+            return FakeResponse(
+                [
+                    {
+                        "number": 1,
+                        "html_url": "u",
+                        "head": {"ref": "b", "sha": "s", "repo": {"full_name": "o/r"}},
+                        "base": {"ref": "main"},
+                    }
+                ],
+                headers={"Link": '<https://api.github.com/x?page=1>; rel="prev"'},
+            )
+
+    opener = SinglePageOpener()
+    client = HttpGithubClient("tok", opener=opener)
+
+    assert len(client.list_pull_requests("o/r")) == 1
+    assert opener.calls == 2  # one list page + one detail call, no page 2
 
 
 def test_http_list_pull_requests_reads_the_head_repo_of_a_fork():

@@ -188,6 +188,26 @@ def test_one_bad_pr_does_not_sink_the_tick():
     assert [o.data["source"]["pr"] for o in obs] == [51]
 
 
+def test_a_swallowed_triage_failure_is_reported_on_stderr(capsys):
+    """Isolation must not be silence: a systemic fault (a revoked token, a rate
+    limit) fails every PR, and with `head_prefix: ""` that is every open PR in
+    every repo — the process would otherwise go quiet with a green board."""
+
+    class Exploding(FakeGithubClient):
+        def list_check_runs(self, repo, sha):
+            raise RuntimeError("401 Bad credentials")
+
+    client = Exploding([])
+    client.add_pull_request(_pr(52, "unstable", sha="boom"))
+
+    assert _check(client).evaluate() == []
+
+    err = capsys.readouterr().err
+    assert "warning: github-unhealthy-prs could not triage" in err
+    assert "#52" in err
+    assert "RuntimeError: 401 Bad credentials" in err
+
+
 def test_seen_ledger_suppresses_a_relist_at_the_same_head():
     client = FakeGithubClient([])
     client.add_pull_request(_pr(60, "dirty", sha="head1"))

@@ -456,14 +456,20 @@ def _build_autoresolver_sources(tmp_path: Path, client, registry, slug_of, clock
     """Mirrors `cli._process_check_factories`'s `github_unhealthy_prs_factory`,
     but with an injected `slug_of` instead of a `github_slug` monkeypatch — the
     client and registry are already in hand, so there is no need to touch git
-    remotes."""
+    remotes.
+
+    The `head_prefix` default is `""` because that is what production defaults
+    to, and it is the most consequential setting this feature has: a helper
+    that mirrors the factory must not quietly disagree with it about the blast
+    radius, or a process omitting the param would be exercised here against a
+    narrower scan than the live one."""
 
     def github_unhealthy_prs_factory(params: dict) -> GithubUnhealthyPrsCheck:
         return GithubUnhealthyPrsCheck(
             client=client,
             registry=registry,
             slug_of=slug_of,
-            head_prefix=params.get("head_prefix", "harness/"),
+            head_prefix=params.get("head_prefix", ""),
         )
 
     return FilesystemProcessRepository(tmp_path / "processes").build(
@@ -473,9 +479,9 @@ def _build_autoresolver_sources(tmp_path: Path, client, registry, slug_of, clock
     )
 
 
-def build_autoresolver_harness(tmp_path, client, workspace):
+def build_autoresolver_harness(tmp_path, client, workspace, process=None):
     _seed_autoresolver_workflows(tmp_path)
-    write_process(tmp_path, "autoresolver", AUTORESOLVER_PROCESS)
+    write_process(tmp_path, "autoresolver", process or AUTORESOLVER_PROCESS)
 
     registry = MemoryRepositoryRegistry({"app": Path("/repos/app")})
     slugs = {Path("/repos/app"): "o/r"}
@@ -491,7 +497,8 @@ def build_autoresolver_harness(tmp_path, client, workspace):
             client=client,
             registry=registry,
             slug_of=slugs.get,
-            head_prefix=params.get("head_prefix", "harness/"),
+            # `""`, as production defaults — see `_build_autoresolver_sources`.
+            head_prefix=params.get("head_prefix", ""),
         )
 
     catalog = MemoryAgentCatalog(
@@ -547,6 +554,38 @@ async def test_dirty_pr_via_autoresolver_process_flows_through_resolver_to_a_sin
     # branch, so this must not be a second, duplicate PR.
     handle = workspace.handles[finished.id]
     assert handle.branch == "harness/tsk_original"
+
+
+async def test_a_process_omitting_head_prefix_scans_a_human_authored_pr(tmp_path):
+    """The compile path's `head_prefix` default is production's `""`.
+
+    A process that omits the param must see *every* open PR, not only
+    `harness/`-prefixed ones — that widening is the whole point of this
+    feature, and a helper defaulting to `harness/` would have hidden a
+    regression in it behind a test that still passed."""
+    process = {
+        **AUTORESOLVER_PROCESS,
+        "action": {"check": "github-unhealthy-prs", "params": {}},
+    }
+    client = FakeGithubClient()
+    client.add_pull_request(
+        PullRequestInfo(
+            9, "https://github.com/o/r/pull/9", "feature/human-branch", "sha9", "main",
+            "dirty", head_repo="o/r",
+        )
+    )
+    workspace = MemoryWorkspace()
+    harness, _, _, _ = build_autoresolver_harness(
+        tmp_path, client, workspace, process=process
+    )
+
+    await drive_until_quiet(harness)
+
+    done_files = list((tmp_path / "done").glob("*.json"))
+    assert len(done_files) == 1
+    finished = Task.from_dict(json.loads(done_files[0].read_text()))
+    assert finished.data["source"]["pr"] == 9
+    assert workspace.handles[finished.id].branch == "feature/human-branch"
 
 
 async def test_behind_pr_via_autoresolver_process_is_auto_updated_with_no_task_created(tmp_path):

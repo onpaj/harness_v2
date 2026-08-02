@@ -27,6 +27,7 @@ registry port — never `cli` — so `test_architecture.py` stays green.
 
 from __future__ import annotations
 
+import sys
 from typing import Any
 
 from harness.drivers.git_remote import github_slug
@@ -172,7 +173,23 @@ class GithubUnhealthyPrsCheck(Check):
             ):
                 try:
                     observation = self._triage(name, slug, pull)
-                except Exception:  # noqa: BLE001 - isolate one misbehaving PR
+                except Exception as error:  # noqa: BLE001 - isolate one PR
+                    # Isolation must not be silence. A systemic fault — a
+                    # revoked token, a rate limit, a 5xx — fails *every* PR
+                    # here, and with `head_prefix` defaulting to `""` that is
+                    # now every open PR in every registered repo. Swallowed
+                    # bare, the process just goes quiet while the board stays
+                    # green, which reads as "nothing to fix". One line per
+                    # failure on stderr (the same channel and `warning:`
+                    # spelling `cli.py` uses) is enough to make it visible in
+                    # the service log; the loop still carries on, because one
+                    # misbehaving PR must not sink the tick.
+                    print(
+                        f"warning: github-unhealthy-prs could not triage "
+                        f"{slug}#{pull.number}: "
+                        f"{type(error).__name__}: {error}",
+                        file=sys.stderr,
+                    )
                     continue
                 if observation is not None:
                     observations.append(observation)

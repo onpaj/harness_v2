@@ -106,6 +106,30 @@ FAILING_CONCLUSIONS = frozenset({"failure", "timed_out"})
 """The conclusions that make a check-run worth waking an agent for."""
 
 
+def _next_page_url(link_header: str | None) -> str | None:
+    """The `rel="next"` URL out of a GitHub `Link` header, or None.
+
+    The header is a comma-separated list of `<url>; rel="name"` entries; an
+    absent header, or one with no `next` entry, means this was the last page.
+    Parsed rather than reconstructed from a `page=` counter so the caller
+    follows the server's own cursor.
+    """
+    if not link_header:
+        return None
+    for part in link_header.split(","):
+        segments = part.split(";")
+        if len(segments) < 2:
+            continue
+        url = segments[0].strip()
+        if not (url.startswith("<") and url.endswith(">")):
+            continue
+        for attribute in segments[1:]:
+            key, _, value = attribute.strip().partition("=")
+            if key.strip() == "rel" and value.strip().strip('"\'') == "next":
+                return url[1:-1]
+    return None
+
+
 class GithubClient(ABC):
     """The minimal GitHub API the connector needs."""
 
@@ -620,17 +644,38 @@ class HttpGithubClient(GithubClient):
             state=item.get("state", "open"),
         )
 
+    def _get_all_pages(self, url: str) -> list[dict]:
+        """Every item of a paginated list endpoint, following `Link: rel="next"`.
+
+        GitHub caps a page at 100 and defaults to 30. Without this, a repo with
+        more than one page of open pull requests is silently *truncated* rather
+        than erroring — the failure mode is a PR the harness simply never sees,
+        which is invisible from the outside. The cursor is the server's own
+        `next` URL rather than a `page=` counter we increment, so it stays
+        correct if GitHub switches that endpoint to cursor pagination.
+        """
+        items: list[dict] = []
+        next_url: str | None = url
+        while next_url:
+            request = urllib.request.Request(
+                next_url, headers=self._headers(), method="GET"
+            )
+            with self._opener.open(request) as response:
+                items.extend(json.loads(response.read()))
+                next_url = _next_page_url(response.headers.get("Link"))
+        return items
+
     def list_pull_requests(
         self, repo: str, *, head_prefix: str | None = None
     ) -> list[PullRequestInfo]:
         # `GET .../pulls` does not return `mergeable_state` — that field is only
         # computed and returned by the single-PR endpoint. So this is two-tier:
-        # one cheap list call, then one detail call per matching PR only.
-        query = urllib.parse.urlencode({"state": "open"})
+        # one cheap (but paginated) list call, then one detail call per matching
+        # PR only. Only the list half paginates — the detail calls are already
+        # one-per-PR and page-free.
+        query = urllib.parse.urlencode({"state": "open", "per_page": 100})
         url = f"{self._api}/repos/{repo}/pulls?{query}"
-        request = urllib.request.Request(url, headers=self._headers(), method="GET")
-        with self._opener.open(request) as response:
-            raw = json.loads(response.read())
+        raw = self._get_all_pages(url)
 
         matching = []
         for item in raw:

@@ -143,8 +143,11 @@ class UnblockPrBehavior(ConsumerBehavior):
         # The worker commits, never the agent (invariant 9). `git commit` with
         # MERGE_HEAD present produces the two-parent merge commit — no special
         # flag needed. `.artifacts` is excluded because this branch may belong
-        # to a human: the agent's write-up belongs in the task record, not in
-        # somebody else's pull request.
+        # to a human — the agent's write-up must not ride into somebody else's
+        # pull request. The cost of that exclusion is that the write-up is not
+        # persisted anywhere on the success path: it stays untracked in the
+        # worktree, and `land`'s reattach (`GitWorkspace.attach`, invariant 31)
+        # ends in an unconditional `clean -fd` that deletes it. See ADR-0026.
         handle.commit(run.summary, exclude=(".artifacts",))
         return BehaviorResult(run.outcome, run.summary)
 
