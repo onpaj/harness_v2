@@ -338,6 +338,12 @@ all of that.
 }
 ```
 
+This is the file in the **operator's own `~/harness-root`**, migrated by hand,
+which deliberately runs the widest `head_prefix`. What `harness init` seeds on a
+*fresh* root is not this: it is `processes/unblock-pr.json` with
+`head_prefix: "harness/"`, matching `automerge.json`, so a default install
+touches only harness-authored branches until an operator widens it (ADR-0026).
+
 Every param renders in the process form via `ParamSpec`, as the existing checks
 do. `cli.py`'s check registry swaps `github-conflicts` for
 `github-unhealthy-prs`; the factory closes over `GithubClient` and the repo
@@ -414,8 +420,16 @@ blast radius with a one-line config change and no code change.
 - **The re-fire loop:** agent pushes → new `head_sha` → CI reruns → still red →
   check sees attempt 3 → labels `harness:needs-human` → never emits again. The
   per-`head_sha` dedup key means intermediate ticks cost nothing.
-- **Agent chooses `stuck`:** routes to `end`. The attempt was still spent, so
-  three stuck rounds also reach the give-up label.
+- **Agent chooses `stuck`:** routes to `end`, and `UnblockPrBehavior` applies
+  `give_up_label` to the PR on its way out. *Corrected 2026-08-02:* this section
+  used to say the attempt was still spent, so three stuck rounds would reach the
+  give-up label. That stopped being true when the attempt label gained its
+  `@<sha7>` stamp — `stuck` pushes nothing, the head sha never moves, and the
+  counter therefore never advances on this path. The budget could not end a
+  give-up at all: no human was told, and the settled task, once retention
+  archived it out of the queues `_seed_pollers` reads, was re-minted on the next
+  restart, every retention window. The behavior labelling the PR itself is what
+  closes it — the check's give-up guard then skips the PR forever. See ADR-0026.
 
 ## Testing
 
