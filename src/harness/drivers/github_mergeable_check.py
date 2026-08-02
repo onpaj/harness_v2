@@ -1,12 +1,12 @@
 """`GithubMergeableCheck`: merge-candidate detection expressed as a `Check`.
 
 The third sibling of `github_issues_check.py` (issue ingestion) and
-`github_conflicts_check.py` (conflict detection), and the exact complement of
-the latter. Both scan the same harness-authored open PRs and partition them by
-`mergeable_state` with no overlap:
+`github_unhealthy_prs_check.py` (PR triage), and the exact complement of the
+latter. Both scan the same open PRs and partition them by `mergeable_state`
+with no overlap:
 
-- `behind`  → the conflicts check updates the branch server-side (no task)
-- `dirty`   → the conflicts check fires the `resolver` workflow
+- `behind`  → the unhealthy-PRs check updates the branch server-side (no task)
+- `dirty`, or a failing check run → the unhealthy-PRs check fires `unblock-pr`
 - `clean`   → **this check** fires the `automerge` workflow
 
 `clean` is doing a lot of work here, and deliberately so: it is GitHub's own

@@ -282,16 +282,17 @@ MODEL = ArchitectureModel(
                     adrs=("0015-process-authoring-aggregate",),
                 ),
                 Driver(
-                    id="github-conflicts-check",
-                    name="GithubConflictsCheck (github-conflicts)",
-                    tagline="Conflict detection as a Process action.",
+                    id="github-unhealthy-prs-check",
+                    name="GithubUnhealthyPrsCheck (github-unhealthy-prs)",
+                    tagline="Pull-request triage as a Process action.",
                     description=(
-                        "Lists harness-authored open PRs across the registry; a "
-                        "PR merely behind its base is updated server-side, a "
-                        "conflicted one becomes an observation for the resolver "
-                        "workflow, keyed per head commit."
+                        "Lists open PRs across the registry; a PR merely behind "
+                        "its base is updated server-side, a conflicted or "
+                        "red-CI one becomes an observation for the unblock-pr "
+                        "workflow, keyed per head commit and bounded by an "
+                        "attempt budget held in a label on the PR."
                     ),
-                    sources=("src/harness/drivers/github_conflicts_check.py",),
+                    sources=("src/harness/drivers/github_unhealthy_prs_check.py",),
                 ),
                 Driver(
                     id="failed-tasks-check",

@@ -57,7 +57,7 @@ class PullRequestDetail:
 
 @dataclass(frozen=True)
 class PullRequestInfo:
-    """A pull request as `GithubConflictsCheck` sees it — distinct from
+    """A pull request as `GithubUnhealthyPrsCheck` sees it — distinct from
     `PullRequestRef` (owned by the forge's find/create pair, which has no
     `mergeable_state`): this answers "is this PR ours, and does it need
     action", not "does a PR already exist for this branch"."""

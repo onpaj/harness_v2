@@ -1024,9 +1024,9 @@ def _process_check_factories(
     jira_client: JiraClient | None = None,
 ) -> dict[str, CheckFactory]:
     """Check kinds `processes/*.json` may name that need a dependency
-    `BUILTIN_CHECKS` can't carry — `github-issues`/`github-conflicts`, each
-    closed over a `GithubClient` + the repo registry, and `jira-issues`,
-    closed over a `JiraClient` + the repo registry. The clients come from the
+    `BUILTIN_CHECKS` can't carry — `github-issues`/`github-unhealthy-prs`/
+    `github-mergeable`, each closed over a `GithubClient` + the repo registry,
+    and `jira-issues`, closed over a `JiraClient` + the repo registry. The clients come from the
     caller (tests) or the environment (`GITHUB_TOKEN`; `JIRA_BASE_URL`/
     `JIRA_EMAIL`/`JIRA_API_TOKEN`).
 
@@ -1040,13 +1040,25 @@ def _process_check_factories(
         MissingCredential,
         ProcessValidationError,
     )
-    from harness.drivers.github_conflicts_check import SPEC as GITHUB_CONFLICTS_SPEC
-    from harness.drivers.github_conflicts_check import GithubConflictsCheck
     from harness.drivers.github_issues_check import SPEC as GITHUB_ISSUES_SPEC
     from harness.drivers.github_issues_check import GithubIssuesCheck
     from harness.drivers.github_mergeable_check import DEFAULT_SKIP_LABEL
     from harness.drivers.github_mergeable_check import SPEC as GITHUB_MERGEABLE_SPEC
     from harness.drivers.github_mergeable_check import GithubMergeableCheck
+
+    # `DEFAULT_SKIP_LABEL` is aliased because *both* PR checks export that name
+    # with deliberately different values — `harness:no-automerge` vetoes a
+    # merge, `harness:no-autofix` vetoes an agent touching the branch. An
+    # unaliased import here would shadow the one bound five lines above and
+    # silently change which PRs the automerger leaves alone.
+    from harness.drivers.github_unhealthy_prs_check import (
+        DEFAULT_GIVE_UP_LABEL,
+        DEFAULT_LOG_TAIL_LINES,
+        DEFAULT_MAX_ATTEMPTS,
+        DEFAULT_SKIP_LABEL as UNHEALTHY_SKIP_LABEL,
+        SPEC as GITHUB_UNHEALTHY_PRS_SPEC,
+        GithubUnhealthyPrsCheck,
+    )
     from harness.drivers.jira_issues_check import JiraIssuesCheck
     from harness.ports.triggers import CheckDefinition
 
@@ -1083,15 +1095,36 @@ def _process_check_factories(
             claimed_label=claimed_label,
         )
 
-    def github_conflicts_factory(params: dict) -> GithubConflictsCheck:
+    def github_unhealthy_prs_factory(params: dict) -> GithubUnhealthyPrsCheck:
         if client is None:
             raise MissingCredential(
-                "github-conflicts action requires GITHUB_TOKEN", field="check"
+                "github-unhealthy-prs action requires GITHUB_TOKEN", field="check"
             )
-        return GithubConflictsCheck(
+        max_attempts = params.get("max_attempts", DEFAULT_MAX_ATTEMPTS)
+        log_tail_lines = params.get("log_tail_lines", DEFAULT_LOG_TAIL_LINES)
+        if not isinstance(max_attempts, int) or max_attempts < 1:
+            raise ProcessValidationError(
+                "github-unhealthy-prs action requires params.max_attempts to be "
+                "a positive integer",
+                field="params",
+            )
+        # `< 1`, not `< 0`: the check tails with `lines[-log_tail_lines:]`, and
+        # Python's `-0 == 0` would make a zero mean the *entire* log rather than
+        # none of it — the one value that quietly defeats the tail.
+        if not isinstance(log_tail_lines, int) or log_tail_lines < 1:
+            raise ProcessValidationError(
+                "github-unhealthy-prs action requires params.log_tail_lines to be "
+                "a positive integer",
+                field="params",
+            )
+        return GithubUnhealthyPrsCheck(
             client=client,
             registry=registry,
-            head_prefix=params.get("head_prefix", "harness/"),
+            head_prefix=params.get("head_prefix", ""),
+            skip_label=params.get("skip_label", UNHEALTHY_SKIP_LABEL),
+            give_up_label=params.get("give_up_label", DEFAULT_GIVE_UP_LABEL),
+            max_attempts=max_attempts,
+            log_tail_lines=log_tail_lines,
         )
 
     def github_mergeable_factory(params: dict) -> GithubMergeableCheck:
@@ -1162,8 +1195,8 @@ def _process_check_factories(
         "github-issues": CheckDefinition(
             spec=GITHUB_ISSUES_SPEC, factory=github_issues_factory
         ),
-        "github-conflicts": CheckDefinition(
-            spec=GITHUB_CONFLICTS_SPEC, factory=github_conflicts_factory
+        "github-unhealthy-prs": CheckDefinition(
+            spec=GITHUB_UNHEALTHY_PRS_SPEC, factory=github_unhealthy_prs_factory
         ),
         "github-mergeable": CheckDefinition(
             spec=GITHUB_MERGEABLE_SPEC, factory=github_mergeable_factory
@@ -2328,7 +2361,7 @@ def _run(args: argparse.Namespace) -> int:
     ] = {"open-issue": _open_issue, "merge-pr": _merge_pr}
 
     # A single GitHub client threads into both the process check factories
-    # (`github-issues`/`github-conflicts`) and the `label-issue` finisher —
+    # (`github-issues`/`github-unhealthy-prs`) and the `label-issue` finisher —
     # one client per wiring site, like every other GitHub-touching helper
     # here. Built here — ahead of where the process check factories and the
     # issue-import factory consume it further down — so `finishers` below is
@@ -2434,7 +2467,7 @@ def _run(args: argparse.Namespace) -> int:
     # (ADR-0018) — the `failed-tasks` check needs the harness's own live
     # `failed`/`healed`/`events`, which only exist once `build()` has
     # constructed them. `_process_check_factories` supplies just the
-    # externally-dependent check kinds (`github-issues`/`github-conflicts`/
+    # externally-dependent check kinds (`github-issues`/`github-unhealthy-prs`/
     # `jira-issues`); the Slack-sink *decision*, though, still has to happen
     # here, before `build()` — a `SlackWebhookSink` must be present in
     # `sources` before `build()` constructs `SourceReflectorSink(sources)`

@@ -480,7 +480,7 @@ class Harness:
 
 _CREDENTIAL_GATED_CHECKS = {
     "github-issues": "GITHUB_TOKEN",
-    "github-conflicts": "GITHUB_TOKEN",
+    "github-unhealthy-prs": "GITHUB_TOKEN",
     "github-mergeable": "GITHUB_TOKEN",
     "jira-issues": "JIRA_BASE_URL/JIRA_EMAIL/JIRA_API_TOKEN",
 }
@@ -844,8 +844,8 @@ def build(
     # Processes (`processes/*.json`) are the operator's top-level authoring
     # aggregate; each compiles into a `ScheduledTrigger` (ADR-0015). Compiled
     # here, inside `build()`, rather than by `cli.py` (as `github-issues`/
-    # `github-conflicts` still are, folded in via `extra_checks`) because the
-    # `failed-tasks` check (ADR-0018) needs the harness's own live
+    # `github-unhealthy-prs` still are, folded in via `extra_checks`) because
+    # the `failed-tasks` check (ADR-0018) needs the harness's own live
     # `failed`/`healed_queue`/`events` — ports only `build()` itself
     # constructs, not something `cli.py` can hand it independently.
     checks: dict[str, CheckFactory] = {

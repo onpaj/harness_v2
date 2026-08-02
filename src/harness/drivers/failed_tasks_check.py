@@ -25,7 +25,7 @@ pipeline, no `Observation` — in three cases. `data.heal` marks it as itself a
 re-enter `failed/` a second time). `data["body"]` carrying the
 `<!-- harness-issue:… -->` marker marks it as a fix attempt for an issue the
 harness itself filed (`heal-declined`). `data["source"]["kind"]` being
-`"mergeability"` or `"pull-request"` marks it as a resolver or
+`"pull-request-health"` or `"pull-request"` marks it as an unblock or
 automerge-review task minted from the harness's own pull request, which
 carries neither a body nor `data.heal` (also `heal-declined`). All three
 express one rule: the harness does not heal a failure of work it filed for
@@ -44,9 +44,9 @@ from __future__ import annotations
 
 from dataclasses import replace
 
-from harness.drivers.github_conflicts_check import SOURCE_KIND as MERGEABILITY_SOURCE_KIND
 from harness.drivers.github_issues import MARKER_PREFIX
 from harness.drivers.github_mergeable_check import SOURCE_KIND as PULL_REQUEST_SOURCE_KIND
+from harness.drivers.github_unhealthy_prs_check import SOURCE_KIND as PR_HEALTH_SOURCE_KIND
 from harness.models import (
     END,
     FAILED,
@@ -68,11 +68,11 @@ ACTOR = HEAL_ACTOR
 (`HEAL_ACTOR`) because the derivations that read the stamp back live there too;
 this alias keeps every existing reference in this module unchanged."""
 
-PR_BORN_SOURCE_KINDS = frozenset({MERGEABILITY_SOURCE_KIND, PULL_REQUEST_SOURCE_KIND})
+PR_BORN_SOURCE_KINDS = frozenset({PR_HEALTH_SOURCE_KIND, PULL_REQUEST_SOURCE_KIND})
 """`source.kind` values stamped by the two Checks that mint tasks from the
-harness's own pull requests rather than a filed issue: `GithubConflictsCheck`
-(`drivers/github_conflicts_check.py`) stamps its own `SOURCE_KIND`
-(`"mergeability"`) on resolver tasks, `GithubMergeableCheck`
+harness's own pull requests rather than a filed issue: `GithubUnhealthyPrsCheck`
+(`drivers/github_unhealthy_prs_check.py`) stamps its own `SOURCE_KIND`
+(`"pull-request-health"`) on unblock tasks, `GithubMergeableCheck`
 (`drivers/github_mergeable_check.py`) stamps its own `SOURCE_KIND`
 (`"pull-request"`) on automerge-review tasks. Neither carries a body or
 `data.heal`, so without this the one-hop limit (invariant 25) wouldn't cover
@@ -353,7 +353,7 @@ def _descends_from_a_harness_filed_issue(task: Task) -> bool:
 def _born_from_a_harness_pull_request(task: Task) -> bool:
     """True when this failed task was minted by a Check that scans the
     harness's own open pull requests rather than ingesting a filed issue —
-    a resolver task (`GithubConflictsCheck`) or an automerge-review task
+    an unblock task (`GithubUnhealthyPrsCheck`) or an automerge-review task
     (`GithubMergeableCheck`). See `PR_BORN_SOURCE_KINDS` for the two
     `source.kind` values this recognises.
 

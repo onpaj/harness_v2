@@ -21,8 +21,8 @@ that guard is separate from, and not overridden by, the "already checked out"
 guard `--force` does lift), falling back to creating it fresh from
 `origin/<branch>` only the one time no local copy exists yet. Reusing the
 local branch this way would leave the new worktree stale whenever the branch
-last advanced server-side (`GithubConflictsCheck`'s `GithubClient.update_branch`
-call, which never touches any local ref) rather than through a harness-driven
+last advanced server-side (`GithubUnhealthyPrsCheck`'s
+`GithubClient.update_branch` call, which never touches any local ref) rather than through a harness-driven
 commit+push here — so once the reused worktree exists, it is immediately hard-reset to
 `origin/<branch>`'s actual tip before the caller does anything else with it.
 A similar reconciliation runs on **reattach** of an override task (the worktree
@@ -288,7 +288,7 @@ class GitWorkspace(Workspace):
                         ["-C", str(base), "worktree", "add", "--force", str(worktree), branch]
                     )
                     # The shared local ref can be behind `origin/<branch>`:
-                    # GithubConflictsCheck's update_branch call advances
+                    # GithubUnhealthyPrsCheck's update_branch call advances
                     # the branch server-side via the GitHub API, touching no
                     # local git state at all. Reconcile the *new* worktree with
                     # origin's actual tip before anything (merge/agent/commit)
@@ -313,8 +313,8 @@ class GitWorkspace(Workspace):
             # Reset-on-reattach for a resolver task's shared branch. Unlike a
             # `harness/<task.id>` branch — which only ever advances through this
             # worktree — a resolver's overridden branch can have moved forward
-            # *server-side* (`GithubConflictsCheck`'s `update_branch` call) between
-            # this task's attempts, touching no local ref. Resetting to local
+            # *server-side* (`GithubUnhealthyPrsCheck`'s `update_branch` call)
+            # between this task's attempts, touching no local ref. Resetting to local
             # `HEAD` here would leave the worktree stale and the resolver's
             # eventual push rejected as non-fast-forward, so reconcile with
             # `origin/<branch>`'s actual tip — the same reconciliation the

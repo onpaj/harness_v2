@@ -1253,7 +1253,7 @@ def test_build_processes_root_defaults_to_layout_processes(tmp_path):
 
 def test_build_extra_checks_merge_over_builtin_checks(tmp_path):
     """`extra_checks` (the dependency-bag shape `github-issues`/
-    `github-conflicts` use, wired from `cli.py`) is merged into the checks
+    `github-unhealthy-prs` use, wired from `cli.py`) is merged into the checks
     dict `build()` uses to compile `processes/*.json` — alongside its own
     unconditional `"failed-tasks"` entry, never replacing it."""
     from harness.drivers.checks import AlwaysCheck

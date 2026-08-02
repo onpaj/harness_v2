@@ -86,7 +86,7 @@ class TaskSource(ABC):
         per polled item that produces no task (precedent: `GithubTaskSource.poll()`
         swaps a label as part of claiming an issue). The same shape recurs one
         layer down: a `Check` driving a `ScheduledTrigger` may do the same inside
-        `evaluate()` — `GithubConflictsCheck.evaluate()` calls GitHub's
+        `evaluate()` — `GithubUnhealthyPrsCheck.evaluate()` calls GitHub's
         update-branch API on a "behind" PR before `ScheduledTrigger.poll()` ever
         returns. Any such action must be safe to repeat every tick.
         """

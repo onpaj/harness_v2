@@ -1789,13 +1789,13 @@ def test_a_github_issues_process_is_skipped_not_fatal_without_a_credential(
     assert "GITHUB_TOKEN" in repo.skipped[0][1]
 
 
-def test_process_check_factories_builds_a_resolve_conflicts_process(tmp_path):
+def test_process_check_factories_builds_an_unblock_pr_process(tmp_path):
     from harness.drivers.memory import FakeClock
 
     (tmp_path / "processes").mkdir()
-    (tmp_path / "processes" / "resolve-conflicts.json").write_text(
+    (tmp_path / "processes" / "unblock-pr.json").write_text(
         '{"trigger": {"interval": "60s"},'
-        ' "action": {"check": "github-conflicts", "params": {"head_prefix": "harness/"}},'
+        ' "action": {"check": "github-unhealthy-prs", "params": {"head_prefix": "harness/"}},'
         ' "target": {"workflow": "resolver"}, "dedup": "per-state",'
         ' "sink": {"kind": "none"}}'
     )
@@ -1810,24 +1810,89 @@ def test_process_check_factories_builds_a_resolve_conflicts_process(tmp_path):
     )
 
     assert len(sources) == 1
-    assert sources[0].kind == "scheduled:resolve-conflicts"
+    assert sources[0].kind == "scheduled:unblock-pr"
 
 
-def test_a_github_conflicts_process_is_skipped_not_fatal_without_a_credential(
+def test_github_unhealthy_prs_factory_defaults_match_the_check_s_own():
+    """The factory is the only place a `processes/*.json` reaches the check, so
+    an omitted param must land on the driver's own constant — in particular the
+    empty `head_prefix` (every open PR, not just `harness/`) and the autofix
+    skip label, which is *not* the automerge one the same name is bound to a
+    few lines above it in `cli.py`."""
+    from harness.drivers.github_unhealthy_prs_check import (
+        DEFAULT_GIVE_UP_LABEL,
+        DEFAULT_LOG_TAIL_LINES,
+        DEFAULT_MAX_ATTEMPTS,
+        DEFAULT_SKIP_LABEL,
+    )
+
+    registry = MemoryRepositoryRegistry({"harness_v2": Path("/repos/harness_v2")})
+    checks = _process_check_factories(_process_args(), registry, client=FakeGithubClient())
+
+    check = checks["github-unhealthy-prs"]({})
+
+    assert check._head_prefix == ""
+    assert check._skip_label == DEFAULT_SKIP_LABEL == "harness:no-autofix"
+    assert check._give_up_label == DEFAULT_GIVE_UP_LABEL
+    assert check._max_attempts == DEFAULT_MAX_ATTEMPTS
+    assert check._log_tail_lines == DEFAULT_LOG_TAIL_LINES
+
+
+def test_github_unhealthy_prs_factory_still_skips_automerge_with_its_own_label():
+    """`github_mergeable_check` and `github_unhealthy_prs_check` both export a
+    `DEFAULT_SKIP_LABEL`, with deliberately different values. An unaliased
+    import of the second would shadow the first *silently* and change which PRs
+    the automerger leaves alone — so pin both factories' defaults together."""
+    registry = MemoryRepositoryRegistry({"harness_v2": Path("/repos/harness_v2")})
+    checks = _process_check_factories(_process_args(), registry, client=FakeGithubClient())
+
+    assert checks["github-mergeable"]({})._skip_label == "harness:no-automerge"
+    assert checks["github-unhealthy-prs"]({})._skip_label == "harness:no-autofix"
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        # Zero is the interesting one: the check tails with
+        # `lines[-log_tail_lines:]`, and Python's `-0 == 0` makes that the
+        # *entire* log — the one value that silently defeats the tail rather
+        # than merely shrinking it.
+        {"log_tail_lines": 0},
+        {"log_tail_lines": -1},
+        {"log_tail_lines": "200"},
+        {"max_attempts": 0},
+        {"max_attempts": -1},
+        {"max_attempts": "3"},
+    ],
+)
+def test_github_unhealthy_prs_factory_rejects_a_non_positive_budget(params):
+    from harness.drivers.fs_processes import ProcessValidationError
+
+    registry = MemoryRepositoryRegistry({"harness_v2": Path("/repos/harness_v2")})
+    checks = _process_check_factories(_process_args(), registry, client=FakeGithubClient())
+
+    with pytest.raises(ProcessValidationError) as excinfo:
+        checks["github-unhealthy-prs"](params)
+
+    assert excinfo.value.field == "params"
+    assert next(iter(params)) in str(excinfo.value)
+
+
+def test_a_github_unhealthy_prs_process_is_skipped_not_fatal_without_a_credential(
     tmp_path, monkeypatch
 ):
     """A missing credential is on the *absent* side of the operator's rule, so
     it warns and skips rather than failing the whole run — otherwise one
-    `github-conflicts` process file would make every credential-less run exit 2
+    `github-unhealthy-prs` process file would make every credential-less run exit 2
     and break the harness's "no token is not fatal" promise. A set-and-wrong
     value (an unknown check, a bad param) is still fatal."""
     from harness.drivers.memory import FakeClock
 
     monkeypatch.delenv("GITHUB_TOKEN", raising=False)
     (tmp_path / "processes").mkdir()
-    (tmp_path / "processes" / "resolve-conflicts.json").write_text(
+    (tmp_path / "processes" / "unblock-pr.json").write_text(
         '{"trigger": {"interval": "60s"},'
-        ' "action": {"check": "github-conflicts"},'
+        ' "action": {"check": "github-unhealthy-prs"},'
         ' "target": {"workflow": "resolver"}}'
     )
     registry = MemoryRepositoryRegistry({"heblo": Path("/repos/heblo")})
@@ -1841,7 +1906,7 @@ def test_a_github_conflicts_process_is_skipped_not_fatal_without_a_credential(
     )
 
     assert triggers == []
-    assert [name for name, _ in repo.skipped] == ["resolve-conflicts.json"]
+    assert [name for name, _ in repo.skipped] == ["unblock-pr.json"]
     assert "GITHUB_TOKEN" in repo.skipped[0][1]
 
 
@@ -1851,7 +1916,12 @@ def test_process_check_factories_stays_dependency_free_for_builtin_checks(tmp_pa
     registry = MemoryRepositoryRegistry({})
     checks = _process_check_factories(_process_args(), registry, client=None)
 
-    assert set(checks) == {"github-issues", "github-conflicts", "github-mergeable", "jira-issues"}
+    assert set(checks) == {
+        "github-issues",
+        "github-unhealthy-prs",
+        "github-mergeable",
+        "jira-issues",
+    }
 
 
 def test_process_check_factories_builds_a_jira_issues_process(tmp_path):
@@ -2282,7 +2352,7 @@ def test_init_is_idempotent_for_resolver_workflow(tmp_path):
 
 def test_run_serves_resolver_workflow_when_its_file_exists(monkeypatch, tmp_path):
     # The resolver workflow must be served (its own step queues + a valid target
-    # for a `github-conflicts` process) whenever `workflows/resolver.json`
+    # for a `github-unhealthy-prs` process) whenever `workflows/resolver.json`
     # exists.
     main(["init", "--root", str(tmp_path)])  # scaffolds resolver.json
     monkeypatch.delenv("GITHUB_TOKEN", raising=False)

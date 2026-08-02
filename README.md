@@ -327,7 +327,7 @@ authored the same way any other scheduled process is: drop a file under
 // ~/harness-root/processes/autoresolver.json
 {
   "trigger": {"interval": "60s"},
-  "action": {"check": "github-conflicts", "params": {"head_prefix": "harness/"}},
+  "action": {"check": "github-unhealthy-prs", "params": {"head_prefix": "harness/"}},
   "target": {"workflow": "resolver"},
   "dedup": "per-state",
   "sink": {"kind": "none"}
@@ -338,8 +338,17 @@ This one is not written by `harness init` — copy the block above yourself, onc
 a token is configured (see
 [Running it as a service](#running-it-as-a-service)). `harness run` then
 auto-updates a `behind` PR server-side and queues exactly one resolve→land task
-per `dirty` PR, deduped per conflicted head commit. Without a token the process
-is skipped with a warning rather than failing the run.
+per unhealthy PR, deduped per head commit. Without a token the process is
+skipped with a warning rather than failing the run.
+
+The `github-unhealthy-prs` action claims more than conflicts: a PR carrying a
+failing check run is unhealthy too, and the observation it emits carries the
+tail of each failing check's log. `head_prefix` is what bounds the blast radius
+— `"harness/"` above watches only the harness's own branches, and `""` watches
+every open PR. Three further params bound it in time rather than in scope:
+`skip_label` (default `harness:no-autofix`) is a per-PR veto, and after
+`max_attempts` (default 3) the PR gets `give_up_label` (default
+`harness:needs-human`) and is never touched again.
 
 ## Automatic merging
 

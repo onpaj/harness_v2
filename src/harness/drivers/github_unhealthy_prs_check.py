@@ -1,8 +1,8 @@
 """`GithubUnhealthyPrsCheck`: pull-request triage expressed as a `Check`.
 
-The successor to `github_conflicts_check.py`, and the exact complement of
-`github_mergeable_check.py`. Both scan the same open PRs and partition them by
-`mergeable_state` with no overlap:
+The successor to the retired `github_conflicts_check.py`, and the exact
+complement of `github_mergeable_check.py`. Both scan the same open PRs and
+partition them by `mergeable_state` with no overlap:
 
 - `behind` → **this check** updates the branch server-side (no task)
 - `dirty`, or anything with a failing check run → **this check** fires the
