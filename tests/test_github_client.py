@@ -187,7 +187,7 @@ def test_http_get_issue_maps_fields():
 
 def test_http_get_issue_404_is_none():
     class NotFoundOpener:
-        def open(self, request):
+        def open(self, request, timeout=None):
             raise urllib.error.HTTPError(
                 request.full_url, 404, "Not Found", {}, io.BytesIO(b"")
             )
@@ -199,7 +199,7 @@ def test_http_get_issue_404_is_none():
 
 def test_http_get_issue_other_error_propagates():
     class ServerErrorOpener:
-        def open(self, request):
+        def open(self, request, timeout=None):
             raise urllib.error.HTTPError(
                 request.full_url, 500, "Server Error", {}, io.BytesIO(b"")
             )
@@ -231,9 +231,11 @@ class FakeOpener:
     def __init__(self, payload=None):
         self.payload = payload if payload is not None else []
         self.requests = []
+        self.timeouts = []
 
-    def open(self, request):
+    def open(self, request, timeout=None):
         self.requests.append(request)
+        self.timeouts.append(timeout)
         return FakeResponse(self.payload)
 
 
@@ -301,7 +303,7 @@ def test_http_remove_label_deletes_and_swallows_404():
 
 def test_http_remove_label_404_is_swallowed():
     class NotFoundOpener:
-        def open(self, request):
+        def open(self, request, timeout=None):
             raise urllib.error.HTTPError(
                 request.full_url, 404, "Not Found", {}, io.BytesIO(b"")
             )
@@ -312,7 +314,7 @@ def test_http_remove_label_404_is_swallowed():
 
 def test_http_remove_label_other_error_propagates():
     class ServerErrorOpener:
-        def open(self, request):
+        def open(self, request, timeout=None):
             raise urllib.error.HTTPError(
                 request.full_url, 500, "Server Error", {}, io.BytesIO(b"")
             )
@@ -338,7 +340,7 @@ def test_http_get_issue_state_reads_the_state_field():
 
 def test_http_get_issue_state_404_is_none():
     class NotFoundOpener:
-        def open(self, request):
+        def open(self, request, timeout=None):
             raise urllib.error.HTTPError(
                 request.full_url, 404, "Not Found", {}, io.BytesIO(b"")
             )
@@ -350,7 +352,7 @@ def test_http_get_issue_state_404_is_none():
 
 def test_http_get_issue_state_other_error_propagates():
     class ServerErrorOpener:
-        def open(self, request):
+        def open(self, request, timeout=None):
             raise urllib.error.HTTPError(
                 request.full_url, 500, "Server Error", {}, io.BytesIO(b"")
             )
@@ -665,7 +667,7 @@ def test_http_get_pull_request_open_pr_is_not_merged():
 
 def test_http_get_pull_request_error_propagates():
     class ServerErrorOpener:
-        def open(self, request):
+        def open(self, request, timeout=None):
             raise urllib.error.HTTPError(
                 request.full_url, 500, "Server Error", {}, io.BytesIO(b"")
             )
@@ -740,7 +742,7 @@ def test_http_list_pull_requests_two_tier_fetch():
         def __init__(self):
             self.requests = []
 
-        def open(self, request):
+        def open(self, request, timeout=None):
             self.requests.append(request)
             if request.full_url.endswith("/pulls/1"):
                 return FakeResponse(detail_payload)
@@ -764,7 +766,7 @@ def test_http_list_pull_requests_two_tier_fetch():
 
 def test_http_list_pull_requests_missing_mergeable_state_is_unknown():
     class TieredOpener:
-        def open(self, request):
+        def open(self, request, timeout=None):
             if "/pulls/1" in request.full_url and request.full_url.endswith("/pulls/1"):
                 return FakeResponse({"head": {"sha": "x"}, "base": {"ref": "main"}})
             return FakeResponse(
@@ -798,7 +800,7 @@ def test_http_update_branch_puts_update_branch_endpoint():
 
 def test_http_update_branch_422_is_swallowed():
     class NotBehindOpener:
-        def open(self, request):
+        def open(self, request, timeout=None):
             raise urllib.error.HTTPError(
                 request.full_url, 422, "Unprocessable", {}, io.BytesIO(b"")
             )
@@ -809,7 +811,7 @@ def test_http_update_branch_422_is_swallowed():
 
 def test_http_update_branch_other_error_propagates():
     class ServerErrorOpener:
-        def open(self, request):
+        def open(self, request, timeout=None):
             raise urllib.error.HTTPError(
                 request.full_url, 500, "Server Error", {}, io.BytesIO(b"")
             )
@@ -886,3 +888,83 @@ def test_http_search_issue_by_marker_returns_none_when_no_body_matches():
     client = HttpGithubClient("tok", opener=FakeOpener(payload))
 
     assert client.search_issue_by_marker("o/r", "<!-- harness-heal:tsk_9 -->") is None
+
+
+# --- timeout -----------------------------------------------------------
+
+
+def test_http_client_defaults_to_a_30_second_timeout():
+    opener = FakeOpener({"default_branch": "main"})
+    client = HttpGithubClient("tok", opener=opener)
+
+    client.default_branch("o/r")
+
+    assert opener.timeouts == [30.0]
+
+
+def test_http_client_configured_timeout_reaches_every_call_site():
+    opener = FakeOpener([])
+    client = HttpGithubClient("tok", opener=opener, timeout=7.5)
+
+    client.list_issues("o/r", label="harness:todo")
+    client.add_label("o/r", 1, "harness:queued")
+
+    assert opener.timeouts == [7.5, 7.5]
+
+
+def test_http_client_raised_timeout_is_not_swallowed():
+    class HangingOpener:
+        def open(self, request, timeout=None):
+            raise TimeoutError("timed out")
+
+    client = HttpGithubClient("tok", opener=HangingOpener())
+
+    with pytest.raises(TimeoutError):
+        client.list_issues("o/r", label="harness:todo")
+
+
+def test_http_client_dead_peer_raises_timeout_within_a_bound_not_forever():
+    """A real socket that accepts the connection and never writes back — the
+    same shape as a NAT/idle drop killing a GitHub connection silently. Proves
+    the configured timeout is honoured by the real `urllib` machinery, not
+    just plumbed through as an inert kwarg, without ever waiting anywhere near
+    the wedge this regression guards against (observed: ~34 hours)."""
+    import socket
+    import threading
+    import time
+
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.bind(("127.0.0.1", 0))
+    server.listen(1)
+    port = server.getsockname()[1]
+
+    def accept_and_hang():
+        try:
+            conn, _ = server.accept()
+            try:
+                # Hold the connection open (never read/write) well past the
+                # client's timeout, so it can't be garbage-collected and
+                # reset the connection out from under the client's read.
+                time.sleep(2.0)
+            finally:
+                conn.close()
+        except OSError:
+            pass  # server closed while waiting — fine, test is tearing down
+
+    thread = threading.Thread(target=accept_and_hang, daemon=True)
+    thread.start()
+
+    try:
+        client = HttpGithubClient(
+            "tok", api=f"http://127.0.0.1:{port}", timeout=0.05
+        )
+
+        start = time.monotonic()
+        with pytest.raises(TimeoutError):
+            client.list_issues("o/r", label="harness:todo")
+        elapsed = time.monotonic() - start
+
+        assert elapsed < 2.0  # bounded — nowhere near "forever"
+    finally:
+        server.close()
+        thread.join(timeout=1.0)

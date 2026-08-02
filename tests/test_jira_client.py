@@ -85,9 +85,11 @@ class FakeOpener:
     def __init__(self, payload=None):
         self.payload = payload if payload is not None else {"issues": []}
         self.requests = []
+        self.timeouts = []
 
-    def open(self, request):
+    def open(self, request, timeout=None):
         self.requests.append(request)
+        self.timeouts.append(timeout)
         return FakeResponse(self.payload)
 
 
@@ -210,7 +212,7 @@ def test_http_remove_label_puts_remove_op():
 
 def test_http_remove_label_404_is_swallowed():
     class NotFoundOpener:
-        def open(self, request):
+        def open(self, request, timeout=None):
             raise urllib.error.HTTPError(
                 request.full_url, 404, "Not Found", {}, io.BytesIO(b"")
             )
@@ -221,7 +223,7 @@ def test_http_remove_label_404_is_swallowed():
 
 def test_http_remove_label_other_error_propagates():
     class ServerErrorOpener:
-        def open(self, request):
+        def open(self, request, timeout=None):
             raise urllib.error.HTTPError(
                 request.full_url, 500, "Server Error", {}, io.BytesIO(b"")
             )
@@ -233,7 +235,7 @@ def test_http_remove_label_other_error_propagates():
 
 def test_http_add_label_error_propagates_unwrapped():
     class ServerErrorOpener:
-        def open(self, request):
+        def open(self, request, timeout=None):
             raise urllib.error.HTTPError(
                 request.full_url, 500, "Server Error", {}, io.BytesIO(b"")
             )
@@ -241,3 +243,80 @@ def test_http_add_label_error_propagates_unwrapped():
     client = HttpJiraClient("https://acme.atlassian.net", "e@x.com", "tok", opener=ServerErrorOpener())
     with pytest.raises(urllib.error.HTTPError):
         client.add_label("PROJ-5", "x")
+
+
+# --- timeout -----------------------------------------------------------
+
+
+def test_http_client_defaults_to_a_30_second_timeout():
+    opener = FakeOpener({})
+    client = HttpJiraClient("https://acme.atlassian.net", "e@x.com", "tok", opener=opener)
+
+    client.add_label("PROJ-5", "harness-queued")
+
+    assert opener.timeouts == [30.0]
+
+
+def test_http_client_configured_timeout_reaches_every_call_site():
+    opener = FakeOpener({"issues": []})
+    client = HttpJiraClient(
+        "https://acme.atlassian.net", "e@x.com", "tok", opener=opener, timeout=7.5
+    )
+
+    client.search_issues("project = PROJ")
+    client.add_label("PROJ-5", "harness-queued")
+
+    assert opener.timeouts == [7.5, 7.5]
+
+
+def test_http_client_raised_timeout_is_not_swallowed():
+    class HangingOpener:
+        def open(self, request, timeout=None):
+            raise TimeoutError("timed out")
+
+    client = HttpJiraClient("https://acme.atlassian.net", "e@x.com", "tok", opener=HangingOpener())
+
+    with pytest.raises(TimeoutError):
+        client.search_issues("project = PROJ")
+
+
+def test_http_client_dead_peer_raises_timeout_within_a_bound_not_forever():
+    """Same shape as the GitHub client's regression test: a real socket that
+    accepts the connection and never writes back, proving the configured
+    timeout is honoured by the real `urllib` machinery."""
+    import socket
+    import threading
+    import time
+
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.bind(("127.0.0.1", 0))
+    server.listen(1)
+    port = server.getsockname()[1]
+
+    def accept_and_hang():
+        try:
+            conn, _ = server.accept()
+            try:
+                time.sleep(2.0)
+            finally:
+                conn.close()
+        except OSError:
+            pass
+
+    thread = threading.Thread(target=accept_and_hang, daemon=True)
+    thread.start()
+
+    try:
+        client = HttpJiraClient(
+            f"http://127.0.0.1:{port}", "e@x.com", "tok", timeout=0.05
+        )
+
+        start = time.monotonic()
+        with pytest.raises(TimeoutError):
+            client.search_issues("project = PROJ")
+        elapsed = time.monotonic() - start
+
+        assert elapsed < 2.0
+    finally:
+        server.close()
+        thread.join(timeout=1.0)

@@ -19,6 +19,19 @@ class RaisingSource(TaskSource):
         pass
 
 
+class TimingOutSource(TaskSource):
+    kind = "boom"
+
+    def poll(self):
+        raise TimeoutError("timed out")
+
+    def report_progress(self, task, progress):  # pragma: no cover - not called
+        pass
+
+    def finish(self, task, result):  # pragma: no cover - not called
+        pass
+
+
 class ScriptedSource(TaskSource):
     """Returns preset batches of tasks, one per `poll()`. Lets a test replay the
     same source identity twice (a restart, label drift or read-after-write lag),
@@ -90,6 +103,24 @@ def test_poll_that_raises_returns_false_and_emits_source_error():
     _, fields = errors[0]
     assert fields["source"] == "boom"
     assert "GitHub is down" in fields["error"]
+
+
+def test_poll_that_raises_timeout_error_returns_false_and_emits_source_error():
+    # A GitHub/Jira client whose connection died silently (a dead-peer NAT
+    # drop) raises TimeoutError from poll() — this must be caught and turned
+    # into a normal, retryable tick failure, exactly like any other source
+    # error, never propagate and crash the loop (the bug this regression
+    # guards: a hang here used to wedge the whole event loop instead).
+    inbox = MemoryTaskQueue("tasks")
+    events = MemoryEventSink()
+    poller = SourcePoller(source=TimingOutSource(), inbox=inbox, events=events)
+
+    assert poller.tick() is False
+    errors = [(name, fields) for name, fields in events.events if name == "source_error"]
+    assert len(errors) == 1
+    _, fields = errors[0]
+    assert fields["source"] == "boom"
+    assert "timed out" in fields["error"]
 
 
 def test_same_source_identity_polled_twice_is_ingested_once():

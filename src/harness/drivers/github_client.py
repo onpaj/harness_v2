@@ -310,10 +310,12 @@ class HttpGithubClient(GithubClient):
         *,
         api: str = "https://api.github.com",
         opener: Any = None,
+        timeout: float = 30.0,
     ) -> None:
         self._token = token
         self._api = api.rstrip("/")
         self._opener = opener or urllib.request.build_opener()
+        self._timeout = timeout
 
     def _headers(self) -> dict[str, str]:
         return {
@@ -344,7 +346,7 @@ class HttpGithubClient(GithubClient):
         query = urllib.parse.urlencode({"state": "open", "labels": label})
         url = f"{self._api}/repos/{repo}/issues?{query}"
         request = urllib.request.Request(url, headers=self._headers(), method="GET")
-        with self._opener.open(request) as response:
+        with self._opener.open(request, timeout=self._timeout) as response:
             raw = json.loads(response.read())
 
         issues: list[Issue] = []
@@ -366,7 +368,7 @@ class HttpGithubClient(GithubClient):
         url = f"{self._api}/repos/{repo}/issues/{number}"
         request = urllib.request.Request(url, headers=self._headers(), method="GET")
         try:
-            with self._opener.open(request) as response:
+            with self._opener.open(request, timeout=self._timeout) as response:
                 item = json.loads(response.read())
         except urllib.error.HTTPError as error:
             if error.code == 404:  # the issue was deleted → gone, not an error
@@ -378,7 +380,7 @@ class HttpGithubClient(GithubClient):
         url = f"{self._api}/repos/{repo}/issues/{number}"
         request = urllib.request.Request(url, headers=self._headers(), method="GET")
         try:
-            with self._opener.open(request) as response:
+            with self._opener.open(request, timeout=self._timeout) as response:
                 item = json.loads(response.read())
         except urllib.error.HTTPError as error:
             if error.code == 404:  # gone → None, not an error
@@ -398,14 +400,14 @@ class HttpGithubClient(GithubClient):
         request = urllib.request.Request(
             url, data=body, headers=self._json_headers(), method="POST"
         )
-        self._opener.open(request)
+        self._opener.open(request, timeout=self._timeout)
 
     def remove_label(self, repo: str, number: int, label: str) -> None:
         quoted = urllib.parse.quote(label, safe="")
         url = f"{self._api}/repos/{repo}/issues/{number}/labels/{quoted}"
         request = urllib.request.Request(url, headers=self._headers(), method="DELETE")
         try:
-            self._opener.open(request)
+            self._opener.open(request, timeout=self._timeout)
         except urllib.error.HTTPError as error:
             if error.code == 404:  # label is already gone → nothing to do
                 return
@@ -414,14 +416,14 @@ class HttpGithubClient(GithubClient):
     def default_branch(self, repo: str) -> str:
         url = f"{self._api}/repos/{repo}"
         request = urllib.request.Request(url, headers=self._headers(), method="GET")
-        with self._opener.open(request) as response:
+        with self._opener.open(request, timeout=self._timeout) as response:
             return json.loads(response.read())["default_branch"]
 
     def find_pull_request(self, repo: str, *, head: str) -> PullRequestRef | None:
         query = urllib.parse.urlencode({"state": "open", "head": head})
         url = f"{self._api}/repos/{repo}/pulls?{query}"
         request = urllib.request.Request(url, headers=self._headers(), method="GET")
-        with self._opener.open(request) as response:
+        with self._opener.open(request, timeout=self._timeout) as response:
             raw = json.loads(response.read())
         for item in raw:
             return PullRequestRef(
@@ -444,7 +446,7 @@ class HttpGithubClient(GithubClient):
             headers=self._json_headers(),
             method="POST",
         )
-        with self._opener.open(request) as response:
+        with self._opener.open(request, timeout=self._timeout) as response:
             item = json.loads(response.read())
         return PullRequestRef(
             number=item["number"],
@@ -455,7 +457,7 @@ class HttpGithubClient(GithubClient):
     def get_pull_request(self, repo: str, number: int) -> PullRequestDetail:
         url = f"{self._api}/repos/{repo}/pulls/{number}"
         request = urllib.request.Request(url, headers=self._headers(), method="GET")
-        with self._opener.open(request) as response:
+        with self._opener.open(request, timeout=self._timeout) as response:
             item = json.loads(response.read())
         return PullRequestDetail(
             number=item["number"],
@@ -474,7 +476,7 @@ class HttpGithubClient(GithubClient):
         query = urllib.parse.urlencode({"state": "open"})
         url = f"{self._api}/repos/{repo}/pulls?{query}"
         request = urllib.request.Request(url, headers=self._headers(), method="GET")
-        with self._opener.open(request) as response:
+        with self._opener.open(request, timeout=self._timeout) as response:
             raw = json.loads(response.read())
 
         matching = []
@@ -491,7 +493,7 @@ class HttpGithubClient(GithubClient):
             detail_request = urllib.request.Request(
                 detail_url, headers=self._headers(), method="GET"
             )
-            with self._opener.open(detail_request) as response:
+            with self._opener.open(detail_request, timeout=self._timeout) as response:
                 detail = json.loads(response.read())
             base = item.get("base") or detail.get("base") or {}
             head_detail = detail.get("head") or item.get("head") or {}
@@ -513,7 +515,7 @@ class HttpGithubClient(GithubClient):
             url, data=b"{}", headers=self._json_headers(), method="PUT"
         )
         try:
-            self._opener.open(request)
+            self._opener.open(request, timeout=self._timeout)
         except urllib.error.HTTPError as error:
             if error.code == 422:  # not behind / already up to date
                 return
@@ -529,7 +531,7 @@ class HttpGithubClient(GithubClient):
         request = urllib.request.Request(
             url, data=payload, headers=self._json_headers(), method="POST"
         )
-        with self._opener.open(request) as response:
+        with self._opener.open(request, timeout=self._timeout) as response:
             item = json.loads(response.read())
         return Issue(
             number=item["number"],

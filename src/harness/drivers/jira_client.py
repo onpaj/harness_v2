@@ -150,12 +150,14 @@ class HttpJiraClient(JiraClient):
         api_token: str,
         *,
         opener: Any = None,
+        timeout: float = 30.0,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._api = f"{self._base_url}/rest/api/3"
         self._email = email
         self._api_token = api_token
         self._opener = opener or urllib.request.build_opener()
+        self._timeout = timeout
 
     @property
     def site(self) -> str:
@@ -175,7 +177,7 @@ class HttpJiraClient(JiraClient):
         )
         url = f"{self._api}/search?{query}"
         request = urllib.request.Request(url, headers=self._headers(), method="GET")
-        with self._opener.open(request) as response:
+        with self._opener.open(request, timeout=self._timeout) as response:
             raw = json.loads(response.read())
 
         issues: list[JiraIssue] = []
@@ -211,4 +213,4 @@ class HttpJiraClient(JiraClient):
         request = urllib.request.Request(
             url, data=payload, headers=self._json_headers(), method="PUT"
         )
-        self._opener.open(request)
+        self._opener.open(request, timeout=self._timeout)
