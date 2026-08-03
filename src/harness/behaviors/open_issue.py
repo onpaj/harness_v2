@@ -1,27 +1,45 @@
 """`OpenIssueBehavior` — the `open-issue` finisher kind (ADR-0016, ADR-0018).
 
-The generic, second half of self-healing's outbound leg: the `heal` step's
-persona only drafts an issue and returns a verdict (invariants 9/26 —
-never opens anything itself); this finisher — a `ConsumerBehavior`, resolved
-through the finisher registry exactly like `LandingBehavior`/`"open-pr"` — is
-the worker that reads the draft and actually calls `IssueTracker.open_issue`.
-Deliberately generic: any future process whose target's last step drafts an
-issue can bind to this same kind.
+The worker half of "an agent drafts, the harness files" (invariants 9/26): a
+step's persona writes issue drafts into its artifact and returns a verdict;
+this finisher reads them and calls `IssueTracker.open_issue`. The persona
+never opens anything itself.
+
+Everything about *which* issues, on *which* repo, under *which* label is the
+binding's `config` — this class has no notion of healing, reviewing, or any
+other purpose:
+
+- `from_step` names the step whose artifact holds the drafts. Its **presence
+  selects the shape**: given, the finisher fully *replaces* the bound step's
+  behavior (the healer's agent-less `file-issue` step); omitted, it *wraps*
+  the step's own behavior — `inner` runs first, then its artifact is filed.
+- `label` is carried by every issue and is the scope the idempotency search
+  reads.
+- `labels` is the guaranteed set — carried by every issue this binding files,
+  whatever the persona did or didn't draft. Config sets the *floor*.
+- `allowed_labels` is the allowlist a draft's own labels are filtered against,
+  so a hallucinated label cannot 422 the whole step. Config sets the *ceiling*;
+  the agent picks in between.
+
+The repository is derived from the *task*, not from wiring: `slug_for` is an
+injected callable (`task.repository` → `owner/repo`). It is injected rather
+than imported because resolving a slug reads a clone's git remote — a driver —
+and `behaviors/` may not import `drivers/` (`test_architecture.py`).
 
 No error handling of its own: `Consumer.tick()` already wraps `behavior.run()`
 in a blanket `except Exception` -> `_fail`, so an `IssueError` here lands the
-task in `failed/` exactly like an agent exception does. `FailedTasksCheck`'s
-recursion guard (keyed on `task.data["heal"]["of"]`) is what stops that from
-looping — not in-behavior error handling.
+task in `failed/` exactly like an agent exception does.
 """
 
 from __future__ import annotations
 
+from typing import Callable
+
+from harness.issue_drafts import DraftError, marker_for, parse_drafts
 from harness.models import DONE, BehaviorResult, Task
 from harness.ports.artifacts import ArtifactView
 from harness.ports.behavior import ConsumerBehavior
-from harness.ports.clock import Clock
-from harness.ports.issues import IssueTracker
+from harness.ports.issues import IssueError, IssueRef, IssueTracker
 
 
 class OpenIssueBehavior(ConsumerBehavior):
@@ -29,81 +47,85 @@ class OpenIssueBehavior(ConsumerBehavior):
         self,
         *,
         tracker: IssueTracker,
-        repo: str,
         artifacts: ArtifactView,
-        clock: Clock,
-        labels: tuple[str, ...] = ("harness:self-heal",),
+        slug_for: Callable[[str | None], str],
+        label: str,
+        from_step: str | None = None,
+        labels: tuple[str, ...] = (),
+        allowed_labels: tuple[str, ...] = (),
+        inner: ConsumerBehavior | None = None,
     ) -> None:
         self._tracker = tracker
-        self._repo = repo
         self._artifacts = artifacts
-        self._clock = clock
+        self._slug_for = slug_for
+        self._label = label
+        self._from_step = from_step
         self._labels = labels
+        self._allowed_labels = allowed_labels
+        self._inner = inner
 
     async def run(self, task: Task) -> BehaviorResult:
-        draft = self._latest_draft(task.id)
-        title = _title(task, draft)
-        body = _body(task, draft)
-        marker = task.data["heal"]["of"]
+        inner_result = None
+        if self._inner is not None:
+            inner_result = await self._inner.run(task)
 
-        ref = self._tracker.open_issue(
-            self._repo, title=title, body=body, labels=self._labels, marker=marker
-        )
-        return BehaviorResult(DONE, f"opened issue {ref.url}")
+        step = self._from_step or task.status or ""
 
-    def _latest_draft(self, task_id: str) -> str:
-        """The `heal` step's drafted artifact — the highest attempt, mirroring
-        the general latest-attempt convention (in practice a single candidate
-        for a fresh heal task)."""
-        refs = [ref for ref in self._artifacts.list(task_id) if ref.step == "heal"]
+        try:
+            drafts = parse_drafts(self._latest_artifact(task.id, step))
+        except DraftError as error:
+            raise IssueError(f"step {step!r} of task {task.id}: {error}") from None
+
+        refs: list[IssueRef] = []
+        dropped: list[str] = []
+        if drafts:
+            # Resolved lazily: a repository-less task (invariant #25 — e.g. an
+            # autoheal process with no seeded `params.repository`) must be
+            # able to settle `done` with nothing to file instead of raising,
+            # so `slug_for` is only called once there is something to file.
+            repo = self._slug_for(task.repository)
+            for draft in drafts:
+                # The binding's own labels are the floor: always applied, and
+                # implicitly allowed. A draft suggesting one of them is a
+                # no-op, never a *dropped* label — reporting it as dropped
+                # would be a lie, since it is on the issue either way.
+                allowed: list[str] = list(self._labels)
+                for label in draft.labels:
+                    if label in self._allowed_labels or label in self._labels:
+                        allowed.append(label)
+                    else:
+                        dropped.append(label)
+                refs.append(
+                    self._tracker.open_issue(
+                        repo,
+                        title=draft.title,
+                        body=draft.body,
+                        labels=tuple(dict.fromkeys(allowed)),
+                        marker=marker_for(task.id, draft.title),
+                        scope_label=self._label,
+                    )
+                )
+
+        outcome = inner_result.outcome if inner_result is not None else DONE
+        return BehaviorResult(outcome, _summary(refs, dropped))
+
+    def _latest_artifact(self, task_id: str, step: str) -> str:
+        """The step's highest-attempt artifact, or "" when it wrote none."""
+        refs = [ref for ref in self._artifacts.list(task_id) if ref.step == step]
         if not refs:
             return ""
         latest = max(refs, key=lambda ref: ref.attempt)
-        content = self._artifacts.read(task_id, "heal", latest.attempt, latest.name)
-        return content or ""
+        return self._artifacts.read(task_id, step, latest.attempt, latest.name) or ""
 
 
-def _heal_verdict_summary(task: Task) -> str | None:
-    """The `heal` step's verdict summary, recovered from history.
-
-    `OpenIssueBehavior.run(task)` has no live `AgentRun` in scope (unlike the
-    old `Healer`, which called the runner directly) — but the summary isn't
-    lost: `Consumer._deliver` already appended it to `task.history` as a
-    `consumer:heal` entry the moment the `heal` step returned `done`, and that
-    history rides the task through the router into `file-issue`."""
-    for entry in reversed(task.history):
-        if entry.from_step == "heal" and entry.actor.startswith("consumer:"):
-            return entry.summary
-    return None
-
-
-def _title(task: Task, draft: str) -> str:
-    """Issue title: the first `# ` heading of the draft, else the verdict
-    summary, else the original request, else a generic line."""
-    for raw in draft.splitlines():
-        line = raw.strip()
-        if line.startswith("# "):
-            return line[2:].strip()
-    summary = _heal_verdict_summary(task)
-    if summary:
-        return summary
-    request = task.data.get("original_request")
-    if isinstance(request, str) and request.strip():
-        return f"Self-heal: {request.strip()}"
-    return f"Self-heal: task {task.data['heal']['of']} failed"
-
-
-def _body(task: Task, draft: str) -> str:
-    """Issue body: the agent's draft plus a footer linking the origin when known."""
-    of = task.data["heal"]["of"]
-    parts = [draft.strip() or f"The harness task {of} failed."]
-    source = task.data.get("source")
-    if isinstance(source, dict):
-        url = source.get("url")
-        issue = source.get("issue")
-        if url:
-            parts.append(f"\nOrigin: {url}")
-        elif issue:
-            parts.append(f"\nOrigin issue: {issue}")
-    parts.append(f"\n_Filed by the harness healer for failed task `{of}`._")
-    return "\n".join(parts)
+def _summary(refs: list[IssueRef], dropped: list[str]) -> str:
+    if not refs:
+        summary = "no issues to file"
+    else:
+        numbers = ", ".join(f"#{ref.number}" for ref in refs)
+        noun = "issue" if len(refs) == 1 else "issues"
+        summary = f"opened {len(refs)} {noun}: {numbers}"
+    if dropped:
+        unique = ", ".join(sorted(set(dropped)))
+        summary = f"{summary} (dropped labels outside the allowlist: {unique})"
+    return summary

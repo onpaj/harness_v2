@@ -4,7 +4,7 @@ A Process is a compile-time aggregate: `FilesystemProcessRepository` reads
 `processes/*.json` and compiles each into a `ScheduledTrigger` — a `TaskSource`.
 Compilation itself now happens *inside* `app.build()` (ADR-0018 relocated it
 there so the `failed-tasks` check can close over the harness's own live
-`failed`/`healed`/`events`) — this mirrors `test_generic_triggers_e2e` but
+`failed`/`done`/`events`) — this mirrors `test_generic_triggers_e2e` but
 starts from the *authoring* surface (files on disk), proving the whole
 compile → poll → dispatch → done path with no disk beyond the queues and no real
 waiting.
@@ -240,7 +240,7 @@ def test_github_issues_observation_repository_beats_the_process_default(tmp_path
     try:
         checks = _process_check_factories(args, registry, client=client)
         (source,) = FilesystemProcessRepository(tmp_path / "processes").build(
-            clock=clock, checks=checks, known_targets={"default"}
+            clock=clock, checks=checks, known_workflows={"default"}
         )
 
         (task,) = source.poll()
@@ -310,7 +310,7 @@ def test_github_issues_process_ingests_a_labelled_issue_once_per_bucket(tmp_path
         # does internally.
         checks = _process_check_factories(args, registry, client=client)
         (source,) = FilesystemProcessRepository(tmp_path / "processes").build(
-            clock=clock, checks=checks, known_targets={"default"}
+            clock=clock, checks=checks, known_workflows={"default"}
         )
 
         first = source.poll()
@@ -321,6 +321,7 @@ def test_github_issues_process_ingests_a_labelled_issue_once_per_bucket(tmp_path
         assert task.data["source"] == {
             "kind": "github", "repo": "onpaj/Anela.Heblo",
             "issue": 42, "url": "https://gh/i/42",
+            "labels": ["harness:todo"],
         }
 
         # Same 30s bucket → no re-fire.
@@ -468,7 +469,7 @@ def _build_autoresolver_sources(tmp_path: Path, client, registry, slug_of, clock
     return FilesystemProcessRepository(tmp_path / "processes").build(
         clock=clock,
         checks={**BUILTIN_CHECKS, "github-conflicts": github_conflicts_factory},
-        known_targets={"default", "resolver"},
+        known_workflows={"default", "resolver"},
     )
 
 

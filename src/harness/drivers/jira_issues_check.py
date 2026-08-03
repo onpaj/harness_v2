@@ -14,8 +14,9 @@ trusted as given and gets no implicit status clause.
 
 Unlike a GitHub issue, a Jira issue carries no intrinsic repo axis, so every
 observation this check emits is stamped with the single `repository`
-configured at construction — the same mechanism `--heal-repo` uses to give a
-repository-less heal task a worktree (invariant #25).
+configured at construction — the same mechanism the `failed-tasks` check's own
+`params.repository` uses to give an otherwise repository-less heal task a
+worktree (invariant #25).
 
 Registered into the process build as the `jira-issues` check by closing a
 `JiraClient` into a factory in `cli.py`; imports only sibling drivers/ports —

@@ -18,14 +18,26 @@ from pathlib import Path
 import uvicorn
 
 from harness.api.app import create_app
-from harness.app import LANDING_STEP, HarnessLayout, build
+from harness.app import (
+    LANDING_STEP,
+    HarnessLayout,
+    UnknownFinisherKind,
+    build,
+    validate_workflow_finishers,
+)
+from harness.behaviors.merge_pr import (
+    DEFAULT_METHOD,
+    DEFAULT_MIN_CONFIDENCE,
+    MergePrBehavior,
+)
 from harness.behaviors.open_issue import OpenIssueBehavior
 from harness.drivers.claude_cli import ClaudeCliRunner
 from harness.drivers.fake_forge import FakeForge
 from harness.drivers.fs_agents import FilesystemAgentAdmin, FilesystemAgentCatalog
-from harness.drivers.fs_processes import FilesystemProcessAdmin
+from harness.drivers.fs_processes import FilesystemProcessAdmin, ProcessValidationError
 from harness.drivers.github_issues import GithubIssueTracker
-from harness.drivers.memory import MemoryIssueTracker
+from harness.drivers.github_pr_merger import GithubPullRequestMerger
+from harness.drivers.memory import MemoryIssueTracker, MemoryPullRequestMerger
 from harness.drivers.fs_repos import FilesystemRepositoryRegistry
 from harness.drivers.fs_workflows import (
     FilesystemWorkflowAdmin,
@@ -65,10 +77,13 @@ from harness.drivers.system_clock import SystemClock
 from harness.drivers.worktree_artifacts import WorktreeArtifactView
 from harness.ids import new_task_id
 from harness.models import DONE, REQUEST_CHANGES, Task
+from harness.retention_reconciler import DEFAULT_RETENTION_DAYS
 from harness.ports.behavior import ConsumerBehavior
 from harness.ports.clock import Clock
 from harness.ports.issue_state import IssueChecker
+from harness.ports.issues import IssueError
 from harness.ports.merge import MergeChecker
+from harness.ports.pr_merge import MERGE_METHODS
 from harness.ports.repos import RepositoryNotFound, RepositoryRegistry
 from harness.ports.source import TaskSource
 from harness.ports.triggers import CheckFactory
@@ -116,6 +131,19 @@ DEFAULT_DEFINITION = {
         {"from": "land", "on": "done", "to": "end"},
         {"from": "review", "on": "request_changes", "to": "development"},
     ],
+    # Prompt-side these steer the agent (invariant #42); board-side they are what
+    # a column head says the step is *for*, instead of only naming it. Seeded
+    # here so a fresh root's board explains itself; an existing workflow file is
+    # never rewritten, so add them there through the workflow editor.
+    "descriptions": {
+        "plan": "break the request down into the work it actually implies",
+        "design": "decide how it will be built, before any of it is",
+        "architecture": "check the design against the codebase's invariants",
+        "development": "write the code and the tests",
+        "verify": "run the repository's own checks against the diff",
+        "review": "read the diff as a reviewer would; send it back or pass it on",
+        "land": "sync the base branch in and open the pull request",
+    },
     "finishers": {"verify": "verify"},
 }
 
@@ -141,16 +169,61 @@ HEAL_DEFINITION = {
         {"from": "heal", "on": "skip", "to": "end",
          "hint": "external/transient, or the task's own request was impossible — nothing to file"},
         {"from": "dedup", "on": "unique", "to": "file-issue",
-         "hint": "nothing similar is open in the harness repo"},
+         "hint": "nothing similar is open in the task's repository"},
         {"from": "dedup", "on": "duplicate", "to": "end",
          "hint": "a correlated issue is already open — settle silently"},
         {"from": "file-issue", "on": "done", "to": "end"},
     ],
     "descriptions": {
         "heal": "diagnose the failed task from its report; decide whether it warrants a GitHub issue",
-        "dedup": "read the harness repo's open issues; decide whether the drafted issue is new",
+        "dedup": "read the task's repository's open issues; decide whether the drafted issue is new",
     },
-    "finishers": {"file-issue": "open-issue"},
+    "finishers": {
+        "file-issue": {
+            "kind": "open-issue",
+            "from_step": "heal",
+            "label": "harness:self-heal",
+            # Ships withheld: configuring the Process is not the same as
+            # trusting it. `allowed_labels` is deliberately absent — adding
+            # it here would switch on unattended auto-fixing (the
+            # `harness:todo` label the persona now drafts, cli.py's
+            # `heal` prompt) for every `harness init` deployment. The
+            # operator opts in per repo by editing this binding themselves.
+        }
+    },
+}
+
+
+DEFAULT_AUTOMERGE_WORKFLOW = "automerge"
+
+AUTOMERGE_DEFINITION = {
+    "name": "automerge",
+    "start": "merge-review",
+    "transitions": [
+        {"from": "merge-review", "on": "approve", "to": "merge",
+         "hint": "you would merge this yourself without asking anyone"},
+        {"from": "merge-review", "on": "reject", "to": "end",
+         "hint": "anything less than that — leave the PR for a human, nothing is merged"},
+        {"from": "merge", "on": "done", "to": "end"},
+    ],
+    "descriptions": {
+        "merge-review": (
+            "review the pull request checked out in your worktree and decide "
+            "whether it is safe to merge unattended"
+        ),
+    },
+    "finishers": {
+        "merge": {
+            "kind": "merge-pr",
+            "from_step": "merge-review",
+            "min_confidence": 0.8,
+            "method": "squash",
+            # Ships withheld: configuring the Process is not the same as
+            # trusting it. The operator flips this to false once the recorded
+            # decisions on real PRs justify it (ADR-0023).
+            "dry_run": True,
+        }
+    },
 }
 
 
@@ -195,32 +268,77 @@ def _init(args: argparse.Namespace) -> int:
         )
 
     # `heal`/`file-issue` (ADR-0018): dormant data, shipped unconditionally
-    # exactly like the resolver workflow — the process that actually drives it
-    # (`processes/autoheal.json`) is gated behind `--heal-repo` instead (a bare
-    # `harness init` has no repo to file issues against).
+    # exactly like the resolver workflow. `processes/autoheal.json` is shipped
+    # unconditionally too — self-healing is now configured entirely through
+    # that file, like every other Process; a bare `harness init` seeds it
+    # with an empty `action.params.repository`, and the operator points it
+    # at a registered repo by editing the file or through the dashboard's
+    # process editor.
     heal_definition_path = layout.workflows / f"{DEFAULT_HEAL_WORKFLOW}.json"
     if not heal_definition_path.exists():
         heal_definition_path.write_text(
             json.dumps(HEAL_DEFINITION, indent=2, ensure_ascii=False),
             encoding="utf-8",
         )
+    # `automerge`/`merge-review` (ADR-0023): shipped unconditionally exactly
+    # like the resolver and heal workflows — and, unlike what the ADR
+    # originally decided, so is `processes/automerge.json` (seeded just below
+    # by `_ensure_automerge_process`, which explains the revision). So this
+    # workflow *runs* on a freshly initialized root: it reviews every clean
+    # harness-authored PR across every registered repo and records what it
+    # would have merged. What withholds the merge itself is
+    # `finishers.merge.dry_run`, seeded `true` until an operator flips it.
+    automerge_definition_path = layout.workflows / f"{DEFAULT_AUTOMERGE_WORKFLOW}.json"
+    if not automerge_definition_path.exists():
+        automerge_definition_path.write_text(
+            json.dumps(AUTOMERGE_DEFINITION, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+    _ensure_autoheal_process(layout)
+    _ensure_automerge_process(layout)
 
+    # Workflows are read straight off the filesystem here, not through
+    # `build()`: `build()` also compiles `processes/*.json` (ADR-0018), and
+    # the autoheal process just seeded above targets `{"workflow": "heal"}` —
+    # a target `build()` only accepts from a harness that *serves* `heal`.
+    # This call only ever wants to serve `args.workflow`, so widening the
+    # served set just to satisfy that one process's validation would be
+    # backwards, and it wouldn't even work: `heal`'s `file-issue` step binds
+    # the `open-issue` finisher, which nothing here registers (that wiring is
+    # `_run`-only), so serving `heal` through `build()` fails a *second*
+    # validation on top of the first. Reading the workflow definitions
+    # directly avoids both.
     try:
-        harness = build(root, args.workflow)
-        resolver_workflow = FilesystemWorkflowRepository(layout.workflows).get(
-            DEFAULT_RESOLVER_WORKFLOW
-        )
-        heal_workflow = FilesystemWorkflowRepository(layout.workflows).get(
-            DEFAULT_HEAL_WORKFLOW
-        )
+        raw_workflows = FilesystemWorkflowRepository(layout.workflows)
+        workflow = raw_workflows.get(args.workflow)
+        resolver_workflow = raw_workflows.get(DEFAULT_RESOLVER_WORKFLOW)
+        heal_workflow = raw_workflows.get(DEFAULT_HEAL_WORKFLOW)
+        automerge_workflow = raw_workflows.get(DEFAULT_AUTOMERGE_WORKFLOW)
     except WorkflowNotFound as error:
         print(f"error: {error}", file=sys.stderr)
         return 2
 
-    workflow = harness.workflows[args.workflow]
+    # Queues/tasks/done/failed directories, previously a side effect of
+    # calling `build()` here — reproduced directly now that `build()` is no
+    # longer called, including each queue's `.processing/` subdirectory
+    # (`FilesystemTaskQueue.__init__`, `drivers/fs_queue.py`). Scoped to
+    # `args.workflow`'s own steps only, exactly as before: `resolver`/`heal`
+    # get their queues the first time a `harness run` actually serves them
+    # (every workflow file on disk, invariant #24).
+    for queue_dir in (layout.tasks, layout.done, layout.failed, layout.healed, layout.archived):
+        queue_dir.mkdir(parents=True, exist_ok=True)
+        (queue_dir / ".processing").mkdir(parents=True, exist_ok=True)
+    for step in workflow.steps():
+        step_dir = layout.queues / step
+        step_dir.mkdir(parents=True, exist_ok=True)
+        (step_dir / ".processing").mkdir(parents=True, exist_ok=True)
+
     _write_default_agents(layout, workflow)
     _write_default_agents(layout, resolver_workflow)
     _write_default_agents(layout, heal_workflow)
+    # Writes `agents/merge-review.json` only — `merge` binds the `merge-pr`
+    # finisher, so `_write_default_agents` skips it (no persona, no agent).
+    _write_default_agents(layout, automerge_workflow)
 
     print(f"harness ready at {root}")
     print(f"steps: {', '.join(workflow.steps())}")
@@ -423,15 +541,36 @@ _HEALER_PERSONA = (
     "tool, or the task's own request being simply wrong or impossible.\n\n"
     "Be conservative: only propose a change when there is a concrete, "
     "plausible one.\n\n"
-    "For a harness bug or an operational/tuning problem, draft a proposed "
-    "GitHub issue to the file the harness told you to write your output to "
-    "above. Its first line must be a title `# <concise title>`; then a short "
-    "diagnosis (what failed and why), and a concrete proposed change. For an "
-    "operational/tuning problem, recommend diagnostically rather than "
-    "prescriptively: name the exceeded budget and the two levers available — "
-    "raising the step's per-agent `timeout`, or decomposing the step into "
-    "smaller ones — without prescribing a specific number. Then finish with "
-    "the outcome that files it.\n\n"
+    "For a harness bug or an operational/tuning problem, write your diagnosis "
+    "to the file the harness told you to write your output to above, and end "
+    "that file with a fenced ```json block holding a one-element array:\n"
+    '```json\n'
+    '[{"title": "<concise title>", "labels": ["harness:todo"], '
+    '"body": "<the work order — see below>"}]\n'
+    "```\n"
+    "The harness reads that block by machine and opens the issue itself — you "
+    "must never open one. That drafts array belongs only in the artifact "
+    "file — never repeat or echo it in your final message, which must carry "
+    "only the verdict block described below (a JSON object, not this array). "
+    "For an operational/tuning problem, recommend "
+    "diagnostically rather than prescriptively: name the exceeded budget and "
+    "the two levers available — raising the step's per-agent `timeout`, or "
+    "decomposing the step into smaller ones — without prescribing a specific "
+    "number. Then finish with the outcome that files it.\n\n"
+    "The issue you draft is consumed by an automated development pipeline, "
+    "not read by a person before work starts — its first step turns your body "
+    "into numbered requirements with acceptance criteria. So write the body "
+    "as a work order, with these sections:\n"
+    "- **Symptom** — what failed, quoting the exact error.\n"
+    "- **Reproduction** — the sequence that produces it, or plainly why it "
+    "cannot be reproduced on demand.\n"
+    "- **Proposed change** — the concrete change, naming files and functions "
+    "wherever you can.\n"
+    "- **Acceptance criteria** — what must be true for the fix to be done, "
+    "stated testably.\n\n"
+    "State in the body which kind of finding this is. A code defect is scoped "
+    "as a code change; an operational/tuning finding must be scoped as a "
+    "configuration change and never as a refactor.\n\n"
     "For an external or transient failure, write nothing and finish with the "
     "outcome that skips — its summary saying briefly why there is nothing to "
     "file.\n\n"
@@ -452,6 +591,48 @@ _DEDUP_PERSONA = (
 )
 
 
+_MERGE_REVIEW_PERSONA = (
+    "You are the last reviewer before a pull request merges into the default "
+    "branch with no human in the loop. Your worktree is checked out on the "
+    "PR's own branch.\n\n"
+    "Read the change before you judge it. `git diff origin/<base>...HEAD` is "
+    "the change; `git log origin/<base>..HEAD` is how it got there. Read the "
+    "PR body and the issue it closes, then read the surrounding source of "
+    "every file it touches — a diff that looks clean in isolation can still be "
+    "wrong in context.\n\n"
+    "Ask, in this order:\n"
+    "1. Does the change do what its PR and issue say it does — no more, no "
+    "less? Unrelated scope is a reason to withhold, even when the code is "
+    "good.\n"
+    "2. Is it correct? Look for the failure cases the tests do not cover, not "
+    "just the ones they do.\n"
+    "3. Does it touch anything with blast radius — auth, secrets, migrations, "
+    "deletion, payments, CI/release config, public API shape?\n"
+    "4. Is it consistent with the conventions of the code around it, and does "
+    "it respect the project's documented invariants?\n\n"
+    "Then decide. Approve only when you would merge it yourself without asking "
+    "anyone. Anything else — an unreviewable diff, a missing test you would "
+    "have asked for, a risk you cannot rule out by reading — is a rejection, "
+    "and a rejection costs nothing but a human's glance. A wrong merge costs "
+    "the default branch.\n\n"
+    "Confidence is your own estimate that merging this is the right call, from "
+    "0.0 to 1.0. It is not a measure of how well you understood the diff, and "
+    "it is not a formality: report it honestly, because the harness merges on "
+    "it. Large, cross-cutting or infrastructural changes should rarely clear "
+    "0.9 no matter how clean they read. If you did not read every changed "
+    "file, say so and stay below the bar.\n\n"
+    "Write your review to the artifact and end it with a fenced json block — "
+    "the last one in the file wins:\n"
+    "```json\n"
+    '{"confidence": 0.0, "reasoning": "one or two sentences", '
+    '"risks": ["..."]}\n'
+    "```\n"
+    "You never merge anything yourself and you have no tool that can. The "
+    "harness merges only if your confidence clears the operator's threshold; "
+    "your job is the judgement, not the button."
+)
+
+
 # Step → (persona, default tools). The tools are names of Claude Code tools,
 # which `claude_cli` passes through via `--allowedTools`.
 AGENT_PERSONAS: dict[str, tuple[str, list[str]]] = {
@@ -466,6 +647,7 @@ AGENT_PERSONAS: dict[str, tuple[str, list[str]]] = {
     "resolve": (_RESOLVE_PERSONA, ["Read", "Edit", "Bash", "Grep", "Glob"]),
     "heal": (_HEALER_PERSONA, ["Read", "Write"]),
     "dedup": (_DEDUP_PERSONA, ["Read", "Bash"]),
+    "merge-review": (_MERGE_REVIEW_PERSONA, ["Read", "Grep", "Glob", "Bash"]),
 }
 
 
@@ -489,6 +671,9 @@ AGENT_MODELS: dict[str, str] = {
     "resolve": "sonnet",
     "heal": "opus",
     "dedup": "opus",
+    # The most consequential judgement the harness makes unattended — the one
+    # step where paying for the top tier is obviously worth it.
+    "merge-review": "opus",
 }
 
 
@@ -806,7 +991,8 @@ def _scheduled_sources(
     registry: RepositoryRegistry,
     *,
     clock: Clock,
-    known_targets: set[str] | None,
+    known_steps: set[str] | None,
+    known_workflows: set[str] | None,
 ) -> list[TaskSource]:
     """Scheduled triggers declared under `<root>/triggers/*.json`.
 
@@ -814,8 +1000,9 @@ def _scheduled_sources(
     clock gate and reflects nothing outward (a `Trigger`) — appended to the run's
     existing `sources` list; `build()` gains no parameter. A missing/empty
     `triggers/` directory yields `[]`, so the harness runs exactly as before.
-    `known_targets` (served workflow names ∪ known step names) lets the
-    repository reject a trigger that names an unknown target up front."""
+    `known_steps` (the real step-queue namespace) and `known_workflows` (served
+    workflow names) let the repository reject a trigger whose target names
+    neither its own namespace nor has no dispatch queue, up front."""
     from harness.drivers.fs_triggers import FilesystemTriggerRepository
 
     repo = FilesystemTriggerRepository(root / "triggers")
@@ -824,7 +1011,8 @@ def _scheduled_sources(
         clock=clock,
         repository=None,
         worktree_root=worktree_root,
-        known_targets=known_targets,
+        known_steps=known_steps,
+        known_workflows=known_workflows,
     )
 
 
@@ -848,11 +1036,17 @@ def _process_check_factories(
     dependency this function has no reason to carry: that check needs the
     harness's own live `failed`/`healed` queues, not an external client).
     """
-    from harness.drivers.fs_processes import ProcessValidationError
+    from harness.drivers.fs_processes import (
+        MissingCredential,
+        ProcessValidationError,
+    )
     from harness.drivers.github_conflicts_check import SPEC as GITHUB_CONFLICTS_SPEC
     from harness.drivers.github_conflicts_check import GithubConflictsCheck
     from harness.drivers.github_issues_check import SPEC as GITHUB_ISSUES_SPEC
     from harness.drivers.github_issues_check import GithubIssuesCheck
+    from harness.drivers.github_mergeable_check import DEFAULT_SKIP_LABEL
+    from harness.drivers.github_mergeable_check import SPEC as GITHUB_MERGEABLE_SPEC
+    from harness.drivers.github_mergeable_check import GithubMergeableCheck
     from harness.drivers.jira_issues_check import JiraIssuesCheck
     from harness.ports.triggers import CheckDefinition
 
@@ -872,7 +1066,7 @@ def _process_check_factories(
 
     def github_issues_factory(params: dict) -> GithubIssuesCheck:
         if client is None:
-            raise ProcessValidationError(
+            raise MissingCredential(
                 "github-issues action requires GITHUB_TOKEN", field="check"
             )
         label = params.get("label", args.github_label)
@@ -891,7 +1085,7 @@ def _process_check_factories(
 
     def github_conflicts_factory(params: dict) -> GithubConflictsCheck:
         if client is None:
-            raise ProcessValidationError(
+            raise MissingCredential(
                 "github-conflicts action requires GITHUB_TOKEN", field="check"
             )
         return GithubConflictsCheck(
@@ -900,9 +1094,21 @@ def _process_check_factories(
             head_prefix=params.get("head_prefix", "harness/"),
         )
 
+    def github_mergeable_factory(params: dict) -> GithubMergeableCheck:
+        if client is None:
+            raise MissingCredential(
+                "github-mergeable action requires GITHUB_TOKEN", field="check"
+            )
+        return GithubMergeableCheck(
+            client=client,
+            registry=registry,
+            head_prefix=params.get("head_prefix", "harness/"),
+            skip_label=params.get("skip_label", DEFAULT_SKIP_LABEL),
+        )
+
     def jira_issues_factory(params: dict) -> JiraIssuesCheck:
         if jira_client is None:
-            raise ProcessValidationError(
+            raise MissingCredential(
                 "jira-issues action requires JIRA_BASE_URL/JIRA_EMAIL/JIRA_API_TOKEN",
                 field="check",
             )
@@ -959,6 +1165,9 @@ def _process_check_factories(
         "github-conflicts": CheckDefinition(
             spec=GITHUB_CONFLICTS_SPEC, factory=github_conflicts_factory
         ),
+        "github-mergeable": CheckDefinition(
+            spec=GITHUB_MERGEABLE_SPEC, factory=github_mergeable_factory
+        ),
         "jira-issues": jira_issues_factory,
     }
 
@@ -1004,6 +1213,63 @@ def _slack_sinks(declared_kinds: set[str]) -> list[TaskSource]:
     return []
 
 
+def _warn_missing_autoheal_repository(
+    processes_root: Path, dropped_workflows: set[str] | None = None
+) -> None:
+    """Startup warning — never fatal — for a `failed-tasks` process with no
+    `action.params.repository`: `harness init` seeds `processes/autoheal.json`
+    with `action.params == {}` (invariant #25), which is valid and stays
+    valid, but self-healing then runs on every failure — spending an agent
+    call on `heal` and one on `dedup` — and files nothing, because
+    `OpenIssueBehavior`'s `slug_for` has no repository to resolve. Read
+    straight off the raw JSON, like `_declared_sink_kinds` — this only ever
+    decides whether to print a warning, so it doesn't need to wait for a full
+    `compile_process` to know the field is missing.
+
+    A *present but wrong* `params.repository` is a different case entirely —
+    a typo, not "not configured yet" — and already fails loud at
+    process-compile time (`fs_processes._validate_action_repository_param`,
+    `ProcessValidationError`, exit 2); this function only ever handles the
+    absent case, per ADR-0022.
+
+    `dropped_workflows` (default none, mirroring `build()`'s own
+    `dropped_workflows` param) names workflows `_validate_served_workflows`
+    already dropped from the served set. A `failed-tasks` process whose own
+    `target.workflow` is one of them is made inert by
+    `FilesystemProcessRepository.build()`'s `_targets_a_dropped_workflow`
+    check — it never fires, so it will not "run heal/dedup on every failure"
+    the way this warning claims. Printing this warning for that process
+    contradicts the drop warning already printed for its target workflow
+    (which says outright that the process is disabled); skip it here instead
+    of leaving two startup warnings that disagree with each other."""
+    if not processes_root.is_dir():
+        return
+    for path in sorted(processes_root.glob("*.json")):
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            continue
+        if not isinstance(raw, dict):
+            continue
+        action = raw.get("action")
+        if not isinstance(action, dict) or action.get("check") != "failed-tasks":
+            continue
+        if dropped_workflows:
+            target = raw.get("target")
+            if isinstance(target, dict) and target.get("workflow") in dropped_workflows:
+                continue
+        params = action.get("params")
+        repository = params.get("repository") if isinstance(params, dict) else None
+        if not repository:
+            print(
+                f"warning: {path.name} enables self-healing (action.check == "
+                "'failed-tasks') with no action.params.repository set — it "
+                "will run heal/dedup on every failure but file nothing until "
+                "you point it at a repository name from repos.json",
+                file=sys.stderr,
+            )
+
+
 AUTOHEAL_PROCESS_DEFINITION = {
     "trigger": {"interval": "30s"},
     "action": {"check": "failed-tasks", "params": {}},
@@ -1014,70 +1280,101 @@ AUTOHEAL_PROCESS_DEFINITION = {
 """Target is `{"workflow": "heal"}`, not `{"step": "heal"}`: a workflow-less
 (bare `step`) task finishes after a single hop through `route()` (see
 `router.py`) — `file-issue` and its `open-issue` finisher would never run,
-silently. `heal`/`file-issue` is a genuine two-step workflow, so it needs a
-real `Workflow` in scope on the *second* `route()` call, which only happens
-when `task.workflow_template` is set (ADR-0018)."""
+silently. `heal` is a genuine three-step workflow (`heal` → `dedup` →
+`file-issue`, invariant #26), so it needs a real `Workflow` in scope on every
+`route()` call past the first, which only happens when `task.workflow_template`
+is set (ADR-0018)."""
 
 
-def _ensure_autoheal_process(layout: HarnessLayout, heal_repo: str) -> None:
-    """`--heal-repo`'s thin-generator half: write `processes/autoheal.json`
-    unless one already exists — never clobbering an operator's hand-edited
-    file. Written directly (like `_init`'s `HEAL_DEFINITION`/
-    `RESOLVER_DEFINITION`), **not** through `FilesystemProcessAdmin.write`:
-    validating `"failed-tasks"` needs the merged registry `app.build()`
-    assembles (`harness.process_checks` — which `serve()` *does* hand the
-    dashboard's admin), and at this point in `_run` no harness exists yet.
-    The real validation this file needs to pass happens when `build()`
-    compiles it moments later, not at write time.
+AUTOMERGE_PROCESS_DEFINITION = {
+    "trigger": {"interval": "5m"},
+    "action": {"check": "github-mergeable", "params": {"head_prefix": "harness/"}},
+    "target": {"workflow": "automerge"},
+    "dedup": "per-state",
+    "sink": {"kind": "none"},
+}
+"""One Process covers **every** repository: `GithubMergeableCheck.evaluate()`
+iterates `RepositoryRegistry.names()` and scans each repo's open PRs, so there
+is nothing per-repo to author — adding a repo to `repos.json` puts it under
+automerge review automatically, and a non-GitHub repo is skipped.
+
+`dedup` is `per-state`, and that is load-bearing rather than stylistic: the
+check emits one observation *per candidate PR*, and under the default
+`per-interval` every observation in a tick collapses onto the same dedup key,
+so `SourcePoller._seen` would keep the first and silently drop the rest (three
+mergeable PRs → one review). `per-state` keys each task on `slug:pr:head_sha`,
+which is also what re-reviews a re-pushed PR and leaves an unchanged one alone.
+
+Seeding this file makes automerge *run*; it does not make it *merge*. The
+`merge` step's `dry_run` lives in `workflows/automerge.json`'s finisher binding
+and ships `true`, so a seeded root reviews every clean PR and records what it
+would have merged until the operator flips that one field (ADR-0023).
+
+Safe to seed even with no `GITHUB_TOKEN`: the `github-mergeable` factory raises
+`MissingCredential`, which `FilesystemProcessRepository.build()` skips with a
+warning instead of failing the run — without that, this file alone would make
+every tokenless run exit 2 and break the harness's "no token is not fatal"
+promise."""
+
+
+def _ensure_automerge_process(layout: HarnessLayout) -> None:
+    """Seed `processes/automerge.json` unless one already exists — never
+    clobbering an operator's hand-edited file, exactly like the autoheal seeder.
+
+    ADR-0023 originally seeded no Process at all, on the reasoning that
+    automerging is a posture rather than a queue that needs draining. That held
+    while the *only* safety gate was "the operator must author a file". It no
+    longer needs to: `dry_run: true` in the workflow binding is the real gate,
+    and it is a strictly better one — it exercises the whole path on real PRs
+    and shows the operator what this persona would have done, which authoring a
+    file from scratch never did. So the Process ships, and the withholding
+    moves entirely to `dry_run`.
+    """
+    path = layout.processes / "automerge.json"
+    if path.exists():
+        return
+    layout.processes.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(AUTOMERGE_PROCESS_DEFINITION, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+
+def _ensure_autoheal_process(layout: HarnessLayout) -> None:
+    """Seed `processes/autoheal.json` unless one already exists — never
+    clobbering an operator's hand-edited file.
+
+    Self-healing is configured like every other Process: this file. Its
+    `action.params.repository` is deliberately empty here — an operator points
+    it at a registered repo (by name, as in `repos.json`) by editing this file
+    or through the dashboard's process editor. Until they do, a heal task is
+    repository-less, and the `open-issue` finisher fails it with a message
+    saying exactly that.
+
+    Written directly (like `_init`'s `HEAL_DEFINITION`/`RESOLVER_DEFINITION`),
+    **not** through `FilesystemProcessAdmin.write`: validating `"failed-tasks"`
+    needs the merged registry `app.build()` assembles, which does not exist at
+    init time. The real validation happens when `build()` compiles it.
+
+    Ordering note: a previous version of this function ran from `_run` and had
+    to run before `_scheduled_sources(...)` compiled `processes/*.json`, or the
+    file it just wrote would sit unread until the next restart. Now that the
+    seeding lives here, in `_init` — a separate command from `run` — that
+    constraint is gone entirely: nothing writes a process file during `run`'s
+    startup wiring any more, so there is no ordering left to preserve between
+    this call and anything `run`'s startup does. (`FilesystemProcessAdmin.write`
+    still writes `processes/*.json` from the dashboard while `run` is live —
+    those are picked up on the next restart, by design.)
     """
     path = layout.processes / "autoheal.json"
     if path.exists():
         return
     layout.processes.mkdir(parents=True, exist_ok=True)
-    definition = {
-        **AUTOHEAL_PROCESS_DEFINITION,
-        "action": {"check": "failed-tasks", "params": {"repository": heal_repo}},
-    }
     path.write_text(
-        json.dumps(definition, indent=2, ensure_ascii=False),
+        json.dumps(AUTOHEAL_PROCESS_DEFINITION, indent=2, ensure_ascii=False),
         encoding="utf-8",
     )
 
-
-def _autoheal_repo(layout: HarnessLayout) -> str | None:
-    """The heal repo `processes/autoheal.json` already carries, or None.
-
-    Self-healing is enabled the same way every other automation in the harness
-    is: by a file in `processes/`. The slug lives in that file's
-    `action.params.repository` — the value `FailedTasksCheck` stamps onto every
-    heal task as `task.repository` (invariant #25) — so reading it back is how
-    `_run` learns the repo the `open-issue` finisher files against, keeping the
-    check's worktree repo and the finisher's file-to repo the same value by
-    construction rather than by two configuration surfaces agreeing (ADR-0019).
-
-    A broken or repository-less file returns None rather than raising: the
-    process still has to compile in `build()` moments later, and that is where
-    a malformed one earns its error message. Returning None here just means
-    "nothing to wire", and the missing `open-issue` kind surfaces as the
-    existing build-time ValueError.
-    """
-    path = layout.processes / "autoheal.json"
-    try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-    except (FileNotFoundError, json.JSONDecodeError):
-        return None
-    if not isinstance(raw, dict):
-        return None
-    action = raw.get("action")
-    if not isinstance(action, dict) or action.get("check") != "failed-tasks":
-        return None
-    params = action.get("params")
-    if not isinstance(params, dict):
-        return None
-    repository = params.get("repository")
-    if isinstance(repository, str) and repository.strip():
-        return repository.strip()
-    return None
 
 
 def service_path_entries(harness: Path) -> list[str]:
@@ -1478,35 +1775,108 @@ def _service_status(args: argparse.Namespace) -> int:
     return _print_service_report(args.label, target, report)
 
 
-def _resolve_served_workflows(
-    args: argparse.Namespace, layout: HarnessLayout
-) -> tuple[str, ...] | None:
-    """The set of workflow names `harness run` should serve, or None on error
-    (an error message has already been printed to stderr)."""
-    if args.workflows and args.all_workflows:
-        print(
-            "error: --workflow and --all-workflows are mutually exclusive",
-            file=sys.stderr,
-        )
-        return None
-    if args.all_workflows:
-        names = FilesystemWorkflowRepository(layout.workflows).names()
-        if not names:
+def _resolve_served_workflows(layout: HarnessLayout) -> tuple[str, ...]:
+    """The set of workflow names `harness run` serves: every definition under
+    `<root>/workflows/`.
+
+    Serving is data, not configuration — dropping a workflow file into the root
+    serves it, and removing it stops serving it. An empty or missing directory
+    is workflow-less mode (FR-6): no workflow is served and the catalog agents
+    run directly, rather than a startup error.
+    """
+    return FilesystemWorkflowRepository(layout.workflows).names()
+
+
+def _processes_targeting_workflow(processes_root: Path, workflow_name: str) -> list[str]:
+    """Which `processes/*.json` files declare `{"target": {"workflow":
+    workflow_name}}`, read straight off the raw JSON — no `compile_process`
+    involved, like `_declared_sink_kinds`/`_warn_missing_autoheal_repository`.
+    Used only to enrich the served-workflow drop warning below with the
+    process(es) it takes down with it, so "my self-healing stopped" is
+    traceable from that one warning line rather than needing to correlate it
+    with a second one printed somewhere else."""
+    names: list[str] = []
+    if not processes_root.is_dir():
+        return names
+    for path in sorted(processes_root.glob("*.json")):
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            continue
+        if not isinstance(raw, dict):
+            continue
+        target = raw.get("target")
+        if isinstance(target, dict) and target.get("workflow") == workflow_name:
+            names.append(path.name)
+    return names
+
+
+def _validate_served_workflows(
+    layout: HarnessLayout,
+    wf_repo: FilesystemWorkflowRepository,
+    served_names: tuple[str, ...],
+    finishers: dict[str, Callable[[str, dict, Callable[[], ConsumerBehavior]], ConsumerBehavior]],
+) -> tuple[str, ...]:
+    """Drop a served workflow whose own finisher bindings can't be wired
+    against `finishers` for a config reason, printing a `warning:` that names
+    the file, the step and the reason — instead of letting it take the whole
+    run down. An *unknown* finisher kind (`UnknownFinisherKind`, a `ValueError`
+    subclass) is a different failure shape entirely and is deliberately not
+    caught here: it propagates out of this function unchanged, and `_run`'s
+    own `except UnknownFinisherKind` around this call still fails the whole
+    run (exit 2) for it — see the operator's governing rule below.
+
+    `harness run` serves every `workflows/*.json` on disk (ADR-0022), so a
+    single stale file — e.g. the pre-generic string form
+    `"file-issue": "open-issue"`, which parses to an empty config and fails
+    the `open-issue` factory's own `label` check — would otherwise crash-loop
+    a launchd-supervised service on every restart. That is a *missing* value
+    (the binding names a real, registered kind but doesn't carry what its
+    factory needs), so it only warns and drops here, before `build()` ever
+    sees the workflow.
+
+    An unknown kind is different: it is a value that is *set and wrong* (a
+    typo, or a binding naming a kind that was never registered — e.g.
+    `label-issue` while `GITHUB_TOKEN` is unset). Per the operator's rule —
+    an explicitly-set bad value fails fast, only a missing one warns — that
+    must still fail the *whole* run, exactly as `app.build()`'s own
+    equivalent check always has (invariant #41): this function lets
+    `UnknownFinisherKind` propagate rather than dropping the workflow for it.
+
+    A workflow that can't even be *parsed* (`WorkflowNotFound` — broken JSON,
+    an unknown step in `finishers`, ...) is left in the returned set
+    untouched: that's `build()`'s own, unrelated fail-fast for a malformed
+    *workflow file*, not a finisher-binding problem, and this function has no
+    business silently dropping it.
+    """
+    kept: list[str] = []
+    for name in served_names:
+        try:
+            workflow = wf_repo.get(name)
+        except WorkflowNotFound:
+            kept.append(name)
+            continue
+        try:
+            validate_workflow_finishers(workflow, finishers)
+        except UnknownFinisherKind:
+            raise
+        except ValueError as error:
+            path = layout.workflows / f"{name}.json"
+            dependents = _processes_targeting_workflow(layout.processes, name)
+            note = (
+                f" — also disables process(es) {', '.join(dependents)}, which "
+                f"target it"
+                if dependents
+                else ""
+            )
             print(
-                f"error: no workflow definitions found under {layout.workflows}",
+                f"warning: workflow {name!r} ({path}) cannot be served — "
+                f"{error} — dropped from the served set{note}",
                 file=sys.stderr,
             )
-            return None
-        return names
-    if args.workflows:
-        return tuple(args.workflows)
-    # Neither --workflow nor --all-workflows: probe for the primary workflow.
-    # Present (a normal `harness init`) → serve `development`.
-    # Absent → workflow-less (FR-6): serve no workflow and run the catalog
-    # agents directly, rather than failing on a missing `development.json`.
-    if (layout.workflows / f"{DEFAULT_WORKFLOW}.json").is_file():
-        return (DEFAULT_WORKFLOW,)
-    return ()
+            continue
+        kept.append(name)
+    return tuple(kept)
 
 
 def _parse_hours(raw: str) -> list[int]:
@@ -1742,20 +2112,106 @@ def _build_issue_checker(args: argparse.Namespace) -> IssueChecker | None:
     return GithubIssueChecker(HttpGithubClient(token)) if token else None
 
 
+def _slug_resolver(registry: RepositoryRegistry) -> Callable[[str | None], str]:
+    """`task.repository` → `owner/repo`, the way every other GitHub-touching
+    driver does it: resolve the name to a clone through the registry, then read
+    the slug off that clone's `origin`. `repos.json` holds paths only — the
+    slug is never duplicated in config. Every failure is an `IssueError`, so it
+    lands the task in `failed/` with a message naming the cause."""
+
+    def slug_for(name: str | None) -> str:
+        if not name:
+            raise IssueError(
+                "the task has no repository, so no GitHub repo can be resolved "
+                "— set the process's params.repository"
+            )
+        try:
+            path = registry.resolve(name)
+        except RepositoryNotFound as error:
+            raise IssueError(str(error)) from None
+        slug = github_slug(path)
+        if slug is None:
+            raise IssueError(f"repo {name!r} ({path}) has no github.com origin remote")
+        return slug
+
+    return slug_for
+
+
+def _retention_days() -> int:
+    """The terminal-task retention window, from `HARNESS_RETENTION_DAYS`.
+
+    A tuning knob, not a secret — so a bad value is a non-fatal startup
+    warning and the default, never an exit. The harness refusing to start
+    over a typo in a housekeeping number would be a worse failure than the
+    window being wrong for one run.
+
+    Set it in `<root>/secrets.env` — the wrapper `harness service install`
+    generates sources that file under `set -a`, so anything in it is exported.
+    An `export` in the operator's own shell never reaches the launchd service,
+    which is handed almost no environment, and editing `harness-run.sh` is
+    silently undone by the next install (including an autoupgrade).
+
+    `0` is deliberately valid: it archives every settled task in the `done`
+    column on the next sweep, which is the "clear the board now" setting.
+    There is therefore no
+    "off" value — `0` is the *most* aggressive setting, and effectively
+    disabling the sweep means a very large window (`36500`, a century).
+    """
+    raw = os.environ.get("HARNESS_RETENTION_DAYS")
+    if raw is None:
+        return DEFAULT_RETENTION_DAYS
+    try:
+        days = int(raw)
+    except ValueError:
+        print(
+            f"warning: HARNESS_RETENTION_DAYS={raw!r} is not an integer; "
+            f"using {DEFAULT_RETENTION_DAYS}",
+            file=sys.stderr,
+        )
+        return DEFAULT_RETENTION_DAYS
+    if days < 0:
+        print(
+            f"warning: HARNESS_RETENTION_DAYS={raw!r} is negative; "
+            f"using {DEFAULT_RETENTION_DAYS}",
+            file=sys.stderr,
+        )
+        return DEFAULT_RETENTION_DAYS
+    return days
+
+
+def _label_list(step: str, config: dict, key: str) -> tuple[str, ...]:
+    """One of the `open-issue` binding's two label lists, validated.
+
+    A plain `ValueError` on a malformed value, so ADR-0022's rule applies
+    unchanged: the binding is unwirable, `_validate_served_workflows` drops
+    that one workflow with a warning naming file/step/reason, and the rest of
+    the run is unaffected. A bare string is rejected rather than iterated into
+    characters — the likeliest way to get this wrong by hand."""
+    value = config.get(key, ())
+    if not isinstance(value, (list, tuple)) or not all(
+        isinstance(one, str) and one for one in value
+    ):
+        raise ValueError(
+            f"step {step!r} binds the 'open-issue' finisher with an invalid "
+            f"{key!r} — expected a list of non-empty strings, got {value!r}"
+        )
+    return tuple(value)
+
+
 def _run(args: argparse.Namespace) -> int:
     root = _root(args.root)
     layout = HarnessLayout(root)
-    served_names = _resolve_served_workflows(args, layout)
-    if served_names is None:
-        return 2
+    served_names = _resolve_served_workflows(layout)
 
     # `--github-workflow` defaults to `None` (not `DEFAULT_WORKFLOW`) so this
     # check only fires when the operator actually named a workflow for GitHub
     # ingestion. Validating the *default* against the served set would reject
-    # e.g. `run --workflow hotfix` with no GitHub flags at all -- a regression
-    # against FR-6, since no GithubTaskSource is ever built in that case.
-    # `--github-step` (workflow-less GitHub ingestion) skips the check: it names
-    # a step, not a workflow, and `_github_sources` applies its own defaulting.
+    # a root whose served set happens to exclude "development" (e.g. no
+    # `development.json` on disk) even with no GitHub flags at all -- a
+    # regression against FR-6, since no GithubTaskSource is ever built in
+    # that case. `--github-step` (workflow-less GitHub ingestion) skips the
+    # check: it names a step, not a workflow, and `_github_sources` applies
+    # its own defaulting.
     if args.github_workflow is not None and args.github_workflow not in served_names:
         print(
             f"error: --github-workflow {args.github_workflow!r} is not served "
@@ -1778,6 +2234,154 @@ def _run(args: argparse.Namespace) -> int:
     runner = ClaudeCliRunner() if use_agent else None
     workspace = GitWorkspace(registry, layout.worktrees)
     artifact_view = WorktreeArtifactView(layout.worktrees)
+
+    # The `open-issue` finisher kind, registered unconditionally: it derives
+    # its repo from `task.repository` and takes its label from the binding, so
+    # it needs no wiring-time configuration at all. That is what lets a root
+    # serve the seeded `heal` workflow without any heal-specific setup.
+    issue_token = os.environ.get("GITHUB_TOKEN")
+    issue_tracker = (
+        GithubIssueTracker(HttpGithubClient(issue_token))
+        if issue_token
+        else MemoryIssueTracker()
+    )
+    slug_for = _slug_resolver(registry)
+
+    def _open_issue(step, config, inner):
+        label = config.get("label")
+        if not isinstance(label, str) or not label:
+            raise ValueError(
+                f"step {step!r} binds the 'open-issue' finisher without a "
+                f"'label' — it is both the label every issue carries and the "
+                f"scope of the idempotency search"
+            )
+        from_step = config.get("from_step")
+        return OpenIssueBehavior(
+            tracker=issue_tracker,
+            artifacts=artifact_view,
+            slug_for=slug_for,
+            label=label,
+            from_step=from_step,
+            labels=_label_list(step, config, "labels"),
+            allowed_labels=_label_list(step, config, "allowed_labels"),
+            # Replace shape when a step is named; wrap shape otherwise. The
+            # thunk is only called in the wrap shape, so a step bound in the
+            # replace shape never triggers `catalog.get` (ADR-0018).
+            inner=None if from_step else inner(),
+        )
+
+    # The `merge-pr` finisher kind (ADR-0023), registered unconditionally for
+    # the same reason `open-issue` is: it takes every deployment-specific
+    # value from the task (`data.source`) and the binding (threshold, method,
+    # dry_run), so it needs no wiring-time configuration. Without a token the
+    # merger is the in-memory fake, so the seeded `automerge` workflow is
+    # servable — and harmless — on a root with no GitHub access at all,
+    # exactly like the seeded `heal` workflow.
+    pr_merger = (
+        GithubPullRequestMerger(HttpGithubClient(issue_token))
+        if issue_token
+        else MemoryPullRequestMerger()
+    )
+
+    def _merge_pr(step, config, inner):
+        method = config.get("method", DEFAULT_METHOD)
+        if method not in MERGE_METHODS:
+            raise ValueError(
+                f"step {step!r} binds the 'merge-pr' finisher with an unknown "
+                f"merge method {method!r} (known: {', '.join(MERGE_METHODS)})"
+            )
+        min_confidence = config.get("min_confidence", DEFAULT_MIN_CONFIDENCE)
+        if isinstance(min_confidence, bool) or not isinstance(
+            min_confidence, (int, float)
+        ):
+            raise ValueError(
+                f"step {step!r} binds the 'merge-pr' finisher with a "
+                f"non-numeric 'min_confidence': {min_confidence!r}"
+            )
+        if not 0.0 <= float(min_confidence) <= 1.0:
+            raise ValueError(
+                f"step {step!r} binds the 'merge-pr' finisher with a "
+                f"'min_confidence' outside 0.0–1.0: {min_confidence!r}"
+            )
+        dry_run = config.get("dry_run", True)
+        if not isinstance(dry_run, bool):
+            raise ValueError(
+                f"step {step!r} binds the 'merge-pr' finisher with a non-boolean "
+                f"'dry_run': {dry_run!r} — omit it to keep the safe default"
+            )
+        from_step = config.get("from_step")
+        return MergePrBehavior(
+            merger=pr_merger,
+            artifacts=artifact_view,
+            from_step=from_step,
+            min_confidence=float(min_confidence),
+            method=method,
+            dry_run=dry_run,
+            # Replace shape when a step is named (the seeded `automerge`
+            # workflow's agent-less `merge` step, reading `merge-review`'s
+            # artifact); wrap shape otherwise — the same split as `open-issue`.
+            inner=None if from_step else inner(),
+        )
+
+    finishers: dict[
+        str, Callable[[str, dict, Callable[[], ConsumerBehavior]], ConsumerBehavior]
+    ] = {"open-issue": _open_issue, "merge-pr": _merge_pr}
+
+    # A single GitHub client threads into both the process check factories
+    # (`github-issues`/`github-conflicts`) and the `label-issue` finisher —
+    # one client per wiring site, like every other GitHub-touching helper
+    # here. Built here — ahead of where the process check factories and the
+    # issue-import factory consume it further down — so `finishers` below is
+    # already complete (including "label-issue") by the time the served-set
+    # validation that follows reads it.
+    token = os.environ.get("GITHUB_TOKEN")
+    github_client = HttpGithubClient(token) if token else None
+
+    # "label-issue" (a finisher, invariant #41): applies an outcome -> label
+    # mapping to a task's source GitHub issue, wrapping (not replacing) the
+    # step's own agent behavior — used by a triage Process's PM persona to
+    # relabel an issue harness:todo/harness:needs-info after judging it. Only
+    # registered when a token is configured; a workflow binding a step to it
+    # otherwise fails the served-set validation below (or, for an unserved
+    # workflow, `build()` itself) through the "unknown finisher kind" error,
+    # no new error path.
+    if github_client is not None:
+        finishers["label-issue"] = lambda step, config, inner: LabelIssueBehavior(
+            inner=inner(), client=github_client, labels=config.get("labels", {})
+        )
+
+    # A served workflow whose own finisher binding names a *known* kind that
+    # rejects its config (e.g. the pre-generic string form `"open-issue"`,
+    # which parses to an empty config and fails the factory's own `label`
+    # check — exactly the shape `workflows/heal.json` shipped with on the
+    # reference install before this branch generalized the finisher) must not
+    # crash-loop the whole service. Drop it from the served set with a
+    # warning instead of letting `build()` fail the entire run over one stale
+    # file — see ADR-0022. An *unknown* kind is a different, set-and-wrong
+    # failure shape and is not dropped: `_validate_served_workflows` re-raises
+    # `UnknownFinisherKind` unchanged, and the `except` below still fails the
+    # whole run (exit 2) for it, exactly as `build()`'s own equivalent check
+    # always has (a genuine cross-workflow binding conflict, a malformed
+    # workflow file, ... still fail there too, unchanged).
+    wf_repo = FilesystemWorkflowRepository(layout.workflows)
+    served_names_on_disk = served_names
+    try:
+        served_names = _validate_served_workflows(layout, wf_repo, served_names, finishers)
+    except UnknownFinisherKind as error:
+        # A set-and-wrong value (a typo, or a kind nothing ever registered) —
+        # the operator's rule keeps this fatal for the whole run, exactly as
+        # `app.build()`'s own equivalent check always has (invariant #41),
+        # unlike the config-shaped failures `_validate_served_workflows`
+        # itself warns-and-drops for. See ADR-0022.
+        print(f"error: {error}", file=sys.stderr)
+        return 2
+    # Workflows dropped by the pre-filter above (e.g. the stale string-form
+    # `heal.json`) can no longer be a Process's target either — a Process
+    # targeting one is made inert further down (`build()`'s `dropped_workflows`
+    # param, threaded to `FilesystemProcessRepository.build()`), rather than
+    # failing the whole build the way an unresolvable target normally would.
+    dropped_workflows = set(served_names_on_disk) - set(served_names)
+
     forge = _build_forge(args.forge, root, registry)
     github = [] if args.no_github_source else _github_sources(args, root, registry)
     # The outbound reflector is registered only when classic ingestion is off
@@ -1787,109 +2391,32 @@ def _run(args: argparse.Namespace) -> int:
     sources = github + reflectors
     merge_checker = _build_merge_checker(args)
     issue_checker = _build_issue_checker(args)
-    # The resolver workflow rides alongside the primary one so its tasks — queued
-    # by a `github-conflicts` process — get their own step queues and board
-    # columns. Served whenever its definition exists: a process-only detection
-    # path still needs a served target (a process targeting an unserved
-    # workflow fails to compile).
-    resolver_defined = (layout.workflows / f"{args.resolver_workflow}.json").is_file()
-    if resolver_defined and args.resolver_workflow not in served_names:
-        served_names = [*served_names, args.resolver_workflow]
-
-    # Self-healing (ADR-0018): enabled by `processes/autoheal.json`, exactly as
-    # every other automation in the harness is enabled by a file in
-    # `processes/`. `--heal-repo <owner/repo>` is the interactive bootstrap that
-    # *writes* that file; once written, the run reads the slug back out of it
-    # (`action.params.repository`), so the launchd service — whose wrapper execs
-    # a fixed `harness run --root ... --api-port ...` with no seam for extra
-    # flags — needs neither a flag nor an environment variable. The file is the
-    # single source of truth: the same value the check stamps as
-    # `task.repository` (invariant #25) is the one the `open-issue` finisher
-    # files against, so the two cannot drift (ADR-0019).
-    #
-    # This must run *before* `known_targets` is computed below — the autoheal
-    # process's `{"workflow": "heal"}` target (and any bare trigger naming it)
-    # needs "heal" in the served set to validate. It reuses the claude agent, so
-    # it needs `--agent claude`; offline (no GITHUB_TOKEN) it falls back to the
-    # in-memory tracker so the loop still runs harmlessly.
-    finishers: dict[
-        str, Callable[[str, dict, Callable[[], ConsumerBehavior]], ConsumerBehavior]
-    ] = {}
-    heal_repo = args.heal_repo or _autoheal_repo(layout)
-    if heal_repo:
-        if args.heal_repo and not use_agent:
-            print(
-                "error: --heal-repo needs --agent claude (the healer is a claude agent)",
-                file=sys.stderr,
-            )
-            return 2
-        if not use_agent:
-            # Config-driven, not flag-driven: the operator is not at a prompt to
-            # read an error, and the service must never crash-loop over this.
-            print(
-                f"warning: {layout.processes / 'autoheal.json'} enables self-healing"
-                " but --agent is not claude; the heal step cannot run and failed"
-                " tasks will settle unhealed.",
-                file=sys.stderr,
-            )
-        # The `heal_repo` slug is also `task.repository` on every heal task
-        # (invariant #25) — `GitWorkspace.attach` resolves it through this same
-        # `registry`, and an unregistered slug raises `RepositoryNotFound` at
-        # attach time. That failure lands the heal task in `failed/`, which the
-        # recursion guard (invariant #25/#26) then retires straight to
-        # `healed/` with no issue filed — self-healing goes silently inert. Warn
-        # up front rather than let the operator discover it that way; this must
-        # never block startup (a WARNING, not an error).
-        try:
-            registry.resolve(heal_repo)
-        except RepositoryNotFound:
-            print(
-                f"warning: heal repo {heal_repo!r} is not registered in"
-                f" {layout.repos} — heal tasks will fail to attach a worktree"
-                " until it is added there, so self-healing will file nothing.",
-                file=sys.stderr,
-            )
-        if DEFAULT_HEAL_WORKFLOW not in served_names:
-            served_names = [*served_names, DEFAULT_HEAL_WORKFLOW]
-        token = os.environ.get("GITHUB_TOKEN")
-        issue_tracker = (
-            GithubIssueTracker(HttpGithubClient(token))
-            if token
-            else MemoryIssueTracker()
-        )
-        # `open-issue` replaces the file-issue step's behavior (like `open-pr`):
-        # it ignores step/config/inner and files the drafted heal issue. A
-        # factory, per the finisher registry contract (invariant #41).
-        finishers["open-issue"] = lambda step, config, inner: OpenIssueBehavior(
-            tracker=issue_tracker,
-            repo=heal_repo,
-            artifacts=artifact_view,
-            clock=SystemClock(),
-        )
-        _ensure_autoheal_process(layout, heal_repo)
 
     # Scheduled triggers (`triggers/*.json`) are `TaskSource`s that ride the
     # existing `sources` list — no new loop, no `build()` parameter. A trigger's
-    # target must be a served workflow or a known step; `known_targets` (served
-    # workflow names ∪ their steps ∪ any catalog agent) lets the repository
-    # reject a misnamed target up front rather than failing at dispatch time.
-    known_targets: set[str] = set(served_names)
-    wf_repo = FilesystemWorkflowRepository(layout.workflows)
+    # `{"step": ...}` target must have a real dispatch queue (`known_steps` —
+    # their steps ∪ any catalog agent, never a served workflow's own name) and
+    # a `{"workflow": ...}` target must be a served workflow name
+    # (`known_workflows`) — two independent namespaces, so the repository
+    # rejects a target that names the wrong one up front, rather than failing
+    # at dispatch time.
+    known_steps: set[str] = set()
     for name in served_names:
         try:
-            known_targets |= set(wf_repo.get(name).steps())
+            known_steps |= set(wf_repo.get(name).steps())
         except WorkflowNotFound:
             continue
     if catalog is not None:
-        known_targets |= set(catalog.names())
+        known_steps |= set(catalog.names())
+    known_workflows = set(served_names)
     sources = sources + _scheduled_sources(
-        args, root, registry, clock=SystemClock(), known_targets=known_targets
+        args,
+        root,
+        registry,
+        clock=SystemClock(),
+        known_steps=known_steps,
+        known_workflows=known_workflows,
     )
-    # A single GitHub client threads into both the process check factories
-    # (`github-issues`/`github-conflicts`) and the `label-issue` finisher —
-    # one client per wiring site, like every other GitHub-touching helper here.
-    token = os.environ.get("GITHUB_TOKEN")
-    github_client = HttpGithubClient(token) if token else None
 
     # Same shape for Jira: all three env vars are required, or the
     # `jira-issues` action fails fast at process build time (mirrors the
@@ -1914,21 +2441,18 @@ def _run(args: argparse.Namespace) -> int:
     # internally. Reading the raw declared sink kinds needs no compilation at
     # all (invariant #40).
     sources = sources + _slack_sinks(_declared_sink_kinds(layout.processes))
+    # A compiled `failed-tasks` process with no `action.params.repository` is
+    # valid — it's the seeded `harness init` default — but silently inert:
+    # self-healing spends an agent call on `heal` and one on `dedup` every
+    # time `failed/` drains, and files nothing. Warn about it (never an
+    # error — a *missing* value is "not configured yet", not a typo; a
+    # *present but wrong* one still fails loud at process-compile time,
+    # unchanged — see ADR-0022) rather than leaving the token bill as the
+    # only signal.
+    _warn_missing_autoheal_repository(layout.processes, dropped_workflows)
     extra_checks = _process_check_factories(
         args, registry, client=github_client, jira_client=jira_client
     )
-
-    # "label-issue" (a finisher, invariant #41): applies an outcome -> label
-    # mapping to a task's source GitHub issue, wrapping (not replacing) the
-    # step's own agent behavior — used by a triage Process's PM persona to
-    # relabel an issue harness:todo/harness:needs-info after judging it. Only
-    # registered when a token is configured; a workflow binding a step to it
-    # otherwise fails at `build()` through the existing "unknown finisher kind"
-    # error, no new error path.
-    if github_client is not None:
-        finishers["label-issue"] = lambda step, config, inner: LabelIssueBehavior(
-            inner=inner(), client=github_client, labels=config.get("labels", {})
-        )
 
     # The Ahanas board's manual "Add issue" write port (invariant #43): built
     # inside `build()` from this factory once the harness's own live queues
@@ -1957,16 +2481,42 @@ def _run(args: argparse.Namespace) -> int:
             issue_import_factory=issue_import_factory,
             repository_registry=registry,
             command_runner=SubprocessCommandRunner(),
+            dropped_workflows=dropped_workflows,
+            retention_days=_retention_days(),
         )
     except WorkflowNotFound as error:
         print(f"error: {error}", file=sys.stderr)
         return 2
     except ValueError as error:
-        # e.g. a served workflow names a finisher kind nothing registered — most
-        # commonly `heal.json`'s `file-issue` step served without `--heal-repo`
-        # (which is what wires the "open-issue" kind into the registry).
+        # A backstop, not the primary path: `served_names` here has already
+        # passed `_validate_served_workflows` above, so an unknown finisher
+        # kind or a binding rejecting its own config normally exits 2 earlier
+        # (the `except UnknownFinisherKind` around that call, or the warn/drop
+        # inside it). This still catches a genuine cross-workflow finisher
+        # conflict — two served workflows binding the same step differently —
+        # which only `build()` itself can see (see `_open_issue` above for the
+        # config-rejection shape).
         print(f"error: {error}", file=sys.stderr)
         return 2
+    except ProcessValidationError as error:
+        # e.g. a process file's action.params.repository names a repo missing
+        # from repos.json (invariant #25/#39) — a malformed process file must
+        # not crash the service with a raw traceback under launchd.
+        print(f"error: {error}", file=sys.stderr)
+        return 2
+
+    # A process whose action needs a credential this run does not have is
+    # skipped, not fatal (`fs_processes.MissingCredential`): the harness runs
+    # degraded — everything else still flows — rather than not at all, which
+    # is what keeps "no token is not fatal" true once a `github-*` Process
+    # exists on the root. A set-and-wrong value still exits 2 just above.
+    # `getattr`: `build()` is a public seam a number of tests stub out with a
+    # bare object; a real `Harness` always carries the attribute.
+    for file_name, reason in getattr(harness, "skipped_processes", ()):
+        print(
+            f"warning: {file_name} is disabled for this run — {reason}",
+            file=sys.stderr,
+        )
 
     try:
         asyncio.run(
@@ -2031,10 +2581,15 @@ async def serve(
         # the checks this run compiles — a GitHub-backed process is authorable
         # in the dashboard, not only by hand-editing `processes/*.json`.
         process_admin=FilesystemProcessAdmin(
-            harness.layout.processes, checks=harness.process_checks, registry=registry
+            harness.layout.processes,
+            checks=harness.process_checks,
+            registry=registry,
+            known_steps=set(harness.known_steps),
+            known_workflows=set(harness.workflows),
         ),
         updater=updater,
         issue_import=harness.issue_import,
+        stats=harness.stats,
         version=version_string(),
         build_time=build_timestamp(),
     )
@@ -2095,20 +2650,6 @@ def main(argv: list[str] | None = None) -> int:
 
     run = subparsers.add_parser("run", help="start the orchestration loop")
     run.add_argument("--root", default=None)
-    run.add_argument(
-        "--workflow",
-        action="append",
-        dest="workflows",
-        default=None,
-        help="workflow to serve (repeatable); unset serves 'development' when it "
-        "exists, otherwise runs workflow-less on the catalog agents",
-    )
-    run.add_argument(
-        "--all-workflows",
-        action="store_true",
-        help="serve every workflow definition found under <root>/workflows "
-        "(mutually exclusive with --workflow)",
-    )
     run.add_argument("--delay", type=float, default=5.0)
     run.add_argument("--poll", type=float, default=0.2)
     run.add_argument(
@@ -2132,11 +2673,14 @@ def main(argv: list[str] | None = None) -> int:
         type=float,
         default=300.0,
         dest="reconcile_poll",
-        help="interval (s) for checking done tasks' PR merge status and "
-        "archiving them once merged; deliberately long to respect GitHub "
-        "rate limits",
+        help="interval (s) for the housekeeping sweeps that archive settled "
+        "tasks: a done task whose PR merged, a task whose source issue was "
+        "closed, and a settled task in the done column past "
+        "HARNESS_RETENTION_DAYS (`failed/` is exempt). "
+        "Deliberately long — none of them is latency-sensitive, and the first "
+        "two poll GitHub, whose rate limits they must respect",
     )
-    run.add_argument("--agent-timeout", type=float, default=1800.0, dest="agent_timeout")
+    run.add_argument("--agent-timeout", type=float, default=5400.0, dest="agent_timeout")
     run.add_argument("--request-changes-at", default=None, dest="request_changes_at")
     run.add_argument(
         "--github-label",
@@ -2166,13 +2710,6 @@ def main(argv: list[str] | None = None) -> int:
     )
     run.add_argument("--worktree-root", default=None, help="root of the task worktrees")
     run.add_argument(
-        "--heal-repo",
-        default=None,
-        dest="heal_repo",
-        help="enable self-healing: assign a healer agent to the failed queue that "
-        "opens diagnostic issues on this repo (owner/repo); needs --agent claude",
-    )
-    run.add_argument(
         "--api-port",
         type=int,
         default=8420,
@@ -2189,13 +2726,6 @@ def main(argv: list[str] | None = None) -> int:
         choices=("github", "fake"),
         default="github",
         help="where landing proposes the change (default: real GitHub)",
-    )
-    run.add_argument(
-        "--resolver-workflow",
-        default=DEFAULT_RESOLVER_WORKFLOW,
-        dest="resolver_workflow",
-        help="workflow the 'resolver' PR-conflict tasks (e.g. from a "
-        "github-conflicts process) are served under",
     )
     run.set_defaults(handler=_run)
 

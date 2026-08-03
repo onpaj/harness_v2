@@ -23,6 +23,7 @@ from harness.ports.process_admin import (
     ProcessFields,
     ProcessNotFound,
 )
+from harness.ports.stats import StatsReport, StatsView
 from harness.ports.triggers import CheckSpec
 from harness.ports.updater import Updater, UpdateError
 from harness.ports.workflow_admin import WorkflowAdmin, WorkflowValidationError
@@ -54,12 +55,24 @@ class _EmptyStageOutputView(StageOutputView):
         yield  # pragma: no cover - makes this an async generator
 
 
-class _NullTaskControl(TaskControl):
-    """No-op control for a board wired without one. Keeps `create_app` backward
-    compatible — restart simply reports nothing was done. Behind the port, so
+class _EmptyStatsView(StatsView):
+    """Empty report for a board wired without stats. Keeps `create_app`
+    backward compatible — the page renders with zeroes. Behind the port, so
     api/ still knows no driver."""
 
+    def report(self, days: int) -> StatsReport:
+        return StatsReport(window_days=days, generated_at="")
+
+
+class _NullTaskControl(TaskControl):
+    """No-op control for a board wired without one. Keeps `create_app` backward
+    compatible — restart and resume simply report nothing was done. Behind the
+    port, so api/ still knows no driver."""
+
     def restart(self, task_id: str) -> bool:
+        return False
+
+    def resume(self, task_id: str) -> bool:
         return False
 
     def delete(self, task_id: str) -> bool:
@@ -153,12 +166,14 @@ def create_app(
     process_admin: ProcessAdmin | None = None,
     updater: Updater | None = None,
     issue_import: IssueImport | None = None,
+    stats: StatsView | None = None,
     version: str = "unknown",
     build_time: str | None = None,
 ) -> FastAPI:
     artifacts = artifacts or _EmptyArtifactView()
     output = output or _EmptyStageOutputView()
     control = control or _NullTaskControl()
+    stats = stats or _EmptyStatsView()
     agent_admin = agent_admin or _EmptyAgentAdmin()
     workflow_admin = workflow_admin or _EmptyWorkflowAdmin()
     process_admin = process_admin or _EmptyProcessAdmin()
@@ -176,9 +191,17 @@ def create_app(
         StaticFiles(directory=str(Path(__file__).parent / "static")),
         name="static",
     )
+    app.state.stats = stats
     app.include_router(
         build_json_router(
-            view, artifacts, agent_admin, workflow_admin, process_admin, version, build_time
+            view,
+            artifacts,
+            agent_admin,
+            workflow_admin,
+            process_admin,
+            stats,
+            version,
+            build_time,
         )
     )
     app.include_router(
@@ -194,6 +217,7 @@ def create_app(
             process_admin,
             updater,
             issue_import,
+            stats,
             version,
             build_time,
         )

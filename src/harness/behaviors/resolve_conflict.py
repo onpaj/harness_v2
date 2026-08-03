@@ -49,7 +49,15 @@ class ResolveConflictBehavior(ConsumerBehavior):
             # race: the PR was updated by someone/something else in the
             # meantime) — commit the clean merge result, no agent call spent.
             handle.commit(f"[{step}] merge {base} — no conflicts")
-            return BehaviorResult(DONE, f"merged {base} cleanly, no conflicts")
+            return BehaviorResult(
+                DONE,
+                f"merged {base} cleanly, no conflicts",
+                # Which of the two paths ran is otherwise legible only in the
+                # summary's wording, and the delivery report has to tell "the
+                # conflict evaporated" from "the agent really fixed it"
+                # (ADR-0026). Record-only: nothing routes on it (invariant #8).
+                data={"resolve": {"clean": True}},
+            )
 
         attempt, relpath = next_attempt(handle.path, task.id, step)
         # Out of Package C's scope: the resolver keeps sourcing its outcomes
@@ -87,4 +95,4 @@ class ResolveConflictBehavior(ConsumerBehavior):
         # (MERGE_HEAD present) produces the two-parent merge commit — no
         # special flag needed.
         handle.commit(run.summary)
-        return BehaviorResult(run.outcome, run.summary)
+        return BehaviorResult(run.outcome, run.summary, data={"resolve": {"clean": False}})

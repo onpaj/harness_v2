@@ -38,6 +38,9 @@ def test_poll_claims_issue_and_builds_task():
         "repo": "o/r",
         "issue": 1,
         "url": "https://gh/o/r/issues/1",
+        # Record-only provenance for the delivery report's label breakdown
+        # (ADR-0026) — the labels as they were at ingestion, before the claim.
+        "labels": ["harness:todo"],
     }
     assert task.data["title"] == "Fix bug"
     assert task.data["body"] == "details"

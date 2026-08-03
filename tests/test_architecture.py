@@ -223,6 +223,21 @@ def test_issue_reconciler_imports_only_ports_and_models():
     ), f"issue_reconciler.py imports outside ports/models/ids: {imports}"
 
 
+def test_retention_reconciler_imports_only_ports_and_models():
+    """RetentionReconciler is core (sibling of PrWatcher/MergeReconciler/
+    IssueReconciler): it knows only ports, models and the base `ids` module
+    (for the claim lock id), never a driver."""
+    imports = {
+        module
+        for module in imported_modules(SOURCE / "retention_reconciler.py")
+        if module.startswith("harness")
+    }
+    assert all(
+        module in ("harness.models", "harness.ids") or module.startswith("harness.ports")
+        for module in imports
+    ), f"retention_reconciler.py imports outside ports/models/ids: {imports}"
+
+
 def test_orchestration_does_not_import_issue_import_port():
     """`IssueImport` (the Ahanas board's manual "Add issue" write port,
     invariant #43) is unknown to dispatcher/consumer — touched only by
@@ -232,6 +247,18 @@ def test_orchestration_does_not_import_issue_import_port():
         assert "harness.ports.issue_import" not in imported_modules(SOURCE / name), (
             f"{name} imports ports.issue_import"
         )
+
+
+def test_orchestration_does_not_import_stats_port():
+    """`StatsView` (ADR-0026) is a UI read surface like `BoardView`, not an
+    orchestration port — unknown to dispatcher/consumer, mirroring invariants
+    #23/#32/#34. The derivation module itself is off limits to them too: it
+    reads history to decide how a task *ended*, which is exactly the kind of
+    judgement the router and dispatcher must never make (invariant #8)."""
+    for name in ("dispatcher.py", "consumer.py"):
+        imports = imported_modules(SOURCE / name)
+        assert "harness.ports.stats" not in imports, f"{name} imports ports.stats"
+        assert "harness.stats" not in imports, f"{name} imports stats"
 
 
 def test_orchestration_does_not_import_issue_state_port():
@@ -397,3 +424,19 @@ def test_api_reads_artifacts_only_through_view():
         names = _imported_names_from(path, "harness.ports.artifacts")
         assert "ArtifactStore" not in names, f"{path.name} imports ArtifactStore"
         assert "ArtifactSlot" not in names, f"{path.name} imports ArtifactSlot"
+
+
+def test_orchestration_does_not_import_pr_merge_port():
+    """`PullRequestMerger` is touched only by the `merge-pr` finisher (wired
+    via `build()`'s `finishers=`) — unknown to the dispatcher and consumer,
+    exactly like `IssueTracker`/`MergeChecker`/`IssueChecker` (invariant 44,
+    mirroring invariants 27/32/34's shape).
+
+    The point is sharper here than for the read-only ports: merging is the one
+    capability that writes to the default branch, so orchestration being
+    unable to even name it is what keeps "only a bound finisher can merge"
+    structurally true rather than merely conventional."""
+    for name in ("dispatcher.py", "consumer.py"):
+        assert "harness.ports.pr_merge" not in imported_modules(SOURCE / name), (
+            f"{name} imports ports.pr_merge"
+        )

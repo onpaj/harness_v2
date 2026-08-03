@@ -1,5 +1,13 @@
 from harness.models import Task
-from harness.ports.board import AgentActivity, Board, BoardColumn, BoardTab
+from harness.ports.board import (
+    COLUMN_STEP,
+    UNKNOWN_WORKFLOW,
+    UNKNOWN_WORKFLOW_LABEL,
+    AgentActivity,
+    Board,
+    BoardColumn,
+    BoardTab,
+)
 
 
 def make_task(task_id: str) -> Task:
@@ -33,6 +41,39 @@ def test_workflow_lookup():
 
     assert board.workflow("hotfix").columns[0].name == "patch"
     assert board.workflow("nonexistent") is None
+
+
+def test_tab_label_renames_only_the_unknown_tab():
+    assert BoardTab(name="development", columns=()).label == "development"
+    assert BoardTab(name="development", columns=()).is_unknown is False
+    # The internal name stays `unknown` — it is the tab's key and its DOM
+    # attribute; only what the operator reads changes.
+    unknown = BoardTab(name=UNKNOWN_WORKFLOW, columns=())
+    assert unknown.is_unknown is True
+    assert unknown.label == UNKNOWN_WORKFLOW_LABEL
+    assert unknown.name == "unknown"
+
+
+def test_tab_task_count_sums_every_column():
+    tab = BoardTab(
+        name="default",
+        columns=(
+            BoardColumn(name="plan", tasks=(make_task("tsk_1"), make_task("tsk_2"))),
+            BoardColumn(name="done", tasks=(make_task("tsk_3"),)),
+            BoardColumn(name="failed", tasks=()),
+        ),
+    )
+
+    assert tab.task_count == 3
+
+
+def test_column_to_dict_carries_kind_and_description():
+    raw = BoardColumn(
+        name="plan", tasks=(), kind=COLUMN_STEP, description="break it down"
+    ).to_dict()
+
+    assert raw["kind"] == COLUMN_STEP
+    assert raw["description"] == "break it down"
 
 
 def test_agent_activity_to_dict_carries_token_fields():
@@ -84,6 +125,15 @@ def test_default_tab_prefers_development_then_alphabetical_then_none():
         BoardTab(name="hotfix", columns=()),
     )).default_tab() == "alpha"
     assert Board(revision=0, workflows=()).default_tab() is None
+
+
+def test_board_repository_names_default_and_to_dict():
+    board = Board(revision=0, workflows=())
+    assert board.repository_names == ()
+    assert board.to_dict()["repository_names"] == []
+
+    board = Board(revision=0, workflows=(), repository_names=("b", "a"))
+    assert board.to_dict()["repository_names"] == ["b", "a"]
 
 
 def test_board_serializes_tasks_as_camelcase():

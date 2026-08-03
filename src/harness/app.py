@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -30,7 +30,10 @@ from harness.drivers.memory import (
 from harness.drivers.checks import BUILTIN_CHECKS
 from harness.drivers.failed_tasks_check import SPEC as FAILED_TASKS_SPEC
 from harness.drivers.failed_tasks_check import FailedTasksCheck
-from harness.drivers.fs_processes import FilesystemProcessRepository
+from harness.drivers.fs_processes import (
+    FilesystemProcessRepository,
+    MissingCredential,
+)
 from harness.drivers.projection_events import ProjectionSink
 from harness.drivers.source_reflector import SourceReflectorSink
 from harness.drivers.stage_output import StageOutputProjection
@@ -51,7 +54,8 @@ from harness.ports.merge import MergeChecker
 from harness.ports.queue import TaskQueue
 from harness.ports.repos import RepositoryRegistry
 from harness.ports.source import TaskSource
-from harness.ports.triggers import CheckDefinition, CheckFactory
+from harness.ports.stats import StatsView
+from harness.ports.triggers import Check, CheckDefinition, CheckFactory
 from harness.ports.workflows import WorkflowNotFound
 from harness.ports.workspace import Workspace
 from harness.projection import BoardProjection
@@ -59,7 +63,9 @@ from harness.ports.control import TaskControl
 from harness.issue_reconciler import IssueReconciler
 from harness.merge_reconciler import MergeReconciler
 from harness.pr_watcher import PrWatcher
+from harness.retention_reconciler import DEFAULT_RETENTION_DAYS, RetentionReconciler
 from harness.source_poller import SourcePoller
+from harness.stats import QueueStatsView
 from harness.task_control import TaskControlService
 
 LANDING_STEP = "land"
@@ -70,6 +76,98 @@ landing exactly as it always did (ADR-0016)."""
 RESOLVE_STEP = "resolve"
 """The step to which the wiring assigns ResolveConflictBehavior, when a catalog
 is configured — the resolver workflow's first step."""
+
+_ALWAYS_WIRABLE_FINISHER_KINDS = frozenset({"open-pr", "verify"})
+"""The two kinds `build()` always registers itself (see `finisher_registry`
+inside `build()`, below) — both ignore `step`/`config`/`inner` entirely and
+return a pre-built singleton, so neither can ever fail to construct. Kept as a
+named constant so `validate_workflow_finishers` doesn't need to duplicate
+`build()`'s own `landing`/`verify` wiring just to prove that."""
+
+
+class UnknownFinisherKind(ValueError):
+    """Raised by `validate_workflow_finishers` when a binding names a finisher
+    kind that isn't registered anywhere — as opposed to a plain `ValueError`,
+    raised when the kind *is* known but the factory rejects the binding's own
+    `config` (e.g. `open-issue` with no `label`).
+
+    The distinction is the operator's governing rule: an unknown kind is a
+    value that is *set and wrong* (a typo, or a binding authored against a
+    finisher that was never registered — e.g. `label-issue` when
+    `GITHUB_TOKEN` isn't set) and must fail the whole run, exactly as
+    `build()` itself has always failed it (invariant #41). A known kind with
+    incomplete config is closer to a *missing* value — that one binding is
+    unwirable, but nothing about the finisher registry itself is wrong — so
+    `cli._validate_served_workflows` only ever drops the served workflow with
+    a warning for a plain `ValueError`; it re-raises `UnknownFinisherKind`
+    (a `ValueError` subclass, so `isinstance` still holds for any caller that
+    only checks the base type) unchanged, so it keeps failing the whole
+    build via `cli._run`'s own `except UnknownFinisherKind` — see ADR-0022.
+    """
+
+
+def validate_workflow_finishers(
+    workflow: Workflow,
+    finishers: dict[str, Callable[[str, dict, Callable[[], ConsumerBehavior]], ConsumerBehavior]]
+    | None = None,
+) -> None:
+    """Raise `UnknownFinisherKind` if `workflow` binds a step to a finisher
+    kind that is not registered anywhere, or a plain `ValueError` if the kind
+    *is* registered but its factory rejects the binding's own `config` —
+    against `finishers`, the same custom registry `cli._run` hands `build()`
+    (e.g. `open-issue`, `label-issue`). `open-issue` fails the second way when
+    a binding's config carries no `label`.
+
+    A lighter-weight mirror of the per-step resolution `build()` performs
+    eagerly while constructing its consumers (`behavior_for`/the inline
+    `finisher_registry`), scoped to one workflow's own bindings and without
+    any of `build()`'s surrounding machinery (queues, catalog, workspace,
+    live processes). The thunk handed to a factory as its "inner behavior"
+    callback is inert — it returns `None` rather than a real behavior — so a
+    *wrap*-shaped finisher (e.g. `label-issue`, which calls the thunk eagerly
+    to embed the result) is still exercised for its own kind/config
+    resolution without needing a catalog agent or a live workspace to exist
+    yet; neither `OpenIssueBehavior` nor `LabelIssueBehavior` inspects the
+    type of what they're handed at construction. That means this check
+    cannot see a failure that would only surface from constructing the real
+    inner behavior (e.g. a step with no catalog entry) — `build()`'s own
+    fail-fast, unchanged, is still the final word for those.
+
+    `cli._run` calls this once per served workflow, before calling `build()`,
+    to decide which workflows are wirable at all: a workflow whose own
+    binding fails with a plain `ValueError` (known kind, bad config) is
+    dropped from the served set with a warning rather than failing the whole
+    run; `UnknownFinisherKind` propagates unchanged and still fails the whole
+    run, exactly as `build()`'s own check always has — see ADR-0022.
+    """
+    registry = finishers or {}
+    known_kinds = _ALWAYS_WIRABLE_FINISHER_KINDS | set(registry)
+
+    def _inert_inner() -> None:
+        return None
+
+    # First pass: every binding's kind must be known, over the *whole*
+    # workflow, before any factory runs — mirrors build()'s own two-pass
+    # shape (the step_bindings loop above raising UnknownFinisherKind, then
+    # a separate pass invoking factories via behavior_for). Collapsing this
+    # into one loop made "unknown kind is fatal" depend on JSON key order: a
+    # config-shaped ValueError from an earlier binding's factory would win
+    # the race and mask a later binding's unknown kind in the same workflow.
+    for step, binding in workflow.finishers.items():
+        if binding.kind in _ALWAYS_WIRABLE_FINISHER_KINDS:
+            continue
+        if binding.kind not in registry:
+            raise UnknownFinisherKind(
+                f"step {step!r} names unknown finisher kind {binding.kind!r} "
+                f"(known: {', '.join(sorted(known_kinds))})"
+            )
+
+    # Second pass: every binding's kind is now known to resolve, so invoke
+    # each one's own factory against its own config.
+    for step, binding in workflow.finishers.items():
+        if binding.kind in _ALWAYS_WIRABLE_FINISHER_KINDS:
+            continue
+        registry[binding.kind](step, binding.config, _inert_inner)
 
 
 @dataclass(frozen=True)
@@ -140,12 +238,15 @@ class Harness:
         control: TaskControl,
         events: EventSink,
         clock: Clock,
+        stats: StatsView | None = None,
         pollers: list[SourcePoller] | None = None,
         pr_watcher: PrWatcher | None = None,
         reconciler: MergeReconciler | None = None,
         issue_reconciler: IssueReconciler | None = None,
+        retention_reconciler: RetentionReconciler | None = None,
         healed: TaskQueue | None = None,
         process_checks: dict[str, CheckFactory] | None = None,
+        skipped_processes: list[tuple[str, str]] | None = None,
         issue_import: IssueImport | None = None,
     ) -> None:
         self.layout = layout
@@ -158,6 +259,12 @@ class Harness:
         self.artifacts = artifacts
         self.stage_output = stage_output
         self.control = control
+        # Fourth UI read surface (ADR-0026), next to projection/artifacts/
+        # stage_output. `build()` always supplies one — it derives from the
+        # queues built there and needs no external service, the same posture as
+        # `RetentionReconciler` — so the None is only for a hand-constructed
+        # `Harness`, and `create_app` falls back to an empty view.
+        self.stats = stats
         # UI-facing write port for the Ahanas board's manual "Add issue" button
         # (invariant #43): always a concrete `IssueImport`, never `None`,
         # mirroring `self.control` — `NullIssueImport` when no factory was
@@ -174,6 +281,7 @@ class Harness:
         self.archived = archived
         self.reconciler = reconciler
         self.issue_reconciler = issue_reconciler
+        self.retention_reconciler = retention_reconciler
         # The effective action registry this run compiles processes with —
         # built-ins plus every wiring-time extra (`extra_checks`, the internal
         # `failed-tasks`). `serve()` hands it to `FilesystemProcessAdmin`, so
@@ -182,6 +290,19 @@ class Harness:
         self.process_checks = (
             process_checks if process_checks is not None else dict(BUILTIN_CHECKS)
         )
+        self.skipped_processes: list[tuple[str, str]] = list(skipped_processes or [])
+        """(file, reason) per process skipped for a missing credential — the
+        harness runs degraded rather than not at all. `cli._run` warns per
+        entry; see `fs_processes.MissingCredential`."""
+
+    @property
+    def known_steps(self) -> frozenset[str]:
+        """Step names with a live dispatch queue — exactly what `step_queues`
+        is keyed by. Derived from `_step_queues`, not a second stored copy, so
+        it can never drift from what `Dispatcher.tick` actually routes into;
+        `serve()` reads this to feed `FilesystemProcessAdmin`'s target
+        validation the same live answer `Dispatcher.tick` uses."""
+        return frozenset(self._step_queues)
 
     def recover(self) -> int:
         # `done` is included because it is the one write-into queue that also
@@ -265,6 +386,11 @@ class Harness:
                 if self.issue_reconciler is not None
                 else []
             ),
+            *(
+                [self._retention_loop(reconcile_interval, stop)]
+                if self.retention_reconciler is not None
+                else []
+            ),
         ]
         if pr_poll_interval > 0 and self.pr_watcher is not None:
             loops.append(self._pr_watcher_loop(pr_poll_interval, stop))
@@ -286,46 +412,61 @@ class Harness:
             default=1,
         )
 
-    async def _dispatcher_loop(self, poll_interval: float, stop: asyncio.Event) -> None:
+    async def _tick_loop(
+        self,
+        tick: Callable[[], bool | Awaitable[bool]],
+        interval: float,
+        stop: asyncio.Event,
+    ) -> None:
+        """The one shape every loop in `run()` has: tick, then wait.
+
+        Two properties, both load-bearing. **A productive tick is followed by no
+        delay at all** (`sleep(0)`, a bare yield to the event loop) — a queue with
+        work in it drains at full speed, and only an idle tick pays the interval.
+        And **the idle wait is on `stop`, not on the clock**: a blind
+        `sleep(interval)` cannot be woken, so `stop.set()` followed by
+        `asyncio.gather(...)` over these loops would block until the *longest*
+        interval elapsed — up to `reconcile_interval` (300s by default), which is
+        well past the SIGKILL deadline launchd gives `cli.serve()`'s shutdown
+        path. Waiting on the event instead makes shutdown prompt for every loop,
+        while the timeout keeps the cadence when nothing is stopping.
+
+        `tick` may be sync (every loop but one) or async (`Consumer.tick`); both
+        are accepted so the seven loops stay one shape rather than two.
+        """
         while not stop.is_set():
-            if not self.dispatcher.tick():
-                await asyncio.sleep(poll_interval)
-            else:
+            progressed = tick()
+            if isinstance(progressed, Awaitable):
+                progressed = await progressed
+            if progressed:
                 await asyncio.sleep(0)
+                continue
+            try:
+                await asyncio.wait_for(stop.wait(), timeout=interval)
+            except asyncio.TimeoutError:
+                pass
+
+    async def _dispatcher_loop(self, poll_interval: float, stop: asyncio.Event) -> None:
+        await self._tick_loop(self.dispatcher.tick, poll_interval, stop)
 
     async def _consumer_loop(
         self, consumer: Consumer, poll_interval: float, stop: asyncio.Event
     ) -> None:
-        while not stop.is_set():
-            if not await consumer.tick():
-                await asyncio.sleep(poll_interval)
-            else:
-                await asyncio.sleep(0)
+        await self._tick_loop(consumer.tick, poll_interval, stop)
 
     async def _source_loop(
         self, poller: SourcePoller, source_interval: float, stop: asyncio.Event
     ) -> None:
-        while not stop.is_set():
-            if not poller.tick():
-                await asyncio.sleep(source_interval)
-            else:
-                await asyncio.sleep(0)
+        await self._tick_loop(poller.tick, source_interval, stop)
 
     async def _pr_watcher_loop(self, interval: float, stop: asyncio.Event) -> None:
-        while not stop.is_set():
-            if not self.pr_watcher.tick():
-                await asyncio.sleep(interval)
-            else:
-                await asyncio.sleep(0)
+        assert self.pr_watcher is not None
+        await self._tick_loop(self.pr_watcher.tick, interval, stop)
 
     async def _reconcile_loop(
         self, reconciler: MergeReconciler, reconcile_interval: float, stop: asyncio.Event
     ) -> None:
-        while not stop.is_set():
-            if not reconciler.tick():
-                await asyncio.sleep(reconcile_interval)
-            else:
-                await asyncio.sleep(0)
+        await self._tick_loop(reconciler.tick, reconcile_interval, stop)
 
     async def _issue_reconcile_loop(
         self, reconcile_interval: float, stop: asyncio.Event
@@ -334,11 +475,36 @@ class Harness:
         # is the same kind of slow GitHub housekeeping sweep as checking a done
         # task's PR — not a latency-sensitive "pick up new work" path.
         assert self.issue_reconciler is not None
-        while not stop.is_set():
-            if not self.issue_reconciler.tick():
-                await asyncio.sleep(reconcile_interval)
-            else:
-                await asyncio.sleep(0)
+        await self._tick_loop(self.issue_reconciler.tick, reconcile_interval, stop)
+
+    async def _retention_loop(
+        self, reconcile_interval: float, stop: asyncio.Event
+    ) -> None:
+        # Shares the reconcilers' cadence. This is the cheapest sweep of the
+        # three — two local `list()` calls over directories holding tens of
+        # files, no remote API — and the slowest-moving: whether a task settled
+        # two days ago does not change between ticks.
+        assert self.retention_reconciler is not None
+        await self._tick_loop(self.retention_reconciler.tick, reconcile_interval, stop)
+
+_CREDENTIAL_GATED_CHECKS = {
+    "github-issues": "GITHUB_TOKEN",
+    "github-conflicts": "GITHUB_TOKEN",
+    "github-mergeable": "GITHUB_TOKEN",
+    "jira-issues": "JIRA_BASE_URL/JIRA_EMAIL/JIRA_API_TOKEN",
+}
+"""Action names that exist but need a credential `build()` itself never holds.
+`cli._run` replaces each with a working factory through `extra_checks` when the
+environment supplies one; otherwise the placeholder below keeps the name known
+(so a process file naming it reads as "not configured", not "typo")."""
+
+
+def _missing_credential_check(name: str, requirement: str) -> CheckFactory:
+    def factory(params: dict) -> Check:
+        raise MissingCredential(f"{name} action requires {requirement}", field="check")
+
+    return factory
+
 
 def build(
     root: Path,
@@ -352,7 +518,7 @@ def build(
     forge: Forge | None = None,
     runner: AgentRunner | None = None,
     catalog: AgentCatalog | None = None,
-    agent_timeout: float = 1800.0,
+    agent_timeout: float = 5400.0,
     artifact_view: ArtifactView | None = None,
     sources: list[TaskSource] | None = None,
     merge_checker: MergeChecker | None = None,
@@ -369,6 +535,8 @@ def build(
     issue_import_factory: IssueImportFactory | None = None,
     repository_registry: RepositoryRegistry | None = None,
     command_runner: CommandRunner | None = None,
+    dropped_workflows: set[str] | None = None,
+    retention_days: int = DEFAULT_RETENTION_DAYS,
 ) -> Harness:
     layout = HarnessLayout(Path(root))
     events = events or StdoutEventSink()
@@ -428,6 +596,7 @@ def build(
     projection = BoardProjection(
         steps=steps,
         workflows=list(discovered.values()),
+        repository_names=repository_registry.names() if repository_registry is not None else (),
     )
     stage_output = StageOutputProjection()
     # The reflector comes after ProjectionSink: the outward projection must not
@@ -444,9 +613,11 @@ def build(
     failed = FilesystemTaskQueue(name="failed", root=layout.failed, events=events)
     done = FilesystemTaskQueue(name="done", root=layout.done, events=events)
     archived = FilesystemTaskQueue(name="archived", root=layout.archived, events=events)
-    # `healed/` is the never-consumed terminal `failed/` drains into once a
-    # `failed-tasks`-driving process is configured (invariant 24); it is
-    # unconditional, like `done`/`archived` — an idle terminal costs nothing.
+    # `healed/` is legacy (ADR-0024): the `failed-tasks` check used to retire
+    # each claimed failure here, and now settles it into `done/` instead.
+    # Nothing writes this queue any more — it is still built, and still
+    # hydrated, so tasks a previous version left in it stay on the board (in
+    # the `done` column) and gettable by id rather than silently vanishing.
     healed_queue = FilesystemTaskQueue(name="healed", root=layout.healed, events=events)
     inbox = FilesystemTaskQueue(
         name="tasks", root=layout.tasks, events=events, quarantine=failed
@@ -494,6 +665,24 @@ def build(
             events=events,
             clock=clock,
         )
+
+    # Nobody consumes `done`/`healed`, so without this a settled task stays on
+    # the board for the lifetime of the root. Unlike the merge and issue
+    # reconcilers this is *always* built: it needs no external service, only the
+    # local queues and the clock.
+    #
+    # `failed/` is deliberately NOT swept. A failure the harness declined to
+    # heal stays in `failed/` on purpose (ADR-0024): nothing is coming to fix
+    # it, so it must keep reading as a problem exactly where the operator
+    # looks. Archiving it would also make it unrestartable — the operator's one
+    # remedy, `TaskControlService.restart`, searches `failed/` and nowhere else.
+    retention_reconciler = RetentionReconciler(
+        queues=[done, healed_queue],
+        archived=archived,
+        days=retention_days,
+        events=events,
+        clock=clock,
+    )
 
     # `IssueImport` (invariant #43): the Ahanas board's manual "Add issue"
     # write port. Built here, not in cli.py, because it needs both an
@@ -591,7 +780,7 @@ def build(
     # from inside behavior_for once tasks are already flowing.
     for step, binding in step_bindings.items():
         if binding.kind not in finisher_registry:
-            raise ValueError(
+            raise UnknownFinisherKind(
                 f"step {step!r} names unknown finisher kind {binding.kind!r} "
                 f"(known: {', '.join(sorted(finisher_registry))})"
             )
@@ -670,33 +859,38 @@ def build(
     # constructs, not something `cli.py` can hand it independently.
     checks: dict[str, CheckFactory] = {
         **BUILTIN_CHECKS,
+        # The credential-gated action names are part of the *vocabulary* even
+        # when this build has no client for them: `cli._run` overrides each
+        # with a real factory via `extra_checks` once the credential exists.
+        # Without these placeholders a seeded `processes/*.json` naming one
+        # would fail a bare `build()` as an "unknown check" — the fatal,
+        # set-and-wrong shape — when the truth is simply that the credential
+        # is absent, which must warn and skip (`MissingCredential`).
+        **{
+            name: _missing_credential_check(name, requirement)
+            for name, requirement in _CREDENTIAL_GATED_CHECKS.items()
+        },
         **(extra_checks or {}),
         # A `CheckDefinition`, not a bare lambda: it carries `failed-tasks`'
         # declarative spec (no user-facing parameters) alongside the factory, so
         # the process form treats it as a fully-defined action rather than an
         # unknown one. `repository` is still accepted at call time — it isn't a
-        # form field; it's the slug `processes/autoheal.json` carries in its own
-        # `action.params` (written there by the `--heal-repo` bootstrap, and read
-        # back by `cli._autoheal_repo` to wire the `open-issue` finisher against
-        # the same repo — invariant #25/#39, ADR-0021), never entered by an
-        # operator through the UI.
+        # form field; self-healing is configured entirely through
+        # `processes/autoheal.json` (`harness init` seeds it with an empty
+        # `action.params.repository`), so an operator sets it there directly —
+        # by hand-editing the file or through the dashboard's process editor —
+        # never through the UI's process form (invariant #25/#39).
         "failed-tasks": CheckDefinition(
             spec=FAILED_TASKS_SPEC,
             factory=lambda params: FailedTasksCheck(
                 failed=failed,
-                healed=healed_queue,
+                done=done,
                 events=events,
                 clock=clock,
                 repository=params.get("repository"),
             ),
         ),
     }
-    # `known_targets` must include served *workflow* names too, not just step
-    # names — a `{"workflow": ...}` process target (e.g. the autoheal process
-    # targeting `heal`, or the pre-existing `github-issues`/`github-conflicts`
-    # processes targeting `default`/`resolver`) validates against the workflow
-    # name itself, not its steps.
-    known_targets = set(known_steps) | set(resolved)
     known_repositories = (
         set(repository_registry.names()) if repository_registry is not None else None
     )
@@ -706,8 +900,17 @@ def build(
         checks=checks,
         repository=None,
         worktree_root=str(layout.worktrees),
-        known_targets=known_targets,
+        known_steps=known_steps,
+        known_workflows=set(resolved),
         known_repositories=known_repositories,
+        # A Process targeting a workflow `cli._run` already dropped from the
+        # served set (an unwirable finisher binding, ADR-0022) is made inert
+        # here too, rather than failing the whole build the way an
+        # unresolvable target normally would: the workflow itself is already
+        # the reason it can't work, not a mistake in this file. Callers other
+        # than `cli._run` (e.g. `build()` invoked directly, as most tests do)
+        # pass nothing here and get the unchanged, fully fail-fast behavior.
+        dropped_workflows=dropped_workflows,
     )
     # `all_sources` feeds `pollers` ONLY — never `SourceReflectorSink`, which
     # was already constructed above, over the caller's own `sources`. Safe:
@@ -731,6 +934,23 @@ def build(
         events=events, clock=clock,
     )
 
+    # The delivery report (ADR-0026). Derived on demand from the task files
+    # themselves, so it is built unconditionally — like the retention sweep it
+    # needs only the local queues and the clock, with no "not configured" state
+    # to gate on. `archived/` is in the list on purpose: once the retention
+    # sweep has run, that is where most of a week's window lives.
+    stats = QueueStatsView(
+        queues=[
+            inbox,
+            *step_queues.values(),
+            done,
+            failed,
+            healed_queue,
+            archived,
+        ],
+        clock=clock,
+    )
+
     return Harness(
         layout=layout,
         workflows=resolved,
@@ -745,13 +965,16 @@ def build(
         artifacts=view,
         stage_output=stage_output,
         control=control,
+        stats=stats,
         events=events,
         clock=clock,
         pollers=pollers,
         pr_watcher=pr_watcher,
         reconciler=reconciler,
         issue_reconciler=issue_reconciler,
+        retention_reconciler=retention_reconciler,
         healed=healed_queue,
         process_checks=checks,
         issue_import=issue_import,
+        skipped_processes=process_repo.skipped,
     )

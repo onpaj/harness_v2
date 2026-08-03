@@ -135,3 +135,13 @@ def test_workflow_less_task_still_requires_last_outcome():
 
     assert isinstance(decision, Failed)
     assert "lastOutcome" in decision.reason
+
+
+def test_a_resumed_task_routes_back_into_the_step_it_failed_at():
+    """The pair TaskControlService.resume writes must make route() choose the
+    failed step again — that is what lets resume avoid naming a queue itself
+    (invariant #3). Rewinding to ("architecture", "done") must re-derive
+    `development`, the step that failed."""
+    rewound = task(status="architecture", last_outcome="done")
+
+    assert route(rewound, WORKFLOW) == MoveTo("development")
