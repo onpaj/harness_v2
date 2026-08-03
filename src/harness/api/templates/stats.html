@@ -130,16 +130,21 @@
               </td>
               <td class="num">{{ report.delivery.merge_withheld }}</td>
             </tr>
-            <tr><td>Conflicts detected</td><td class="num">{{ report.delivery.conflicts }}</td></tr>
             <tr>
-              <td>— gone by the time the resolver looked</td>
-              <td class="num">{{ report.delivery.conflicts_clean }}</td>
+              <td>Unhealthy PRs picked up
+                <span class="hint">conflicted, failing checks, or both</span>
+              </td>
+              <td class="num">{{ report.delivery.unblocks }}</td>
             </tr>
             <tr>
-              <td>— resolved by the agent</td>
-              <td class="num">{{ report.delivery.conflicts_resolved }}</td>
+              <td>— gone by the time the agent looked</td>
+              <td class="num">{{ report.delivery.unblocks_clean }}</td>
             </tr>
-            <tr><td>— unresolved (failed)</td><td class="num">{{ report.delivery.conflicts_failed }}</td></tr>
+            <tr>
+              <td>— unblocked by the agent</td>
+              <td class="num">{{ report.delivery.unblocks_resolved }}</td>
+            </tr>
+            <tr><td>— still blocked (failed or stuck)</td><td class="num">{{ report.delivery.unblocks_failed }}</td></tr>
             <tr>
               <td>Review bounces
                 <span class="hint"><code>request_changes</code> sent back for another pass</span>

@@ -1,6 +1,31 @@
 # CHANGELOG
 
 
+## v1.10.1 (2026-08-03)
+
+
+## v1.10.0 (2026-08-03)
+
+### Bug Fixes
+
+- Stop replaying the GitHub credential to Azure on a log redirect
+  ([`6855b4b`](https://github.com/onpaj/harness_v2/commit/6855b4be9a83865c88d9967947b92dcafb17c979))
+
+The Actions log endpoint 302s to Azure Blob Storage, whose SAS token is already in the query string.
+  urllib copies every header onto the redirected request, so Azure received a GitHub bearer token it
+  never asked for and answered 401 — not in check_run_log's (404, 410) allowlist, so it raised,
+  GithubUnhealthyPrsCheck's per-PR guard swallowed it, and every red pull request was silently
+  skipped. Only conflicted PRs with no failing check-run ever reached an agent.
+
+Verified against the live 1.10.0 service, which logged one such warning per PR per tick, including
+  onpaj/harness_v2#155.
+
+No injected test opener exercises urllib's redirect path, which is why this shipped green; the
+  handler is now tested directly and one test pins that the default opener carries it.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+
+
 ## v1.9.0 (2026-08-02)
 
 ### Features
@@ -43,6 +68,280 @@ Co-authored-by: Claude <noreply@anthropic.com>
 
 
 ## v1.8.0 (2026-07-30)
+
+### Bug Fixes
+
+- Label a give-up on the pull request, and withhold the seeded blast radius
+  ([`151e205`](https://github.com/onpaj/harness_v2/commit/151e205dc5aa493025e7d74a20575bd72a7a0416))
+
+Five findings from the pre-merge review, all in the unblock-pr path.
+
+**A give-up now reaches `harness:needs-human`.** The attempt budget advances only when the head sha
+  moves, and the `stuck` path moves no sha by design — it pushes nothing. So on the one path where
+  the agent has declared the PR unfixable, no attempt was ever spent, no human was ever told, and
+  the settled task, once `RetentionReconciler` archived it out of the queues `_seed_pollers` seeds
+  `SourcePoller._seen` from, was re-minted on the next restart: another agent run on the same
+  unchanged PR, every retention window, indefinitely.
+
+`UnblockPrBehavior` now applies the give-up label itself on any non-`done` outcome, through an
+  injected `PrLabeller` callable (`behaviors/` may not import `drivers/`, so the wiring closes a
+  `GithubClient` into it — `OpenIssueBehavior` takes `slug_for` the same way). That closes both
+  halves at once: a human is told, and the check's existing give-up guard skips the PR forever, so
+  there is nothing left to re-mint. The label value travels on the task (`data["give_up_label"]`,
+  stamped by the check) so renaming it in `processes/unblock-pr.json` renames both halves — a
+  constant in the wiring would have the behavior write a label the check never reads. Best-effort: a
+  failed label call is written into the summary, never into a failed task.
+
+Also:
+
+- `harness init` seeds `head_prefix: "harness/"`, matching `automerge.json`, so a fresh install plus
+  a token no longer starts pushing to every open PR in every registered repo — including branches a
+  human has checked out. The check's own capability is unchanged; widening is one field and the
+  operator's act. - The fork guard casefolds both sides. `slug` is parsed verbatim from
+  `remote.origin.url`, `head_repo` is GitHub's canonical `full_name`, so a clone made with
+  `OnPaj/Harness_v2` failed the guard for *every* PR: no observations, no warning, a green board,
+  and every API call still working because GitHub repo paths are case-insensitive. - A missing
+  `data["source"]["base"]` raises `UnblockPrError` naming the key, before a worktree is attached,
+  instead of a bare `KeyError: 'base'`. - The attempt is spent, and the PR marked seen, only after
+  the brief is assembled — a transient 5xx from `check_run_log` no longer burns an attempt with zero
+  work done and skips the retry. - The give-up comment no longer claims a clean merge leaves nothing
+  to abandon: `merge()` runs `--no-commit --no-ff`, so it does. The merge is still only aborted when
+  conflicted, because `abort_merge` cannot tell a staged clean merge from the commoner "Already up
+  to date" (no MERGE_HEAD), where `git merge --abort` would fail a task whose only sin was a red
+  check.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+
+- Narrow the dashboard-authored head_prefix default and cover the give-up label wiring
+  ([`792e8b8`](https://github.com/onpaj/harness_v2/commit/792e8b86ca2eb89a3c752a2948162d6293dad4e6))
+
+github_unhealthy_prs_factory's head_prefix default widens to every open PR in every registered repo
+  when a second github-unhealthy-prs process is authored blank through the dashboard, unlike the
+  seeded process file which pins harness/. Narrow the factory default to harness/ and add
+  placeholder="harness/" to the ParamSpec, matching github_mergeable_factory's sibling shape; the
+  check class's own constructor default stays "" since tests construct it directly and rely on the
+  wide default, and nothing but the factory reaches the constructor in a real run.
+
+Also add the missing test for pr_labeller (the give-up label's wiring in cli._run, closing
+  GithubClient.add_label into UnblockPrBehavior) and fix a git_workspace.py comment that credited
+  abort_merge's "only after a conflicted merge" invariant to Landing alone, when UnblockPrBehavior
+  is a second caller under the same rule.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+
+- Restore UnblockPrBehavior wiring coverage in test_app.py
+  ([`9c4ba16`](https://github.com/onpaj/harness_v2/commit/9c4ba16a6181ad6d2e5c00f86e3389b56247c9c6))
+
+RESOLVER_DEFINITION and its catalog/queue wiring still used the pre-rename "resolve" step literal,
+  so the test silently fell through to the generic ClaudeCliBehavior instead of exercising app.py's
+  UNBLOCK_STEP dispatch branch. Rename the fixture to "unblock" and assert on two fingerprints only
+  UnblockPrBehavior can leave (a doubled WorkspaceHandle.merge call, and its clean-merge summary
+  string) so the test fails again if the dedicated branch regresses.
+
+- Seed the unblock-pr process on init, and page through open PRs
+  ([`e362316`](https://github.com/onpaj/harness_v2/commit/e362316f9bb4ebd377a8a5b724089b8015ef2baa))
+
+`harness init` still scaffolded `workflows/resolver.json` + `agents/resolve.json` for a workflow
+  this branch deleted. Worse, its `resolve` step no longer matches `app.UNBLOCK_STEP`, so a fresh
+  root fell through to the generic `ClaudeCliBehavior` — which never merges the base and commits
+  without excluding `.artifacts`, the exact behavior this branch exists to remove. Replaced with
+  `workflows/unblock-pr.json`, the `unblock` persona and `processes/unblock-pr.json`, seeded the way
+  `heal` and `automerge` already are (never clobbering a hand-edited file). The workflow writes
+  `maxParallel`, the key `fs_workflows` actually reads; the persona's `allowed_outcomes` stays
+  `["done"]` because `fs_agents` rejects `stuck` there — the live vocabulary is the workflow's
+  (invariant 42).
+
+`HttpGithubClient.list_pull_requests` took GitHub's default 30 per page with no `Link` following.
+  Under the old `harness/` prefix that filtered a small set client-side; with `head_prefix: ""` it
+  silently truncated the scan. Now `per_page=100` plus `rel="next"` following, on the cheap list
+  half only — the per-PR detail calls keep their shape.
+
+`GithubUnhealthyPrsCheck`'s per-PR `except Exception: continue` gave a systemic failure (bad token,
+  rate limit) no operator-visible signal. It now prints one `warning:` line per swallowed failure to
+  stderr and carries on.
+
+Also: the test helper that claims to mirror the production check factory now defaults `head_prefix`
+  to `""` as production does, and `github_mergeable_check.py`'s comment names `unblock-pr` instead
+  of the retired resolver.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+
+- Stamp the head sha into the autofix label, and skip fork PRs
+  ([`9d17941`](https://github.com/onpaj/harness_v2/commit/9d179419eef0312865896313e32ceb01aab1a399))
+
+Two consequences of `head_prefix` defaulting to `""` (the harness now acts on every open PR, not
+  just its own `harness/`-prefixed ones).
+
+The attempt budget counted restarts, not attempts. `_triage` bumps the `harness:autofix-<n>` label
+  inside `evaluate()`, gated only by the check's in-process `_seen`; the cross-restart guarantee
+  lives downstream in `SourcePoller._seen`, which drops the duplicate observation *after* the label
+  has been written. Every restart therefore re-triaged the same unchanged head and burned an
+  attempt, so a PR could reach `harness:needs-human` with zero completed attempts — twice an hour on
+  this machine, given the autoupdate job. The label is now `harness:autofix-<n>@<sha7>`, and a label
+  already naming the current head is not bumped: re-triaging the same head is free, only a genuinely
+  new head sha spends an attempt. A legacy `harness:autofix-2` (no `@sha`) names no head, so its
+  count is honoured and the next triage bumps, as before.
+
+`_bump_attempt_label` now adds the fresh label before removing the stale ones, so a failure between
+  the two — swallowed by the per-PR `except Exception` — leaves two counters rather than none, never
+  a silently reset budget; `_attempt_of` resolves that transient by taking the maximum rather than
+  the first match of an unordered tuple.
+
+A fork PR was also indistinguishable from a same-repo one: `PullRequestInfo` carried no head repo,
+  and a fork PR opened from the contributor's own `main` (the commonest shape) reads as `head_branch
+  == "main"`, so the workspace would attach to, commit to and push the *base* repo's `main` —
+  ADR-0009. The head repo is now carried on `PullRequestInfo` and the check skips any PR whose head
+  repo is not the slug being scanned; a missing one (a deleted fork) is skipped too, failing closed.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+
+- Tell the unblock agent when the brief is stale, and push nothing when it is stuck
+  ([`20907d8`](https://github.com/onpaj/harness_v2/commit/20907d87fd57cf2bdb9f0c3f274690874b336411))
+
+Four defects in the unblock-pr path, all in the same stretch of code:
+
+- The behavior recomputed `conflicted` from its own `merge(base)` but never told the agent when that
+  disagreed with the flag the check recorded at scan time. A conflict that appeared in between
+  reached the agent as a tree full of markers and a brief that never mentioned them. `data.body` is
+  now amended in both directions, word-for-word what the check renders for the same case. - A
+  non-`done` outcome ("stuck": you could not fix this — push nothing) still committed the tree,
+  turning unresolved markers into a two-parent merge commit. A conflicted merge is now abandoned
+  instead, as `LandingBehavior` already does when it has no agent to resolve one. -
+  `LandingBehavior` excluded `.artifacts` only by accident — the workspace's reattach `clean -fd`
+  deleted the untracked file before landing staged anything. The exclusion is now stated, scoped to
+  `data.branch` override tasks so an ordinary task still commits its artifacts (ADR-0006). -
+  `UnblockPrBehavior` composed its prompt with no `WorkflowRepository`, so the workflow's authored
+  hints, description and outcome vocabulary were silently discarded (invariant 42).
+  `served_workflows` is threaded in, sharing `ClaudeCliBehavior`'s derivation via a new
+  `resolve_step_vocabulary`. `app.py` also honours `agents/unblock.json`'s own `timeout`.
+
+Tests: the give-up edge is now driven end to end rather than only declared, and landing's exclusion
+  is pinned in both directions.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+
+### Documentation
+
+- Adr-0026, one agent unblocks a pull request
+  ([`ee455f0`](https://github.com/onpaj/harness_v2/commit/ee455f0cbf85641c55bdf6a6957e9d9dc6636442))
+
+- Correct stale resolver-workflow references in CLAUDE.md
+  ([`fcc8058`](https://github.com/onpaj/harness_v2/commit/fcc805899d7c0a4dfbdf8a6859a0e9f5ed9e72ea))
+
+Task 8 review found present-tense prose still describing the deleted `resolver` workflow. Rename
+  each live reference to `unblock-pr` (and its `unblock` step, replacing the old `resolve` step),
+  and rewrite the automerge partition paragraph so it states what GithubMergeableCheck and
+  GithubUnhealthyPrsCheck actually do: dirty (unconditionally) or
+  blocked/unstable/unknown-with-a-failing-check-run goes to unblock-pr; literal `clean` goes to
+  automerge unconditionally, even when a non-required check is failing, since github-unhealthy-prs
+  returns before ever inspecting check-runs once mergeable_state reads clean.
+
+- Design for a unified resolve-failing-pr process
+  ([`b9f7442`](https://github.com/onpaj/harness_v2/commit/b9f7442cf198773c67b5d4b0aaffb63b386bb2a4))
+
+Replaces the resolve-conflicts process, resolver workflow and resolve agent with one process whose
+  check triages every unhealthy open PR deterministically and whose single agent fixes whatever it
+  finds -- merge conflicts, failing check-runs, or both.
+
+Widens scope beyond the harness/ prefix to all open PRs, opt-out by label, bounded by a
+  three-attempt budget that ends in harness:needs-human.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+
+- Implementation plan for resolve-failing-pr
+  ([`9bd0c39`](https://github.com/onpaj/harness_v2/commit/9bd0c3997e62950f942b872d8c0903d4d86550c9))
+
+Eight TDD tasks: check-run reads on GithubClient, the unhealthy-PRs check and its attempt budget,
+  the wiring swap, a pathspec-excluding commit, UnblockPrBehavior, end-to-end coverage, and the ADR
+  plus the harness-root cutover.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+
+- Record the give-up label, the withheld seed and the casefolded fork guard
+  ([`1763273`](https://github.com/onpaj/harness_v2/commit/17632739bf597a9196fd3c763f4ecd86f483ba74))
+
+ADR-0026 gains the reasoning for the give-up label — why the attempt budget structurally cannot
+  reach `harness:needs-human` on the `stuck` path, and why that left the settled task being
+  re-minted every retention window — plus the three rejected alternatives (spending an attempt on
+  give-up, seeding `_seen` from `archived/`, binding a `label-issue`-shaped finisher).
+
+It also corrects two claims. The seeded blast radius is `harness/`, not `""`; and the assertion that
+  "unlike automerge, there is no dry_run half-measure available" was wrong — `head_prefix` is
+  exactly that half-measure, as the ADR's own revert path already documented.
+
+The design spec's error-handling section said a stuck round still spends an attempt, so three of
+  them reach the give-up label. That stopped being true when the attempt label gained its `@<sha7>`
+  stamp; corrected in place with a dated note, and its process JSON now says which root it describes
+  (the operator's hand-migrated `~/harness-root`, which deliberately runs the wide prefix) versus
+  what `harness init` seeds.
+
+CLAUDE.md's module map: the false "no merge to abandon" clause, the give-up labelling,
+  `UnblockPrError`, the casefolded fork guard, and when the attempt is spent.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+
+- Record the stamped autofix label, the fork skip and the lost write-up
+  ([`9a6df31`](https://github.com/onpaj/harness_v2/commit/9a6df319e0335cd35a92e6faad04d73a920b766f))
+
+Fix wave 1 changed the attempt label to `harness:autofix-<n>@<sha7>` and added a fork-PR guard; fix
+  wave 2 changed the behavior's brief handling and its give-up path. Neither wave touched a
+  document. ADR-0026, the design spec and CLAUDE.md now state the current format *and the reason for
+  it*: the sha stamp is what stops a service restart from spending an attempt on an unchanged head,
+  which is the whole point. The spec's decision table gains the fork row (it is now the first guard,
+  ahead of the skip label), and its migration section records how a legacy unstamped label reads.
+
+ADR-0026 also states the consequence fix wave 2 verified against a real git repo: on the success
+  path the `unblock` write-up is not persisted anywhere — excluded from the commit, then deleted by
+  `land`'s reattach `clean -fd`. It is reachable only between `unblock` finishing and `land`
+  attaching, and permanently on the `stuck` path, so the give-up case keeps its write-up and the
+  success case loses it.
+
+The plan's cutover section gains the two preconditions the final review found missing —
+  `queues/resolve/` must be empty before `workflows/resolver.json` is deleted, and the old resolver
+  worktrees must be left alone (invariant 30) — and Step 7's verification snippet now actually calls
+  `build()` instead of printing a repository object that has validated nothing. Its workflow JSON
+  spells `maxParallel`, the key the parser reads, and its agent JSON drops `stuck` from
+  `allowed_outcomes`, which `fs_agents` rejects outright.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+
+### Features
+
+- Bound PR autofix to three attempts, then hand it to a human
+  ([`7658026`](https://github.com/onpaj/harness_v2/commit/76580268b76c59b6a4680b8e09d2dbbabe822479))
+
+- Let a commit exclude a pathspec
+  ([`63a8173`](https://github.com/onpaj/harness_v2/commit/63a8173bd6c3fcb75c7c541554090a63b40cabe0))
+
+- One behavior unblocks a PR, whatever is wrong with it
+  ([`d5fb9dd`](https://github.com/onpaj/harness_v2/commit/d5fb9dd9306fe8466dbca6ec45bb01c9842cd3f6))
+
+- Read check runs and their logs from GitHub
+  ([`382883d`](https://github.com/onpaj/harness_v2/commit/382883d60cffda71634bd54083c08a088a0b074f))
+
+- Triage unhealthy pull requests into a single brief
+  ([`6647f2d`](https://github.com/onpaj/harness_v2/commit/6647f2dbfb37a01b2320d1615961cea414eed9ba))
+
+### Refactoring
+
+- Replace the github-conflicts action with github-unhealthy-prs
+  ([`ca6a34f`](https://github.com/onpaj/harness_v2/commit/ca6a34fbb15652590f4b8565ecc6eb04a44a6f24))
+
+### Testing
+
+- Pin the exclude-only commit case and fix a drifted port signature
+  ([`3b65842`](https://github.com/onpaj/harness_v2/commit/3b65842e7bf840ed3003865a2101edc9b0673bd7))
+
+test_git_workspace.py gained the motivating case for checking `diff --cached` instead of `status
+  --porcelain` in GitWorkspaceHandle.commit: when the only change on disk is inside the excluded
+  path, staging with the pathspec exclusion must leave nothing to commit and must not raise.
+
+RealFsHandle.commit in test_agent_behavior.py never picked up the widened `commit(message, *,
+  exclude=())` signature from the WorkspaceHandle port; ABCMeta doesn't check subclass signatures,
+  so nothing failed today, but a future call with `exclude=` would TypeError.
+
+- Unblock-pr end to end, including the give-up path
+  ([`c923c41`](https://github.com/onpaj/harness_v2/commit/c923c419c7996ecf7fafb4d74ebfdec2a0b6fced))
 
 
 ## v1.7.0 (2026-07-30)

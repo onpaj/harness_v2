@@ -45,8 +45,8 @@ def clamp_window(days: Any, *, default: int = DEFAULT_WINDOW_DAYS) -> int:
 KIND_ISSUE = "issue"
 """Work born from an issue in a tracker — the harness implementing something."""
 
-KIND_CONFLICT = "conflict"
-"""A resolver task: `GithubConflictsCheck` saw a PR go `dirty`."""
+KIND_UNBLOCK = "unblock"
+"""An unblock task: `GithubUnhealthyPrsCheck` saw a PR go `dirty` or red."""
 
 KIND_AUTOMERGE = "automerge"
 """An automerge-review task: `GithubMergeableCheck` saw a PR go `clean`."""
@@ -57,7 +57,7 @@ KIND_HEAL = "heal"
 KIND_OTHER = "other"
 """Everything else — `harness submit`, a bare scheduled trigger."""
 
-KINDS = (KIND_ISSUE, KIND_CONFLICT, KIND_AUTOMERGE, KIND_HEAL, KIND_OTHER)
+KINDS = (KIND_ISSUE, KIND_UNBLOCK, KIND_AUTOMERGE, KIND_HEAL, KIND_OTHER)
 """Report order. Issues first: they are what the operator came to look at."""
 
 
@@ -123,12 +123,16 @@ class Delivery:
     """The `merge-pr` finisher would have merged but `dry_run` was on. Paired
     with `auto_merged`, this is the number that says whether it is safe to flip
     `dry_run: false`."""
-    conflicts: int = 0
-    conflicts_clean: int = 0
-    """Resolved by a plain merge, no agent call spent."""
-    conflicts_resolved: int = 0
-    """Resolved by the `resolve` persona — a real conflict, really fixed."""
-    conflicts_failed: int = 0
+    unblocks: int = 0
+    """Unhealthy pull requests the harness was handed — conflicted, red, or
+    both. `GithubUnhealthyPrsCheck`'s whole catchment, not just conflicts."""
+    unblocks_clean: int = 0
+    """Nothing left to fix by the time the behavior looked: the base merged
+    cleanly and nothing was red. No agent call spent."""
+    unblocks_resolved: int = 0
+    """Unblocked by the `unblock` persona — a real problem, really fixed."""
+    unblocks_failed: int = 0
+    """The unblock task failed, or the agent reported `stuck`."""
     review_bounces: int = 0
     """`request_changes` outcomes — how much rework the review loop demanded."""
 
@@ -138,10 +142,10 @@ class Delivery:
             "prsMerged": self.prs_merged,
             "autoMerged": self.auto_merged,
             "mergeWithheld": self.merge_withheld,
-            "conflicts": self.conflicts,
-            "conflictsClean": self.conflicts_clean,
-            "conflictsResolved": self.conflicts_resolved,
-            "conflictsFailed": self.conflicts_failed,
+            "unblocks": self.unblocks,
+            "unblocksClean": self.unblocks_clean,
+            "unblocksResolved": self.unblocks_resolved,
+            "unblocksFailed": self.unblocks_failed,
             "reviewBounces": self.review_bounces,
         }
 

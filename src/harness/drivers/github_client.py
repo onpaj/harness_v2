@@ -57,7 +57,7 @@ class PullRequestDetail:
 
 @dataclass(frozen=True)
 class PullRequestInfo:
-    """A pull request as `GithubConflictsCheck` sees it — distinct from
+    """A pull request as `GithubUnhealthyPrsCheck` sees it — distinct from
     `PullRequestRef` (owned by the forge's find/create pair, which has no
     `mergeable_state`): this answers "is this PR ours, and does it need
     action", not "does a PR already exist for this branch"."""
@@ -77,6 +77,57 @@ class PullRequestInfo:
     body: str = ""
     labels: tuple[str, ...] = ()
     draft: bool = False
+    # The repo the head branch actually lives in (`owner/name`), which is what
+    # distinguishes a fork PR from a same-repo one — `head_branch` alone cannot:
+    # a fork PR opened from the contributor's own `main` reads as `"main"`, the
+    # base repo's own default branch. `""` means unknown, which GitHub reports
+    # as a null `head.repo` once the fork has been deleted. Defaulted like the
+    # four fields above, so every existing construction site compiles unchanged
+    # — but a caller that acts on a PR must treat the default as "not mine".
+    head_repo: str = ""
+
+
+@dataclass(frozen=True)
+class CheckRun:
+    """One CI check on a commit, as the unhealthy-PRs check sees it.
+
+    `conclusion` is GitHub's own vocabulary and is `""` while the run is still
+    in progress. Only `failure` and `timed_out` are things an agent can fix —
+    `cancelled` and `skipped` are states of the world, not defects.
+    """
+
+    id: int
+    name: str
+    conclusion: str
+    url: str
+
+
+FAILING_CONCLUSIONS = frozenset({"failure", "timed_out"})
+"""The conclusions that make a check-run worth waking an agent for."""
+
+
+def _next_page_url(link_header: str | None) -> str | None:
+    """The `rel="next"` URL out of a GitHub `Link` header, or None.
+
+    The header is a comma-separated list of `<url>; rel="name"` entries; an
+    absent header, or one with no `next` entry, means this was the last page.
+    Parsed rather than reconstructed from a `page=` counter so the caller
+    follows the server's own cursor.
+    """
+    if not link_header:
+        return None
+    for part in link_header.split(","):
+        segments = part.split(";")
+        if len(segments) < 2:
+            continue
+        url = segments[0].strip()
+        if not (url.startswith("<") and url.endswith(">")):
+            continue
+        for attribute in segments[1:]:
+            key, _, value = attribute.strip().partition("=")
+            if key.strip() == "rel" and value.strip().strip('"\'') == "next":
+                return url[1:-1]
+    return None
 
 
 class GithubClient(ABC):
@@ -142,6 +193,20 @@ class GithubClient(ABC):
 
         Idempotent: a PR that is already up to date / not behind is a no-op,
         not a failure — safe to call every tick.
+        """
+
+    @abstractmethod
+    def list_check_runs(self, repo: str, sha: str) -> list[CheckRun]:
+        """Every check run GitHub has recorded against this commit."""
+
+    @abstractmethod
+    def check_run_log(self, repo: str, check_run_id: int) -> str:
+        """The run's plain-text log, or "" when there is none to fetch.
+
+        Only GitHub Actions check runs have a log at this endpoint (their
+        check-run ids *are* job ids). A third-party check, or a log that has
+        aged out, yields "" rather than raising — an absent log degrades the
+        brief, it does not fail the tick.
         """
 
     @abstractmethod
@@ -215,6 +280,8 @@ class FakeGithubClient(GithubClient):
         # from `pulls`' "does a PR already exist for this branch".
         self._pull_requests: dict[int, PullRequestInfo] = {}
         self.updated_branches: list[tuple[str, int]] = []
+        self._check_runs: dict[str, list[CheckRun]] = {}
+        self._check_run_logs: dict[int, str] = {}
 
     def add_issue(self, issue: Issue) -> None:
         self._issues[issue.number] = issue
@@ -244,17 +311,26 @@ class FakeGithubClient(GithubClient):
         ]
 
     def add_label(self, repo: str, number: int, label: str) -> None:
-        issue = self._issues[number]
-        if label not in issue.labels:
+        issue = self._issues.get(number)
+        if issue is not None and label not in issue.labels:
             self._issues[number] = replace(issue, labels=issue.labels + (label,))
+        pull = self._pull_requests.get(number)
+        if pull is not None and label not in pull.labels:
+            self._pull_requests[number] = replace(
+                pull, labels=pull.labels + (label,)
+            )
 
     def remove_label(self, repo: str, number: int, label: str) -> None:
         issue = self._issues.get(number)
-        if issue is None or label not in issue.labels:
-            return
-        self._issues[number] = replace(
-            issue, labels=tuple(l for l in issue.labels if l != label)
-        )
+        if issue is not None and label in issue.labels:
+            self._issues[number] = replace(
+                issue, labels=tuple(l for l in issue.labels if l != label)
+            )
+        pull = self._pull_requests.get(number)
+        if pull is not None and label in pull.labels:
+            self._pull_requests[number] = replace(
+                pull, labels=tuple(l for l in pull.labels if l != label)
+            )
 
     def default_branch(self, repo: str) -> str:
         return self._default_branch
@@ -370,6 +446,18 @@ class FakeGithubClient(GithubClient):
         if info is not None:
             self._pull_requests[number] = replace(info, mergeable_state="clean")
 
+    def add_check_run(self, sha: str, run: CheckRun) -> None:
+        self._check_runs.setdefault(sha, []).append(run)
+
+    def set_check_run_log(self, check_run_id: int, text: str) -> None:
+        self._check_run_logs[check_run_id] = text
+
+    def list_check_runs(self, repo: str, sha: str) -> list[CheckRun]:
+        return list(self._check_runs.get(sha, ()))
+
+    def check_run_log(self, repo: str, check_run_id: int) -> str:
+        return self._check_run_logs.get(check_run_id, "")
+
     def create_issue(
         self, repo: str, *, title: str, body: str, labels: tuple[str, ...]
     ) -> Issue:
@@ -391,9 +479,52 @@ class FakeGithubClient(GithubClient):
         return None
 
 
+class _StripCrossHostAuth(urllib.request.HTTPRedirectHandler):
+    """Drops `Authorization` when a redirect crosses to a different host.
+
+    `check_run_log`'s endpoint (`/actions/jobs/<id>/logs`) 302s to a signed
+    Azure Blob Storage URL that already carries its own SAS token in the query
+    string. urllib's stock handler copies *every* header of the original
+    request onto the redirected one, so Azure receives a GitHub
+    `Authorization: Bearer …` it never asked for and rejects the whole request
+    with `401 Server failed to authenticate the request.` — and 401 is not in
+    `check_run_log`'s `(404, 410)` allowlist, so it raises.
+
+    That raise is then swallowed by `GithubUnhealthyPrsCheck.evaluate()`'s
+    per-PR guard, which skips the PR entirely. The effect is the worst
+    available shape: no crash, one warning line per PR per tick, and **every
+    red pull request silently un-triaged** — the feature's whole point. Only
+    conflicted PRs with no failing check-run (no log to fetch) ever worked.
+
+    Dropping the header is the correct general rule, not a workaround for this
+    one endpoint: a credential minted for one host must never be replayed to
+    another. Python 3.11's `HTTPRedirectHandler` does not do this for us —
+    verified, not assumed.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        redirected = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if redirected is None:
+            return None
+        if urllib.parse.urlsplit(newurl).netloc != urllib.parse.urlsplit(
+            req.full_url
+        ).netloc:
+            # `Request` capitalizes header names on the way in and
+            # `remove_header` capitalizes on the way out, so the two agree.
+            redirected.remove_header("Authorization")
+        return redirected
+
+
 class HttpGithubClient(GithubClient):
     """Real client against `api.github.com`. `opener` is injectable so it can be
-    tested without a network; the default is stdlib `urllib.request.build_opener()`."""
+    tested without a network; the default is a `urllib.request.build_opener()`
+    carrying `_StripCrossHostAuth`.
+
+    Note what the injection seam does *not* cover: a fake opener returns its
+    response directly, so no injected opener ever exercises urllib's redirect
+    path. Every test of `check_run_log` passed while the real client 401'd on
+    every call — which is why `_StripCrossHostAuth` is tested directly, and why
+    one test asserts the default opener actually carries it."""
 
     def __init__(
         self,
@@ -404,7 +535,7 @@ class HttpGithubClient(GithubClient):
     ) -> None:
         self._token = token
         self._api = api.rstrip("/")
-        self._opener = opener or urllib.request.build_opener()
+        self._opener = opener or urllib.request.build_opener(_StripCrossHostAuth())
 
     def _headers(self) -> dict[str, str]:
         return {
@@ -556,17 +687,38 @@ class HttpGithubClient(GithubClient):
             state=item.get("state", "open"),
         )
 
+    def _get_all_pages(self, url: str) -> list[dict]:
+        """Every item of a paginated list endpoint, following `Link: rel="next"`.
+
+        GitHub caps a page at 100 and defaults to 30. Without this, a repo with
+        more than one page of open pull requests is silently *truncated* rather
+        than erroring — the failure mode is a PR the harness simply never sees,
+        which is invisible from the outside. The cursor is the server's own
+        `next` URL rather than a `page=` counter we increment, so it stays
+        correct if GitHub switches that endpoint to cursor pagination.
+        """
+        items: list[dict] = []
+        next_url: str | None = url
+        while next_url:
+            request = urllib.request.Request(
+                next_url, headers=self._headers(), method="GET"
+            )
+            with self._opener.open(request) as response:
+                items.extend(json.loads(response.read()))
+                next_url = _next_page_url(response.headers.get("Link"))
+        return items
+
     def list_pull_requests(
         self, repo: str, *, head_prefix: str | None = None
     ) -> list[PullRequestInfo]:
         # `GET .../pulls` does not return `mergeable_state` — that field is only
         # computed and returned by the single-PR endpoint. So this is two-tier:
-        # one cheap list call, then one detail call per matching PR only.
-        query = urllib.parse.urlencode({"state": "open"})
+        # one cheap (but paginated) list call, then one detail call per matching
+        # PR only. Only the list half paginates — the detail calls are already
+        # one-per-PR and page-free.
+        query = urllib.parse.urlencode({"state": "open", "per_page": 100})
         url = f"{self._api}/repos/{repo}/pulls?{query}"
-        request = urllib.request.Request(url, headers=self._headers(), method="GET")
-        with self._opener.open(request) as response:
-            raw = json.loads(response.read())
+        raw = self._get_all_pages(url)
 
         matching = []
         for item in raw:
@@ -586,6 +738,10 @@ class HttpGithubClient(GithubClient):
                 detail = json.loads(response.read())
             base = item.get("base") or detail.get("base") or {}
             head_detail = detail.get("head") or item.get("head") or {}
+            # `head.repo` is null once a fork has been deleted, so `or {}` is
+            # load-bearing rather than defensive: the read must degrade to the
+            # unknown-repo default, never raise.
+            head_repo = (head_detail.get("repo") or {}).get("full_name") or ""
             infos.append(
                 PullRequestInfo(
                     number=number,
@@ -602,6 +758,7 @@ class HttpGithubClient(GithubClient):
                         if isinstance(label, dict) and "name" in label
                     ),
                     draft=bool(detail.get("draft", item.get("draft", False))),
+                    head_repo=head_repo,
                 )
             )
         return infos
@@ -655,6 +812,36 @@ class HttpGithubClient(GithubClient):
         except urllib.error.HTTPError as error:
             if error.code == 422:  # not behind / already up to date
                 return
+            raise
+
+    def list_check_runs(self, repo: str, sha: str) -> list[CheckRun]:
+        url = f"{self._api}/repos/{repo}/commits/{sha}/check-runs"
+        request = urllib.request.Request(url, headers=self._headers(), method="GET")
+        with self._opener.open(request) as response:
+            raw = json.loads(response.read())
+        return [
+            CheckRun(
+                id=int(item["id"]),
+                name=item.get("name", ""),
+                conclusion=item.get("conclusion") or "",
+                url=item.get("html_url", ""),
+            )
+            for item in raw.get("check_runs", [])
+        ]
+
+    def check_run_log(self, repo: str, check_run_id: int) -> str:
+        # An Actions check-run id is its job id; the endpoint 302s to a signed
+        # URL that the opener follows for us, and the body is plain text.
+        url = f"{self._api}/repos/{repo}/actions/jobs/{check_run_id}/logs"
+        request = urllib.request.Request(url, headers=self._headers(), method="GET")
+        try:
+            with self._opener.open(request) as response:
+                return response.read().decode("utf-8", errors="replace")
+        except urllib.error.HTTPError as error:
+            # 404: not an Actions run, or the log has aged out. 410: expired.
+            # Neither is a fault — the brief simply carries no log.
+            if error.code in (404, 410):
+                return ""
             raise
 
     def create_issue(

@@ -10,8 +10,8 @@ reads: a healed failure is retired into `done/`, a declined one stays in
 """
 
 from harness.drivers.failed_tasks_check import FailedTasksCheck
-from harness.drivers.github_conflicts_check import SOURCE_KIND as MERGEABILITY_SOURCE_KIND
 from harness.drivers.github_mergeable_check import SOURCE_KIND as PULL_REQUEST_SOURCE_KIND
+from harness.drivers.github_unhealthy_prs_check import SOURCE_KIND as PR_HEALTH_SOURCE_KIND
 from harness.drivers.memory import FakeClock, MemoryEventSink, MemoryTaskQueue
 from harness.models import END, FAILED, HistoryEntry, Task
 
@@ -302,21 +302,21 @@ def test_the_two_recursion_guards_record_distinct_notes():
     assert "heal-declined" in notes["tsk_fix_1"]
 
 
-def test_brake_declines_a_failed_resolver_task_born_from_a_harness_pr():
-    """`GithubConflictsCheck` mints resolver tasks with `source.kind ==
-    github_conflicts_check.SOURCE_KIND` ("mergeability") and no body/
-    `data.heal` — the brake must still catch them, or the resolver half of
-    the cycle in the review's diagram is unbounded. Sourcing the literal
+def test_brake_declines_a_failed_unblock_task_born_from_a_harness_pr():
+    """`GithubUnhealthyPrsCheck` mints unblock tasks with `source.kind ==
+    github_unhealthy_prs_check.SOURCE_KIND` ("pull-request-health") and no
+    body/`data.heal` — the brake must still catch them, or the unblock half
+    of the cycle in the review's diagram is unbounded. Sourcing the literal
     from the owning driver's own constant means renaming it there fails
     this test instead of silently disarming the guard."""
     failed = MemoryTaskQueue("failed")
     done = MemoryTaskQueue("done")
     failed.put(
         failed_task(
-            "tsk_resolver_1",
+            "tsk_unblock_1",
             data={
-                "request": "resolve merge conflict",
-                "source": {"kind": MERGEABILITY_SOURCE_KIND},
+                "request": "unblock PR #7",
+                "source": {"kind": PR_HEALTH_SOURCE_KIND},
             },
         )
     )
@@ -471,3 +471,10 @@ def test_render_failure_report_falls_back_to_status_when_there_is_no_trace():
     )
 
     assert "- failing step: failed" in _render_failure_report(task)
+
+
+def test_pr_health_tasks_are_recognised_as_pr_born():
+    from harness.drivers.failed_tasks_check import PR_BORN_SOURCE_KINDS
+    from harness.drivers.github_unhealthy_prs_check import SOURCE_KIND
+
+    assert SOURCE_KIND in PR_BORN_SOURCE_KINDS

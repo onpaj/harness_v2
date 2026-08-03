@@ -46,7 +46,7 @@ from harness.ports.queue import TaskQueue
 from harness.ports.stats import (
     DEFAULT_WINDOW_DAYS,
     KIND_AUTOMERGE,
-    KIND_CONFLICT,
+    KIND_UNBLOCK,
     KIND_HEAL,
     KIND_ISSUE,
     KIND_OTHER,
@@ -59,11 +59,16 @@ from harness.ports.stats import (
     StatsView,
 )
 
-CONFLICT_SOURCE_KIND = "mergeability"
-"""`drivers/github_conflicts_check.SOURCE_KIND`, repeated rather than imported:
-this is a core module and may not import a driver. `tests/test_stats.py` asserts
-the two are equal, so a rename in the driver fails the suite instead of silently
-reclassifying every resolver task as `other`."""
+UNBLOCK_SOURCE_KIND = "pull-request-health"
+"""`drivers/github_unhealthy_prs_check.SOURCE_KIND`, repeated rather than
+imported: this is a core module and may not import a driver.
+`tests/test_stats.py` asserts the two are equal, so a rename in the driver fails
+the suite instead of silently reclassifying every unblock task as `other`.
+
+It was `"mergeability"` while the retired `GithubConflictsCheck` minted these
+tasks. Nothing migrates the old value: a task minted before the swap keeps its
+own `data.source.kind` and now classifies as `other`, which only affects a
+window still reaching back past the upgrade."""
 
 AUTOMERGE_SOURCE_KIND = "pull-request"
 """`drivers/github_mergeable_check.SOURCE_KIND`. Same arrangement."""
@@ -138,8 +143,8 @@ def task_kind(task: Task) -> str:
         return KIND_HEAL
     source = task.data.get("source")
     kind = source.get("kind") if isinstance(source, dict) else None
-    if kind == CONFLICT_SOURCE_KIND:
-        return KIND_CONFLICT
+    if kind == UNBLOCK_SOURCE_KIND:
+        return KIND_UNBLOCK
     if kind == AUTOMERGE_SOURCE_KIND:
         return KIND_AUTOMERGE
     if kind in ISSUE_SOURCE_KINDS:
@@ -206,10 +211,10 @@ class _DeliveryTally:
     prs_merged: int = 0
     auto_merged: int = 0
     merge_withheld: int = 0
-    conflicts: int = 0
-    conflicts_clean: int = 0
-    conflicts_resolved: int = 0
-    conflicts_failed: int = 0
+    unblocks: int = 0
+    unblocks_clean: int = 0
+    unblocks_resolved: int = 0
+    unblocks_failed: int = 0
     review_bounces: int = 0
 
     def freeze(self) -> Delivery:
@@ -232,10 +237,10 @@ def _count_delivery(task: Task, *, kind: str, completed: bool, into: _DeliveryTa
         else:
             into.auto_merged += 1
 
-    if kind == KIND_CONFLICT:
-        into.conflicts += 1
+    if kind == KIND_UNBLOCK:
+        into.unblocks += 1
         if not completed:
-            into.conflicts_failed += 1
+            into.unblocks_failed += 1
         else:
             resolve = task.data.get("resolve")
             clean = resolve.get("clean") if isinstance(resolve, dict) else None
@@ -243,9 +248,9 @@ def _count_delivery(task: Task, *, kind: str, completed: bool, into: _DeliveryTa
             # counts as resolved rather than clean: it is the conservative read,
             # since a clean merge is the cheaper half of the pair.
             if clean:
-                into.conflicts_clean += 1
+                into.unblocks_clean += 1
             else:
-                into.conflicts_resolved += 1
+                into.unblocks_resolved += 1
 
     into.review_bounces += sum(
         1 for entry in task.history if entry.outcome == REQUEST_CHANGES

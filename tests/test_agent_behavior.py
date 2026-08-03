@@ -60,7 +60,7 @@ class RealFsHandle(WorkspaceHandle):
         target.write_text(content)
         self.writes.append((relpath, content))
 
-    def commit(self, message: str) -> str | None:
+    def commit(self, message: str, *, exclude: tuple[str, ...] = ()) -> str | None:
         self.commits.append(message)
         return f"sha{len(self.commits)}"
 

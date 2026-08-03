@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import pytest
 
-from harness.drivers.github_conflicts_check import SOURCE_KIND as CONFLICTS_KIND
+from harness.drivers.github_unhealthy_prs_check import SOURCE_KIND as UNBLOCK_KIND
 from harness.drivers.github_mergeable_check import SOURCE_KIND as MERGEABLE_KIND
 from harness.drivers.memory import FakeClock, MemoryTaskQueue
 from harness.models import (
@@ -22,7 +22,7 @@ from harness.models import (
 )
 from harness.ports.stats import (
     KIND_AUTOMERGE,
-    KIND_CONFLICT,
+    KIND_UNBLOCK,
     KIND_HEAL,
     KIND_ISSUE,
     KIND_OTHER,
@@ -30,7 +30,7 @@ from harness.ports.stats import (
 )
 from harness.stats import (
     AUTOMERGE_SOURCE_KIND,
-    CONFLICT_SOURCE_KIND,
+    UNBLOCK_SOURCE_KIND,
     QueueStatsView,
     settling_entry,
     summarize,
@@ -202,7 +202,7 @@ def test_source_kind_literals_match_the_drivers_that_stamp_them():
     """`stats.py` is core and may not import a driver, so it repeats these two
     literals. This is the guard that a rename in either driver fails loudly
     instead of silently reclassifying every task as `other`."""
-    assert CONFLICT_SOURCE_KIND == CONFLICTS_KIND
+    assert UNBLOCK_SOURCE_KIND == UNBLOCK_KIND
     assert AUTOMERGE_SOURCE_KIND == MERGEABLE_KIND
 
 
@@ -211,7 +211,7 @@ def test_source_kind_literals_match_the_drivers_that_stamp_them():
     [
         ({"source": {"kind": "github"}}, KIND_ISSUE),
         ({"source": {"kind": "jira"}}, KIND_ISSUE),
-        ({"source": {"kind": CONFLICTS_KIND}}, KIND_CONFLICT),
+        ({"source": {"kind": UNBLOCK_KIND}}, KIND_UNBLOCK),
         ({"source": {"kind": MERGEABLE_KIND}}, KIND_AUTOMERGE),
         ({}, KIND_OTHER),
         ({"source": {"kind": "something-else"}}, KIND_OTHER),
@@ -235,17 +235,17 @@ def test_breakdowns_group_by_kind_repository_and_workflow():
             status=END,
             repository="other_repo",
             workflow_template="resolver",
-            data={"source": {"kind": CONFLICTS_KIND}},
+            data={"source": {"kind": UNBLOCK_KIND}},
         ),
     ]
     report = summarize(tasks, now=NOW, days=7)
 
     assert group(report.by_kind, KIND_ISSUE).outcomes.settled == 2
-    assert group(report.by_kind, KIND_CONFLICT).outcomes.completed == 1
+    assert group(report.by_kind, KIND_UNBLOCK).outcomes.completed == 1
     assert group(report.by_repository, "harness_v2").outcomes.failed == 1
     assert group(report.by_workflow, "resolver").outcomes.completed == 1
     # Fixed order for kinds, volume order for the open-ended axes.
-    assert [row.name for row in report.by_kind] == [KIND_ISSUE, KIND_CONFLICT]
+    assert [row.name for row in report.by_kind] == [KIND_ISSUE, KIND_UNBLOCK]
     assert [row.name for row in report.by_repository] == ["harness_v2", "other_repo"]
 
 
@@ -265,7 +265,7 @@ def test_labels_of_a_non_issue_task_are_not_a_label_row():
     conflict = task(
         history=(entry(at=NOW, to=END),),
         status=END,
-        data={"source": {"kind": CONFLICTS_KIND, "labels": ["noise"]}},
+        data={"source": {"kind": UNBLOCK_KIND, "labels": ["noise"]}},
     )
     assert summarize([conflict], now=NOW, days=7).by_label == ()
 
@@ -336,9 +336,9 @@ def test_automerge_separates_a_real_merge_from_a_dry_run():
     assert (report.delivery.auto_merged, report.delivery.merge_withheld) == (1, 1)
 
 
-def test_conflicts_split_clean_resolved_and_failed():
+def test_unblocks_split_clean_resolved_and_failed():
     def conflict(task_id, *, to=END, resolve=None):
-        data = {"source": {"kind": CONFLICTS_KIND}}
+        data = {"source": {"kind": UNBLOCK_KIND}}
         if resolve is not None:
             data["resolve"] = resolve
         return task(
@@ -361,11 +361,11 @@ def test_conflicts_split_clean_resolved_and_failed():
         now=NOW,
         days=7,
     )
-    assert report.delivery.conflicts == 4
-    assert report.delivery.conflicts_clean == 1
+    assert report.delivery.unblocks == 4
+    assert report.delivery.unblocks_clean == 1
     # The unstamped one reads as agent-resolved: the conservative half.
-    assert report.delivery.conflicts_resolved == 2
-    assert report.delivery.conflicts_failed == 1
+    assert report.delivery.unblocks_resolved == 2
+    assert report.delivery.unblocks_failed == 1
 
 
 # --- cost --------------------------------------------------------------------

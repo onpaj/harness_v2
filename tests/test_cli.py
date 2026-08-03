@@ -29,7 +29,7 @@ from harness.cli import (
     serve,
 )
 from harness.drivers.fs_agents import FilesystemAgentCatalog
-from harness.drivers.github_client import FakeGithubClient
+from harness.drivers.github_client import FakeGithubClient, HttpGithubClient
 from harness.drivers.jira_client import FakeJiraClient
 from harness.drivers.memory import MemoryArtifactStore, MemoryRepositoryRegistry
 from harness.drivers.stage_output import StageOutputProjection
@@ -332,7 +332,7 @@ def test_a_binding_without_a_label_is_dropped_from_the_served_set(monkeypatch, t
     # `open-issue` must already be a known finisher kind here.
     assert "label" in err
     assert "review" not in captured["served_names"]
-    assert set(captured["served_names"]) == {DEFAULT_WORKFLOW, DEFAULT_HEAL_WORKFLOW, "resolver", "automerge"}
+    assert set(captured["served_names"]) == {DEFAULT_WORKFLOW, DEFAULT_HEAL_WORKFLOW, "unblock-pr", "automerge"}
 
 
 def _make_stale_heal_root(tmp_path) -> Path:
@@ -405,7 +405,7 @@ def test_the_stale_pre_generic_heal_workflow_is_dropped_not_fatal(
     assert "label" in err
     harness = captured["harness"]
     assert DEFAULT_HEAL_WORKFLOW not in harness.workflows
-    assert set(harness.workflows) == {DEFAULT_WORKFLOW, "resolver", "automerge"}
+    assert set(harness.workflows) == {DEFAULT_WORKFLOW, "unblock-pr", "automerge"}
     # The seeded autoheal Process targets the now-dropped `heal` workflow, so
     # it must be skipped rather than crashing `build()` with "not a known
     # workflow or step" — the same warning above names it.
@@ -673,6 +673,38 @@ def test_run_passes_issue_import_factory_to_build_only_with_a_token(monkeypatch,
     monkeypatch.setenv("GITHUB_TOKEN", "tok")
     assert main(["run", "--root", str(tmp_path)]) == 0
     assert captured["issue_import_factory"] is not None
+
+
+def test_run_wires_pr_labeller_to_add_label_only_with_a_token(monkeypatch, tmp_path):
+    """`pr_labeller` is the other half of the give-up containment (ADR-0027):
+    `UnblockPrBehavior` calls it to stamp `harness:needs-human` itself when the
+    agent gives up. `None` without a token, exactly like the
+    `github-unhealthy-prs` check that mints those tasks in the first place, so
+    the two halves are never configured apart — bound to `GithubClient.add_label`
+    the same way `issue_import_factory` is only present with a token."""
+    main(["init", "--root", str(tmp_path)])
+    captured = {}
+
+    def fake_build(*args, **kwargs):
+        captured["pr_labeller"] = kwargs.get("pr_labeller")
+        return object()
+
+    async def fake_serve(harness, port, poll_interval, source_interval=30.0, pr_poll_interval=0.0, reconcile_interval=300.0, registry=None):
+        pass
+
+    monkeypatch.setattr("harness.cli.build", fake_build)
+    monkeypatch.setattr("harness.cli.serve", fake_serve)
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+
+    assert main(["run", "--root", str(tmp_path)]) == 0
+    assert captured["pr_labeller"] is None
+
+    monkeypatch.setenv("GITHUB_TOKEN", "tok")
+    assert main(["run", "--root", str(tmp_path)]) == 0
+    pr_labeller = captured["pr_labeller"]
+    assert pr_labeller is not None
+    assert pr_labeller.__self__.__class__.__name__ == "HttpGithubClient"
+    assert pr_labeller.__func__ is HttpGithubClient.add_label
 
 
 async def test_serve_passes_the_harness_issue_import_into_create_app(monkeypatch, tmp_path):
@@ -1235,15 +1267,16 @@ def test_init_no_workflow_writes_no_default_workflow(tmp_path, capsys):
 
 def test_init_creates_processes_directory(tmp_path):
     """`harness init` writes processes/ next to agents/ and triggers/ — no
-    longer empty (it seeds `autoheal.json`, see
+    longer empty (it seeds one file per shipped Process, see
     `test_init_seeds_the_autoheal_process`), but nothing else: an operator
-    who wants a second process still adds its own file."""
+    who wants a further process still adds its own file."""
     assert main(["init", "--root", str(tmp_path)]) == 0
 
     assert (tmp_path / "processes").is_dir()
     assert sorted(p.name for p in (tmp_path / "processes").glob("*.json")) == [
         "autoheal.json",
         "automerge.json",
+        "unblock-pr.json",
     ]
 
 
@@ -1269,7 +1302,7 @@ def test_run_serves_every_workflow_definition_on_disk(monkeypatch, tmp_path):
 
     assert main(["run", "--root", str(tmp_path)]) == 0
     assert set(captured["harness"].workflows) == {
-        "development", "hotfix", "resolver", "heal", "automerge"
+        "development", "hotfix", "unblock-pr", "heal", "automerge"
     }
 
 
@@ -1351,14 +1384,16 @@ def test_run_without_a_default_workflow_ignores_github_workflow_default(
     main(["init", "--root", str(tmp_path)])
     (tmp_path / "workflows" / f"{DEFAULT_WORKFLOW}.json").unlink()
     (tmp_path / "workflows" / "hotfix.json").write_text(json.dumps(HOTFIX_DEFINITION))
-    # Unrelated to this test's own regression: the two seeded processes would
+    # Unrelated to this test's own regression: the seeded processes would
     # otherwise print their own startup warnings here and break the
     # `err == ""` assertion below, which exists to check for the
     # *github-workflow* regression specifically — `autoheal.json` because it
-    # is repository-less (ADR-0022), `automerge.json` because this run has no
-    # GITHUB_TOKEN for its `github-mergeable` action (ADR-0023).
+    # is repository-less (ADR-0022), `automerge.json` and `unblock-pr.json`
+    # because this run has no GITHUB_TOKEN for their GitHub actions
+    # (ADR-0023/ADR-0027).
     (tmp_path / "processes" / "autoheal.json").unlink()
     (tmp_path / "processes" / "automerge.json").unlink()
+    (tmp_path / "processes" / "unblock-pr.json").unlink()
     captured = {}
 
     async def fake_serve(harness, port, poll_interval, source_interval=30.0, pr_poll_interval=0.0, reconcile_interval=300.0, registry=None):
@@ -1371,9 +1406,9 @@ def test_run_without_a_default_workflow_ignores_github_workflow_default(
 
     out, err = capsys.readouterr()
     assert err == ""
-    # `development` isn't on disk, so it isn't served; `hotfix`, `resolver`
+    # `development` isn't on disk, so it isn't served; `hotfix`, `unblock-pr`
     # and `heal` are, because their files are.
-    assert set(captured["harness"].workflows) == {"hotfix", "resolver", "heal", "automerge"}
+    assert set(captured["harness"].workflows) == {"hotfix", "unblock-pr", "heal", "automerge"}
 
 
 def test_init_rejects_workflow_name_with_path_separator(tmp_path, capsys):
@@ -1791,13 +1826,13 @@ def test_a_github_issues_process_is_skipped_not_fatal_without_a_credential(
     assert "GITHUB_TOKEN" in repo.skipped[0][1]
 
 
-def test_process_check_factories_builds_a_resolve_conflicts_process(tmp_path):
+def test_process_check_factories_builds_an_unblock_pr_process(tmp_path):
     from harness.drivers.memory import FakeClock
 
     (tmp_path / "processes").mkdir()
-    (tmp_path / "processes" / "resolve-conflicts.json").write_text(
+    (tmp_path / "processes" / "unblock-pr.json").write_text(
         '{"trigger": {"interval": "60s"},'
-        ' "action": {"check": "github-conflicts", "params": {"head_prefix": "harness/"}},'
+        ' "action": {"check": "github-unhealthy-prs", "params": {"head_prefix": "harness/"}},'
         ' "target": {"workflow": "resolver"}, "dedup": "per-state",'
         ' "sink": {"kind": "none"}}'
     )
@@ -1812,24 +1847,95 @@ def test_process_check_factories_builds_a_resolve_conflicts_process(tmp_path):
     )
 
     assert len(sources) == 1
-    assert sources[0].kind == "scheduled:resolve-conflicts"
+    assert sources[0].kind == "scheduled:unblock-pr"
 
 
-def test_a_github_conflicts_process_is_skipped_not_fatal_without_a_credential(
+def test_github_unhealthy_prs_factory_defaults_match_the_check_s_own():
+    """The factory is the only place a `processes/*.json` reaches the check —
+    including one authored blank through the dashboard's process editor, not
+    just the seeded `unblock-pr.json` (which pins `head_prefix: "harness/"`
+    explicitly). So an omitted `head_prefix` must land on the same narrow
+    default as its sibling `github_mergeable_factory`, not the check
+    class's own wide-open constant (see
+    `test_the_check_s_own_head_prefix_constant_stays_empty` for why that one
+    is different). The other omitted params still land on the driver's own
+    constants — in particular the autofix skip label, which is *not* the
+    automerge one the same name is bound to a few lines above it in
+    `cli.py`."""
+    from harness.drivers.github_unhealthy_prs_check import (
+        DEFAULT_GIVE_UP_LABEL,
+        DEFAULT_LOG_TAIL_LINES,
+        DEFAULT_MAX_ATTEMPTS,
+        DEFAULT_SKIP_LABEL,
+    )
+
+    registry = MemoryRepositoryRegistry({"harness_v2": Path("/repos/harness_v2")})
+    checks = _process_check_factories(_process_args(), registry, client=FakeGithubClient())
+
+    check = checks["github-unhealthy-prs"]({})
+
+    assert check._head_prefix == "harness/"
+    assert check._skip_label == DEFAULT_SKIP_LABEL == "harness:no-autofix"
+    assert check._give_up_label == DEFAULT_GIVE_UP_LABEL
+    assert check._max_attempts == DEFAULT_MAX_ATTEMPTS
+    assert check._log_tail_lines == DEFAULT_LOG_TAIL_LINES
+
+
+def test_github_unhealthy_prs_factory_still_skips_automerge_with_its_own_label():
+    """`github_mergeable_check` and `github_unhealthy_prs_check` both export a
+    `DEFAULT_SKIP_LABEL`, with deliberately different values. An unaliased
+    import of the second would shadow the first *silently* and change which PRs
+    the automerger leaves alone — so pin both factories' defaults together."""
+    registry = MemoryRepositoryRegistry({"harness_v2": Path("/repos/harness_v2")})
+    checks = _process_check_factories(_process_args(), registry, client=FakeGithubClient())
+
+    assert checks["github-mergeable"]({})._skip_label == "harness:no-automerge"
+    assert checks["github-unhealthy-prs"]({})._skip_label == "harness:no-autofix"
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        # Zero is the interesting one: the check tails with
+        # `lines[-log_tail_lines:]`, and Python's `-0 == 0` makes that the
+        # *entire* log — the one value that silently defeats the tail rather
+        # than merely shrinking it.
+        {"log_tail_lines": 0},
+        {"log_tail_lines": -1},
+        {"log_tail_lines": "200"},
+        {"max_attempts": 0},
+        {"max_attempts": -1},
+        {"max_attempts": "3"},
+    ],
+)
+def test_github_unhealthy_prs_factory_rejects_a_non_positive_budget(params):
+    from harness.drivers.fs_processes import ProcessValidationError
+
+    registry = MemoryRepositoryRegistry({"harness_v2": Path("/repos/harness_v2")})
+    checks = _process_check_factories(_process_args(), registry, client=FakeGithubClient())
+
+    with pytest.raises(ProcessValidationError) as excinfo:
+        checks["github-unhealthy-prs"](params)
+
+    assert excinfo.value.field == "params"
+    assert next(iter(params)) in str(excinfo.value)
+
+
+def test_a_github_unhealthy_prs_process_is_skipped_not_fatal_without_a_credential(
     tmp_path, monkeypatch
 ):
     """A missing credential is on the *absent* side of the operator's rule, so
     it warns and skips rather than failing the whole run — otherwise one
-    `github-conflicts` process file would make every credential-less run exit 2
+    `github-unhealthy-prs` process file would make every credential-less run exit 2
     and break the harness's "no token is not fatal" promise. A set-and-wrong
     value (an unknown check, a bad param) is still fatal."""
     from harness.drivers.memory import FakeClock
 
     monkeypatch.delenv("GITHUB_TOKEN", raising=False)
     (tmp_path / "processes").mkdir()
-    (tmp_path / "processes" / "resolve-conflicts.json").write_text(
+    (tmp_path / "processes" / "unblock-pr.json").write_text(
         '{"trigger": {"interval": "60s"},'
-        ' "action": {"check": "github-conflicts"},'
+        ' "action": {"check": "github-unhealthy-prs"},'
         ' "target": {"workflow": "resolver"}}'
     )
     registry = MemoryRepositoryRegistry({"heblo": Path("/repos/heblo")})
@@ -1843,7 +1949,7 @@ def test_a_github_conflicts_process_is_skipped_not_fatal_without_a_credential(
     )
 
     assert triggers == []
-    assert [name for name, _ in repo.skipped] == ["resolve-conflicts.json"]
+    assert [name for name, _ in repo.skipped] == ["unblock-pr.json"]
     assert "GITHUB_TOKEN" in repo.skipped[0][1]
 
 
@@ -1853,7 +1959,12 @@ def test_process_check_factories_stays_dependency_free_for_builtin_checks(tmp_pa
     registry = MemoryRepositoryRegistry({})
     checks = _process_check_factories(_process_args(), registry, client=None)
 
-    assert set(checks) == {"github-issues", "github-conflicts", "github-mergeable", "jira-issues"}
+    assert set(checks) == {
+        "github-issues",
+        "github-unhealthy-prs",
+        "github-mergeable",
+        "jira-issues",
+    }
 
 
 def test_process_check_factories_builds_a_jira_issues_process(tmp_path):
@@ -2187,7 +2298,7 @@ def test_run_serves_every_scaffolded_workflow_for_an_ordinary_init(tmp_path, mon
     with pytest.raises(SystemExit):
         main(["run", "--root", str(tmp_path), "--api-port", "0"])
 
-    assert list(seen["served"]) == ["automerge", "development", "heal", "resolver"]
+    assert list(seen["served"]) == ["automerge", "development", "heal", "unblock-pr"]
 
 
 def test_run_over_a_fresh_init_builds_successfully_with_a_real_build(monkeypatch, tmp_path):
@@ -2227,7 +2338,7 @@ def test_run_over_a_fresh_init_builds_successfully_with_a_real_build(monkeypatch
 
     # `HEAL_DEFINITION` compiled: `heal` (and every other scaffolded workflow)
     # is being served.
-    assert set(captured["harness"].workflows) == {"development", "heal", "resolver", "automerge"}
+    assert set(captured["harness"].workflows) == {"development", "heal", "unblock-pr", "automerge"}
     # `AUTOHEAL_PROCESS_DEFINITION` compiled: the seeded `processes/autoheal.json`
     # became one live poller alongside the scaffolded `triggers/` (empty by
     # default, so this is exactly the autoheal process).
@@ -2254,39 +2365,83 @@ def test_run_with_no_workflow_harness_defaults_to_none(tmp_path, monkeypatch):
     assert seen["served"] == ()
 
 
-def test_init_also_writes_resolver_workflow_and_resolve_agent(tmp_path):
+def test_init_also_writes_unblock_pr_workflow_and_unblock_agent(tmp_path):
     assert main(["init", "--root", str(tmp_path)]) == 0
 
-    resolver = json.loads((tmp_path / "workflows" / "resolver.json").read_text())
-    assert resolver["start"] == "resolve"
-    assert {"from": "resolve", "on": "done", "to": "land"} in resolver["transitions"]
-    assert {"from": "land", "on": "done", "to": "end"} in resolver["transitions"]
+    workflow = json.loads((tmp_path / "workflows" / "unblock-pr.json").read_text())
+    assert workflow["start"] == "unblock"
+    assert {"from": "unblock", "on": "done", "to": "land"} == {
+        k: v for k, v in workflow["transitions"][0].items() if k != "hint"
+    }
+    assert {"from": "unblock", "on": "stuck", "to": "end"} == {
+        k: v for k, v in workflow["transitions"][1].items() if k != "hint"
+    }
+    assert {"from": "land", "on": "done", "to": "end"} in workflow["transitions"]
+    # `maxParallel`, the key `fs_workflows` actually reads — the snake_case
+    # spelling would be ignored and silently leave the step at 1.
+    assert workflow["maxParallel"] == {"unblock": 2}
+    assert set(workflow["descriptions"]) == {"unblock", "land"}
 
-    resolve_agent = json.loads((tmp_path / "agents" / "resolve.json").read_text())
-    assert resolve_agent["allowed_outcomes"] == ["done"]
-    assert "merge conflict" in resolve_agent["prompt"]
+    unblock_agent = json.loads((tmp_path / "agents" / "unblock.json").read_text())
+    # Not `["done", "stuck"]`: `fs_agents._parse_agent_spec` accepts only
+    # `done`/`request_changes` here, so writing the workflow's own vocabulary
+    # into the persona file would make it unloadable. The live vocabulary comes
+    # from the workflow's edges (invariant #42).
+    assert unblock_agent["allowed_outcomes"] == ["done"]
+    assert "unblocked" in unblock_agent["prompt"]
+    assert "stuck" in unblock_agent["prompt"]
+    assert unblock_agent["model"] == "sonnet"
     # `land` is shared with the default workflow and already written there —
     # no separate agents/land.json (landing has no persona, invariant unchanged).
     assert not (tmp_path / "agents" / "land.json").exists()
 
 
-def test_init_is_idempotent_for_resolver_workflow(tmp_path):
-    main(["init", "--root", str(tmp_path)])
-    (tmp_path / "workflows" / "resolver.json").write_text(
-        json.dumps({"name": "resolver", "start": "resolve", "transitions": []})
+def test_init_writes_the_unblock_pr_process_withheld_to_harness_branches(tmp_path):
+    """A fresh install must not start pushing to branches a human authored.
+
+    The check can work any open PR (ADR-0027) and widening it is one field of
+    this file — but a default `harness init` plus a `GITHUB_TOKEN` would
+    otherwise begin merging into, committing to and pushing every unhealthy
+    open PR in every registered repo from the first tick, with no withholding
+    at all. `automerge.json`'s seeded blast radius is the same `harness/`."""
+    assert main(["init", "--root", str(tmp_path)]) == 0
+
+    process = json.loads((tmp_path / "processes" / "unblock-pr.json").read_text())
+    assert process["action"]["check"] == "github-unhealthy-prs"
+    assert process["target"] == {"workflow": "unblock-pr"}
+    # Per-state, or the check's one-observation-per-PR would collapse onto a
+    # single task per tick.
+    assert process["dedup"] == "per-state"
+    assert process["action"]["params"]["head_prefix"] == "harness/"
+    automerge = json.loads((tmp_path / "processes" / "automerge.json").read_text())
+    assert (
+        process["action"]["params"]["head_prefix"]
+        == automerge["action"]["params"]["head_prefix"]
     )
+    assert process["action"]["params"]["skip_label"] == "harness:no-autofix"
+    assert process["action"]["params"]["max_attempts"] == 3
+
+
+def test_init_is_idempotent_for_the_unblock_pr_workflow_and_process(tmp_path):
+    main(["init", "--root", str(tmp_path)])
+    (tmp_path / "workflows" / "unblock-pr.json").write_text(
+        json.dumps({"name": "unblock-pr", "start": "unblock", "transitions": []})
+    )
+    (tmp_path / "processes" / "unblock-pr.json").write_text(json.dumps({"edited": True}))
 
     assert main(["init", "--root", str(tmp_path)]) == 0
 
-    resolver = json.loads((tmp_path / "workflows" / "resolver.json").read_text())
-    assert resolver["transitions"] == []
+    workflow = json.loads((tmp_path / "workflows" / "unblock-pr.json").read_text())
+    assert workflow["transitions"] == []
+    process = json.loads((tmp_path / "processes" / "unblock-pr.json").read_text())
+    assert process == {"edited": True}
 
 
-def test_run_serves_resolver_workflow_when_its_file_exists(monkeypatch, tmp_path):
-    # The resolver workflow must be served (its own step queues + a valid target
-    # for a `github-conflicts` process) whenever `workflows/resolver.json`
-    # exists.
-    main(["init", "--root", str(tmp_path)])  # scaffolds resolver.json
+def test_run_serves_unblock_pr_workflow_when_its_file_exists(monkeypatch, tmp_path):
+    # The unblock-pr workflow must be served (its own step queues + a valid
+    # target for the seeded `github-unhealthy-prs` process) whenever
+    # `workflows/unblock-pr.json` exists.
+    main(["init", "--root", str(tmp_path)])  # scaffolds unblock-pr.json
     monkeypatch.delenv("GITHUB_TOKEN", raising=False)
     captured = {}
 
@@ -2296,7 +2451,10 @@ def test_run_serves_resolver_workflow_when_its_file_exists(monkeypatch, tmp_path
     monkeypatch.setattr("harness.cli.serve", fake_serve)
 
     assert main(["run", "--root", str(tmp_path)]) == 0
-    assert "resolver" in captured["harness"].workflows
+    assert "unblock-pr" in captured["harness"].workflows
+    # The `unblock` step gets its own queue, and the workflow's own
+    # concurrency limit is what the harness reads.
+    assert captured["harness"].workflows["unblock-pr"].max_parallel_for("unblock") == 2
 
 
 def test_run_accepts_api_port(monkeypatch, tmp_path):
@@ -3757,11 +3915,15 @@ def test_a_credential_less_process_leaves_the_run_alive_and_warns(
 
     err = capsys.readouterr().err
     assert "automerge.json is disabled for this run" in err
+    assert "unblock-pr.json is disabled for this run" in err
     assert "GITHUB_TOKEN" in err
     # Degraded, not dead: the rest of the harness is fully wired.
     harness = captured["harness"]
     assert "development" in harness.workflows
-    assert [name for name, _ in harness.skipped_processes] == ["automerge.json"]
+    assert sorted(name for name, _ in harness.skipped_processes) == [
+        "automerge.json",
+        "unblock-pr.json",
+    ]
 
 
 def test_a_genuinely_unknown_check_is_still_fatal(monkeypatch, tmp_path):

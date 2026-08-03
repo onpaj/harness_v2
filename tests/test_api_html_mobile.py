@@ -111,9 +111,9 @@ def test_wide_desktop_breakpoints_relax_page_and_column_caps(client):
     tier_1400_block = css[css.index("@media (min-width: 1400px)") : css.index("@media (min-width: 1800px)")]
     tier_1800_block = css[css.index("@media (min-width: 1800px)") :]
 
-    # The base 768px block is untouched: it still caps .column at 360px and
+    # The base 768px block is untouched: it still sizes .column at 280px and
     # says nothing about .page — those overrides live only in the new tiers.
-    assert "max-width: 360px" in base_block
+    assert "width: 280px" in base_block
     assert ".page {" not in base_block
 
     assert "max-width: 1600px" in tier_1400_block
