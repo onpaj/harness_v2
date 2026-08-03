@@ -23,7 +23,7 @@ through an injected `PrLabeller` — `behaviors/` may not import `drivers/`), wh
 both tells a human and makes the check skip the PR forever. Without it the
 settled task is archived by retention, drops out of `SourcePoller._seen`'s
 seeded set, and the identical task is re-minted on the next restart — every
-retention window, indefinitely. See ADR-0026.
+retention window, indefinitely. See ADR-0027.
 """
 
 from __future__ import annotations
@@ -60,6 +60,16 @@ CONFLICT_GONE = (
 """The mirror case. The brief was rendered at scan time and someone resolved
 the conflict since, so the agent would otherwise hunt for markers that are not
 there."""
+
+CLEAN = {"resolve": {"clean": True}}
+AGENT = {"resolve": {"clean": False}}
+"""The two `data.resolve` stamps the delivery report counts apart: the problem
+was gone by the time this behavior looked, versus the agent was actually spent
+on it. The key is `resolve` rather than `unblock` because `stats.py` has read
+it under that name since the retired `ResolveConflictBehavior` wrote it, and a
+rename here would silently reclassify every task written before it. Record-only
+— `stats.py` treats an unstamped task as the agent path, the conservative read.
+See ADR-0026 (the report) and ADR-0027 (this behavior)."""
 
 GIVE_UP_LABEL_KEY = "give_up_label"
 """Where the check leaves the label this behavior applies when the agent gives
@@ -128,7 +138,15 @@ class UnblockPrBehavior(ConsumerBehavior):
             # and nothing was red to begin with. Commit the clean merge; no
             # agent call spent.
             handle.commit(f"[{step}] merge {base} — nothing left to fix")
-            return BehaviorResult(DONE, f"merged {base} cleanly, nothing to fix")
+            return BehaviorResult(
+                DONE,
+                f"merged {base} cleanly, nothing to fix",
+                # Which of the two paths ran is otherwise legible only in the
+                # summary's wording, and the delivery report has to tell "the
+                # problem evaporated" from "the agent really fixed it"
+                # (ADR-0027). Record-only: nothing routes on it (invariant #8).
+                data=CLEAN,
+            )
 
         attempt, relpath = next_attempt(handle.path, task.id, step)
 
@@ -182,7 +200,7 @@ class UnblockPrBehavior(ConsumerBehavior):
             # `harness:needs-human` on its own. The label is also what makes
             # the give-up *terminal* — the check's give-up guard skips a
             # labelled PR on every later tick, which is what stops the settled
-            # task being re-minted every time retention archives it (ADR-0026).
+            # task being re-minted every time retention archives it (ADR-0027).
             summary = self._label_give_up(task, run.summary)
             if conflicted:
                 # Committing would turn the agent's unresolved conflict markers
@@ -204,7 +222,7 @@ class UnblockPrBehavior(ConsumerBehavior):
                 # only: `stuck` routes straight to `end`, nothing pushes, and
                 # the next task's worktree is `reset --hard origin/<branch>`.
                 handle.abort_merge()
-                return BehaviorResult(run.outcome, summary)
+                return BehaviorResult(run.outcome, summary, data=AGENT)
 
         # The worker commits, never the agent (invariant 9). `git commit` with
         # MERGE_HEAD present produces the two-parent merge commit — no special
@@ -213,14 +231,14 @@ class UnblockPrBehavior(ConsumerBehavior):
         # pull request. The cost of that exclusion is that the write-up is not
         # persisted anywhere on the success path: it stays untracked in the
         # worktree, and `land`'s reattach (`GitWorkspace.attach`, invariant 31)
-        # ends in an unconditional `clean -fd` that deletes it. See ADR-0026.
+        # ends in an unconditional `clean -fd` that deletes it. See ADR-0027.
         #
         # Reached on a give-up too, when the merge was clean: nothing to
         # abandon that this behavior can safely detect (see above), and the
         # branch carries the agent's own work in progress. The commit is local
         # — `stuck` routes to `end` and nothing pushes it.
         handle.commit(run.summary, exclude=(".artifacts",))
-        return BehaviorResult(run.outcome, summary)
+        return BehaviorResult(run.outcome, summary, data=AGENT)
 
     def _label_give_up(self, task: Task, summary: str) -> str:
         """Apply the give-up label to the task's pull request, best-effort.

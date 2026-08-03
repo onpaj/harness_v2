@@ -481,7 +481,7 @@ def test_a_genuine_fork_is_still_skipped_when_the_casing_differs():
     assert check.evaluate() == []
 
 
-# --- the give-up label travels with the task (ADR-0026) ----------------------
+# --- the give-up label travels with the task (ADR-0027) ----------------------
 
 
 def test_the_observation_carries_the_give_up_label_the_check_would_read():

@@ -249,6 +249,18 @@ def test_orchestration_does_not_import_issue_import_port():
         )
 
 
+def test_orchestration_does_not_import_stats_port():
+    """`StatsView` (ADR-0026) is a UI read surface like `BoardView`, not an
+    orchestration port — unknown to dispatcher/consumer, mirroring invariants
+    #23/#32/#34. The derivation module itself is off limits to them too: it
+    reads history to decide how a task *ended*, which is exactly the kind of
+    judgement the router and dispatcher must never make (invariant #8)."""
+    for name in ("dispatcher.py", "consumer.py"):
+        imports = imported_modules(SOURCE / name)
+        assert "harness.ports.stats" not in imports, f"{name} imports ports.stats"
+        assert "harness.stats" not in imports, f"{name} imports stats"
+
+
 def test_orchestration_does_not_import_issue_state_port():
     """IssueChecker is unknown to dispatcher/consumer. Only IssueReconciler
     (core) and app.py/cli.py (wiring) reach for it — mirroring MergeChecker."""

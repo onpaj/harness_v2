@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from harness.behaviors.unblock_pr import UnblockPrBehavior
+from harness.behaviors.unblock_pr import AGENT, CLEAN, UnblockPrBehavior
 from harness.drivers.memory import (
     FakeAgentRunner,
     FakeClock,
@@ -73,6 +73,9 @@ async def test_clean_merge_and_nothing_red_skips_the_agent():
     assert handle.commits == ["[unblock] merge main — nothing left to fix"]
     assert result.outcome == DONE
     assert "nothing to fix" in result.summary
+    # Which of the two paths ran must be legible without parsing the summary's
+    # wording — the delivery report counts them apart (ADR-0026/ADR-0027).
+    assert result.data == CLEAN
 
 
 async def test_clean_merge_but_red_checks_still_calls_the_agent():
@@ -97,7 +100,7 @@ async def test_real_conflict_calls_the_agent_and_commits_its_summary():
     handle = workspace.handles[task.id]
     assert len(runner.calls) == 1
     assert handle.commits == ["unblock: fixed it"]
-    assert result == BehaviorResult(DONE, "unblock: fixed it")
+    assert result == BehaviorResult(DONE, "unblock: fixed it", data=AGENT)
 
 
 async def test_the_agent_commit_excludes_artifacts():
@@ -193,7 +196,7 @@ async def test_a_non_done_outcome_abandons_the_conflicted_merge():
     handle = workspace.handles[task.id]
     assert handle.merge_aborts == 1
     assert handle.commits == []
-    assert result == BehaviorResult(STUCK, "unblock: gave up")
+    assert result == BehaviorResult(STUCK, "unblock: gave up", data=AGENT)
 
 
 async def test_a_done_outcome_still_commits_the_conflicted_merge():
@@ -280,7 +283,7 @@ async def test_falls_back_to_the_persona_without_a_workflow_repository():
     assert runner.calls[0]["spec"].allowed_outcomes == (DONE, STUCK)
 
 
-# --- a give-up is told to a human (ADR-0026) --------------------------------
+# --- a give-up is told to a human (ADR-0027) --------------------------------
 
 
 def build_with_labeller(*, runner=None, labeller=None):
@@ -398,7 +401,7 @@ async def test_a_give_up_without_a_labeller_wired_is_still_a_clean_give_up():
 
     result = await behavior.run(task)
 
-    assert result == BehaviorResult(STUCK, "unblock: gave up")
+    assert result == BehaviorResult(STUCK, "unblock: gave up", data=AGENT)
 
 
 # --- a malformed task says which key is missing ------------------------------

@@ -50,6 +50,7 @@ from harness.ports.process_admin import (
     ProcessFields,
     ProcessNotFound,
 )
+from harness.ports.stats import DEFAULT_WINDOW_DAYS, StatsView, clamp_window
 from harness.ports.updater import Updater, UpdateError
 from harness.ports.workflow_admin import WorkflowAdmin, WorkflowValidationError
 from harness.ports.workflows import WorkflowNotFound
@@ -112,6 +113,37 @@ def _shorttime(value: str | None) -> str:
 
 
 TEMPLATES.env.filters["shorttime"] = _shorttime
+
+WINDOW_CHOICES = (1, 7, 30, 90)
+"""The windows the stats page offers. Any `?days=` value still works — these
+are the ones worth a button."""
+
+
+def _percent(value: float | None) -> str:
+    """A rate as a whole-number percentage. None renders as a dash, never as
+    0% — "nothing settled" and "everything failed" must not look alike."""
+    return "—" if value is None else f"{value * 100:.0f}%"
+
+
+TEMPLATES.env.filters["percent"] = _percent
+
+
+def _thousands(value: int | float | None) -> str:
+    """Group digits so a seven-figure token count is readable at a glance."""
+    return "0" if not value else f"{value:,.0f}"
+
+
+TEMPLATES.env.filters["thousands"] = _thousands
+
+
+def _usd(value: float | None) -> str:
+    """A dollar amount, cent-precise below $10 so a per-task cost isn't $0."""
+    if not value:
+        return "$0.00"
+    return f"${value:,.2f}" if value >= 10 else f"${value:.3f}".rstrip("0").rstrip(".")
+
+
+TEMPLATES.env.filters["usd"] = _usd
 
 
 def _outcome_step(task: Task) -> str:
@@ -449,6 +481,7 @@ def build_json_router(
     agent_admin: AgentAdmin,
     workflow_admin: WorkflowAdmin,
     process_admin: ProcessAdmin,
+    stats: StatsView,
     version: str,
     build_time: str | None,
 ) -> APIRouter:
@@ -457,6 +490,12 @@ def build_json_router(
     @router.get("/board")
     def board() -> dict:
         return view.snapshot().to_dict()
+
+    @router.get("/stats")
+    def delivery_stats(days: int | str = DEFAULT_WINDOW_DAYS) -> dict:
+        # `days` is clamped rather than validated: a hand-typed query string is
+        # not worth a 422, and the report states the window it actually used.
+        return stats.report(clamp_window(days)).to_dict()
 
     @router.get("/version")
     def version_info() -> dict:
@@ -594,6 +633,7 @@ def build_html_router(
     process_admin: ProcessAdmin,
     updater: Updater,
     issue_import: IssueImport,
+    stats: StatsView,
     version: str,
     build_time: str | None,
 ) -> APIRouter:
@@ -620,6 +660,21 @@ def build_html_router(
             name="board.html",
             context={
                 "board": view.snapshot(),
+                "version": version,
+                "build_time": build_time,
+            },
+        )
+
+    @router.get("/stats", response_class=HTMLResponse)
+    def stats_page(request: Request, days: int | str = DEFAULT_WINDOW_DAYS) -> HTMLResponse:
+        window = clamp_window(days)
+        return TEMPLATES.TemplateResponse(
+            request=request,
+            name="stats.html",
+            context={
+                "report": stats.report(window),
+                "window": window,
+                "windows": WINDOW_CHOICES,
                 "version": version,
                 "build_time": build_time,
             },

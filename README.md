@@ -352,7 +352,7 @@ The `github-unhealthy-prs` action claims more than conflicts: a PR carrying a
 failing check run is unhealthy too, and the observation it emits carries the
 tail of each failing check's log. `head_prefix` is what bounds the blast radius
 — `"harness/"` above watches only the harness's own branches, and `""` watches
-every open PR (including ones humans have checked out — see ADR-0026 before
+every open PR (including ones humans have checked out — see ADR-0027 before
 widening it). Three further params bound it in time rather than in scope:
 `skip_label` (default `harness:no-autofix`) is a per-PR veto, and after
 `max_attempts` (default 3) the PR gets `give_up_label` (default

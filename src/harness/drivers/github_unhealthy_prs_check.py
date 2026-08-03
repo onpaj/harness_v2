@@ -306,7 +306,7 @@ class GithubUnhealthyPrsCheck(Check):
                 # The give-up label travels with the task because the *agent*
                 # can also give up, and that path never moves the head sha —
                 # so no attempt is ever spent on it and the budget above can
-                # never end it (ADR-0026). `UnblockPrBehavior` applies this
+                # never end it (ADR-0027). `UnblockPrBehavior` applies this
                 # label when its run reports anything but `done`, which both
                 # tells a human and makes the give-up guard at the top of this
                 # method skip the PR on every later tick. It is carried in the

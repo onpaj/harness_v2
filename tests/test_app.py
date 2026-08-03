@@ -295,7 +295,7 @@ def test_unblock_behavior_honours_a_per_persona_timeout(tmp_path):
 
 
 def test_unblock_behavior_is_wired_with_the_give_up_labeller(tmp_path):
-    """ADR-0026: `stuck` moves no head sha, so the check's attempt budget can
+    """ADR-0027: `stuck` moves no head sha, so the check's attempt budget can
     never label the PR — the behavior does it, and only if `build()` hands it
     the capability `cli.py` closes over the GitHub client."""
     calls: list[tuple[str, int, str]] = []

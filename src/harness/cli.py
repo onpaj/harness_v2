@@ -283,7 +283,7 @@ def _init(args: argparse.Namespace) -> int:
             encoding="utf-8",
         )
 
-    # `unblock-pr`/`unblock` (ADR-0026), the retired `resolver`/`resolve`
+    # `unblock-pr`/`unblock` (ADR-0027), the retired `resolver`/`resolve`
     # workflow's successor. Seeded together with `processes/unblock-pr.json`
     # below, so the feature is reachable from a fresh install rather than
     # needing three files hand-written first.
@@ -1447,7 +1447,7 @@ a non-GitHub repo is skipped.
 
 `head_prefix` is seeded `"harness/"`, matching `automerge.json` — a fresh
 `harness init` plus a `GITHUB_TOKEN` therefore touches only branches the
-harness itself authored. ADR-0026's decision is that the *feature* may work any
+harness itself authored. ADR-0027's decision is that the *feature* may work any
 open PR, and it can: widening it is one field of this file and no code change.
 But the widening is the operator's explicit act, not something a default install
 does on its own, because the widest setting means merging into, committing to
@@ -2638,7 +2638,7 @@ def _run(args: argparse.Namespace) -> int:
             command_runner=SubprocessCommandRunner(),
             dropped_workflows=dropped_workflows,
             retention_days=_retention_days(),
-            # The `unblock` step's give-up label (ADR-0026). The capability,
+            # The `unblock` step's give-up label (ADR-0027). The capability,
             # not the client: `behaviors/` may not import `drivers/`, so
             # `UnblockPrBehavior` takes a callable and the wiring closes the
             # client into it — the shape `OpenIssueBehavior` already uses for
@@ -2754,6 +2754,7 @@ async def serve(
         ),
         updater=updater,
         issue_import=harness.issue_import,
+        stats=harness.stats,
         version=version_string(),
         build_time=build_timestamp(),
     )

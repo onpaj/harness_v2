@@ -34,6 +34,7 @@ from harness.drivers.jira_client import FakeJiraClient
 from harness.drivers.memory import MemoryArtifactStore, MemoryRepositoryRegistry
 from harness.drivers.stage_output import StageOutputProjection
 from harness.models import DONE, END, REQUEST_CHANGES, Task, Transition, Workflow
+from harness.api.app import _EmptyStatsView
 from harness.ports.issue_import import NullIssueImport
 from harness.projection import BoardProjection
 from tests.fakes import FakeTaskControl
@@ -675,7 +676,7 @@ def test_run_passes_issue_import_factory_to_build_only_with_a_token(monkeypatch,
 
 
 def test_run_wires_pr_labeller_to_add_label_only_with_a_token(monkeypatch, tmp_path):
-    """`pr_labeller` is the other half of the give-up containment (ADR-0026):
+    """`pr_labeller` is the other half of the give-up containment (ADR-0027):
     `UnblockPrBehavior` calls it to stamp `harness:needs-human` itself when the
     agent gives up. `None` without a token, exactly like the
     `github-unhealthy-prs` check that mints those tasks in the first place, so
@@ -747,6 +748,7 @@ async def test_serve_passes_the_harness_issue_import_into_create_app(monkeypatch
             self.known_steps = frozenset()
             self.workflows = {}
             self.issue_import = sentinel
+            self.stats = _EmptyStatsView()
 
         async def run(
             self, poll_interval, source_interval=30.0, pr_poll_interval=0.0, reconcile_interval=300.0, stop=None
@@ -1388,7 +1390,7 @@ def test_run_without_a_default_workflow_ignores_github_workflow_default(
     # *github-workflow* regression specifically — `autoheal.json` because it
     # is repository-less (ADR-0022), `automerge.json` and `unblock-pr.json`
     # because this run has no GITHUB_TOKEN for their GitHub actions
-    # (ADR-0023/ADR-0026).
+    # (ADR-0023/ADR-0027).
     (tmp_path / "processes" / "autoheal.json").unlink()
     (tmp_path / "processes" / "automerge.json").unlink()
     (tmp_path / "processes" / "unblock-pr.json").unlink()
@@ -2397,7 +2399,7 @@ def test_init_also_writes_unblock_pr_workflow_and_unblock_agent(tmp_path):
 def test_init_writes_the_unblock_pr_process_withheld_to_harness_branches(tmp_path):
     """A fresh install must not start pushing to branches a human authored.
 
-    The check can work any open PR (ADR-0026) and widening it is one field of
+    The check can work any open PR (ADR-0027) and widening it is one field of
     this file — but a default `harness init` plus a `GITHUB_TOKEN` would
     otherwise begin merging into, committing to and pushing every unhealthy
     open PR in every registered repo from the first tick, with no withholding
@@ -2549,6 +2551,7 @@ async def test_serve_returns_when_uvicorn_stops_before_the_loop(monkeypatch, tmp
             self.known_steps = frozenset()
             self.workflows = {}
             self.issue_import = NullIssueImport()
+            self.stats = _EmptyStatsView()
             self.stop_seen: asyncio.Event | None = None
 
         async def run(
@@ -2622,6 +2625,7 @@ async def test_serve_wires_the_filesystem_process_admin(monkeypatch, tmp_path):
             self.known_steps = frozenset()
             self.workflows = {}
             self.issue_import = NullIssueImport()
+            self.stats = _EmptyStatsView()
 
         async def run(
             self, poll_interval, source_interval=30.0, pr_poll_interval=0.0, reconcile_interval=300.0, stop=None
@@ -2676,6 +2680,7 @@ async def test_serve_wires_the_registry_into_the_filesystem_process_admin(
             self.known_steps = frozenset()
             self.workflows = {}
             self.issue_import = NullIssueImport()
+            self.stats = _EmptyStatsView()
 
         async def run(
             self, poll_interval, source_interval=30.0, pr_poll_interval=0.0, reconcile_interval=300.0, stop=None
@@ -2733,6 +2738,7 @@ async def test_serve_wires_known_steps_and_workflows_into_the_process_admin(
             self.known_steps = frozenset({"plan", "review"})
             self.workflows = {"resolver": SERVE_TEST_WORKFLOW}
             self.issue_import = NullIssueImport()
+            self.stats = _EmptyStatsView()
 
         async def run(
             self, poll_interval, source_interval=30.0, pr_poll_interval=0.0, reconcile_interval=300.0, stop=None

@@ -93,6 +93,10 @@ class GithubIssuesCheck(Check):
                                 "repo": slug,
                                 "issue": issue.number,
                                 "url": issue.url,
+                                # Record-only, for the delivery report's "what
+                                # kind of issue" breakdown (ADR-0026). Never
+                                # read by route() or the dispatcher (#8).
+                                "labels": list(issue.labels),
                             },
                         },
                     )

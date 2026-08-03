@@ -1,4 +1,4 @@
-# ADR-0026: One agent unblocks a pull request, and the check decides why
+# ADR-0027: One agent unblocks a pull request, and the check decides why
 
 Status: Accepted (2026-07-31)
 

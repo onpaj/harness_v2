@@ -342,7 +342,7 @@ This is the file in the **operator's own `~/harness-root`**, migrated by hand,
 which deliberately runs the widest `head_prefix`. What `harness init` seeds on a
 *fresh* root is not this: it is `processes/unblock-pr.json` with
 `head_prefix: "harness/"`, matching `automerge.json`, so a default install
-touches only harness-authored branches until an operator widens it (ADR-0026).
+touches only harness-authored branches until an operator widens it (ADR-0027).
 
 Every param renders in the process form via `ParamSpec`, as the existing checks
 do. `cli.py`'s check registry swaps `github-conflicts` for
@@ -429,7 +429,7 @@ blast radius with a one-line config change and no code change.
   give-up at all: no human was told, and the settled task, once retention
   archived it out of the queues `_seed_pollers` reads, was re-minted on the next
   restart, every retention window. The behavior labelling the PR itself is what
-  closes it — the check's give-up guard then skips the PR forever. See ADR-0026.
+  closes it — the check's give-up guard then skips the PR forever. See ADR-0027.
 
 ## Testing
 

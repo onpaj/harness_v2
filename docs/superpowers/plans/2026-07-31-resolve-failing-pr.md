@@ -1809,10 +1809,10 @@ git commit -m "test: unblock-pr end to end, including the give-up path"
 
 - [ ] **Step 1: Write the ADR**
 
-Create `docs/adr/0026-one-agent-unblocks-a-pull-request.md`. `tests/test_adr_docs.py` requires the filename to match `NNNN-slug.md`, a `# ADR-0026: ...` title and a `Status:` line.
+Create `docs/adr/0026-one-agent-unblocks-a-pull-request.md`. `tests/test_adr_docs.py` requires the filename to match `NNNN-slug.md`, a `# ADR-0027: ...` title and a `Status:` line.
 
 ```markdown
-# ADR-0026: One agent unblocks a pull request, and the check decides why
+# ADR-0027: One agent unblocks a pull request, and the check decides why
 
 Status: Accepted (2026-07-31)
 
@@ -1883,7 +1883,7 @@ Expected: all pass. Do not proceed to Step 4 until it does — Step 4 changes th
 
 ```bash
 git add -A
-git commit -m "docs: ADR-0026, one agent unblocks a pull request"
+git commit -m "docs: ADR-0027, one agent unblocks a pull request"
 ```
 
 - [ ] **Step 5: Understand the cutover before touching anything**
