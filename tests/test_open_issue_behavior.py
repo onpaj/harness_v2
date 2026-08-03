@@ -316,15 +316,34 @@ async def test_a_rerun_after_a_partial_failure_resumes():
     assert [o["title"] for o in tracker.opened] == ["first", "second"]
 
 
+async def test_a_report_with_no_drafts_block_files_nothing_and_still_succeeds():
+    """A prose-only artifact with no ```json block at all (e.g. a clean review
+    that concludes in prose) is 'nothing to file', not a fault — it must not
+    raise `IssueError` and route the task to `failed/`."""
+    artifacts = MemoryArtifactStore()
+    tracker = MemoryIssueTracker()
+    behavior = make(
+        tracker=tracker,
+        artifacts=artifacts,
+        inner=StubInner(artifacts=artifacts, text="# A report with no block\n"),
+    )
+
+    result = await behavior.run(task())
+
+    assert tracker.opened == []
+    assert result.outcome == DONE
+    assert "no issues to file" in result.summary
+
+
 async def test_a_malformed_block_raises_issue_error():
     artifacts = MemoryArtifactStore()
     behavior = make(
         tracker=MemoryIssueTracker(),
         artifacts=artifacts,
-        inner=StubInner(artifacts=artifacts, text="# A report with no block\n"),
+        inner=StubInner(artifacts=artifacts, text="# A report\n\n```json\n[{,}]\n```\n"),
     )
 
-    with pytest.raises(IssueError, match="fenced json block"):
+    with pytest.raises(IssueError, match="not valid JSON"):
         await behavior.run(task())
 
 
