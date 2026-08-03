@@ -1,7 +1,29 @@
 # CHANGELOG
 
 
+## v1.10.1 (2026-08-03)
+
+
 ## v1.10.0 (2026-08-03)
+
+### Bug Fixes
+
+- Stop replaying the GitHub credential to Azure on a log redirect
+  ([`6855b4b`](https://github.com/onpaj/harness_v2/commit/6855b4be9a83865c88d9967947b92dcafb17c979))
+
+The Actions log endpoint 302s to Azure Blob Storage, whose SAS token is already in the query string.
+  urllib copies every header onto the redirected request, so Azure received a GitHub bearer token it
+  never asked for and answered 401 — not in check_run_log's (404, 410) allowlist, so it raised,
+  GithubUnhealthyPrsCheck's per-PR guard swallowed it, and every red pull request was silently
+  skipped. Only conflicted PRs with no failing check-run ever reached an agent.
+
+Verified against the live 1.10.0 service, which logged one such warning per PR per tick, including
+  onpaj/harness_v2#155.
+
+No injected test opener exercises urllib's redirect path, which is why this shipped green; the
+  handler is now tested directly and one test pins that the default opener carries it.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
 
 
 ## v1.9.0 (2026-08-02)
