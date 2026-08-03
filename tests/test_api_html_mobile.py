@@ -92,6 +92,37 @@ def test_stylesheet_switches_board_layout_at_768px(client):
     assert "flex-direction: row" in css
 
 
+def test_stylesheet_adds_wide_desktop_breakpoints_above_768px(client):
+    css = client.get("/static/app.css").text
+
+    assert "@media (min-width: 1400px)" in css
+    assert "@media (min-width: 1800px)" in css
+
+    base_index = css.index("@media (min-width: 768px)")
+    wide_1400_index = css.index("@media (min-width: 1400px)")
+    wide_1800_index = css.index("@media (min-width: 1800px)")
+    assert base_index < wide_1400_index < wide_1800_index
+
+
+def test_wide_desktop_breakpoints_relax_page_and_column_caps(client):
+    css = client.get("/static/app.css").text
+
+    base_block = css[css.index("@media (min-width: 768px)") : css.index("@media (min-width: 1400px)")]
+    tier_1400_block = css[css.index("@media (min-width: 1400px)") : css.index("@media (min-width: 1800px)")]
+    tier_1800_block = css[css.index("@media (min-width: 1800px)") :]
+
+    # The base 768px block is untouched: it still caps .column at 360px and
+    # says nothing about .page — those overrides live only in the new tiers.
+    assert "max-width: 360px" in base_block
+    assert ".page {" not in base_block
+
+    assert "max-width: 1600px" in tier_1400_block
+    assert "max-width: 420px" in tier_1400_block
+
+    assert "max-width: 2200px" in tier_1800_block
+    assert "max-width: 500px" in tier_1800_block
+
+
 def test_nav_renders_a_board_entry_for_both_appbar_and_tabbar(client):
     body = client.get("/").text
 

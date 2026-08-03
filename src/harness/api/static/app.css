@@ -393,6 +393,18 @@ td.wrap, th.wrap { white-space: normal; }
   .kv .k { flex-basis: 150px; }
 }
 
+/* --- Wide desktop --------------------------------------------------------- */
+
+@media (min-width: 1400px) {
+  .page { max-width: 1600px; }
+  .column { max-width: 420px; }
+}
+
+@media (min-width: 1800px) {
+  .page { max-width: 2200px; }
+  .column { max-width: 500px; }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .card, a, .btn { transition: none; }
 }
