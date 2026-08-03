@@ -52,6 +52,15 @@ from harness.drivers.github_forge import GithubForge
 from harness.drivers.github_issue_checker import GithubIssueChecker
 from harness.drivers.github_merge_checker import GithubMergeChecker
 from harness.drivers.github_source import GithubLabelReflector, GithubTaskSource
+# `DEFAULT_SKIP_LABEL` is aliased because *both* PR checks export that name with
+# deliberately different values — `harness:no-automerge` vetoes a merge,
+# `harness:no-autofix` vetoes an agent touching the branch at all.
+from harness.drivers.github_unhealthy_prs_check import (
+    DEFAULT_GIVE_UP_LABEL,
+    DEFAULT_LOG_TAIL_LINES,
+    DEFAULT_MAX_ATTEMPTS,
+    DEFAULT_SKIP_LABEL as UNHEALTHY_SKIP_LABEL,
+)
 from harness.drivers.jira_client import HttpJiraClient, JiraClient
 from harness.drivers.label_issue import LabelIssueBehavior
 from harness.drivers.slack_sink import SlackWebhookSink
@@ -147,15 +156,29 @@ DEFAULT_DEFINITION = {
     "finishers": {"verify": "verify"},
 }
 
-DEFAULT_RESOLVER_WORKFLOW = "resolver"
+DEFAULT_UNBLOCK_WORKFLOW = "unblock-pr"
 
-RESOLVER_DEFINITION = {
-    "name": "resolver",
-    "start": "resolve",
+UNBLOCK_PR_DEFINITION = {
+    "name": "unblock-pr",
+    "start": "unblock",
     "transitions": [
-        {"from": "resolve", "on": "done", "to": "land"},
+        {"from": "unblock", "on": "done", "to": "land",
+         "hint": "the conflict is resolved and/or the failing checks should now pass"},
+        {"from": "unblock", "on": "stuck", "to": "end",
+         "hint": "you could not fix this from what you were given — push nothing"},
         {"from": "land", "on": "done", "to": "end"},
     ],
+    "descriptions": {
+        "unblock": (
+            "fix whatever is blocking this pull request — merge conflicts, "
+            "failing checks, or both"
+        ),
+        "land": "commit the fix and push it to the pull request's branch",
+    },
+    # `maxParallel`, not `max_parallel`: `fs_workflows._parse_workflow` reads
+    # the camelCase key and ignores everything else, so the snake_case spelling
+    # would silently leave this step on the default of 1.
+    "maxParallel": {"unblock": 2},
 }
 
 DEFAULT_HEAL_WORKFLOW = "heal"
@@ -260,15 +283,19 @@ def _init(args: argparse.Namespace) -> int:
             encoding="utf-8",
         )
 
-    resolver_definition_path = layout.workflows / f"{DEFAULT_RESOLVER_WORKFLOW}.json"
-    if not resolver_definition_path.exists():
-        resolver_definition_path.write_text(
-            json.dumps(RESOLVER_DEFINITION, indent=2, ensure_ascii=False),
+    # `unblock-pr`/`unblock` (ADR-0027), the retired `resolver`/`resolve`
+    # workflow's successor. Seeded together with `processes/unblock-pr.json`
+    # below, so the feature is reachable from a fresh install rather than
+    # needing three files hand-written first.
+    unblock_definition_path = layout.workflows / f"{DEFAULT_UNBLOCK_WORKFLOW}.json"
+    if not unblock_definition_path.exists():
+        unblock_definition_path.write_text(
+            json.dumps(UNBLOCK_PR_DEFINITION, indent=2, ensure_ascii=False),
             encoding="utf-8",
         )
 
     # `heal`/`file-issue` (ADR-0018): dormant data, shipped unconditionally
-    # exactly like the resolver workflow. `processes/autoheal.json` is shipped
+    # exactly like the unblock-pr workflow. `processes/autoheal.json` is shipped
     # unconditionally too — self-healing is now configured entirely through
     # that file, like every other Process; a bare `harness init` seeds it
     # with an empty `action.params.repository`, and the operator points it
@@ -281,7 +308,7 @@ def _init(args: argparse.Namespace) -> int:
             encoding="utf-8",
         )
     # `automerge`/`merge-review` (ADR-0023): shipped unconditionally exactly
-    # like the resolver and heal workflows — and, unlike what the ADR
+    # like the unblock-pr and heal workflows — and, unlike what the ADR
     # originally decided, so is `processes/automerge.json` (seeded just below
     # by `_ensure_automerge_process`, which explains the revision). So this
     # workflow *runs* on a freshly initialized root: it reviews every clean
@@ -296,6 +323,7 @@ def _init(args: argparse.Namespace) -> int:
         )
     _ensure_autoheal_process(layout)
     _ensure_automerge_process(layout)
+    _ensure_unblock_pr_process(layout)
 
     # Workflows are read straight off the filesystem here, not through
     # `build()`: `build()` also compiles `processes/*.json` (ADR-0018), and
@@ -311,7 +339,7 @@ def _init(args: argparse.Namespace) -> int:
     try:
         raw_workflows = FilesystemWorkflowRepository(layout.workflows)
         workflow = raw_workflows.get(args.workflow)
-        resolver_workflow = raw_workflows.get(DEFAULT_RESOLVER_WORKFLOW)
+        unblock_workflow = raw_workflows.get(DEFAULT_UNBLOCK_WORKFLOW)
         heal_workflow = raw_workflows.get(DEFAULT_HEAL_WORKFLOW)
         automerge_workflow = raw_workflows.get(DEFAULT_AUTOMERGE_WORKFLOW)
     except WorkflowNotFound as error:
@@ -322,7 +350,7 @@ def _init(args: argparse.Namespace) -> int:
     # calling `build()` here — reproduced directly now that `build()` is no
     # longer called, including each queue's `.processing/` subdirectory
     # (`FilesystemTaskQueue.__init__`, `drivers/fs_queue.py`). Scoped to
-    # `args.workflow`'s own steps only, exactly as before: `resolver`/`heal`
+    # `args.workflow`'s own steps only, exactly as before: `unblock-pr`/`heal`
     # get their queues the first time a `harness run` actually serves them
     # (every workflow file on disk, invariant #24).
     for queue_dir in (layout.tasks, layout.done, layout.failed, layout.healed, layout.archived):
@@ -334,7 +362,14 @@ def _init(args: argparse.Namespace) -> int:
         (step_dir / ".processing").mkdir(parents=True, exist_ok=True)
 
     _write_default_agents(layout, workflow)
-    _write_default_agents(layout, resolver_workflow)
+    # Writes `agents/unblock.json` only — `land` is the landing step, skipped.
+    # Its `allowed_outcomes` comes out as `["done"]`, not the workflow's own
+    # `done`/`stuck`: `fs_agents._parse_agent_spec` accepts only `done` and
+    # `request_changes` in that field, so writing `stuck` there would make the
+    # persona unloadable. Harmless — the live vocabulary is the workflow's
+    # (invariant #42), and `UnblockPrBehavior` is wired with the workflow
+    # repository, so `stuck` reaches the agent from `unblock-pr.json`'s edges.
+    _write_default_agents(layout, unblock_workflow)
     _write_default_agents(layout, heal_workflow)
     # Writes `agents/merge-review.json` only — `merge` binds the `merge-pr`
     # finisher, so `_write_default_agents` skips it (no persona, no agent).
@@ -513,17 +548,34 @@ _REVIEW_PERSONA = (
     "cleanup suggestions)."
 )
 
-_RESOLVE_PERSONA = (
-    "You are a senior developer whose only job right now is to resolve a git "
-    "merge conflict. The working directory already contains a real conflict "
-    "from merging the base branch into this PR's branch — files with "
-    "<<<<<<<, =======, >>>>>>> markers. Read each conflicted file, understand "
-    "both sides using the surrounding code and tests, and produce a correct "
-    "resolution: remove every marker, preserve the combined intent of both "
-    "changes, and leave a tree that would pass the project's existing "
-    "tests.\n\n"
-    "Do not commit, create a branch, or open a worktree — the harness handles "
-    "all of that."
+_UNBLOCK_PERSONA = (
+    "You are a senior developer whose only job right now is to get one pull "
+    "request unblocked. The working directory is a checkout of the PR's own "
+    "branch, and the base branch has already been merged in — so if there was "
+    "a conflict, the files with <<<<<<< ======= >>>>>>> markers are in front "
+    "of you now.\n\n"
+    "Your brief above says what is wrong: a conflict, one or more failing "
+    "checks with the tail of their logs, or both. Fix all of it.\n\n"
+    "For a conflict: read each conflicted file, understand both sides from the "
+    "surrounding code and tests, and produce a resolution that preserves the "
+    "combined intent. Remove every marker.\n\n"
+    "For a failing check: the log tail tells you what failed, not always why. "
+    "Read the code the failure points at before you change it. Then run the "
+    "relevant tests yourself and confirm they pass — a fix you have not run is "
+    "a guess, and pushing a guess costs another round of CI.\n\n"
+    "A log tail may be absent for checks whose logs this harness cannot fetch. "
+    "Say so and work from the check's name and the diff rather than inventing "
+    "what it said.\n\n"
+    "Do not widen the scope. You are fixing what is broken, not improving what "
+    "happens to be nearby — an unrelated change here lands on someone else's "
+    "PR.\n\n"
+    "If you cannot fix it from what you have — the failure is environmental, "
+    "the log is uninformative, or the right fix is a judgement call that is "
+    "not yours to make — choose \"stuck\" and explain why in your artifact. "
+    "Stuck is a perfectly good answer and costs a human one glance. A "
+    "speculative push costs a full CI run and burns one of three attempts.\n\n"
+    "Do not commit, push, create a branch, or open a worktree — the harness "
+    "does all of that."
 )
 
 _HEALER_PERSONA = (
@@ -644,7 +696,10 @@ AGENT_PERSONAS: dict[str, tuple[str, list[str]]] = {
         ["Read", "Write", "Edit", "Bash", "Grep", "Glob", "Task"],
     ),
     "review": (_REVIEW_PERSONA, ["Read", "Grep", "Glob", "Bash"]),
-    "resolve": (_RESOLVE_PERSONA, ["Read", "Edit", "Bash", "Grep", "Glob"]),
+    "unblock": (
+        _UNBLOCK_PERSONA,
+        ["Read", "Write", "Edit", "Bash", "Grep", "Glob"],
+    ),
     "heal": (_HEALER_PERSONA, ["Read", "Write"]),
     "dedup": (_DEDUP_PERSONA, ["Read", "Bash"]),
     "merge-review": (_MERGE_REVIEW_PERSONA, ["Read", "Grep", "Glob", "Bash"]),
@@ -660,7 +715,7 @@ AGENT_PERSONAS: dict[str, tuple[str, list[str]]] = {
 #   architecture  ← architect (opus)
 #   development    ← developer (sonnet)
 #   review        ← code-reviewer, the full-diff reviewer (sonnet)
-#   resolve       ← developer-class conflict fix (sonnet)
+#   unblock       ← developer-class PR unblocking (sonnet)
 # A step with no entry keeps `model = null` (the CLI's configured default).
 AGENT_MODELS: dict[str, str] = {
     "plan": "opus",
@@ -668,7 +723,7 @@ AGENT_MODELS: dict[str, str] = {
     "architecture": "opus",
     "development": "sonnet",
     "review": "sonnet",
-    "resolve": "sonnet",
+    "unblock": "sonnet",
     "heal": "opus",
     "dedup": "opus",
     # The most consequential judgement the harness makes unattended — the one
@@ -1024,9 +1079,9 @@ def _process_check_factories(
     jira_client: JiraClient | None = None,
 ) -> dict[str, CheckFactory]:
     """Check kinds `processes/*.json` may name that need a dependency
-    `BUILTIN_CHECKS` can't carry — `github-issues`/`github-conflicts`, each
-    closed over a `GithubClient` + the repo registry, and `jira-issues`,
-    closed over a `JiraClient` + the repo registry. The clients come from the
+    `BUILTIN_CHECKS` can't carry — `github-issues`/`github-unhealthy-prs`/
+    `github-mergeable`, each closed over a `GithubClient` + the repo registry,
+    and `jira-issues`, closed over a `JiraClient` + the repo registry. The clients come from the
     caller (tests) or the environment (`GITHUB_TOKEN`; `JIRA_BASE_URL`/
     `JIRA_EMAIL`/`JIRA_API_TOKEN`).
 
@@ -1040,13 +1095,21 @@ def _process_check_factories(
         MissingCredential,
         ProcessValidationError,
     )
-    from harness.drivers.github_conflicts_check import SPEC as GITHUB_CONFLICTS_SPEC
-    from harness.drivers.github_conflicts_check import GithubConflictsCheck
     from harness.drivers.github_issues_check import SPEC as GITHUB_ISSUES_SPEC
     from harness.drivers.github_issues_check import GithubIssuesCheck
     from harness.drivers.github_mergeable_check import DEFAULT_SKIP_LABEL
     from harness.drivers.github_mergeable_check import SPEC as GITHUB_MERGEABLE_SPEC
     from harness.drivers.github_mergeable_check import GithubMergeableCheck
+
+    # The unhealthy-PRs defaults (`UNHEALTHY_SKIP_LABEL`,
+    # `DEFAULT_GIVE_UP_LABEL`, `DEFAULT_MAX_ATTEMPTS`,
+    # `DEFAULT_LOG_TAIL_LINES`) are imported at module level — the local
+    # `DEFAULT_SKIP_LABEL` bound just above is the *automerge* one, which is
+    # why the unhealthy-PRs skip label carries an alias everywhere it is read.
+    from harness.drivers.github_unhealthy_prs_check import (
+        SPEC as GITHUB_UNHEALTHY_PRS_SPEC,
+        GithubUnhealthyPrsCheck,
+    )
     from harness.drivers.jira_issues_check import JiraIssuesCheck
     from harness.ports.triggers import CheckDefinition
 
@@ -1083,15 +1146,36 @@ def _process_check_factories(
             claimed_label=claimed_label,
         )
 
-    def github_conflicts_factory(params: dict) -> GithubConflictsCheck:
+    def github_unhealthy_prs_factory(params: dict) -> GithubUnhealthyPrsCheck:
         if client is None:
             raise MissingCredential(
-                "github-conflicts action requires GITHUB_TOKEN", field="check"
+                "github-unhealthy-prs action requires GITHUB_TOKEN", field="check"
             )
-        return GithubConflictsCheck(
+        max_attempts = params.get("max_attempts", DEFAULT_MAX_ATTEMPTS)
+        log_tail_lines = params.get("log_tail_lines", DEFAULT_LOG_TAIL_LINES)
+        if not isinstance(max_attempts, int) or max_attempts < 1:
+            raise ProcessValidationError(
+                "github-unhealthy-prs action requires params.max_attempts to be "
+                "a positive integer",
+                field="params",
+            )
+        # `< 1`, not `< 0`: the check tails with `lines[-log_tail_lines:]`, and
+        # Python's `-0 == 0` would make a zero mean the *entire* log rather than
+        # none of it — the one value that quietly defeats the tail.
+        if not isinstance(log_tail_lines, int) or log_tail_lines < 1:
+            raise ProcessValidationError(
+                "github-unhealthy-prs action requires params.log_tail_lines to be "
+                "a positive integer",
+                field="params",
+            )
+        return GithubUnhealthyPrsCheck(
             client=client,
             registry=registry,
             head_prefix=params.get("head_prefix", "harness/"),
+            skip_label=params.get("skip_label", UNHEALTHY_SKIP_LABEL),
+            give_up_label=params.get("give_up_label", DEFAULT_GIVE_UP_LABEL),
+            max_attempts=max_attempts,
+            log_tail_lines=log_tail_lines,
         )
 
     def github_mergeable_factory(params: dict) -> GithubMergeableCheck:
@@ -1162,8 +1246,8 @@ def _process_check_factories(
         "github-issues": CheckDefinition(
             spec=GITHUB_ISSUES_SPEC, factory=github_issues_factory
         ),
-        "github-conflicts": CheckDefinition(
-            spec=GITHUB_CONFLICTS_SPEC, factory=github_conflicts_factory
+        "github-unhealthy-prs": CheckDefinition(
+            spec=GITHUB_UNHEALTHY_PRS_SPEC, factory=github_unhealthy_prs_factory
         ),
         "github-mergeable": CheckDefinition(
             spec=GITHUB_MERGEABLE_SPEC, factory=github_mergeable_factory
@@ -1336,6 +1420,77 @@ def _ensure_automerge_process(layout: HarnessLayout) -> None:
     layout.processes.mkdir(parents=True, exist_ok=True)
     path.write_text(
         json.dumps(AUTOMERGE_PROCESS_DEFINITION, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+
+UNBLOCK_PR_PROCESS_DEFINITION = {
+    "trigger": {"interval": "60s"},
+    "action": {
+        "check": "github-unhealthy-prs",
+        "params": {
+            "head_prefix": "harness/",
+            "skip_label": UNHEALTHY_SKIP_LABEL,
+            "give_up_label": DEFAULT_GIVE_UP_LABEL,
+            "max_attempts": DEFAULT_MAX_ATTEMPTS,
+            "log_tail_lines": DEFAULT_LOG_TAIL_LINES,
+        },
+    },
+    "target": {"workflow": "unblock-pr"},
+    "dedup": "per-state",
+    "sink": {"kind": "none"},
+}
+"""One Process covers **every** repository, exactly like the automerge one:
+`GithubUnhealthyPrsCheck.evaluate()` iterates `RepositoryRegistry.names()`, so
+adding a repo to `repos.json` puts its open PRs under triage automatically and
+a non-GitHub repo is skipped.
+
+`head_prefix` is seeded `"harness/"`, matching `automerge.json` — a fresh
+`harness init` plus a `GITHUB_TOKEN` therefore touches only branches the
+harness itself authored. ADR-0027's decision is that the *feature* may work any
+open PR, and it can: widening it is one field of this file and no code change.
+But the widening is the operator's explicit act, not something a default install
+does on its own, because the widest setting means merging into, committing to
+and pushing every unhealthy open PR in every registered repository — including
+branches a human has checked out — from the first tick. The sibling automerge
+Process ships equally withheld (`dry_run: true` in its finisher binding); this
+is the same posture expressed with the knob this check actually has.
+
+What contains the widened setting, once an operator chooses it, is on the PR
+rather than in this file: nothing is ever force-pushed, a fork PR is never
+touched, `harness:no-autofix` vetoes one PR with no config change, and both the
+three-attempt budget and the agent's own give-up end at `harness:needs-human`
+instead of looping.
+
+`dedup` is `per-state`, and load-bearing rather than stylistic: the check emits
+one observation *per unhealthy PR*, and under the default `per-interval` every
+observation in a tick collapses onto one dedup key, so `SourcePoller._seen`
+would keep the first and silently drop the rest.
+
+Safe to seed with no `GITHUB_TOKEN`: the `github-unhealthy-prs` factory raises
+`MissingCredential`, which `FilesystemProcessRepository.build()` skips with a
+warning rather than failing the run."""
+
+
+def _ensure_unblock_pr_process(layout: HarnessLayout) -> None:
+    """Seed `processes/unblock-pr.json` unless one already exists — never
+    clobbering an operator's hand-edited file, exactly like the autoheal and
+    automerge seeders.
+
+    Seeded for the same reason `automerge.json` is: authoring a file from
+    scratch was never the safety gate people took it for, and leaving the
+    feature unreachable from a fresh install only meant the previous release
+    kept seeding the *retired* `resolver` workflow instead — whose `resolve`
+    step no longer matches `app.UNBLOCK_STEP`, so it fell through to the
+    generic `ClaudeCliBehavior` and committed without merging the base or
+    excluding `.artifacts`.
+    """
+    path = layout.processes / "unblock-pr.json"
+    if path.exists():
+        return
+    layout.processes.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(UNBLOCK_PR_PROCESS_DEFINITION, indent=2, ensure_ascii=False),
         encoding="utf-8",
     )
 
@@ -2328,7 +2483,7 @@ def _run(args: argparse.Namespace) -> int:
     ] = {"open-issue": _open_issue, "merge-pr": _merge_pr}
 
     # A single GitHub client threads into both the process check factories
-    # (`github-issues`/`github-conflicts`) and the `label-issue` finisher —
+    # (`github-issues`/`github-unhealthy-prs`) and the `label-issue` finisher —
     # one client per wiring site, like every other GitHub-touching helper
     # here. Built here — ahead of where the process check factories and the
     # issue-import factory consume it further down — so `finishers` below is
@@ -2434,7 +2589,7 @@ def _run(args: argparse.Namespace) -> int:
     # (ADR-0018) — the `failed-tasks` check needs the harness's own live
     # `failed`/`healed`/`events`, which only exist once `build()` has
     # constructed them. `_process_check_factories` supplies just the
-    # externally-dependent check kinds (`github-issues`/`github-conflicts`/
+    # externally-dependent check kinds (`github-issues`/`github-unhealthy-prs`/
     # `jira-issues`); the Slack-sink *decision*, though, still has to happen
     # here, before `build()` — a `SlackWebhookSink` must be present in
     # `sources` before `build()` constructs `SourceReflectorSink(sources)`
@@ -2483,6 +2638,16 @@ def _run(args: argparse.Namespace) -> int:
             command_runner=SubprocessCommandRunner(),
             dropped_workflows=dropped_workflows,
             retention_days=_retention_days(),
+            # The `unblock` step's give-up label (ADR-0027). The capability,
+            # not the client: `behaviors/` may not import `drivers/`, so
+            # `UnblockPrBehavior` takes a callable and the wiring closes the
+            # client into it — the shape `OpenIssueBehavior` already uses for
+            # `slug_for`. `None` without a token, exactly like the
+            # `github-unhealthy-prs` check that mints those tasks, so the two
+            # halves of the containment are never configured apart.
+            pr_labeller=(
+                github_client.add_label if github_client is not None else None
+            ),
         )
     except WorkflowNotFound as error:
         print(f"error: {error}", file=sys.stderr)
@@ -2589,6 +2754,7 @@ async def serve(
         ),
         updater=updater,
         issue_import=harness.issue_import,
+        stats=harness.stats,
         version=version_string(),
         build_time=build_timestamp(),
     )

@@ -9,7 +9,7 @@ from pathlib import Path
 
 from harness.behaviors.agent import ClaudeCliBehavior
 from harness.behaviors.landing import LandingBehavior
-from harness.behaviors.resolve_conflict import ResolveConflictBehavior
+from harness.behaviors.unblock_pr import PrLabeller, UnblockPrBehavior
 from harness.behaviors.verify import VerifyBehavior
 from harness.consumer import Consumer
 from harness.dispatcher import Dispatcher
@@ -54,6 +54,7 @@ from harness.ports.merge import MergeChecker
 from harness.ports.queue import TaskQueue
 from harness.ports.repos import RepositoryRegistry
 from harness.ports.source import TaskSource
+from harness.ports.stats import StatsView
 from harness.ports.triggers import Check, CheckDefinition, CheckFactory
 from harness.ports.workflows import WorkflowNotFound
 from harness.ports.workspace import Workspace
@@ -64,6 +65,7 @@ from harness.merge_reconciler import MergeReconciler
 from harness.pr_watcher import PrWatcher
 from harness.retention_reconciler import DEFAULT_RETENTION_DAYS, RetentionReconciler
 from harness.source_poller import SourcePoller
+from harness.stats import QueueStatsView
 from harness.task_control import TaskControlService
 
 LANDING_STEP = "land"
@@ -71,9 +73,9 @@ LANDING_STEP = "land"
 workflow binds it — a workflow file written before `finishers` existed keeps
 landing exactly as it always did (ADR-0016)."""
 
-RESOLVE_STEP = "resolve"
-"""The step to which the wiring assigns ResolveConflictBehavior, when a catalog
-is configured — the resolver workflow's first step."""
+UNBLOCK_STEP = "unblock"
+"""The step to which the wiring assigns UnblockPrBehavior, when a catalog is
+configured — the unblock-pr workflow's first step."""
 
 _ALWAYS_WIRABLE_FINISHER_KINDS = frozenset({"open-pr", "verify"})
 """The two kinds `build()` always registers itself (see `finisher_registry`
@@ -236,6 +238,7 @@ class Harness:
         control: TaskControl,
         events: EventSink,
         clock: Clock,
+        stats: StatsView | None = None,
         pollers: list[SourcePoller] | None = None,
         pr_watcher: PrWatcher | None = None,
         reconciler: MergeReconciler | None = None,
@@ -256,6 +259,12 @@ class Harness:
         self.artifacts = artifacts
         self.stage_output = stage_output
         self.control = control
+        # Fourth UI read surface (ADR-0026), next to projection/artifacts/
+        # stage_output. `build()` always supplies one — it derives from the
+        # queues built there and needs no external service, the same posture as
+        # `RetentionReconciler` — so the None is only for a hand-constructed
+        # `Harness`, and `create_app` falls back to an empty view.
+        self.stats = stats
         # UI-facing write port for the Ahanas board's manual "Add issue" button
         # (invariant #43): always a concrete `IssueImport`, never `None`,
         # mirroring `self.control` — `NullIssueImport` when no factory was
@@ -480,7 +489,7 @@ class Harness:
 
 _CREDENTIAL_GATED_CHECKS = {
     "github-issues": "GITHUB_TOKEN",
-    "github-conflicts": "GITHUB_TOKEN",
+    "github-unhealthy-prs": "GITHUB_TOKEN",
     "github-mergeable": "GITHUB_TOKEN",
     "jira-issues": "JIRA_BASE_URL/JIRA_EMAIL/JIRA_API_TOKEN",
 }
@@ -528,6 +537,7 @@ def build(
     command_runner: CommandRunner | None = None,
     dropped_workflows: set[str] | None = None,
     retention_days: int = DEFAULT_RETENTION_DAYS,
+    pr_labeller: PrLabeller | None = None,
 ) -> Harness:
     layout = HarnessLayout(Path(root))
     events = events or StdoutEventSink()
@@ -782,14 +792,30 @@ def build(
         a finisher actually reads `inner()` — never for a step exclusively
         finished by "open-pr", so a landing-only step with no catalog agent
         never triggers `catalog.get(step)`."""
-        if step == RESOLVE_STEP and catalog is not None:
-            return ResolveConflictBehavior(
+        if step == UNBLOCK_STEP and catalog is not None:
+            spec = catalog.get(step)
+            return UnblockPrBehavior(
                 clock=clock,
                 workspace=workspace,
                 runner=runner,
-                spec=catalog.get(step),
+                spec=spec,
                 events=events,
-                timeout=agent_timeout,
+                # A per-persona timeout on `agents/unblock.json` is honoured
+                # here exactly as it is on the generic branch below.
+                timeout=spec.timeout if spec.timeout is not None else agent_timeout,
+                # Invariant 42: the workflow declares the step's outcome
+                # vocabulary, its per-edge hints and its description. Threaded
+                # the same way `ClaudeCliBehavior` gets it — without it the
+                # `unblock-pr` workflow's authored `done`/`stuck` hints and
+                # `descriptions.unblock` never reach the agent.
+                workflows=served_workflows,
+                # The give-up label capability (ADR-0027). `None` here is the
+                # no-`GITHUB_TOKEN` run, where the check that mints these
+                # tasks is skipped anyway — so nothing gives up and nothing is
+                # re-minted. Injected as a callable rather than as a client
+                # because `behaviors/` may not import `drivers/` (invariant 1),
+                # the same shape `OpenIssueBehavior` takes `slug_for` in.
+                pr_labeller=pr_labeller,
             )
         if catalog is not None:
             # Missing spec → AgentNotFound surfaces already at build time (fail fast).
@@ -844,8 +870,8 @@ def build(
     # Processes (`processes/*.json`) are the operator's top-level authoring
     # aggregate; each compiles into a `ScheduledTrigger` (ADR-0015). Compiled
     # here, inside `build()`, rather than by `cli.py` (as `github-issues`/
-    # `github-conflicts` still are, folded in via `extra_checks`) because the
-    # `failed-tasks` check (ADR-0018) needs the harness's own live
+    # `github-unhealthy-prs` still are, folded in via `extra_checks`) because
+    # the `failed-tasks` check (ADR-0018) needs the harness's own live
     # `failed`/`healed_queue`/`events` — ports only `build()` itself
     # constructs, not something `cli.py` can hand it independently.
     checks: dict[str, CheckFactory] = {
@@ -925,6 +951,23 @@ def build(
         events=events, clock=clock,
     )
 
+    # The delivery report (ADR-0026). Derived on demand from the task files
+    # themselves, so it is built unconditionally — like the retention sweep it
+    # needs only the local queues and the clock, with no "not configured" state
+    # to gate on. `archived/` is in the list on purpose: once the retention
+    # sweep has run, that is where most of a week's window lives.
+    stats = QueueStatsView(
+        queues=[
+            inbox,
+            *step_queues.values(),
+            done,
+            failed,
+            healed_queue,
+            archived,
+        ],
+        clock=clock,
+    )
+
     return Harness(
         layout=layout,
         workflows=resolved,
@@ -939,6 +982,7 @@ def build(
         artifacts=view,
         stage_output=stage_output,
         control=control,
+        stats=stats,
         events=events,
         clock=clock,
         pollers=pollers,

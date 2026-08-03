@@ -282,16 +282,17 @@ MODEL = ArchitectureModel(
                     adrs=("0015-process-authoring-aggregate",),
                 ),
                 Driver(
-                    id="github-conflicts-check",
-                    name="GithubConflictsCheck (github-conflicts)",
-                    tagline="Conflict detection as a Process action.",
+                    id="github-unhealthy-prs-check",
+                    name="GithubUnhealthyPrsCheck (github-unhealthy-prs)",
+                    tagline="Pull-request triage as a Process action.",
                     description=(
-                        "Lists harness-authored open PRs across the registry; a "
-                        "PR merely behind its base is updated server-side, a "
-                        "conflicted one becomes an observation for the resolver "
-                        "workflow, keyed per head commit."
+                        "Lists open PRs across the registry; a PR merely behind "
+                        "its base is updated server-side, a conflicted or "
+                        "red-CI one becomes an observation for the unblock-pr "
+                        "workflow, keyed per head commit and bounded by an "
+                        "attempt budget held in a label on the PR."
                     ),
-                    sources=("src/harness/drivers/github_conflicts_check.py",),
+                    sources=("src/harness/drivers/github_unhealthy_prs_check.py",),
                 ),
                 Driver(
                     id="failed-tasks-check",
@@ -444,17 +445,19 @@ MODEL = ArchitectureModel(
                     ),
                 ),
                 Driver(
-                    id="resolve-conflict-behavior",
-                    name="ResolveConflictBehavior",
-                    tagline="Merges base into the branch; escalates real conflicts.",
+                    id="unblock-pr-behavior",
+                    name="UnblockPrBehavior",
+                    tagline="Merges base into the branch; briefs the agent on whatever is red.",
                     description=(
-                        "The resolver step's behavior: a clean merge commits "
-                        "without spending an agent call; a real conflict runs "
-                        "the resolve persona, then the worker commits. Always a "
-                        "merge, never a rebase — pushed history is never "
-                        "rewritten."
+                        "The unblock-pr step's behavior: a clean merge with "
+                        "nothing red commits without spending an agent call; a "
+                        "real conflict or a failing check runs the unblock "
+                        "persona over the triage brief, then the worker "
+                        "commits, excluding `.artifacts` since the branch may "
+                        "belong to a human. Always a merge, never a rebase — "
+                        "pushed history is never rewritten."
                     ),
-                    sources=("src/harness/behaviors/resolve_conflict.py",),
+                    sources=("src/harness/behaviors/unblock_pr.py",),
                 ),
                 Driver(
                     id="open-issue-behavior",

@@ -21,8 +21,8 @@ that guard is separate from, and not overridden by, the "already checked out"
 guard `--force` does lift), falling back to creating it fresh from
 `origin/<branch>` only the one time no local copy exists yet. Reusing the
 local branch this way would leave the new worktree stale whenever the branch
-last advanced server-side (`GithubConflictsCheck`'s `GithubClient.update_branch`
-call, which never touches any local ref) rather than through a harness-driven
+last advanced server-side (`GithubUnhealthyPrsCheck`'s
+`GithubClient.update_branch` call, which never touches any local ref) rather than through a harness-driven
 commit+push here — so once the reused worktree exists, it is immediately hard-reset to
 `origin/<branch>`'s actual tip before the caller does anything else with it.
 A similar reconciliation runs on **reattach** of an override task (the worktree
@@ -164,10 +164,20 @@ class GitWorkspaceHandle(WorkspaceHandle):
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content, encoding="utf-8")
 
-    def commit(self, message: str) -> str | None:
-        _git(["-C", str(self._path), "add", "-A"])
-        status = _git(["-C", str(self._path), "status", "--porcelain"])
-        if status.strip() == "":
+    def commit(self, message: str, *, exclude: tuple[str, ...] = ()) -> str | None:
+        add = ["-C", str(self._path), "add", "-A"]
+        if exclude:
+            # `git add -A -- . ':(exclude)<path>'` — the pathspec applies to
+            # this staging call alone, unlike .gitignore or info/exclude (the
+            # latter lives in the *common* dir and would leak across every
+            # worktree of this clone).
+            add += ["--", "."] + [f":(exclude){path}" for path in exclude]
+        _git(add)
+        # Excluded files still show up as untracked in `status --porcelain`,
+        # so that check alone can't tell "nothing to commit" apart from "only
+        # excluded files changed". Check what's actually staged instead.
+        staged = _git(["-C", str(self._path), "diff", "--cached", "--name-only"])
+        if staged.strip() == "":
             return None
         _git(
             ["-C", str(self._path), "commit", "-m", message],
@@ -222,9 +232,10 @@ class GitWorkspaceHandle(WorkspaceHandle):
 
     def abort_merge(self) -> None:
         # `git merge --abort` restores the pre-merge HEAD, index and working
-        # tree (clears MERGE_HEAD and the conflict markers). Landing calls this
-        # only when merge() reported a conflict, so a merge is always in
-        # progress here — there is nothing to abort otherwise.
+        # tree (clears MERGE_HEAD and the conflict markers). Landing and
+        # UnblockPrBehavior both call this only when merge() reported a
+        # conflict, so a merge is always in progress here — there is nothing
+        # to abort otherwise.
         _git(["-C", str(self._path), "merge", "--abort"])
 
 
@@ -288,7 +299,7 @@ class GitWorkspace(Workspace):
                         ["-C", str(base), "worktree", "add", "--force", str(worktree), branch]
                     )
                     # The shared local ref can be behind `origin/<branch>`:
-                    # GithubConflictsCheck's update_branch call advances
+                    # GithubUnhealthyPrsCheck's update_branch call advances
                     # the branch server-side via the GitHub API, touching no
                     # local git state at all. Reconcile the *new* worktree with
                     # origin's actual tip before anything (merge/agent/commit)
@@ -313,8 +324,8 @@ class GitWorkspace(Workspace):
             # Reset-on-reattach for a resolver task's shared branch. Unlike a
             # `harness/<task.id>` branch — which only ever advances through this
             # worktree — a resolver's overridden branch can have moved forward
-            # *server-side* (`GithubConflictsCheck`'s `update_branch` call) between
-            # this task's attempts, touching no local ref. Resetting to local
+            # *server-side* (`GithubUnhealthyPrsCheck`'s `update_branch` call)
+            # between this task's attempts, touching no local ref. Resetting to local
             # `HEAD` here would leave the worktree stale and the resolver's
             # eventual push rejected as non-fast-forward, so reconcile with
             # `origin/<branch>`'s actual tip — the same reconciliation the

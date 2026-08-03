@@ -40,6 +40,8 @@ def test_emits_one_observation_per_labelled_issue_with_provenance():
         "repo": "onpaj/Anela.Heblo",
         "issue": 7,
         "url": "https://gh/i/7",
+        # Record-only, for the delivery report's label breakdown (ADR-0026).
+        "labels": ["harness:todo"],
     }
 
 

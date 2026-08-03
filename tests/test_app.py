@@ -74,9 +74,9 @@ DEFINITION = {
 
 RESOLVER_DEFINITION = {
     "name": "resolver",
-    "start": "resolve",
+    "start": "unblock",
     "transitions": [
-        {"from": "resolve", "on": "done", "to": "land"},
+        {"from": "unblock", "on": "done", "to": "land"},
         {"from": "land", "on": "done", "to": "end"},
     ],
 }
@@ -153,13 +153,13 @@ def test_build_with_extra_workflow_unions_step_queues(tmp_path):
         tmp_path, ["default", "resolver"], events=MemoryEventSink()
     )
 
-    assert (tmp_path / "queues" / "resolve").is_dir()
+    assert (tmp_path / "queues" / "unblock").is_dir()
     assert (tmp_path / "queues" / "land").is_dir()
-    # default: plan, review, land (3); resolver adds only resolve (land is shared).
+    # default: plan, review, land (3); resolver adds only unblock (land is shared).
     assert len(harness.consumers) == 4
 
 
-async def test_resolver_task_flows_through_resolve_and_land_to_done(tmp_path):
+async def test_resolver_task_flows_through_unblock_and_land_to_done(tmp_path):
     from harness.drivers.memory import (
         FakeAgentRunner,
         FakeClock,
@@ -176,7 +176,7 @@ async def test_resolver_task_flows_through_resolve_and_land_to_done(tmp_path):
         {
             "plan": AgentSpec(name="plan", prompt="p"),
             "review": AgentSpec(name="review", prompt="p"),
-            "resolve": AgentSpec(name="resolve", prompt="p"),
+            "unblock": AgentSpec(name="unblock", prompt="p"),
         }
     )
     runner = FakeAgentRunner(default=AgentRun(DONE, "done"))
@@ -203,7 +203,7 @@ async def test_resolver_task_flows_through_resolve_and_land_to_done(tmp_path):
         repository="app",
         data={
             "branch": "harness/tsk_original",
-            "source": {"kind": "mergeability", "repo": "o/r", "pr": 1, "url": "u", "base": "main"},
+            "source": {"kind": "pull-request-health", "repo": "o/r", "pr": 1, "url": "u", "base": "main"},
         },
     )
     (tmp_path / "tasks" / "tsk_resolver_1.json").write_text(json.dumps(task.to_dict()))
@@ -222,6 +222,101 @@ async def test_resolver_task_flows_through_resolve_and_land_to_done(tmp_path):
         json.loads((tmp_path / "done" / "tsk_resolver_1.json").read_text())
     )
     assert finished.status == "end"
+    # Proves the `unblock` step actually ran through the dedicated
+    # `UnblockPrBehavior` branch of `_inner_behavior_for`, not the generic
+    # `ClaudeCliBehavior` fallback (which never calls `merge` at all — grep
+    # confirms `behaviors/agent.py` has no `handle.merge` call). Two
+    # independent fingerprints only `UnblockPrBehavior.run` could leave:
+    #
+    # 1. `WorkspaceHandle.merge` is called twice — once by `unblock` itself,
+    #    once more by `land`'s base-branch sync (invariant #12). A generic
+    #    `ClaudeCliBehavior` on `unblock` would leave exactly one, since it
+    #    never merges at all.
+    handle = workspace.handles["tsk_resolver_1"]
+    assert handle.merges == ["main", "main"]
+    # 2. The `unblock` step's own history entry carries the exact summary
+    #    string `UnblockPrBehavior` writes on its clean-merge path
+    #    (`unblock_pr.py`: `f"merged {base} cleanly, nothing to fix"`) —
+    #    `ClaudeCliBehavior` has no code path that could ever produce it.
+    unblock_entries = [entry for entry in finished.history if entry.actor == "consumer:unblock"]
+    assert len(unblock_entries) == 1
+    assert unblock_entries[0].summary == "merged main cleanly, nothing to fix"
+
+
+def _unblock_behavior(tmp_path, *, spec, pr_labeller=None):
+    """The `UnblockPrBehavior` `build()` wires onto the `unblock` step."""
+    from harness.drivers.memory import MemoryWorkspace
+
+    layout = seed(tmp_path)
+    (layout.workflows / "resolver.json").write_text(json.dumps(RESOLVER_DEFINITION))
+    catalog = MemoryAgentCatalog(
+        {
+            "plan": AgentSpec(name="plan", prompt="p"),
+            "review": AgentSpec(name="review", prompt="p"),
+            "unblock": spec,
+        }
+    )
+    harness = build(
+        tmp_path,
+        ["default", "resolver"],
+        events=MemoryEventSink(),
+        clock=FakeClock(),
+        workspace=MemoryWorkspace(),
+        forge=MemoryForge(),
+        catalog=catalog,
+        delay=0.0,
+        pr_labeller=pr_labeller,
+    )
+    consumer = next(c for c in harness.consumers if c.step == "unblock")
+    return consumer.behavior
+
+
+def test_unblock_behavior_is_wired_with_the_served_workflows(tmp_path):
+    """Invariant 42: the workflow is the authoritative declaration of a step's
+    outcome vocabulary, hints and description — `UnblockPrBehavior` can only
+    read it if `build()` hands it the repository, exactly as it does for
+    `ClaudeCliBehavior`."""
+    behavior = _unblock_behavior(
+        tmp_path, spec=AgentSpec(name="unblock", prompt="p")
+    )
+
+    assert behavior._workflows is not None
+    assert "resolver" in behavior._workflows.names()
+
+
+def test_unblock_behavior_honours_a_per_persona_timeout(tmp_path):
+    """`agents/unblock.json` may set its own `timeout`, the same way every
+    other persona's is honoured on the `ClaudeCliBehavior` branch."""
+    behavior = _unblock_behavior(
+        tmp_path, spec=AgentSpec(name="unblock", prompt="p", timeout=123.0)
+    )
+
+    assert behavior._timeout == 123.0
+
+
+def test_unblock_behavior_is_wired_with_the_give_up_labeller(tmp_path):
+    """ADR-0027: `stuck` moves no head sha, so the check's attempt budget can
+    never label the PR — the behavior does it, and only if `build()` hands it
+    the capability `cli.py` closes over the GitHub client."""
+    calls: list[tuple[str, int, str]] = []
+
+    behavior = _unblock_behavior(
+        tmp_path,
+        spec=AgentSpec(name="unblock", prompt="p"),
+        pr_labeller=lambda repo, number, label: calls.append((repo, number, label)),
+    )
+
+    assert behavior._pr_labeller is not None
+    behavior._pr_labeller("o/r", 42, "harness:needs-human")
+    assert calls == [("o/r", 42, "harness:needs-human")]
+
+
+def test_unblock_behavior_without_a_labeller_is_wired_with_none(tmp_path):
+    """The no-`GITHUB_TOKEN` run: no labeller, and no crash — the check that
+    mints these tasks is skipped on the same condition."""
+    behavior = _unblock_behavior(tmp_path, spec=AgentSpec(name="unblock", prompt="p"))
+
+    assert behavior._pr_labeller is None
 
 
 def test_build_without_sources_has_no_pollers(tmp_path):
@@ -1253,7 +1348,7 @@ def test_build_processes_root_defaults_to_layout_processes(tmp_path):
 
 def test_build_extra_checks_merge_over_builtin_checks(tmp_path):
     """`extra_checks` (the dependency-bag shape `github-issues`/
-    `github-conflicts` use, wired from `cli.py`) is merged into the checks
+    `github-unhealthy-prs` use, wired from `cli.py`) is merged into the checks
     dict `build()` uses to compile `processes/*.json` — alongside its own
     unconditional `"failed-tasks"` entry, never replacing it."""
     from harness.drivers.checks import AlwaysCheck

@@ -13,7 +13,7 @@ the consumer handles them via `_fail` and the task lands in `failed/`.
 
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import dataclass, replace
 
 from harness.artifacts_layout import next_attempt
 from harness.models import BehaviorResult, Task
@@ -23,6 +23,54 @@ from harness.ports.clock import Clock
 from harness.ports.events import EventSink
 from harness.ports.workflows import WorkflowNotFound, WorkflowRepository
 from harness.ports.workspace import Workspace
+
+
+@dataclass(frozen=True)
+class StepVocabulary:
+    """Everything the workflow authored about one step, resolved live.
+
+    `outcomes` is the vocabulary the step may report, `hints` the per-edge
+    hints keyed by outcome, `description` the authored sentence for the step —
+    invariant #42's three prompt inputs, in one value so every behavior that
+    needs them reads the same derivation.
+    """
+
+    outcomes: tuple[str, ...]
+    hints: dict[str, str]
+    description: str | None
+
+
+def resolve_step_vocabulary(
+    *,
+    workflows: WorkflowRepository | None,
+    task: Task,
+    step: str,
+    fallback: tuple[str, ...],
+) -> StepVocabulary:
+    """The step's live vocabulary, hints and description (invariant #42).
+
+    The workflow is the authoritative declaration of what a step may report;
+    `fallback` (a persona's `allowed_outcomes`) applies only when there is no
+    `WorkflowRepository` wired at all, no `workflow_template` on the task, an
+    unresolvable one, or a step with no outgoing edges declared. Shared by
+    every behavior that composes a prompt, so there is exactly one derivation
+    rather than a second mechanism per behavior.
+    """
+    if workflows is None or not task.workflow_template:
+        return StepVocabulary(fallback, {}, None)
+    try:
+        workflow = workflows.get(task.workflow_template)
+    except WorkflowNotFound:
+        return StepVocabulary(fallback, {}, None)
+    derived = workflow.outcomes_for(step)
+    if not derived:
+        return StepVocabulary(fallback, {}, None)
+    hints = {
+        transition.on: transition.hint
+        for transition in workflow.transitions
+        if transition.from_step == step and transition.hint
+    }
+    return StepVocabulary(derived, hints, workflow.description_for(step))
 
 
 class ClaudeCliBehavior(ConsumerBehavior):
@@ -61,34 +109,24 @@ class ClaudeCliBehavior(ConsumerBehavior):
         # prompt-only *and* enforcement-affecting: the resolved set is fed
         # into `effective_spec` below, so the runner's own verdict check
         # (invariant #13) binds against the same live set as the prompt.
-        outcomes = self._spec.allowed_outcomes
-        hints: dict[str, str] = {}
-        description: str | None = None
-        if self._workflows is not None and task.workflow_template:
-            try:
-                workflow = self._workflows.get(task.workflow_template)
-            except WorkflowNotFound:
-                workflow = None
-            if workflow is not None:
-                derived = workflow.outcomes_for(step)
-                if derived:
-                    outcomes = derived
-                    hints = {
-                        transition.on: transition.hint
-                        for transition in workflow.transitions
-                        if transition.from_step == step and transition.hint
-                    }
-                    description = workflow.description_for(step)
+        vocabulary = resolve_step_vocabulary(
+            workflows=self._workflows,
+            task=task,
+            step=step,
+            fallback=self._spec.allowed_outcomes,
+        )
 
-        effective_spec = replace(self._spec, allowed_outcomes=tuple(outcomes))
+        effective_spec = replace(
+            self._spec, allowed_outcomes=tuple(vocabulary.outcomes)
+        )
 
         prompt = compose_prompt(
             task,
             step=step,
             artifact_relpath=relpath,
             outcomes=effective_spec.allowed_outcomes,
-            hints=hints,
-            description=description,
+            hints=vocabulary.hints,
+            description=vocabulary.description,
         )
 
         # Live stage output: the behavior is the only place that knows the task,

@@ -8,11 +8,13 @@ import pytest
 
 from harness.drivers.github_client import (
     SELF_HEAL_LABEL,
+    CheckRun,
     FakeGithubClient,
     HttpGithubClient,
     Issue,
     PullRequestInfo,
     PullRequestRef,
+    _StripCrossHostAuth,
 )
 
 
@@ -223,8 +225,11 @@ def test_http_get_issue_other_error_propagates():
 
 
 class FakeResponse:
-    def __init__(self, payload):
+    def __init__(self, payload, headers=None):
         self._body = json.dumps(payload).encode("utf-8")
+        # A real `urllib` response always carries headers; `list_pull_requests`
+        # reads `Link` off them to follow pagination.
+        self.headers = headers if headers is not None else {}
 
     def read(self):
         return self._body
@@ -713,6 +718,27 @@ def test_fake_list_pull_requests_without_prefix_returns_all():
     assert len(client.list_pull_requests("o/r")) == 1
 
 
+def test_fake_carries_the_head_repo_so_a_fork_pr_can_be_constructed():
+    client = FakeGithubClient()
+    client.add_pull_request(
+        PullRequestInfo(1, "u1", "main", "sha1", "main", "dirty", head_repo="fork/r")
+    )
+    client.add_pull_request(
+        PullRequestInfo(2, "u2", "main", "sha2", "main", "dirty", head_repo="o/r")
+    )
+
+    assert [pr.head_repo for pr in client.list_pull_requests("o/r")] == [
+        "fork/r",
+        "o/r",
+    ]
+
+
+def test_head_repo_defaults_to_unknown():
+    info = PullRequestInfo(1, "u", "b", "s", "main", "dirty")
+
+    assert info.head_repo == ""
+
+
 def test_fake_update_branch_records_call_and_flips_to_clean():
     client = FakeGithubClient()
     client.add_pull_request(
@@ -742,7 +768,7 @@ def test_http_list_pull_requests_two_tier_fetch():
         },
     ]
     detail_payload = {
-        "head": {"sha": "abc123"},
+        "head": {"sha": "abc123", "repo": {"full_name": "o/r"}},
         "base": {"ref": "main"},
         "mergeable_state": "behind",
     }
@@ -769,8 +795,137 @@ def test_http_list_pull_requests_two_tier_fetch():
     assert info.head_sha == "abc123"
     assert info.base_branch == "main"
     assert info.mergeable_state == "behind"
+    assert info.head_repo == "o/r"
     # exactly one list call + one detail call (for the matching PR only)
     assert len(opener.requests) == 2
+
+
+def test_http_list_pull_requests_asks_for_a_full_page_and_follows_link_next():
+    """GitHub's default page is 30 open PRs. Without `per_page` + `Link`
+    following, a busy repo (dependabot alone crosses 30) is silently truncated
+    and the harness simply never sees the rest — invisible from the outside."""
+
+    def _item(number):
+        return {
+            "number": number,
+            "html_url": f"u{number}",
+            "head": {"ref": f"b{number}", "sha": f"s{number}", "repo": {"full_name": "o/r"}},
+            "base": {"ref": "main"},
+        }
+
+    class PagingOpener:
+        def __init__(self):
+            self.urls = []
+
+        def open(self, request, timeout=None):
+            self.urls.append(request.full_url)
+            if "/pulls/" in request.full_url:
+                return FakeResponse({"head": {"sha": "x"}, "mergeable_state": "dirty"})
+            if "page=2" in request.full_url:
+                return FakeResponse([_item(2)])
+            return FakeResponse(
+                [_item(1)],
+                headers={"Link": '<https://api.github.com/x?page=2>; rel="next", '
+                                 '<https://api.github.com/x?page=9>; rel="last"'},
+            )
+
+    opener = PagingOpener()
+    client = HttpGithubClient("tok", opener=opener)
+
+    infos = client.list_pull_requests("o/r")
+
+    assert [i.number for i in infos] == [1, 2]
+    assert "per_page=100" in opener.urls[0]
+    assert opener.urls[1] == "https://api.github.com/x?page=2"
+
+
+def test_http_list_pull_requests_stops_when_there_is_no_next_link():
+    class SinglePageOpener:
+        def __init__(self):
+            self.calls = 0
+
+        def open(self, request, timeout=None):
+            self.calls += 1
+            if "/pulls/" in request.full_url:
+                return FakeResponse({"head": {"sha": "x"}, "mergeable_state": "dirty"})
+            # `last`/`prev` present, `next` absent — the final page.
+            return FakeResponse(
+                [
+                    {
+                        "number": 1,
+                        "html_url": "u",
+                        "head": {"ref": "b", "sha": "s", "repo": {"full_name": "o/r"}},
+                        "base": {"ref": "main"},
+                    }
+                ],
+                headers={"Link": '<https://api.github.com/x?page=1>; rel="prev"'},
+            )
+
+    opener = SinglePageOpener()
+    client = HttpGithubClient("tok", opener=opener)
+
+    assert len(client.list_pull_requests("o/r")) == 1
+    assert opener.calls == 2  # one list page + one detail call, no page 2
+
+
+def test_http_list_pull_requests_reads_the_head_repo_of_a_fork():
+    class TieredOpener:
+        def open(self, request, timeout=None):
+            if request.full_url.endswith("/pulls/1"):
+                return FakeResponse(
+                    {
+                        "head": {"sha": "x", "repo": {"full_name": "contributor/r"}},
+                        "base": {"ref": "main"},
+                        "mergeable_state": "dirty",
+                    }
+                )
+            return FakeResponse(
+                [
+                    {
+                        "number": 1,
+                        "html_url": "u",
+                        "head": {"ref": "main", "repo": {"full_name": "contributor/r"}},
+                        "base": {"ref": "main"},
+                    }
+                ]
+            )
+
+    client = HttpGithubClient("tok", opener=TieredOpener())
+
+    [info] = client.list_pull_requests("o/r")
+
+    assert info.head_repo == "contributor/r"
+
+
+def test_http_list_pull_requests_null_head_repo_reads_as_unknown():
+    """GitHub nulls `head.repo` once the fork has been deleted."""
+
+    class TieredOpener:
+        def open(self, request, timeout=None):
+            if request.full_url.endswith("/pulls/1"):
+                return FakeResponse(
+                    {
+                        "head": {"sha": "x", "repo": None},
+                        "base": {"ref": "main"},
+                        "mergeable_state": "dirty",
+                    }
+                )
+            return FakeResponse(
+                [
+                    {
+                        "number": 1,
+                        "html_url": "u",
+                        "head": {"ref": "gone", "repo": None},
+                        "base": {"ref": "main"},
+                    }
+                ]
+            )
+
+    client = HttpGithubClient("tok", opener=TieredOpener())
+
+    [info] = client.list_pull_requests("o/r")
+
+    assert info.head_repo == ""
 
 
 def test_http_list_pull_requests_missing_mergeable_state_is_unknown():
@@ -984,3 +1139,163 @@ def test_http_client_dead_peer_raises_timeout_within_a_bound_not_forever():
     finally:
         server.close()
         thread.join(timeout=1.0)
+
+
+# --- check runs ------------------------------------------------------------
+
+
+class FakeTextResponse:
+    def __init__(self, text):
+        self._body = text.encode("utf-8")
+
+    def read(self):
+        return self._body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def test_fake_list_check_runs_is_keyed_by_sha():
+    client = FakeGithubClient([])
+    client.add_check_run("abc", CheckRun(1, "pytest", "failure", "u1"))
+    client.add_check_run("def", CheckRun(2, "lint", "success", "u2"))
+
+    assert [r.id for r in client.list_check_runs("o/r", "abc")] == [1]
+    assert client.list_check_runs("o/r", "zzz") == []
+
+
+def test_fake_check_run_log_defaults_to_empty():
+    client = FakeGithubClient([])
+    client.set_check_run_log(1, "boom")
+
+    assert client.check_run_log("o/r", 1) == "boom"
+    assert client.check_run_log("o/r", 99) == ""
+
+
+def test_http_list_check_runs_reads_the_commit_endpoint():
+    payload = {
+        "check_runs": [
+            {"id": 7, "name": "pytest (3.12)", "conclusion": "failure",
+             "html_url": "https://gh/run/7"},
+            {"id": 8, "name": "lint", "conclusion": "success",
+             "html_url": "https://gh/run/8"},
+        ]
+    }
+    opener = FakeOpener(payload)
+    client = HttpGithubClient("tok", opener=opener)
+
+    runs = client.list_check_runs("o/r", "abc123")
+
+    assert [(r.id, r.name, r.conclusion, r.url) for r in runs] == [
+        (7, "pytest (3.12)", "failure", "https://gh/run/7"),
+        (8, "lint", "success", "https://gh/run/8"),
+    ]
+    req = opener.requests[0]
+    assert req.get_method() == "GET"
+    assert req.full_url == "https://api.github.com/repos/o/r/commits/abc123/check-runs"
+
+
+def test_http_check_run_log_returns_plain_text():
+    class TextOpener:
+        def __init__(self):
+            self.requests = []
+
+        def open(self, request):
+            self.requests.append(request)
+            return FakeTextResponse("line one\nline two\n")
+
+    opener = TextOpener()
+    client = HttpGithubClient("tok", opener=opener)
+
+    assert client.check_run_log("o/r", 7) == "line one\nline two\n"
+    assert opener.requests[0].full_url == (
+        "https://api.github.com/repos/o/r/actions/jobs/7/logs"
+    )
+
+
+def test_a_cross_host_redirect_drops_the_github_credential():
+    """The Actions log endpoint 302s to Azure Blob Storage, whose SAS token is
+    already in the query string. urllib's stock handler replays the original
+    `Authorization` to the new host and Azure answers `401 Server failed to
+    authenticate` — which is not in `check_run_log`'s (404, 410) allowlist, so
+    it raises, `GithubUnhealthyPrsCheck` swallows it per-PR, and every red PR
+    is skipped. Measured against the live service: every failing-check fetch
+    401'd, so the feature's main path never ran once."""
+    handler = _StripCrossHostAuth()
+    request = urllib.request.Request(
+        "https://api.github.com/repos/o/r/actions/jobs/7/logs",
+        headers={"Authorization": "Bearer tok", "Accept": "text/plain"},
+    )
+
+    redirected = handler.redirect_request(
+        request,
+        io.BytesIO(b""),
+        302,
+        "Found",
+        {},
+        "https://productionresultssa0.blob.core.windows.net/actions-results/x?sig=y",
+    )
+
+    assert redirected.get_header("Authorization") is None
+    # Only the credential is dropped — the rest of the request is untouched.
+    assert redirected.get_header("Accept") == "text/plain"
+
+
+def test_a_same_host_redirect_keeps_the_credential():
+    """The rule is cross-*host*, not "any redirect": an api.github.com →
+    api.github.com hop still needs the token or every such call breaks."""
+    handler = _StripCrossHostAuth()
+    request = urllib.request.Request(
+        "https://api.github.com/repos/o/r/issues",
+        headers={"Authorization": "Bearer tok"},
+    )
+
+    redirected = handler.redirect_request(
+        request, io.BytesIO(b""), 301, "Moved", {},
+        "https://api.github.com/repositories/1/issues",
+    )
+
+    assert redirected.get_header("Authorization") == "Bearer tok"
+
+
+def test_the_default_opener_strips_cross_host_credentials():
+    """The handler is useless unless the opener the real client builds by
+    default actually carries it — the injected test openers never exercise
+    urllib's redirect path at all, which is why this went out undetected."""
+    client = HttpGithubClient("tok")
+
+    assert any(
+        isinstance(handler, _StripCrossHostAuth)
+        for handler in client._opener.handlers
+    )
+
+
+def test_http_check_run_log_404_is_empty_string():
+    class GoneOpener:
+        def open(self, request):
+            raise urllib.error.HTTPError(
+                request.full_url, 404, "Not Found", {}, io.BytesIO(b"")
+            )
+
+    client = HttpGithubClient("tok", opener=GoneOpener())
+
+    assert client.check_run_log("o/r", 7) == ""
+
+
+def test_fake_labels_apply_to_pull_requests_too():
+    client = FakeGithubClient([])
+    client.add_pull_request(
+        PullRequestInfo(
+            number=42, url="u", head_branch="b", head_sha="s",
+            base_branch="main", mergeable_state="unstable",
+        )
+    )
+
+    client.add_label("o/r", 42, "harness:autofix-1")
+    assert client.list_pull_requests("o/r")[0].labels == ("harness:autofix-1",)
+
+    client.remove_label("o/r", 42, "harness:autofix-1")
+    assert client.list_pull_requests("o/r")[0].labels == ()
