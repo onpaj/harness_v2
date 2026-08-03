@@ -14,6 +14,7 @@ from harness.drivers.github_client import (
     Issue,
     PullRequestInfo,
     PullRequestRef,
+    _StripCrossHostAuth,
 )
 
 
@@ -1130,6 +1131,63 @@ def test_http_check_run_log_returns_plain_text():
     assert client.check_run_log("o/r", 7) == "line one\nline two\n"
     assert opener.requests[0].full_url == (
         "https://api.github.com/repos/o/r/actions/jobs/7/logs"
+    )
+
+
+def test_a_cross_host_redirect_drops_the_github_credential():
+    """The Actions log endpoint 302s to Azure Blob Storage, whose SAS token is
+    already in the query string. urllib's stock handler replays the original
+    `Authorization` to the new host and Azure answers `401 Server failed to
+    authenticate` — which is not in `check_run_log`'s (404, 410) allowlist, so
+    it raises, `GithubUnhealthyPrsCheck` swallows it per-PR, and every red PR
+    is skipped. Measured against the live service: every failing-check fetch
+    401'd, so the feature's main path never ran once."""
+    handler = _StripCrossHostAuth()
+    request = urllib.request.Request(
+        "https://api.github.com/repos/o/r/actions/jobs/7/logs",
+        headers={"Authorization": "Bearer tok", "Accept": "text/plain"},
+    )
+
+    redirected = handler.redirect_request(
+        request,
+        io.BytesIO(b""),
+        302,
+        "Found",
+        {},
+        "https://productionresultssa0.blob.core.windows.net/actions-results/x?sig=y",
+    )
+
+    assert redirected.get_header("Authorization") is None
+    # Only the credential is dropped — the rest of the request is untouched.
+    assert redirected.get_header("Accept") == "text/plain"
+
+
+def test_a_same_host_redirect_keeps_the_credential():
+    """The rule is cross-*host*, not "any redirect": an api.github.com →
+    api.github.com hop still needs the token or every such call breaks."""
+    handler = _StripCrossHostAuth()
+    request = urllib.request.Request(
+        "https://api.github.com/repos/o/r/issues",
+        headers={"Authorization": "Bearer tok"},
+    )
+
+    redirected = handler.redirect_request(
+        request, io.BytesIO(b""), 301, "Moved", {},
+        "https://api.github.com/repositories/1/issues",
+    )
+
+    assert redirected.get_header("Authorization") == "Bearer tok"
+
+
+def test_the_default_opener_strips_cross_host_credentials():
+    """The handler is useless unless the opener the real client builds by
+    default actually carries it — the injected test openers never exercise
+    urllib's redirect path at all, which is why this went out undetected."""
+    client = HttpGithubClient("tok")
+
+    assert any(
+        isinstance(handler, _StripCrossHostAuth)
+        for handler in client._opener.handlers
     )
 
 

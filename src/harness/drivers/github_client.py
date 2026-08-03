@@ -479,9 +479,52 @@ class FakeGithubClient(GithubClient):
         return None
 
 
+class _StripCrossHostAuth(urllib.request.HTTPRedirectHandler):
+    """Drops `Authorization` when a redirect crosses to a different host.
+
+    `check_run_log`'s endpoint (`/actions/jobs/<id>/logs`) 302s to a signed
+    Azure Blob Storage URL that already carries its own SAS token in the query
+    string. urllib's stock handler copies *every* header of the original
+    request onto the redirected one, so Azure receives a GitHub
+    `Authorization: Bearer …` it never asked for and rejects the whole request
+    with `401 Server failed to authenticate the request.` — and 401 is not in
+    `check_run_log`'s `(404, 410)` allowlist, so it raises.
+
+    That raise is then swallowed by `GithubUnhealthyPrsCheck.evaluate()`'s
+    per-PR guard, which skips the PR entirely. The effect is the worst
+    available shape: no crash, one warning line per PR per tick, and **every
+    red pull request silently un-triaged** — the feature's whole point. Only
+    conflicted PRs with no failing check-run (no log to fetch) ever worked.
+
+    Dropping the header is the correct general rule, not a workaround for this
+    one endpoint: a credential minted for one host must never be replayed to
+    another. Python 3.11's `HTTPRedirectHandler` does not do this for us —
+    verified, not assumed.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        redirected = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if redirected is None:
+            return None
+        if urllib.parse.urlsplit(newurl).netloc != urllib.parse.urlsplit(
+            req.full_url
+        ).netloc:
+            # `Request` capitalizes header names on the way in and
+            # `remove_header` capitalizes on the way out, so the two agree.
+            redirected.remove_header("Authorization")
+        return redirected
+
+
 class HttpGithubClient(GithubClient):
     """Real client against `api.github.com`. `opener` is injectable so it can be
-    tested without a network; the default is stdlib `urllib.request.build_opener()`."""
+    tested without a network; the default is a `urllib.request.build_opener()`
+    carrying `_StripCrossHostAuth`.
+
+    Note what the injection seam does *not* cover: a fake opener returns its
+    response directly, so no injected opener ever exercises urllib's redirect
+    path. Every test of `check_run_log` passed while the real client 401'd on
+    every call — which is why `_StripCrossHostAuth` is tested directly, and why
+    one test asserts the default opener actually carries it."""
 
     def __init__(
         self,
@@ -492,7 +535,7 @@ class HttpGithubClient(GithubClient):
     ) -> None:
         self._token = token
         self._api = api.rstrip("/")
-        self._opener = opener or urllib.request.build_opener()
+        self._opener = opener or urllib.request.build_opener(_StripCrossHostAuth())
 
     def _headers(self) -> dict[str, str]:
         return {
