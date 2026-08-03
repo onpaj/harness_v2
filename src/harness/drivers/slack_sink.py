@@ -38,7 +38,7 @@ from harness.models import Task
 from harness.ports.source import FinishResult, Progress, TaskSource, effective_sink_kind
 
 
-def post_json(url: str, payload: dict) -> None:
+def post_json(url: str, payload: dict, *, timeout: float = 30.0) -> None:
     """POST `payload` as a JSON body — the default webhook transport."""
     body = json.dumps(payload).encode("utf-8")
     request = urllib.request.Request(
@@ -47,7 +47,7 @@ def post_json(url: str, payload: dict) -> None:
         headers={"Content-Type": "application/json"},
         method="POST",
     )
-    urllib.request.urlopen(request)
+    urllib.request.urlopen(request, timeout=timeout)
 
 
 class SlackWebhookSink(TaskSource):

@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from harness.drivers.slack_sink import SlackWebhookSink, post_json
 from harness.models import Task
 from harness.ports.source import FinishResult, Progress
@@ -154,12 +156,55 @@ def test_default_post_helper_sends_a_json_post(monkeypatch) -> None:
     import urllib.request
 
     opened = []
-    monkeypatch.setattr(urllib.request, "urlopen", lambda request: opened.append(request))
+    monkeypatch.setattr(
+        urllib.request,
+        "urlopen",
+        lambda request, timeout=None: opened.append((request, timeout)),
+    )
 
     post_json(URL, {"text": "hello"})
 
-    [request] = opened
+    [(request, timeout)] = opened
     assert request.full_url == URL
     assert request.get_method() == "POST"
     assert request.get_header("Content-type") == "application/json"
     assert json.loads(request.data.decode("utf-8")) == {"text": "hello"}
+    assert timeout == 30.0
+
+
+def test_post_json_dead_peer_raises_timeout_within_a_bound_not_forever() -> None:
+    """Same shape as the GitHub/Jira client regressions: a real socket that
+    accepts the connection and never writes back, proving `post_json` honours
+    its configured timeout instead of blocking forever on a dead webhook."""
+    import socket
+    import threading
+    import time
+
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.bind(("127.0.0.1", 0))
+    server.listen(1)
+    port = server.getsockname()[1]
+
+    def accept_and_hang():
+        try:
+            conn, _ = server.accept()
+            try:
+                time.sleep(2.0)
+            finally:
+                conn.close()
+        except OSError:
+            pass
+
+    thread = threading.Thread(target=accept_and_hang, daemon=True)
+    thread.start()
+
+    try:
+        start = time.monotonic()
+        with pytest.raises(TimeoutError):
+            post_json(f"http://127.0.0.1:{port}/webhook", {"text": "hi"}, timeout=0.05)
+        elapsed = time.monotonic() - start
+
+        assert elapsed < 2.0
+    finally:
+        server.close()
+        thread.join(timeout=1.0)
